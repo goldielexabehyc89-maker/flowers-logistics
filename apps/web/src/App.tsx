@@ -1,108 +1,102 @@
 /**
- * Служебная страница ветки feat/stage1-foundation.
+ * Маршрутизация приложения.
  *
- * Это НЕ интерфейс продукта: единый UI shell, экраны входа и разделы логистики
- * создаются в ветке feat/stage1-ui-shell. Здесь проверяется только то, что собранный
- * клиент отдаётся тем же Node-процессом и видит API.
+ * Пока сессия проверяется, показывается экран ожидания: административные разделы
+ * не должны кратко мелькать у пользователя, которому они недоступны.
+ * Неизвестный или запрещённый адрес ведёт на первый доступный раздел.
  */
 
-import { useEffect, useState } from 'react';
+import { Navigate, Route, Routes, useLocation } from 'react-router';
+import { useAuth } from './auth/AuthContext';
+import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
+import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
+import { PLACEHOLDERS, PlaceholderScreen, WarehousePlaceholder } from './screens/PlaceholderScreen';
+import { SettingsScreen } from './screens/SettingsScreen';
+import { UsersScreen } from './screens/users/UsersScreen';
+import { AppShell } from './shell/AppShell';
 
-interface IntegrationStatus {
-  provider: string;
-  state: string;
-  pendingOperations: number;
-}
-
-interface StatusResponse {
-  stage: number;
-  integrations: IntegrationStatus[];
-}
-
-type LoadState =
-  | { kind: 'loading' }
-  | { kind: 'ready'; data: StatusResponse }
-  | { kind: 'error'; message: string };
-
-const INTEGRATION_LABELS: Record<string, string> = {
-  moysklad: 'МойСклад',
-  maps: 'Карты',
-};
-
-const STATE_LABELS: Record<string, string> = {
-  NOT_CONFIGURED: 'Не настроена',
-  CONFIGURED: 'Настроена',
-  OK: 'Работает',
-  DEGRADED: 'Работает с ошибками',
-  ERROR: 'Ошибка',
-};
-
-const REQUEST_TIMEOUT_MS = 10_000;
-
-export function App(): React.JSX.Element {
-  const [state, setState] = useState<LoadState>({ kind: 'loading' });
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // Запрос без предела ожидания оставил бы страницу в вечной загрузке.
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    fetch('/api/status', { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Сервис ответил кодом ${response.status}`);
-        }
-        return (await response.json()) as StatusResponse;
-      })
-      .then((data) => setState({ kind: 'ready', data }))
-      .catch((error: unknown) => {
-        setState({
-          kind: 'error',
-          message: error instanceof Error ? error.message : 'Нет связи с сервисом',
-        });
-      })
-      .finally(() => clearTimeout(timer));
-
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  }, []);
-
+function CheckingSession(): React.JSX.Element {
   return (
-    <main className="page">
-      <h1>Логистика — служебная сборка</h1>
-      <p className="note">
-        Этап 1, ветка <code>feat/stage1-foundation</code>. Рабочий интерфейс ещё не реализован:
-        экраны входа, навигация и разделы логистики создаются в ветке{' '}
-        <code>feat/stage1-ui-shell</code>.
-      </p>
-
-      <section>
-        <h2>Состояние интеграций</h2>
-        {state.kind === 'loading' && <p className="note">Загрузка…</p>}
-        {state.kind === 'error' && <p className="error">Нет связи с сервисом: {state.message}</p>}
-        {state.kind === 'ready' && (
-          <table>
-            <thead>
-              <tr>
-                <th>Интеграция</th>
-                <th>Состояние</th>
-                <th>Ожидают отправки</th>
-              </tr>
-            </thead>
-            <tbody>
-              {state.data.integrations.map((integration) => (
-                <tr key={integration.provider}>
-                  <td>{INTEGRATION_LABELS[integration.provider] ?? integration.provider}</td>
-                  <td>{STATE_LABELS[integration.state] ?? integration.state}</td>
-                  <td>{integration.pendingOperations}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+    <main className="auth">
+      <section className="auth__card" role="status" aria-live="polite">
+        <h1>Проверяем сессию…</h1>
+        <p className="muted text-sm">Это займёт мгновение.</p>
       </section>
     </main>
+  );
+}
+
+/** Раздел, доступный только определённым ролям; иначе — на первый доступный. */
+function SectionRoute({ children }: { children: React.JSX.Element }): React.JSX.Element {
+  const { user } = useAuth();
+  const location = useLocation();
+  const roles = user?.roles ?? [];
+
+  if (!isSectionVisible(roles, location.pathname)) {
+    const fallback = firstAvailablePath(roles);
+    return fallback === null ? <WarehousePlaceholder /> : <Navigate to={fallback} replace />;
+  }
+
+  return children;
+}
+
+export function App(): React.JSX.Element {
+  const { status, user } = useAuth();
+
+  if (status === 'checking') {
+    return <CheckingSession />;
+  }
+
+  if (status === 'anonymous') {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginScreen />} />
+        <Route path="/first-login" element={<FirstLoginScreen />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
+  const roles = user?.roles ?? [];
+  const home = firstAvailablePath(roles);
+
+  // Роль без доступных разделов (кладовщик) получает честную заглушку.
+  if (home === null) {
+    return <WarehousePlaceholder />;
+  }
+
+  return (
+    <Routes>
+      <Route element={<AppShell />}>
+        {Object.entries(PLACEHOLDERS).map(([key, placeholder]) => (
+          <Route
+            key={key}
+            path={`/${key}`}
+            element={
+              <SectionRoute>
+                <PlaceholderScreen {...placeholder} />
+              </SectionRoute>
+            }
+          />
+        ))}
+        <Route
+          path="/couriers"
+          element={
+            <SectionRoute>
+              <UsersScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <SectionRoute>
+              <SettingsScreen />
+            </SectionRoute>
+          }
+        />
+      </Route>
+      <Route path="*" element={<Navigate to={home} replace />} />
+    </Routes>
   );
 }

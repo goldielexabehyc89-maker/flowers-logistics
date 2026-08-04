@@ -1,0 +1,18 @@
+<!--
+  Собственная нейтральная иконка приложения: маршрутная линия с точками остановок.
+  Никаких сторонних логотипов и защищённых материалов.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Логистика">
+  <rect width="512" height="512" rx="96" fill="#1f5f9e" />
+  <path
+    d="M128 352c0-64 56-96 128-96s128-32 128-96"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="28"
+    stroke-linecap="round"
+    stroke-dasharray="4 44"
+  />
+  <circle cx="128" cy="352" r="34" fill="#ffffff" />
+  <circle cx="384" cy="160" r="34" fill="#ffffff" />
+  <circle cx="256" cy="256" r="22" fill="#ffffff" opacity="0.85" />
+</svg>
