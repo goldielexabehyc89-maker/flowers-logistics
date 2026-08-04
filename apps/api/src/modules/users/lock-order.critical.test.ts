@@ -112,37 +112,56 @@ describe('порядок блокировок: строка User и ActivationCo
 });
 
 describe('порядок блокировок: advisory-lock последнего администратора', () => {
-  it('заморозка одновременно со снятием ADMIN не вызывает взаимной блокировки', async () => {
-    // Ровно два активных администратора: любая пара успешных операций оставила бы
-    // систему без администратора, поэтому вторая обязана получить отказ.
+  it('заморозка одновременно со снятием ADMIN у ОДНОГО пользователя не вызывает взаимной блокировки', async () => {
+    // Обе операции нацелены на одного и того же пользователя: только так
+    // воспроизводится прежняя пара «строка User ↔ advisory-lock» в обратном порядке.
     await ctx.db.user.updateMany({
       where: { roles: { some: { role: 'ADMIN' } }, status: { not: 'FROZEN' } },
       data: { status: 'FROZEN', frozenAt: new Date() },
     });
 
-    const first = await seedUser(ctx.db, { roles: ['ADMIN'] });
-    const second = await seedUser(ctx.db, { roles: ['ADMIN'] });
+    const target = await seedUser(ctx.db, { roles: ['ADMIN'] });
     const operator = await seedUser(ctx.db, { roles: ['ADMIN'] });
+    // Третий администратор нужен, чтобы каждая операция по отдельности была законной.
+    await seedUser(ctx.db, { roles: ['ADMIN'] });
 
-    // operator тоже администратор, поэтому активных трое: заморозка одного
-    // и снятие роли у другого по отдельности законны, вместе — нет.
-    const secondVersion = await ctx.db.user.findUniqueOrThrow({
-      where: { id: second.id },
+    const targetVersion = await ctx.db.user.findUniqueOrThrow({
+      where: { id: target.id },
       select: { version: true },
     });
 
     const results = await Promise.allSettled([
-      freezeUser(ctx, adminActor(operator.id), first.id, META),
+      freezeUser(ctx, adminActor(operator.id), target.id, META),
       updateUser(
         ctx,
         adminActor(operator.id),
-        second.id,
-        { version: secondVersion.version, roles: ['COURIER'] },
+        target.id,
+        { version: targetVersion.version, roles: ['COURIER'] },
         META,
       ),
     ]);
 
     assertNoDeadlock(results);
+
+    // Хотя бы одна операция обязана завершиться: взаимная блокировка сняла бы обе.
+    expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+
+    const stored = await ctx.db.user.findUniqueOrThrow({
+      where: { id: target.id },
+      select: { status: true, roles: { select: { role: true } } },
+    });
+    const stillAdmin = stored.roles.some((assignment) => assignment.role === 'ADMIN');
+
+    // Допустимые последовательные исходы:
+    //   заморозка первой  — роль осталась, версия изменилась, снятие роли отклонено;
+    //   снятие роли первым — роли ADMIN нет, заморозка законна уже для курьера.
+    const [freeze, demotion] = results;
+    if (demotion.status === 'fulfilled') {
+      expect(stillAdmin).toBe(false);
+    } else {
+      expect(freeze.status).toBe('fulfilled');
+      expect(stored.status).toBe('FROZEN');
+    }
 
     // Инвариант сохранён при любом исходе.
     const activeAdmins = await ctx.db.user.count({

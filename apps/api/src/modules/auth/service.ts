@@ -356,13 +356,48 @@ export async function login(
     deviceLabel: input.deviceLabel ?? context.deviceLabel,
   };
 
-  const session = await db.$transaction(async (tx) => {
-    const created = await createSession(tx, user.id, sessionContext);
+  const outcome = await db.$transaction(async (tx) => {
+    // Порядок блокировок: User → RefreshSession → аудит и счётчики.
+    //
+    // Медленная проверка argon2 выполнена выше, вне транзакции. Но за время этой
+    // проверки администратор мог заморозить пользователя или сбросить ему PIN,
+    // отозвав все сессии. Без повторной проверки под блокировкой вход создал бы
+    // новую живую сессию уже после отзыва.
+    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id}::uuid FOR UPDATE`;
+
+    const fresh = await tx.user.findUnique({
+      where: { id: user.id },
+      select: {
+        id: true,
+        phone: true,
+        fullName: true,
+        status: true,
+        pinHash: true,
+        sessionVersion: true,
+        roles: { select: { role: true } },
+      },
+    });
+
+    // PIN считается проверенным, только если хеш не изменился: сброс PIN обнуляет
+    // pinHash, смена телефона делает предъявленный логин неактуальным.
+    const stillValid =
+      fresh !== null &&
+      fresh.status === 'ACTIVE' &&
+      fresh.phone === user.phone &&
+      fresh.pinHash !== null &&
+      fresh.pinHash === candidateHash;
+
+    if (!stillValid || fresh === null) {
+      // Ни сессии, ни успешной попытки, ни аудита: транзакция откатывается целиком.
+      throw invalidCredentials();
+    }
+
+    const created = await createSession(tx, fresh.id, sessionContext);
 
     await tx.authAttempt.create({
       data: {
-        phone: input.phone,
-        userId: user.id,
+        phone: fresh.phone,
+        userId: fresh.id,
         kind: 'LOGIN',
         success: true,
         ip: context.ip,
@@ -373,27 +408,34 @@ export async function login(
     await writeAudit(tx, {
       action: 'AUTH_LOGIN_SUCCEEDED',
       entityType: 'User',
-      entityId: user.id,
-      actorUserId: user.id,
-      actorRoles: user.roles.map((assignment) => assignment.role),
+      entityId: fresh.id,
+      actorUserId: fresh.id,
+      actorRoles: fresh.roles.map((assignment) => assignment.role),
       newValue: { deviceLabel: sessionContext.deviceLabel },
       ip: context.ip,
       userAgent: context.userAgent,
     });
 
+    // Счётчики сбрасываются только после действительно успешного входа.
     await resetFailures(tx, keys);
 
-    return created;
+    return { session: created, fresh };
   });
 
+  // Токен и ответ строятся из снимка, прочитанного под блокировкой,
+  // а не из данных, прочитанных до медленной проверки PIN.
   const accessToken = await issueAccessToken(
     config,
-    user.id,
-    user.sessionVersion,
-    session.familyId,
+    outcome.fresh.id,
+    outcome.fresh.sessionVersion,
+    outcome.session.familyId,
   );
 
-  return { accessToken, refreshToken: session.refreshToken, user: toAuthenticatedUser(user) };
+  return {
+    accessToken,
+    refreshToken: outcome.session.refreshToken,
+    user: toAuthenticatedUser(outcome.fresh),
+  };
 }
 
 export interface RefreshResult {
@@ -513,11 +555,14 @@ export async function logoutAll(
   context: RequestContext,
 ): Promise<void> {
   await deps.db.$transaction(async (tx) => {
-    await revokeAllSessions(tx, actor.userId, 'LOGOUT_ALL');
+    // Порядок блокировок: User → RefreshSession → аудит. Обратный порядок здесь
+    // и в административных операциях (сброс PIN, заморозка) оставлял возможность
+    // взаимной блокировки.
     await tx.user.update({
       where: { id: actor.userId },
       data: { sessionVersion: { increment: 1 } },
     });
+    await revokeAllSessions(tx, actor.userId, 'LOGOUT_ALL');
     await writeAudit(tx, {
       action: 'AUTH_LOGOUT_ALL',
       entityType: 'User',
