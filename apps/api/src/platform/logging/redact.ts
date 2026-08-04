@@ -14,8 +14,53 @@ const SENSITIVE_KEY_PATTERN =
 
 const MAX_DEPTH = 8;
 
+/**
+ * Правила очистки произвольных строк.
+ *
+ * Редакции по имени поля недостаточно: секрет может оказаться внутри текста ошибки.
+ * Так, ошибка подключения к PostgreSQL содержит строку подключения с паролем,
+ * а ошибка HTTP-клиента — заголовок с токеном.
+ */
+const STRING_RULES: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+  // Учётные данные внутри URI: postgresql://user:password@host/db
+  {
+    pattern: /\b([a-z][a-z0-9+.-]*:\/\/)([^:@/\s]+):([^@/\s]+)@/gi,
+    replacement: `$1${'[redacted]'}:${'[redacted]'}@`,
+  },
+  // JWT
+  {
+    pattern: /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+/g,
+    replacement: '[redacted]',
+  },
+  // Схемы авторизации
+  { pattern: /\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, replacement: '$1 [redacted]' },
+  // Пары «имя = значение» для секретных имён, в том числе в параметрах строки подключения
+  {
+    pattern:
+      /\b(password|passwd|pwd|token|secret|pepper|api[_-]?key|apikey|credential|pin|code)\s*[=:]\s*("[^"]*"|'[^']*'|[^\s,;&)]+)/gi,
+    replacement: '$1=[redacted]',
+  },
+  // Телефоны в российском формате
+  {
+    pattern: /(?<!\d)(?:\+7|\b8|\b7)[\s-]?\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}(?!\d)/g,
+    replacement: '[redacted]',
+  },
+];
+
 export function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_PATTERN.test(key);
+}
+
+/**
+ * Очищает произвольную строку от секретов и телефонов.
+ * Применяется к каждому строковому значению, к тексту сообщения и к стеку ошибки.
+ */
+export function redactString(text: string): string {
+  let result = text;
+  for (const rule of STRING_RULES) {
+    result = result.replace(rule.pattern, rule.replacement);
+  }
+  return result;
 }
 
 /**
@@ -23,6 +68,10 @@ export function isSensitiveKey(key: string): boolean {
  * Циклические ссылки заменяются на `[circular]`, слишком глубокие ветки — на `[truncated]`.
  */
 export function redactDeep(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') {
+    return redactString(value);
+  }
+
   if (value === null || typeof value !== 'object') {
     return value;
   }
@@ -45,10 +94,13 @@ export function redactDeep(value: unknown, depth = 0, seen = new WeakSet<object>
   }
 
   if (value instanceof Error) {
+    // Текст и стек ошибки очищаются: ошибка подключения к базе содержит пароль,
+    // ошибка внешнего вызова — токен, ошибка валидации — телефон.
     return {
       name: value.name,
-      message: value.message,
-      stack: value.stack,
+      message: redactString(value.message),
+      ...(value.stack === undefined ? {} : { stack: redactString(value.stack) }),
+      ...(value.cause === undefined ? {} : { cause: redactDeep(value.cause, depth + 1, seen) }),
     };
   }
 

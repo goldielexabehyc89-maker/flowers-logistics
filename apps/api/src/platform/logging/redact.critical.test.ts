@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { pino } from 'pino';
 import { Writable } from 'node:stream';
-import { redactDeep, safePath, REDACTED } from './redact.js';
+import { redactDeep, redactString, safePath, REDACTED } from './redact.js';
 import { buildLoggerOptions } from './logger.js';
 import { loadConfig } from '../config.js';
 
@@ -64,6 +64,74 @@ describe('редакция чувствительных данных', () => {
   it('убирает строку запроса из пути: она может содержать телефон или код', () => {
     expect(safePath('/api/users?phone=%2B79161234567')).toBe('/api/users?[redacted]');
     expect(safePath('/api/users')).toBe('/api/users');
+  });
+
+  it('очищает секреты внутри произвольной строки', () => {
+    const text = redactString(
+      'connect ECONNREFUSED postgresql://fl_app:sup3r-s3cret@db:5432/fl_dev?password=other-secret ' +
+        'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln клиент +7 916 123-45-67',
+    );
+
+    expect(text).not.toContain('sup3r-s3cret');
+    expect(text).not.toContain('other-secret');
+    expect(text).not.toContain('eyJhbGciOiJIUzI1NiJ9');
+    expect(text).not.toContain('9161234567');
+    expect(text).not.toContain('916 123-45-67');
+    // Диагностически полезная часть сообщения сохраняется.
+    expect(text).toContain('ECONNREFUSED');
+    expect(text).toContain('db:5432');
+  });
+
+  it('очищает текст и стек ошибки', () => {
+    const error = new Error(
+      'ошибка подключения postgresql://fl_app:sup3r-s3cret@db:5432/fl_dev, телефон +79161234567',
+    );
+    error.stack = `Error: токен Bearer eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln\n    at db.ts:1:1`;
+
+    const serialized = JSON.stringify(redactDeep({ err: error }));
+
+    expect(serialized).not.toContain('sup3r-s3cret');
+    expect(serialized).not.toContain('79161234567');
+    expect(serialized).not.toContain('eyJhbGciOiJIUzI1NiJ9');
+    expect(serialized).toContain('ошибка подключения');
+  });
+
+  it('очищает вложенную причину ошибки', () => {
+    const cause = new Error('пароль password=sup3r-s3cret');
+    const error = new Error('обёртка', { cause });
+
+    const serialized = JSON.stringify(redactDeep({ err: error }));
+
+    expect(serialized).not.toContain('sup3r-s3cret');
+    expect(serialized).toContain('обёртка');
+  });
+
+  it('фактический вывод логгера не содержит секрет из текста ошибки и из сообщения', () => {
+    const lines: string[] = [];
+    const config = loadConfig({
+      DATABASE_URL: 'postgresql://fl_app:sup3r-s3cret@db:5432/fl_dev',
+      LOG_LEVEL: 'info',
+    });
+
+    const logger = pino(
+      buildLoggerOptions(config),
+      captureLogOutput((line) => lines.push(line)),
+    );
+
+    const dbError = new Error(
+      'connect ECONNREFUSED postgresql://fl_app:sup3r-s3cret@db:5432/fl_dev',
+    );
+
+    // Так ошибка попадает в лог из readiness-пробы.
+    logger.error({ err: dbError }, 'readiness: база данных недоступна');
+    // А так секрет мог бы попасть в лог через текст сообщения.
+    logger.error(`не удалось подключиться: ${dbError.message}, телефон +79161234567`);
+
+    const output = lines.join('\n');
+
+    expect(output).toContain('readiness');
+    expect(output).not.toContain('sup3r-s3cret');
+    expect(output).not.toContain('79161234567');
   });
 
   it('фактический вывод логгера не содержит PIN, телефон, токены и cookies', () => {

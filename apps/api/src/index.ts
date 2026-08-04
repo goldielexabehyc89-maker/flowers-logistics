@@ -7,6 +7,7 @@
 
 import { loadConfig } from './platform/config.js';
 import { createLogger } from './platform/logging/logger.js';
+import { redactString } from './platform/logging/redact.js';
 import { createDatabase } from './platform/db.js';
 import { buildServer } from './platform/http/server.js';
 
@@ -15,7 +16,7 @@ const SHUTDOWN_TIMEOUT_MS = 15_000;
 async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger(config);
-  const db = createDatabase(config);
+  const db = createDatabase(config, logger);
   const app = await buildServer({ config, logger, db });
 
   let shuttingDown = false;
@@ -56,7 +57,9 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   // Логгер может быть ещё не создан, поэтому пишем в stderr напрямую.
-  // Текст ошибки конфигурации не содержит значений переменных окружения.
-  console.error('Не удалось запустить приложение:', error instanceof Error ? error.message : error);
+  // Текст ошибки обязательно очищается: сбой подключения к базе на старте
+  // содержит строку подключения с паролем.
+  const message = error instanceof Error ? error.message : String(error);
+  console.error('Не удалось запустить приложение:', redactString(message));
   process.exit(1);
 });

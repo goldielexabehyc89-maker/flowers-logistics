@@ -49,6 +49,10 @@ services:
       TZ: Europe/Moscow
       # Внутри compose-сети обращение идёт к сервису db по внутреннему порту 5432.
       DATABASE_URL: postgresql://fl_app:fl_local_dev_password@db:5432/fl_dev?schema=public
+      # Отдельная одноразовая база для разрушающих критических тестов.
+      # Обычная база разработки для них закрыта: они оставляют записи,
+      # которые нельзя удалить. Пересоздаётся через ./scripts/reset-test-db.sh
+      TEST_DATABASE_URL: postgresql://fl_app:fl_local_dev_password@db:5432/fl_test?schema=public
     ports:
       - '3000:3000'
       - '5173:5173'

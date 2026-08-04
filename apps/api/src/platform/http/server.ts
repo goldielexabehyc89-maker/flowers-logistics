@@ -40,7 +40,9 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
     // Идентификатор запроса связывает ответ пользователю с записью в логе,
     // не раскрывая при этом технических деталей.
     genReqId: () => crypto.randomUUID(),
-    trustProxy: true,
+    // По умолчанию заголовкам прокси не доверяем: иначе клиент подделает свой IP
+    // и обойдёт rate limit. Доверенные прокси задаются переменной TRUST_PROXY.
+    trustProxy: config.trustProxy,
     bodyLimit: 1_048_576,
   });
 

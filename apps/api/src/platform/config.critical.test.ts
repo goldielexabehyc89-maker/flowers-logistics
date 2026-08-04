@@ -38,6 +38,33 @@ describe('загрузка конфигурации', () => {
     expect(config.PORT).toBe(3000);
   });
 
+  it('по умолчанию не доверяет заголовкам прокси', () => {
+    expect(loadConfig({ DATABASE_URL: VALID_URL }).trustProxy).toBe(false);
+    expect(loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: '' }).trustProxy).toBe(false);
+    expect(loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: 'false' }).trustProxy).toBe(false);
+  });
+
+  it('запрещает безусловное доверие прокси', () => {
+    // TRUST_PROXY=true позволило бы клиенту подделать X-Forwarded-For
+    // и обойти будущий rate limit по IP.
+    expect(() => loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: 'true' })).toThrow(
+      /TRUST_PROXY=true запрещено/,
+    );
+  });
+
+  it('принимает список доверенных адресов и число переходов', () => {
+    expect(
+      loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: '10.0.0.1, 172.16.0.0/12' }).trustProxy,
+    ).toEqual(['10.0.0.1', '172.16.0.0/12']);
+
+    expect(loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: '1' }).trustProxy).toBe(1);
+  });
+
+  it('отказывается стартовать при непонятном значении TRUST_PROXY', () => {
+    expect(() => loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: 'да' })).toThrow(/TRUST_PROXY/);
+    expect(() => loadConfig({ DATABASE_URL: VALID_URL, TRUST_PROXY: '99' })).toThrow(/переходов/);
+  });
+
   it('распознаёт production и маркер окружения', () => {
     const config = loadConfig({
       DATABASE_URL: VALID_URL,

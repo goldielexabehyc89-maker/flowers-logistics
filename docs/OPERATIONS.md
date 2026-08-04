@@ -51,6 +51,22 @@ docker compose exec -T db pg_restore -U fl_app -d fl_dev --clean --if-exists < b
 Дампы содержат PII и в Git не попадают: `*.dump`, `*.sql.gz`, `backups/` перечислены
 в `.gitignore`.
 
+## Тестовая база
+
+Критические тесты инвариантов **разрушающие**: они создают пользователей и записи аудита,
+которые невозможно удалить (защищены триггерами). Поэтому они допускаются только к одноразовой
+базе `fl_test` локально и `fl_ci` в CI.
+
+```bash
+./scripts/reset-test-db.sh                          # пересоздаёт fl_test и применяет миграции
+docker compose run --rm app npm run test:critical
+```
+
+Защита реализована в коде (`apps/api/src/platform/testing/test-database.ts`) и отказывает
+при попытке запуска против `fl_dev`, а также при `APP_ENV`/`APP_ENVIRONMENT_MARKER`, равном
+`staging` или `production`, — независимо от имени базы. Скрипт пересоздания принимает только
+имена `fl_test` и `fl_ci`.
+
 ## Миграции
 
 Только forward-only. Применённая миграция не редактируется — исправление оформляется новой.

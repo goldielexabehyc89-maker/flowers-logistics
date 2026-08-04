@@ -7,15 +7,17 @@
  *  * у пользователя не может быть двух активных кодов активации одновременно;
  *  * у настройки не может быть двух текущих версий одновременно.
  *
- * Требуется переменная DATABASE_URL. Тест не «пропускается молча»: без базы он падает,
- * потому что молчаливый пропуск создаёт ложное ощущение проверенной защиты.
+ * Тесты разрушающие: они создают записи, которые невозможно удалить (пользователи и аудит
+ * защищены триггерами). Поэтому они допускаются только к одноразовой тестовой базе —
+ * см. `platform/testing/test-database.ts`. Без неё тест падает, а не «пропускается молча»:
+ * молчаливый пропуск создаёт ложное ощущение проверенной защиты.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
+import { resolveTestDatabaseUrl } from './testing/test-database.js';
 
-const databaseUrl = process.env.DATABASE_URL;
 const suffix = process.env.VITEST_WORKER_ID ?? '0';
 
 let db: PrismaClient;
@@ -31,17 +33,14 @@ function uniquePhone(): string {
 }
 
 beforeAll(() => {
-  if (databaseUrl === undefined || databaseUrl === '') {
-    throw new Error(
-      'DATABASE_URL не задан. Запускайте критические тесты через docker compose (см. README).',
-    );
-  }
-  db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
+  // Бросает исключение, если база не является одноразовой тестовой.
+  const connectionString = resolveTestDatabaseUrl();
+  db = new PrismaClient({ adapter: new PrismaPg({ connectionString }) });
 });
 
 afterAll(async () => {
-  // Пользователей удалить нельзя by design, поэтому тестовые записи остаются в базе
-  // разработки. Это осознанно: проверка ровно про невозможность удаления.
+  // Записи остаются в базе: удалить их нельзя by design. Именно поэтому тесты
+  // работают с одноразовой базой, которая пересоздаётся ./scripts/reset-test-db.sh
   await db?.$disconnect();
 });
 
@@ -118,6 +117,44 @@ describe('инварианты базы данных', () => {
     await expect(
       db.activationCode.create({
         data: { userId, codeHash: 'hash-3', expiresAt, activeKey: userId },
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('в activeKey нельзя записать чужое значение в обход уникальности', async () => {
+    const userId = await createUser();
+    const otherUserId = await createUser();
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+
+    // Уникальный индекс по activeKey работает, только если там лежит именно userId.
+    // Произвольное значение обошло бы правило «не более одного активного кода»,
+    // поэтому оно отклоняется CHECK-ограничением базы.
+    await expect(
+      db.activationCode.create({
+        data: { userId, codeHash: 'hash-mismatch', expiresAt, activeKey: otherUserId },
+      }),
+    ).rejects.toThrow();
+
+    // Корректное значение по-прежнему принимается.
+    await expect(
+      db.activationCode.create({
+        data: { userId, codeHash: 'hash-correct', expiresAt, activeKey: userId },
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('в currentKey нельзя записать чужое значение в обход уникальности', async () => {
+    const key = `test.setting.check.${suffix}.${process.hrtime.bigint()}`;
+
+    await expect(
+      db.systemSetting.create({
+        data: { key, version: 1, value: { enabled: true }, currentKey: `${key}.другое` },
+      }),
+    ).rejects.toThrow();
+
+    await expect(
+      db.systemSetting.create({
+        data: { key, version: 1, value: { enabled: true }, currentKey: key },
       }),
     ).resolves.toBeTruthy();
   });

@@ -5,9 +5,9 @@
  * чувствительных полей (см. `redact.ts`).
  */
 
-import { pino, type Logger, type LoggerOptions } from 'pino';
+import { pino, type LogFn, type Logger, type LoggerOptions } from 'pino';
 import type { AppConfig } from '../config.js';
-import { redactDeep, safePath } from './redact.js';
+import { redactDeep, redactString, safePath } from './redact.js';
 
 export type AppLogger = Logger;
 
@@ -23,6 +23,17 @@ export function buildLoggerOptions(config: AppConfig): LoggerOptions {
       level: (label) => ({ level: label }),
       // Единая точка редакции: сюда попадает всё, что логируется как объект.
       log: (object) => redactDeep(object) as Record<string, unknown>,
+    },
+    hooks: {
+      // formatters.log очищает только объект. Сам текст сообщения приходит отдельной
+      // строкой, поэтому очищается здесь — иначе секрет, попавший в текст ошибки
+      // через `logger.error(err.message)`, ушёл бы в лог как есть.
+      logMethod(args, method) {
+        const sanitized = args.map((arg) =>
+          typeof arg === 'string' ? redactString(arg) : arg,
+        ) as Parameters<LogFn>;
+        method.apply(this, sanitized);
+      },
     },
     // Дублирующая защита на уровне pino для заголовков запроса/ответа.
     redact: {

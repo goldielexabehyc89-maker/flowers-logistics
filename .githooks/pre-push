@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Запрет прямого push в main.
+#
+# Ветка main на стороне GitHub НЕ защищена: branch protection для приватного
+# репозитория требует платного тарифа, который владелец решил не подключать.
+# Поэтому запрет реализован локально и версионируется вместе с кодом.
+#
+# Это организационная мера: она защищает от случайной ошибки, а не от злого умысла,
+# и обходится флагом --no-verify. Обход без прямого разрешения владельца запрещён
+# правилами проекта (PROJECT_RULES.md, п. 14).
+#
+# Установка: npm run hooks:install  (задаёт repo-local core.hooksPath=.githooks)
+
+set -euo pipefail
+
+PROTECTED_BRANCH="main"
+Z40="0000000000000000000000000000000000000000"
+
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  # Удаление ветки: локальный SHA нулевой.
+  if [ "${local_sha}" = "${Z40}" ]; then
+    if [ "${remote_ref}" = "refs/heads/${PROTECTED_BRANCH}" ]; then
+      echo "ОТКАЗ: удаление ветки ${PROTECTED_BRANCH} запрещено." >&2
+      exit 1
+    fi
+    continue
+  fi
+
+  if [ "${remote_ref}" = "refs/heads/${PROTECTED_BRANCH}" ]; then
+    cat >&2 <<MESSAGE
+
+  ОТКАЗ: прямой push в ветку ${PROTECTED_BRANCH} запрещён.
+
+  Работа ведётся только через pull request:
+    1. отдельная ветка;
+    2. проверки и отчёт;
+    3. отдельное разрешение владельца;
+    4. merge выполняет владелец;
+    5. следующая ветка создаётся от обновлённой ${PROTECTED_BRANCH}.
+
+  Ветка ${PROTECTED_BRANCH} не защищена средствами GitHub (branch protection
+  для приватного репозитория требует платного тарифа), поэтому запрет локальный.
+
+MESSAGE
+    exit 1
+  fi
+done
+
+exit 0
