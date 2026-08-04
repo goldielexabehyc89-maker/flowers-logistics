@@ -20,7 +20,5 @@ export default defineConfig({
   migrations: {
     path: 'prisma/migrations',
   },
-  ...(databaseUrl === undefined || databaseUrl === ''
-    ? {}
-    : { datasource: { url: databaseUrl } }),
+  ...(databaseUrl === undefined || databaseUrl === '' ? {} : { datasource: { url: databaseUrl } }),
 });
