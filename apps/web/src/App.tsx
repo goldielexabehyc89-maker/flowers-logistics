@@ -6,7 +6,7 @@
  * Неизвестный или запрещённый адрес ведёт на первый доступный раздел.
  */
 
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { useAuth } from './auth/AuthContext';
 import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';

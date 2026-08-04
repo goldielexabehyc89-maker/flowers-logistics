@@ -9,7 +9,7 @@
  */
 
 import { useState } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { NavLink, Outlet, useLocation } from 'react-router';
 import { ROLE_LABELS } from '@fl/shared';
 import { useAuth } from '../auth/AuthContext';
 import { splitMobileNavigation, visibleSections } from '../navigation/navigation';
