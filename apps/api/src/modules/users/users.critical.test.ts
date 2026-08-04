@@ -55,9 +55,19 @@ describe('права логиста', () => {
     expect(created.user.roles).toEqual(['COURIER']);
     expect(created.activationCode).toMatch(/^\d{4}$/);
 
-    for (const roles of [['ADMIN'], ['LOGISTICIAN'], ['WAREHOUSE'], ['COURIER', 'ADMIN']] as const) {
+    for (const roles of [
+      ['ADMIN'],
+      ['LOGISTICIAN'],
+      ['WAREHOUSE'],
+      ['COURIER', 'ADMIN'],
+    ] as const) {
       await expect(
-        createUser(ctx, actor, { phone: uniquePhone(), fullName: 'Нельзя', roles: [...roles] }, META),
+        createUser(
+          ctx,
+          actor,
+          { phone: uniquePhone(), fullName: 'Нельзя', roles: [...roles] },
+          META,
+        ),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     }
   });
@@ -157,12 +167,16 @@ describe('заморозка, разморозка и сброс PIN', () => {
       select: { sessionVersion: true },
     });
     expect(after.sessionVersion).toBe(before.sessionVersion + 1);
-    expect(await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } })).toBe(0);
+    expect(
+      await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } }),
+    ).toBe(0);
 
     const unfrozen = await unfreezeUser(ctx, adminActor(admin.id), courier.id, META);
     expect(unfrozen.status).toBe('ACTIVE');
     // Сессии остаются отозванными: нужен новый вход.
-    expect(await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } })).toBe(0);
+    expect(
+      await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } }),
+    ).toBe(0);
   });
 
   it('разморозка пользователя без PIN возвращает его в ожидание активации', async () => {
@@ -192,7 +206,9 @@ describe('заморозка, разморозка и сброс PIN', () => {
     const stored = await ctx.db.user.findUniqueOrThrow({ where: { id: courier.id } });
     expect(stored.pinHash).toBeNull();
     expect(stored.status).toBe('PENDING_ACTIVATION');
-    expect(await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } })).toBe(0);
+    expect(
+      await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } }),
+    ).toBe(0);
 
     // Код в базе только в виде хеша.
     const codes = await ctx.db.activationCode.findMany({ where: { userId: courier.id } });
@@ -219,9 +235,11 @@ describe('защита последнего активного админист�
       data: { status: 'FROZEN', frozenAt: new Date() },
     });
 
-    await expect(freezeUser(ctx, adminActor(survivor.id), survivor.id, META)).rejects.toMatchObject({
-      code: 'CONFLICT',
-    });
+    await expect(freezeUser(ctx, adminActor(survivor.id), survivor.id, META)).rejects.toMatchObject(
+      {
+        code: 'CONFLICT',
+      },
+    );
 
     await expect(resetPin(ctx, adminActor(survivor.id), survivor.id, META)).rejects.toMatchObject({
       code: 'CONFLICT',
@@ -323,7 +341,9 @@ describe('оптимистическая блокировка и аудит', ()
     });
 
     expect(after.sessionVersion).toBe(before.sessionVersion + 1);
-    expect(await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } })).toBe(0);
+    expect(
+      await ctx.db.refreshSession.count({ where: { userId: courier.id, revokedAt: null } }),
+    ).toBe(0);
 
     const roleAudit = await ctx.db.auditLog.findFirst({
       where: { entityId: courier.id, action: 'USER_ROLES_CHANGED' },

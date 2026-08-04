@@ -60,9 +60,7 @@ describe('маршрутная таблица', () => {
     }
 
     // Пользователь на месте.
-    await expect(
-      ctx.db.user.findUniqueOrThrow({ where: { id: victim.id } }),
-    ).resolves.toBeTruthy();
+    await expect(ctx.db.user.findUniqueOrThrow({ where: { id: victim.id } })).resolves.toBeTruthy();
   });
 });
 

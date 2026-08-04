@@ -27,10 +27,7 @@ function secretKey(secret: string): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-export async function signAccessToken(
-  claims: AccessTokenClaims,
-  secret: string,
-): Promise<string> {
+export async function signAccessToken(claims: AccessTokenClaims, secret: string): Promise<string> {
   return new SignJWT({ sv: claims.sessionVersion, fid: claims.familyId } satisfies JWTPayload)
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(claims.userId)

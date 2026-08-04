@@ -148,7 +148,11 @@ export async function activate(
   // Неизвестный телефон, замороженный пользователь и отсутствие кода обрабатываются
   // одинаково по времени и по ответу.
   if (user === undefined || user === null || user.status === 'FROZEN' || activeCode === undefined) {
-    await verifySecretCode(await getDummyPinHash(config.AUTH_PIN_PEPPER), input.code, config.AUTH_PIN_PEPPER);
+    await verifySecretCode(
+      await getDummyPinHash(config.AUTH_PIN_PEPPER),
+      input.code,
+      config.AUTH_PIN_PEPPER,
+    );
     await db.$transaction(async (tx) => {
       await tx.authAttempt.create({
         data: {

@@ -107,10 +107,7 @@ export async function registerFailure(
 }
 
 /** Сбрасывает счётчики после успешного входа или активации. */
-export async function resetFailures(
-  db: TransactionClient,
-  keys: readonly string[],
-): Promise<void> {
+export async function resetFailures(db: TransactionClient, keys: readonly string[]): Promise<void> {
   if (keys.length === 0) {
     return;
   }

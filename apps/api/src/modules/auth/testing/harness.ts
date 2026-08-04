@@ -85,7 +85,9 @@ export async function seedUser(
       fullName: options.fullName ?? 'Тестовый пользователь',
       status: options.status ?? 'ACTIVE',
       pinHash: options.pinHash ?? null,
-      ...(options.pinHash === undefined || options.pinHash === null ? {} : { pinSetAt: new Date() }),
+      ...(options.pinHash === undefined || options.pinHash === null
+        ? {}
+        : { pinSetAt: new Date() }),
       roles: { create: options.roles.map((role) => ({ role })) },
       ...(options.roles.includes('COURIER') ? { courierProfile: { create: {} } } : {}),
     },

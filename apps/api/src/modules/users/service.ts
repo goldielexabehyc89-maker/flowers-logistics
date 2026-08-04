@@ -678,4 +678,3 @@ export async function resetPin(
 
   return { activationCode: prepared.code, expiresAt: prepared.expiresAt };
 }
-

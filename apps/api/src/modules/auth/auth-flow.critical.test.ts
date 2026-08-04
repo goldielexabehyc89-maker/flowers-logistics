@@ -357,7 +357,10 @@ describe('несколько устройств и отзыв доступа', (
     expect(new Set(families.map((row) => row.familyId)).size).toBe(2);
 
     // Выход с первого устройства не трогает второе.
-    const firstActor = await authenticate({ headers: { authorization: `Bearer ${first.accessToken}` } }, ctx);
+    const firstActor = await authenticate(
+      { headers: { authorization: `Bearer ${first.accessToken}` } },
+      ctx,
+    );
     await logout(ctx, firstActor, CONTEXT);
 
     const alive = await ctx.db.refreshSession.findMany({
@@ -374,7 +377,11 @@ describe('несколько устройств и отзыв доступа', (
 
   it('logout-all закрывает доступ немедленно, не дожидаясь истечения access-токена', async () => {
     const user = await seedActiveUser('2468', ['COURIER']);
-    const session = await login(ctx, { phone: user.phone, pin: '2468' }, { ...CONTEXT, ip: '10.6.0.1' });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin: '2468' },
+      { ...CONTEXT, ip: '10.6.0.1' },
+    );
 
     const actor = await authenticate(
       { headers: { authorization: `Bearer ${session.accessToken}` } },
