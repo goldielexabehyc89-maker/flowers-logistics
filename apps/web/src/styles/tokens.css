@@ -1,0 +1,79 @@
+/*
+ * Design tokens интерфейса.
+ *
+ * Интерфейс рабочий: спокойный, плотный, светлый. Никаких декоративных градиентов
+ * и анимаций — логист смотрит на эти экраны весь день, и они не должны утомлять.
+ * Все значения задаются здесь; компоненты не содержат «магических» цветов и отступов.
+ */
+
+:root {
+  /* --- Поверхности и границы --- */
+  --color-canvas: #f5f6f8;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f0f2f5;
+  --color-surface-hover: #e9edf2;
+  --color-border: #d5dae1;
+  --color-border-strong: #b6bec9;
+
+  /* --- Текст --- */
+  --color-text: #1c2430;
+  --color-text-muted: #5b6675;
+  --color-text-inverse: #ffffff;
+
+  /* --- Акцент --- */
+  --color-accent: #1f5f9e;
+  --color-accent-hover: #17517f;
+  --color-accent-soft: #e6eef7;
+
+  /* --- Статусы --- */
+  --color-success: #1f7a4d;
+  --color-success-soft: #e4f2ea;
+  --color-warning: #8a5a00;
+  --color-warning-soft: #fbf1dd;
+  --color-error: #b42318;
+  --color-error-soft: #fbe9e7;
+  --color-info: #1f5f9e;
+  --color-info-soft: #e6eef7;
+
+  /* --- Типографика --- */
+  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --line-height: 1.45;
+
+  /* --- Отступы --- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* --- Радиусы и тени --- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --shadow-sm: 0 1px 2px rgb(28 36 48 / 8%);
+  --shadow-md: 0 6px 20px rgb(28 36 48 / 14%);
+
+  /* --- Интерактивные размеры --- */
+  --control-height: 36px;
+  /* На мобильном палец требует площади не меньше 44 px. */
+  --control-height-touch: 44px;
+  --focus-ring: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+
+  /* --- Каркас --- */
+  --sidebar-width: 232px;
+  --topbar-height: 52px;
+  --bottombar-height: 60px;
+}
+
+/*
+ * Точки перехода:
+ *   до 767px  — мобильная раскладка с нижней навигацией;
+ *   от 768px  — боковая панель.
+ */

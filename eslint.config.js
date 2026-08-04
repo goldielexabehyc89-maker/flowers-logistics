@@ -13,6 +13,10 @@ export default tseslint.config(
       '**/coverage/**',
       '**/playwright-report/**',
       '**/test-results/**',
+      // Service worker подключается браузером как отдельный скрипт, вне сборки
+      // и вне модульной системы проекта. Его правила кэширования продублированы
+      // из apps/web/src/pwa/cache-policy.ts, который покрыт критическими тестами.
+      'apps/web/public/**',
     ],
   },
   js.configs.recommended,

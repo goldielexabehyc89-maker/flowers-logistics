@@ -1,0 +1,18 @@
+<!--
+  Вариант с безопасной зоной для maskable-иконок: содержимое умещается
+  в центральные 80% холста, чтобы система могла обрезать края под свою форму.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Логистика">
+  <rect width="512" height="512" fill="#1f5f9e" />
+  <path
+    d="M166 326c0-48 42-72 96-72s96-24 96-72"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="24"
+    stroke-linecap="round"
+    stroke-dasharray="4 38"
+  />
+  <circle cx="166" cy="326" r="28" fill="#ffffff" />
+  <circle cx="358" cy="182" r="28" fill="#ffffff" />
+  <circle cx="262" cy="254" r="18" fill="#ffffff" opacity="0.85" />
+</svg>
