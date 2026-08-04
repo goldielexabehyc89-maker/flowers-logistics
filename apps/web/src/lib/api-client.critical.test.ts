@@ -184,7 +184,9 @@ describe('обновление сессии при 401', () => {
 
   it('отложенный 401 со старым токеном не запускает второй refresh', async () => {
     let refreshCalls = 0;
-    let releaseSlow: (() => void) | null = null;
+    // Присваивание происходит внутри исполнителя Promise, поэтому используется
+    // утверждение определённого присваивания.
+    let releaseSlow!: () => void;
 
     // Ответ медленного запроса придёт уже после того, как токен обновит другой запрос.
     const slowResponse = new Promise<Response>((resolve) => {
@@ -217,7 +219,7 @@ describe('обновление сессии при 401', () => {
     // Быстрый запрос успевает целиком: 401 → refresh → повтор.
     await client.get('/api/fast').catch(() => undefined);
 
-    releaseSlow?.();
+    releaseSlow();
     await expect(slow).resolves.toEqual({ ok: true });
 
     // Второй refresh не запускался: токен уже был обновлён.
