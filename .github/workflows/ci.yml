@@ -44,6 +44,12 @@ jobs:
       TEST_DATABASE_URL: postgresql://fl_app:fl_ci_password@localhost:5432/fl_ci?schema=public
       APP_ENV: local
       TZ: Europe/Moscow
+      # Фиксированные тестовые секреты. Значения заведомо непригодны для реальных
+      # окружений: у staging и production собственные секреты вне репозитория.
+      AUTH_ACCESS_TOKEN_SECRET: ci-only-access-token-secret-000000000000
+      AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
+      # 32 байта в base64 — ключ AES-256-GCM, тоже только для CI.
+      AUTH_REFRESH_REPLAY_KEY: Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0=
 
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +96,11 @@ jobs:
 
       - name: Production-сборка
         run: npm run build
+
+      - name: Уязвимости в production-зависимостях
+        # Порог high: критические и высокие уязвимости останавливают сборку,
+        # шум низкого уровня — нет. Dev-зависимости в рантайм не попадают.
+        run: npm audit --omit=dev --audit-level=high
 
   secrets-scan:
     name: Запрещённые файлы и поиск секретов
