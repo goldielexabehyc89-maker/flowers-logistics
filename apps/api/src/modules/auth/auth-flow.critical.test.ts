@@ -251,9 +251,13 @@ describe('секреты не хранятся и не публикуются в
     expect(audit.some((entry) => entry.action === 'USER_ACTIVATED')).toBe(true);
 
     // Журнал попыток тоже не содержит секретов.
+    // Идентификатор записи — BigInt, поэтому сериализуется отдельным заменителем.
     const attempts = await ctx.db.authAttempt.findMany({ where: { userId: user.id } });
-    expect(JSON.stringify(attempts)).not.toContain('9137');
-    expect(JSON.stringify(attempts)).not.toContain('0428');
+    const attemptsSerialized = JSON.stringify(attempts, (_key, value: unknown) =>
+      typeof value === 'bigint' ? value.toString() : value,
+    );
+    expect(attemptsSerialized).not.toContain('9137');
+    expect(attemptsSerialized).not.toContain('0428');
   });
 });
 
