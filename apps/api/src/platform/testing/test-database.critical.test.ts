@@ -33,6 +33,46 @@ describe('защита тестовой базы', () => {
     ).toThrow(/staging/);
   });
 
+  it('проверяет оба маркера независимо: безопасный не перекрывает опасный', () => {
+    // Приоритет одного маркера над другим позволил бы разрушающим тестам
+    // отработать по production-окружению, если APP_ENV случайно остался local.
+    expect(() =>
+      resolveTestDatabaseUrl({
+        TEST_DATABASE_URL: TEST_URL,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'production',
+      }),
+    ).toThrow(/APP_ENVIRONMENT_MARKER=production/);
+
+    expect(() =>
+      resolveTestDatabaseUrl({
+        TEST_DATABASE_URL: TEST_URL,
+        APP_ENV: 'production',
+        APP_ENVIRONMENT_MARKER: 'local',
+      }),
+    ).toThrow(/APP_ENV=production/);
+
+    expect(() =>
+      resolveTestDatabaseUrl({
+        TEST_DATABASE_URL: TEST_URL,
+        APP_ENV: 'staging',
+        APP_ENVIRONMENT_MARKER: 'production',
+      }),
+    ).toThrow(/APP_ENV=staging, APP_ENVIRONMENT_MARKER=production/);
+  });
+
+  it('разрешает, когда оба маркера безопасны или не заданы', () => {
+    expect(
+      resolveTestDatabaseUrl({
+        TEST_DATABASE_URL: TEST_URL,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+      }),
+    ).toBe(TEST_URL);
+
+    expect(resolveTestDatabaseUrl({ TEST_DATABASE_URL: TEST_URL })).toBe(TEST_URL);
+  });
+
   it('отказывает, если строка подключения не задана', () => {
     expect(() => resolveTestDatabaseUrl({})).toThrow(/TEST_DATABASE_URL/);
   });

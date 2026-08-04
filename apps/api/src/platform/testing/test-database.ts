@@ -37,10 +37,23 @@ function databaseNameOf(connectionString: string): string {
  * пропущенная проверка создаёт ложное ощущение защищённости.
  */
 export function resolveTestDatabaseUrl(env: TestDatabaseEnv = process.env): string {
-  const environment = env.APP_ENV ?? env.APP_ENVIRONMENT_MARKER ?? 'local';
-  if (FORBIDDEN_ENVIRONMENTS.includes(environment)) {
+  // Оба маркера проверяются НЕЗАВИСИМО. Приоритет одного над другим означал бы,
+  // что APP_ENV=local скрывает APP_ENVIRONMENT_MARKER=production, и разрушающие
+  // тесты отработали бы по production-окружению. Достаточно одного опасного
+  // значения из двух, чтобы отказать.
+  const markers = [
+    { name: 'APP_ENV', value: env.APP_ENV },
+    { name: 'APP_ENVIRONMENT_MARKER', value: env.APP_ENVIRONMENT_MARKER },
+  ];
+
+  const dangerous = markers.filter(
+    (marker) => marker.value !== undefined && FORBIDDEN_ENVIRONMENTS.includes(marker.value),
+  );
+
+  if (dangerous.length > 0) {
+    const listed = dangerous.map((marker) => `${marker.name}=${marker.value ?? ''}`).join(', ');
     throw new Error(
-      `Разрушающие тесты запрещены в окружении «${environment}». ` +
+      `Разрушающие тесты запрещены: ${listed}. ` +
         'Они допускаются только к одноразовой тестовой базе локально и в CI.',
     );
   }
