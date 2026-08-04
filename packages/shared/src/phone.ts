@@ -26,7 +26,9 @@ export class PhoneFormatError extends Error {
  * непонятного ввода привело бы к входу под чужим номером.
  */
 export function normalizePhone(input: string): string {
-  const digitsOnly = input.replace(/[\s ()\-.]/g, '');
+  // Неразрывный пробел записан escape-последовательностью: в коде он визуально
+  // неотличим от обычного и потому запрещён линтером.
+  const digitsOnly = input.replace(/[\s\u00A0()\-.]/g, '');
 
   if (!/^\+?\d+$/.test(digitsOnly)) {
     throw new PhoneFormatError();
