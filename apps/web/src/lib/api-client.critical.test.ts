@@ -157,6 +157,73 @@ describe('обновление сессии при 401', () => {
     expect(refreshCalls).toBe(1);
   });
 
+  it('повторный 401 после успешного refresh очищает сессию ровно один раз', async () => {
+    const onSessionLost = vi.fn();
+    let refreshCalls = 0;
+
+    const { impl } = stubFetch((call) => {
+      if (call.url === '/api/auth/refresh') {
+        refreshCalls += 1;
+        return jsonResponse(200, { accessToken: 'fresh-token' });
+      }
+      // Сервер отвечает 401 и до, и после обновления: сессия действительно мертва.
+      return jsonResponse(401, { error: { code: 'UNAUTHENTICATED' } });
+    });
+
+    const client = new ApiClient({ fetchImpl: impl, onSessionLost });
+    client.setAccessToken('stale-token');
+
+    await expect(client.get('/api/users')).rejects.toBeInstanceOf(ApiError);
+
+    // Без этого пользователь остался бы внутри приложения с мёртвым токеном,
+    // а каждый следующий запрос снова запускал бы обновление.
+    expect(client.hasAccessToken).toBe(false);
+    expect(onSessionLost).toHaveBeenCalledTimes(1);
+    expect(refreshCalls).toBe(1);
+  });
+
+  it('отложенный 401 со старым токеном не запускает второй refresh', async () => {
+    let refreshCalls = 0;
+    let releaseSlow: (() => void) | null = null;
+
+    // Ответ медленного запроса придёт уже после того, как токен обновит другой запрос.
+    const slowResponse = new Promise<Response>((resolve) => {
+      releaseSlow = () => resolve(jsonResponse(401, { error: { code: 'UNAUTHENTICATED' } }));
+    });
+
+    let slowAttempts = 0;
+    const impl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === '/api/auth/refresh') {
+        refreshCalls += 1;
+        return jsonResponse(200, { accessToken: 'fresh-token' });
+      }
+
+      if (url === '/api/slow') {
+        slowAttempts += 1;
+        // Первая попытка «зависает», повтор после обновления проходит успешно.
+        return slowAttempts === 1 ? slowResponse : jsonResponse(200, { ok: true });
+      }
+
+      // Быстрый запрос получает 401 и запускает единственный refresh.
+      return jsonResponse(401, { error: { code: 'UNAUTHENTICATED' } });
+    }) as unknown as typeof fetch;
+
+    const client = new ApiClient({ fetchImpl: impl });
+    client.setAccessToken('stale-token');
+
+    const slow = client.get('/api/slow');
+    // Быстрый запрос успевает целиком: 401 → refresh → повтор.
+    await client.get('/api/fast').catch(() => undefined);
+
+    releaseSlow?.();
+    await expect(slow).resolves.toEqual({ ok: true });
+
+    // Второй refresh не запускался: токен уже был обновлён.
+    expect(refreshCalls).toBe(1);
+  });
+
   it('окончательный отказ очищает сессию и сообщает интерфейсу', async () => {
     const onSessionLost = vi.fn();
     const { impl } = stubFetch((call) =>

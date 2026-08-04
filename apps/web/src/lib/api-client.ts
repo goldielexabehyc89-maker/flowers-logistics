@@ -50,7 +50,15 @@ export interface ApiClientOptions {
 export class ApiClient {
   /** Токен живёт только здесь. Наружу не отдаётся и никуда не сохраняется. */
   #accessToken: string | null = null;
+  /**
+   * Счётчик поколений токена. Запрос запоминает поколение в момент отправки:
+   * если к моменту его 401 токен уже успел обновиться другим запросом,
+   * второй refresh не нужен — достаточно повторить запрос с новым токеном.
+   */
+  #tokenGeneration = 0;
   #refreshInFlight: Promise<boolean> | null = null;
+  /** Сессия теряется один раз: интерфейс не должен получать несколько уведомлений. */
+  #sessionLostNotified = false;
   readonly #onSessionLost: (() => void) | undefined;
   readonly #fetch: typeof fetch;
 
@@ -65,12 +73,31 @@ export class ApiClient {
 
   setAccessToken(token: string | null): void {
     this.#accessToken = token;
+    this.#tokenGeneration += 1;
+    if (token !== null) {
+      // Появился рабочий токен — значит сессия снова жива.
+      this.#sessionLostNotified = false;
+    }
   }
 
   /** Полностью очищает память клиента. Вызывается при выходе и потере сессии. */
   clear(): void {
     this.#accessToken = null;
+    this.#tokenGeneration += 1;
     this.#refreshInFlight = null;
+  }
+
+  /**
+   * Сессия окончательно потеряна: память очищается, интерфейс возвращает на вход.
+   * Уведомление отправляется ровно один раз, сколько бы запросов ни завершилось 401.
+   */
+  #loseSession(): void {
+    this.clear();
+    if (this.#sessionLostNotified) {
+      return;
+    }
+    this.#sessionLostNotified = true;
+    this.#onSessionLost?.();
   }
 
   /**
@@ -112,7 +139,7 @@ export class ApiClient {
     body: unknown,
   ): Promise<T> {
     const result = await this.#json<T>(path, { method: 'POST', body: JSON.stringify(body) }, false);
-    this.#accessToken = result.accessToken;
+    this.setAccessToken(result.accessToken);
     return result;
   }
 
@@ -135,6 +162,7 @@ export class ApiClient {
     init: RequestInit,
     allowRefresh: boolean,
   ): Promise<Response> {
+    const generationAtSend = this.#tokenGeneration;
     const response = await this.#rawRequest(path, init);
 
     // Обновление сессии не пытается обновить само себя.
@@ -142,15 +170,32 @@ export class ApiClient {
       return response;
     }
 
+    // Запрос ушёл со старым токеном, но пока он выполнялся, токен уже обновил
+    // другой запрос. Второй refresh не нужен: достаточно повторить запрос.
+    if (this.#tokenGeneration !== generationAtSend) {
+      return this.#retryOnce(path, init);
+    }
+
     const refreshed = await this.#refreshOnce();
     if (!refreshed) {
-      this.clear();
-      this.#onSessionLost?.();
+      this.#loseSession();
       return response;
     }
 
-    // Ровно одна повторная попытка: рекурсии и циклов нет.
-    return this.#rawRequest(path, init);
+    return this.#retryOnce(path, init);
+  }
+
+  /**
+   * Ровно одна повторная попытка. Если и она отвечает 401, сессия считается
+   * потерянной: иначе пользователь остался бы внутри приложения с мёртвым токеном,
+   * а каждый следующий запрос снова запускал бы обновление.
+   */
+  async #retryOnce(path: string, init: RequestInit): Promise<Response> {
+    const retried = await this.#rawRequest(path, init);
+    if (retried.status === 401) {
+      this.#loseSession();
+    }
+    return retried;
   }
 
   async #rawRequest(path: string, init: RequestInit): Promise<Response> {
@@ -195,7 +240,7 @@ export class ApiClient {
       if (typeof body.accessToken !== 'string') {
         return false;
       }
-      this.#accessToken = body.accessToken;
+      this.setAccessToken(body.accessToken);
       return true;
     } catch {
       return false;

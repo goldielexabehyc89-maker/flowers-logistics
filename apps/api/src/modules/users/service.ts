@@ -322,7 +322,7 @@ export async function createUser(
   actor: Actor,
   input: CreateUserInput,
   meta: RequestMeta,
-): Promise<{ user: UserView; activationCode: string }> {
+): Promise<{ user: UserView; activationCode: string; expiresAt: Date }> {
   assertCanManage(actor, input.roles);
 
   if (input.roles.length === 0) {
@@ -389,7 +389,9 @@ export async function createUser(
   });
 
   // Открытый код показывается ровно один раз и больше нигде не хранится.
-  return { user: toView(created), activationCode: prepared.code };
+  // `expiresAt` возвращается так же, как в перевыпуске и сбросе PIN: интерфейс
+  // сообщает пользователю, до какого момента код действует.
+  return { user: toView(created), activationCode: prepared.code, expiresAt: prepared.expiresAt };
 }
 
 export interface UpdateUserInput {

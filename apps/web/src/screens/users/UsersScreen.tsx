@@ -158,9 +158,20 @@ export function UsersScreen(): React.JSX.Element {
       await invalidate();
     },
     onError: async (error) => {
-      if (error instanceof ApiError && error.status === 409) {
-        // Чужое изменение не перетирается: карточка обновляется актуальными данными.
-        setFormError(`${error.message} Данные обновлены — проверьте и повторите.`);
+      if (error instanceof ApiError && error.status === 409 && editing !== null) {
+        // Чужие изменения не перетираются. Форма перезаряжается актуальными данными
+        // вместе с новой версией записи — иначе повторное сохранение снова дало бы 409.
+        try {
+          const fresh = await client.get<{ user: UserView }>(`/api/users/${editing.id}`);
+          setEditing(fresh.user);
+          setFormError(
+            'Запись изменена другим пользователем. Загружены актуальные данные — проверьте их и сохраните ещё раз.',
+          );
+        } catch {
+          setFormError(
+            'Запись изменена другим пользователем. Не удалось загрузить актуальные данные, закройте окно и откройте карточку заново.',
+          );
+        }
         await invalidate();
         return;
       }
@@ -190,10 +201,12 @@ export function UsersScreen(): React.JSX.Element {
           };
       }
     },
-    onSuccess: async (result) => {
-      const pending = confirm;
+    // Результат связывается с АРГУМЕНТОМ мутации, а не с текущим состоянием:
+    // окно подтверждения могло закрыться, пока запрос выполнялся, и одноразовый код,
+    // уже созданный на сервере, оказался бы потерян навсегда.
+    onSuccess: async (result, variables) => {
       setConfirm(null);
-      if (pending === null || result === undefined) {
+      if (result === undefined) {
         return;
       }
 
@@ -202,7 +215,7 @@ export function UsersScreen(): React.JSX.Element {
         setOneTimeCode({
           code: payload.activationCode,
           expiresAt: payload.expiresAt,
-          personName: pending.user.fullName,
+          personName: variables.user.fullName,
           reason: result.kind === 'reset-pin' ? 'pin-reset' : 'reissued',
         });
       } else {
@@ -452,7 +465,13 @@ export function UsersScreen(): React.JSX.Element {
             actionMutation.mutate(confirm);
           }
         }}
-        onCancel={() => setConfirm(null)}
+        onCancel={() => {
+          // Пока операция выполняется, окно закрыть нельзя: результат может
+          // содержать одноразовый код, который показывается только один раз.
+          if (!actionMutation.isPending) {
+            setConfirm(null);
+          }
+        }}
       />
 
       <OneTimeCodeModal value={oneTimeCode} onClose={() => setOneTimeCode(null)} />

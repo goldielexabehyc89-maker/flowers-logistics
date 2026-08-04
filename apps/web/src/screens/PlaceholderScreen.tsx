@@ -6,6 +6,9 @@
  * «почти работающий» экран создаёт ложное представление о готовности продукта.
  */
 
+import { useAuth } from '../auth/AuthContext';
+import { Button } from '../ui/components';
+
 export interface PlaceholderProps {
   title: string;
   stage: string;
@@ -110,7 +113,15 @@ export const PLACEHOLDERS: Record<string, PlaceholderProps> = {
   },
 };
 
+/**
+ * Заглушка для роли без доступных разделов.
+ *
+ * Рабочих разделов здесь нет и быть не должно, но выход обязателен: без него
+ * кладовщик не смог бы завершить сессию на общем устройстве.
+ */
 export function WarehousePlaceholder(): React.JSX.Element {
+  const { user, logout, logoutEverywhere } = useAuth();
+
   return (
     <main className="shell__content">
       <section className="card stack">
@@ -123,6 +134,21 @@ export function WarehousePlaceholder(): React.JSX.Element {
           Если вам нужен доступ к работе логистики, попросите администратора добавить
           соответствующую роль.
         </p>
+
+        <div>
+          <div className="field__label">Вы вошли как</div>
+          <div>{user?.fullName}</div>
+          <div className="muted text-sm">{user?.phone}</div>
+        </div>
+
+        <div className="row">
+          <Button variant="primary" onClick={() => void logout()}>
+            Выйти
+          </Button>
+          <Button variant="ghost" onClick={() => void logoutEverywhere()}>
+            Выйти на всех устройствах
+          </Button>
+        </div>
       </section>
     </main>
   );

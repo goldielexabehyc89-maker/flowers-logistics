@@ -264,9 +264,12 @@ export function ConfirmDialog({
       open={open}
       title={title}
       onClose={onCancel}
+      // Пока операция выполняется, окно нельзя закрыть ни крестиком, ни Escape:
+      // её результат может содержать значение, которое показывается один раз.
+      dismissible={!busy}
       footer={
         <>
-          <Button variant="ghost" onClick={onCancel}>
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>
             Отмена
           </Button>
           <Button variant={destructive ? 'danger' : 'primary'} loading={busy} onClick={onConfirm}>
