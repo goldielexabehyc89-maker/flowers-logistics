@@ -1,0 +1,51 @@
+# Зависимости
+node_modules/
+
+# Сборка
+dist/
+build/
+*.tsbuildinfo
+apps/api/public/
+
+# Сгенерированный Prisma-клиент
+packages/db/generated/
+**/generated/prisma/
+
+# Секреты и локальное окружение — в Git не попадают никогда
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# Дампы и выгрузки БД, потенциально содержащие PII
+*.sql.gz
+*.dump
+*.bak
+backups/
+
+# Логи
+*.log
+logs/
+npm-debug.log*
+
+# Результаты тестов и отчёты
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# Локальные артефакты деплоя
+deploy/state/
+*.lock.d/
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

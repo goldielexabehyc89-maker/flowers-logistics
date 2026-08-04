@@ -1,0 +1,97 @@
+# Локальное окружение разработки.
+# Канонический способ запуска команд проекта: хостовый Node не используется,
+# все команды выполняются в контейнере с зафиксированной версией Node 24.19.0.
+#
+#   docker compose run --rm app npm ci
+#   docker compose run --rm app npm run typecheck
+#
+# Файл не предназначен для staging/production — у них отдельные конфигурации.
+
+name: flowers-logistics
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fl-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fl_app
+      POSTGRES_PASSWORD: fl_local_dev_password
+      POSTGRES_DB: fl_dev
+      TZ: Europe/Moscow
+      PGTZ: Europe/Moscow
+    ports:
+      # Порт хоста вынесен в 55432, чтобы не конфликтовать ни с локально установленным
+      # PostgreSQL, ни с контейнерами других проектов на этой машине.
+      # Значение можно переопределить переменной DB_HOST_PORT.
+      - '${DB_HOST_PORT:-55432}:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U fl_app -d fl_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/dev.Dockerfile
+    image: flowers-logistics-dev:node24.19.0
+    container_name: fl-app
+    working_dir: /workspace
+    environment:
+      NODE_ENV: development
+      APP_ENV: local
+      APP_ENVIRONMENT_MARKER: local
+      HOST: 0.0.0.0
+      PORT: '3000'
+      TZ: Europe/Moscow
+      # Внутри compose-сети обращение идёт к сервису db по внутреннему порту 5432.
+      DATABASE_URL: postgresql://fl_app:fl_local_dev_password@db:5432/fl_dev?schema=public
+    ports:
+      - '3000:3000'
+      - '5173:5173'
+    volumes:
+      - .:/workspace
+      # node_modules живут в томах, а не в bind-mount: на macOS запись десятков тысяч
+      # мелких файлов через bind-mount занимает десятки минут. Хостовый Node всё равно
+      # не используется, поэтому зависимости нужны только внутри контейнера.
+      - app-node-modules:/workspace/node_modules
+      - api-node-modules:/workspace/apps/api/node_modules
+      - web-node-modules:/workspace/apps/web/node_modules
+      - shared-node-modules:/workspace/packages/shared/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ['sleep', 'infinity']
+
+  # Отдельный зафиксированный образ для браузерных проверок.
+  # Хостовый Node для Playwright не используется. Профиль включается явно:
+  #   docker compose --profile e2e run --rm playwright npx playwright test
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.62.1-noble
+    container_name: fl-playwright
+    profiles: ['e2e']
+    working_dir: /workspace
+    environment:
+      TZ: Europe/Moscow
+      CI: '1'
+    volumes:
+      - .:/workspace
+      - app-node-modules:/workspace/node_modules
+      - api-node-modules:/workspace/apps/api/node_modules
+      - web-node-modules:/workspace/apps/web/node_modules
+      - shared-node-modules:/workspace/packages/shared/node_modules
+    ipc: host
+    network_mode: service:app
+    depends_on:
+      - app
+    command: ['sleep', 'infinity']
+
+volumes:
+  db-data:
+  app-node-modules:
+  api-node-modules:
+  web-node-modules:
+  shared-node-modules:
