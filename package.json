@@ -1,0 +1,47 @@
+{
+  "name": "flowers-logistics",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Сервис логистики цветочного интернет-магазина (модульный монолит)",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "24.19.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w @fl/api\" \"npm run dev -w @fl/web\"",
+    "build": "npm run build -w @fl/shared && npm run build -w @fl/web && npm run build -w @fl/api",
+    "typecheck": "npm run build -w @fl/shared && npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "test": "vitest run --config vitest.config.ts",
+    "test:critical": "vitest run --config vitest.critical.config.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "start": "node apps/api/dist/index.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.3",
+    "concurrently": "^10.0.4",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "prisma": "7.9.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.66.0",
+    "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "prisma@7.9.1": true,
+    "@prisma/engines@7.9.1": true,
+    "esbuild@0.28.1": true
+  }
+}

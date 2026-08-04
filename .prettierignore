@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+coverage/
+**/generated/
+package-lock.json
+playwright-report/
+test-results/
+prisma/migrations/

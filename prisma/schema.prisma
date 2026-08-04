@@ -1,0 +1,355 @@
+// Схема этапа 1: только фундамент, авторизация, роли, аудит и примитивы интеграции.
+//
+// Таблицы заказов, маршрутов и финансов сознательно НЕ проектируются: их поля определяются
+// после read-only исследования МоегоСклада (этап 2). Состояния домена описаны в
+// docs/DOMAIN_STATES.md.
+//
+// Правила:
+//  * миграции только forward-only;
+//  * сотрудники и курьеры физически не удаляются — только заморозка/разморозка;
+//  * внешние ключи на пользователя используют onDelete: Restrict, чтобы удаление было невозможно.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../apps/api/src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+// Строка подключения задаётся в prisma.config.ts (Prisma 7 убрал `url` из schema.prisma)
+// и передаётся клиенту через driver adapter @prisma/adapter-pg.
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  LOGISTICIAN
+  COURIER
+  WAREHOUSE
+}
+
+enum UserStatus {
+  PENDING_ACTIVATION
+  ACTIVE
+  FROZEN
+}
+
+enum VehicleType {
+  CAR
+  FOOT
+}
+
+enum AuthAttemptKind {
+  LOGIN
+  ACTIVATION
+  PIN_SET
+  REFRESH
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DONE
+  ERROR
+  DEAD
+}
+
+enum IntegrationState {
+  NOT_CONFIGURED
+  CONFIGURED
+  OK
+  DEGRADED
+  ERROR
+}
+
+/// Пользователь системы. Один пользователь может иметь несколько ролей.
+/// Записи не удаляются никогда: недоступность выражается статусом FROZEN.
+model User {
+  id       String     @id @default(uuid(7)) @db.Uuid
+  /// Телефон в нормализованном виде E.164 (+7XXXXXXXXXX). Логин пользователя.
+  phone    String     @unique
+  fullName String
+  status   UserStatus @default(PENDING_ACTIVATION)
+
+  /// Стойкий хеш PIN (argon2id + серверный pepper). Открытый PIN нигде не хранится.
+  pinHash  String?
+  pinSetAt DateTime?
+
+  /// Увеличивается при заморозке и сбросе PIN: делает недействительными все выданные
+  /// access-токены немедленно, не дожидаясь их истечения.
+  sessionVersion Int @default(0)
+
+  /// Версия записи для оптимистической блокировки при конкурентном редактировании.
+  version Int @default(0)
+
+  comment  String?
+  frozenAt DateTime?
+
+  /// Кто создал запись. Автор изменений и заморозки фиксируется в AuditLog.
+  createdById  String? @db.Uuid
+  createdBy    User?   @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdUsers User[]  @relation("UserCreatedBy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roles           UserRoleAssignment[]
+  courierProfile  CourierProfile?
+  activationCodes ActivationCode[]     @relation("ActivationCodeUser")
+  issuedCodes     ActivationCode[]     @relation("ActivationCodeIssuer")
+  sessions        RefreshSession[]
+  authAttempts    AuthAttempt[]
+  auditEntries    AuditLog[]
+  settingUpdates  SystemSetting[]
+  realtimeEvents  RealtimeEvent[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Роли пользователя (many-to-many без отдельной таблицы ролей: набор ролей фиксирован).
+model UserRoleAssignment {
+  userId     String   @db.Uuid
+  role       Role
+  assignedAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([userId, role])
+  @@index([role])
+}
+
+/// Профиль курьера. Создаётся для пользователя с ролью COURIER.
+/// Баланс и финансовые данные появятся на этапе 7 и здесь сознательно отсутствуют.
+model CourierProfile {
+  userId             String      @id @db.Uuid
+  defaultVehicleType VehicleType @default(CAR)
+  comment            String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  user               User        @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+}
+
+/// Одноразовый код первичной активации и сброса PIN. Хранится только хеш.
+/// Код действует 30 минут; новый код инвалидирует предыдущий.
+model ActivationCode {
+  id       String @id @default(uuid(7)) @db.Uuid
+  userId   String @db.Uuid
+  codeHash String
+
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  invalidatedAt DateTime?
+
+  /// Пока код активен, поле равно userId; при погашении или инвалидации становится NULL.
+  /// Уникальный индекс по нему даёт «не более одного активного кода на пользователя»
+  /// средствами Prisma, без внешних частичных индексов (NULL в PostgreSQL не конфликтуют).
+  activeKey String? @unique @db.Uuid
+
+  issuedById String?  @db.Uuid
+  createdAt  DateTime @default(now())
+
+  user     User  @relation("ActivationCodeUser", fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  issuedBy User? @relation("ActivationCodeIssuer", fields: [issuedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+}
+
+/// Refresh-сессия устройства. Несколько устройств = несколько семей (familyId).
+/// Ротация выполняется с обнаружением повторного использования токена.
+model RefreshSession {
+  id        String @id @default(uuid(7)) @db.Uuid
+  userId    String @db.Uuid
+  /// Идентификатор цепочки ротаций одного устройства.
+  familyId  String @db.Uuid
+  /// Хеш refresh-токена. Открытый токен в базе не хранится.
+  tokenHash String @unique
+
+  /// Преемник, зашифрованный AES-256-GCM, на время grace-окна (30 секунд).
+  /// Нужен, чтобы повторный запрос с потерянным ответом получил ТОТ ЖЕ токен,
+  /// а не создал вторую активную ветку. Затирается по истечении grace.
+  successorTokenEnc String?
+  graceUntil        DateTime?
+
+  deviceLabel String?
+  ip          String?
+  userAgent   String?
+
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  rotatedAt  DateTime?
+
+  /// Ссылка на выданную взамен сессию. Позволяет отличить нормальную ротацию
+  /// от повторного использования уже ротированного токена.
+  replacedById String?         @unique @db.Uuid
+  replacedBy   RefreshSession? @relation("SessionRotation", fields: [replacedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  replaces     RefreshSession? @relation("SessionRotation")
+
+  revokedAt     DateTime?
+  revokedReason String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([graceUntil])
+}
+
+/// Журнал попыток входа и активации. Используется для расследований и защиты от перебора.
+model AuthAttempt {
+  id        BigInt          @id @default(autoincrement())
+  /// Нормализованный телефон из запроса, даже если такого пользователя нет.
+  phone     String
+  userId    String?         @db.Uuid
+  kind      AuthAttemptKind
+  success   Boolean
+  ip        String?
+  userAgent String?
+  /// Причина отказа в виде кода (без секретных значений).
+  reason    String?
+  createdAt DateTime        @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([phone, createdAt])
+  @@index([ip, createdAt])
+  @@index([createdAt])
+}
+
+/// Счётчик прогрессивной блокировки. Ключ вида "phone:+7..." или "ip:1.2.3.4".
+model AuthLockout {
+  key           String    @id
+  failedCount   Int       @default(0)
+  firstFailedAt DateTime  @default(now())
+  lastFailedAt  DateTime  @default(now())
+  lockedUntil   DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@index([lockedUntil])
+}
+
+/// Неизменяемый аудит. UPDATE и DELETE запрещены триггером на уровне базы (см. миграцию).
+model AuditLog {
+  id          BigInt   @id @default(autoincrement())
+  occurredAt  DateTime @default(now())
+  actorUserId String?  @db.Uuid
+  /// Снимок ролей автора на момент действия.
+  actorRoles  Role[]
+  /// Код действия, например USER_FROZEN, PIN_RESET, ACTIVATION_CODE_ISSUED.
+  action      String
+  entityType  String
+  entityId    String?
+  /// Значения до и после. Секреты и открытые коды сюда не попадают никогда.
+  oldValue    Json?
+  newValue    Json?
+  ip          String?
+  userAgent   String?
+  /// Источник действия: api, bootstrap, worker.
+  source      String   @default("api")
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([occurredAt])
+  @@index([actorUserId, occurredAt])
+  @@index([entityType, entityId])
+  @@index([action, occurredAt])
+}
+
+/// Версионируемая системная настройка.
+/// Хранит ТОЛЬКО несекретные значения: адрес склада, вместимость, длительность маршрута и т. п.
+/// Токены и ключи интеграций сюда не попадают никогда — они живут в переменных окружения
+/// или в отдельном серверном зашифрованном хранилище (см. docs/ARCHITECTURE.md).
+model SystemSetting {
+  id      String @id @default(uuid(7)) @db.Uuid
+  key     String
+  version Int
+
+  value Json
+
+  /// Пока версия актуальна, поле равно key; у исторических версий — NULL.
+  /// Даёт «ровно одна текущая версия на ключ» без частичных индексов.
+  currentKey String? @unique
+
+  updatedById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([key, version])
+  @@index([key, createdAt])
+}
+
+/// Событие realtime. Пишется в одной транзакции с бизнес-изменением,
+/// поэтому «изменение есть, а события нет» невозможно.
+/// LISTEN/NOTIFY только ускоряет доставку; при переподключении пропущенное читается отсюда.
+model RealtimeEvent {
+  id         BigInt   @id @default(autoincrement())
+  topic      String
+  /// Персональный адресат: если задан, событие видит только этот пользователь.
+  audienceUserId String? @db.Uuid
+  /// Роли-адресаты: событие видят пользователи с любой из перечисленных ролей.
+  /// Пустой список вместе с пустым audienceUserId означает «никому» — это защищает
+  /// от случайной широковещательной рассылки административных данных курьерам.
+  audienceRoles  Role[]
+  payload    Json
+  occurredAt DateTime @default(now())
+  /// Граница хранения (24 часа). За её пределами клиент получает resync-required.
+  expiresAt  DateTime
+
+  audienceUser User? @relation(fields: [audienceUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([occurredAt])
+  @@index([expiresAt])
+  @@index([audienceUserId, id])
+}
+
+/// Транзакционный outbox для фоновых операций.
+/// Запись создаётся в той же транзакции, что и бизнес-изменение.
+model OutboxMessage {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  topic          String
+  /// Ключ идемпотентности: повторная постановка того же события не создаёт дубликат.
+  idempotencyKey String       @unique
+  payload        Json
+  status         OutboxStatus @default(PENDING)
+
+  attempts     Int      @default(0)
+  maxAttempts  Int      @default(10)
+  nextAttemptAt DateTime @default(now())
+  /// Текст последней ошибки после очистки от секретов и PII.
+  lastError    String?
+
+  lockedAt DateTime?
+  lockedBy String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  processedAt DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
+}
+
+/// Отметка о фактически выполненной обработке. Обеспечивает идемпотентность handler'а
+/// при повторной доставке одного и того же сообщения.
+model OutboxProcessedMessage {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  handlerName    String
+  idempotencyKey String
+  processedAt    DateTime @default(now())
+
+  @@unique([handlerName, idempotencyKey])
+}
+
+/// Состояние внешней интеграции для индикатора в интерфейсе.
+/// На этапе 1 реальных подключений нет: обе записи находятся в состоянии NOT_CONFIGURED.
+model IntegrationStatus {
+  provider          String           @id
+  state             IntegrationState @default(NOT_CONFIGURED)
+  lastOkAt          DateTime?
+  lastErrorAt       DateTime?
+  pendingOperations Int              @default(0)
+  /// Только очищенные технические детали: без токенов, cookies, заголовков и PII.
+  details           Json?
+  updatedAt         DateTime         @updatedAt
+}

@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Права по умолчанию — только чтение репозитория.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24.19.0'
+
+jobs:
+  checks:
+    name: Обязательные проверки
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fl_app
+          POSTGRES_PASSWORD: fl_ci_password
+          POSTGRES_DB: fl_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fl_app -d fl_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://fl_app:fl_ci_password@localhost:5432/fl_ci?schema=public
+      # Разрушающие критические тесты допускаются только к одноразовой базе.
+      # В CI это контейнер, живущий время сборки; базы разработки здесь нет.
+      TEST_DATABASE_URL: postgresql://fl_app:fl_ci_password@localhost:5432/fl_ci?schema=public
+      APP_ENV: local
+      TZ: Europe/Moscow
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Проверить, что версия Node совпадает с .nvmrc
+        run: |
+          set -euo pipefail
+          expected="$(tr -d '[:space:]' < .nvmrc)"
+          actual="$(node -v | sed 's/^v//')"
+          if [ "$expected" != "$actual" ]; then
+            echo "Версия Node ($actual) не совпадает с .nvmrc ($expected)" >&2
+            exit 1
+          fi
+
+      - name: Установить зависимости
+        run: npm ci --no-audit --no-fund
+
+      - name: Сгенерировать клиент Prisma
+        run: npx prisma generate
+
+      - name: Применить миграции на чистой PostgreSQL 16
+        run: npx prisma migrate deploy
+
+      - name: Проверить отсутствие дрейфа схемы
+        run: npx prisma migrate status
+
+      - name: Типы
+        run: npm run typecheck
+
+      - name: Линтер
+        run: npm run lint
+
+      - name: Форматирование
+        run: npm run format
+
+      - name: Критические проверки
+        run: npm run test:critical
+
+      - name: Production-сборка
+        run: npm run build
+
+  secrets-scan:
+    name: Запрещённые файлы и поиск секретов
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Версия и контрольная сумма закреплены: обновление сканера — осознанное действие,
+      # а не молчаливое подтягивание нового кода в CI.
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Запретить коммит .env и дампов
+        run: |
+          set -euo pipefail
+          # Проверка по именам файлов. Содержимое проверяется отдельным шагом ниже.
+          # .env.example содержит только имена переменных и разрешён намеренно.
+          forbidden="$(git ls-files \
+            | grep -E '(^|/)\.env($|\.)|\.dump$|\.sql\.gz$|\.pem$|\.p12$' \
+            | grep -v -E '(^|/)\.env\.example$' || true)"
+          if [ -n "$forbidden" ]; then
+            echo "В репозитории найдены файлы, которые не должны попадать в Git:" >&2
+            echo "$forbidden" >&2
+            exit 1
+          fi
+
+      - name: Установить gitleaks с проверкой контрольной суммы
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL --retry 3 --max-time 120 \
+            -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" gitleaks
+          chmod +x gitleaks
+          ./gitleaks version
+
+      - name: Поиск секретов в содержимом файлов и в истории
+        run: |
+          set -euo pipefail
+          # --redact: найденное значение не печатается в лог CI, чтобы отчёт
+          # о секрете сам не стал местом его публикации.
+          ./gitleaks detect \
+            --source . \
+            --config .gitleaks.toml \
+            --redact \
+            --no-banner \
+            --verbose \
+            --exit-code 1
