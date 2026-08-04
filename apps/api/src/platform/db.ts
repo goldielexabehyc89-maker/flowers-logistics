@@ -10,7 +10,12 @@ import { PrismaClient } from '../generated/prisma/client.js';
 import type { AppConfig } from './config.js';
 import type { AppLogger } from './logging/logger.js';
 
-export type Database = PrismaClient;
+/**
+ * Клиент параметризуется уровнями логов, которые он публикует событиями.
+ * Тип указан явно, иначе конкретный клиент с `emit: 'event'` не совпадёт
+ * с обобщённым `PrismaClient`.
+ */
+export type Database = PrismaClient<'warn' | 'error'>;
 
 /** Событие лога Prisma при `emit: 'event'`. */
 interface PrismaLogEvent {

@@ -9,12 +9,15 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
+import fastifyCookie from '@fastify/cookie';
 import { ZodError } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { AppLogger } from '../logging/logger.js';
 import { AppError, isAppError } from '../errors.js';
 import type { Database } from '../db.js';
 import { registerHealthRoutes } from '../../modules/health/routes.js';
+import { registerAuthRoutes } from '../../modules/auth/routes.js';
+import { registerUserRoutes } from '../../modules/users/routes.js';
 import type { AppServer } from './types.js';
 
 export interface ServerDeps {
@@ -52,6 +55,16 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
         { err: error, code: error.code, details: error.details },
         'обработанная ошибка приложения',
       );
+
+      // При блокировке клиент должен узнать, когда повторять. Значение берётся
+      // из details, но сами details наружу не отдаются: в теле только код и текст.
+      if (error.code === 'RATE_LIMITED') {
+        const retryAfter = error.details?.['retryAfterSeconds'];
+        if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+          reply.header('Retry-After', String(Math.max(1, Math.ceil(retryAfter))));
+        }
+      }
+
       return reply.code(error.statusCode).send(error.toBody(request.id));
     }
 
@@ -69,7 +82,12 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
     return reply.code(internal.statusCode).send(internal.toBody(request.id));
   });
 
+  // Cookie нужны только для refresh-токена: он передаётся исключительно так.
+  await app.register(fastifyCookie);
+
   await registerHealthRoutes(app, { db, config });
+  await registerAuthRoutes(app, { db, config });
+  await registerUserRoutes(app, { db, config });
 
   await app.register(async (api) => {
     api.get('/api/status', async () => ({

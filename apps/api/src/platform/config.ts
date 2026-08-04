@@ -18,7 +18,8 @@ const configSchema = z.object({
   APP_ENVIRONMENT_MARKER: z.string().min(1).default('local'),
   HOST: z.string().min(1).default('0.0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  // `silent` полностью отключает вывод и используется в тестах.
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL обязателен'),
   /** Каталог собранного web-клиента; в production один Node-процесс отдаёт API и статику. */
   WEB_DIST_PATH: z.string().optional(),
@@ -40,19 +41,46 @@ const configSchema = z.object({
   TRUST_PROXY: z.string().optional(),
 
   // --- Секреты авторизации ---
-  // На этапе 1 модуль auth ещё не реализован, поэтому значения необязательны.
-  // Ветка feat/stage1-auth делает их обязательными для APP_ENV !== 'local'.
-  AUTH_ACCESS_TOKEN_SECRET: z.string().min(32).optional(),
-  AUTH_PIN_PEPPER: z.string().min(32).optional(),
-  AUTH_REFRESH_REPLAY_KEY: z.string().min(32).optional(),
+  // Обязательны во всех окружениях. Небезопасного значения по умолчанию нет намеренно:
+  // сгенерированный на лету секрет молча обесценил бы подписи и шифрование,
+  // а «пустой» секрет означал бы подделываемые токены.
+  // Для локальной разработки значения задаются в docker-compose.yml и явно помечены dev-only.
+  AUTH_ACCESS_TOKEN_SECRET: z
+    .string()
+    .min(32, 'AUTH_ACCESS_TOKEN_SECRET должен быть не короче 32 символов'),
+  AUTH_PIN_PEPPER: z.string().min(32, 'AUTH_PIN_PEPPER должен быть не короче 32 символов'),
+  /** Ключ AES-256-GCM в base64: ровно 32 байта после декодирования. */
+  AUTH_REFRESH_REPLAY_KEY: z
+    .string()
+    .min(1, 'AUTH_REFRESH_REPLAY_KEY обязателен')
+    .refine((value) => decodeBase64Key(value)?.length === 32, {
+      message: 'AUTH_REFRESH_REPLAY_KEY должен быть 32 байтами в base64 (ключ AES-256-GCM)',
+    }),
 });
+
+/** Декодирует base64 без выбрасывания исключения; возвращает null при некорректном значении. */
+function decodeBase64Key(value: string): Buffer | null {
+  try {
+    const buffer = Buffer.from(value, 'base64');
+    // Buffer.from не сообщает об ошибке, поэтому проверяем обратимость кодирования.
+    return buffer.toString('base64').replace(/=+$/, '') === value.replace(/=+$/, '')
+      ? buffer
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Значение, которое принимает Fastify в опции `trustProxy`. */
 export type TrustProxySetting = false | number | string[];
 
 export type AppConfig = Readonly<z.infer<typeof configSchema>> & {
   readonly isProduction: boolean;
+  /** Локальная разработка: только здесь допустимы cookie без флага Secure. */
+  readonly isLocal: boolean;
   readonly trustProxy: TrustProxySetting;
+  /** Ключ AES-256-GCM для кратковременного хранения преемника refresh-токена. */
+  readonly refreshReplayKey: Buffer;
 };
 
 const IP_OR_CIDR = /^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$|^[0-9a-f:]+(\/\d{1,3})?$/i;
@@ -117,7 +145,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return Object.freeze({
     ...parsed.data,
     isProduction: parsed.data.NODE_ENV === 'production',
+    isLocal: parsed.data.APP_ENV === 'local',
     trustProxy: parseTrustProxy(parsed.data.TRUST_PROXY),
+    refreshReplayKey: Buffer.from(parsed.data.AUTH_REFRESH_REPLAY_KEY, 'base64'),
   });
 }
 

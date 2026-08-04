@@ -53,6 +53,14 @@ services:
       # Обычная база разработки для них закрыта: они оставляют записи,
       # которые нельзя удалить. Пересоздаётся через ./scripts/reset-test-db.sh
       TEST_DATABASE_URL: postgresql://fl_app:fl_local_dev_password@db:5432/fl_test?schema=public
+      # ВНИМАНИЕ: значения ниже — ТОЛЬКО ДЛЯ ЛОКАЛЬНОЙ РАЗРАБОТКИ (dev-only).
+      # Они лежат в открытом виде в репозитории и потому непригодны нигде, кроме
+      # машины разработчика. Для staging и production секреты генерируются заново
+      # и хранятся вне Git (см. docs/DEPLOY.md).
+      AUTH_ACCESS_TOKEN_SECRET: dev-only-access-token-secret-not-for-any-real-environment
+      AUTH_PIN_PEPPER: dev-only-pin-pepper-not-for-any-real-environment
+      # 32 байта в base64 (ключ AES-256-GCM), тоже dev-only.
+      AUTH_REFRESH_REPLAY_KEY: ZGV2LW9ubHkta2V5LTMyLWJ5dGVzLTAwMDAwMDAwMDA=
     ports:
       - '3000:3000'
       - '5173:5173'

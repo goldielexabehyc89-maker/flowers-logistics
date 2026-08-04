@@ -9,11 +9,13 @@ import { describe, expect, it } from 'vitest';
 import { Writable } from 'node:stream';
 import { pino } from 'pino';
 import { loadConfig } from '../config.js';
+import { TEST_SECRETS } from '../testing/secrets.js';
 import { buildLoggerOptions } from '../logging/logger.js';
 import { buildServer } from './server.js';
 import type { Database } from '../db.js';
 
 const config = loadConfig({
+  ...TEST_SECRETS,
   DATABASE_URL: 'postgresql://user:sup3r-s3cret@localhost:5432/db',
   LOG_LEVEL: 'info',
 });

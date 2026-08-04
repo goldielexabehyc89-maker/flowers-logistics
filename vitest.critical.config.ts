@@ -14,5 +14,15 @@ export default defineConfig({
     include: ['apps/**/*.critical.test.ts', 'packages/**/*.critical.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/generated/**'],
     passWithNoTests: false,
+    /**
+     * Файлы выполняются последовательно.
+     *
+     * Часть проверок работает с общей тестовой базой и с глобальным состоянием
+     * (единственный активный администратор, счётчики блокировки). При параллельном
+     * запуске файлы влияли бы друг на друга, и результат зависел бы от расписания —
+     * такой набор тестов не доказывал бы ничего.
+     */
+    fileParallelism: false,
+    sequence: { concurrent: false },
   },
 });
