@@ -11,6 +11,7 @@ import { Writable } from 'node:stream';
 import { redactDeep, redactString, safePath, REDACTED } from './redact.js';
 import { buildLoggerOptions } from './logger.js';
 import { loadConfig } from '../config.js';
+import { TEST_SECRETS } from '../testing/secrets.js';
 
 const SECRET_VALUES = [
   '1234', // PIN
@@ -109,6 +110,7 @@ describe('редакция чувствительных данных', () => {
   it('фактический вывод логгера не содержит секрет из текста ошибки и из сообщения', () => {
     const lines: string[] = [];
     const config = loadConfig({
+      ...TEST_SECRETS,
       DATABASE_URL: 'postgresql://fl_app:sup3r-s3cret@db:5432/fl_dev',
       LOG_LEVEL: 'info',
     });
@@ -137,6 +139,7 @@ describe('редакция чувствительных данных', () => {
   it('фактический вывод логгера не содержит PIN, телефон, токены и cookies', () => {
     const lines: string[] = [];
     const config = loadConfig({
+      ...TEST_SECRETS,
       DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
       LOG_LEVEL: 'info',
     });

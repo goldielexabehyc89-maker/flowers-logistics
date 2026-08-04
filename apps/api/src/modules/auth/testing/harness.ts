@@ -10,18 +10,11 @@ import type { Role } from '@fl/shared';
 import { loadConfig, type AppConfig } from '../../../platform/config.js';
 import { createDatabase, type Database } from '../../../platform/db.js';
 import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.js';
+import { TEST_SECRETS } from '../../../platform/testing/secrets.js';
 import { buildServer } from '../../../platform/http/server.js';
 import type { AppServer } from '../../../platform/http/types.js';
 
-/**
- * Фиксированные тестовые секреты. Значения заведомо непригодны для реальных окружений
- * и существуют только внутри тестов.
- */
-export const TEST_SECRETS = {
-  AUTH_ACCESS_TOKEN_SECRET: 'test-only-access-token-secret-0000000000',
-  AUTH_PIN_PEPPER: 'test-only-pin-pepper-000000000000000000',
-  AUTH_REFRESH_REPLAY_KEY: Buffer.alloc(32, 7).toString('base64'),
-} as const;
+export { TEST_SECRETS };
 
 export function testConfig(overrides: Record<string, string> = {}): AppConfig {
   return loadConfig({

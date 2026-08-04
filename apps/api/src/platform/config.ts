@@ -18,7 +18,8 @@ const configSchema = z.object({
   APP_ENVIRONMENT_MARKER: z.string().min(1).default('local'),
   HOST: z.string().min(1).default('0.0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  // `silent` полностью отключает вывод и используется в тестах.
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL обязателен'),
   /** Каталог собранного web-клиента; в production один Node-процесс отдаёт API и статику. */
   WEB_DIST_PATH: z.string().optional(),
