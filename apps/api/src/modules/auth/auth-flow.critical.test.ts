@@ -39,19 +39,35 @@ async function seedActiveUser(pin: string, roles: Parameters<typeof seedUser>[1]
   return seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
 }
 
+/**
+ * Приводит базу к состоянию «администраторов нет».
+ *
+ * Пользователей удалить нельзя, поэтому все существующие администраторы
+ * замораживаются: для bootstrap это равнозначно их отсутствию. Без такой подготовки
+ * результат теста зависел бы от данных, созданных другими тестами.
+ */
+async function withoutAnyAdmins(): Promise<void> {
+  await ctx.db.user.updateMany({
+    where: { roles: { some: { role: 'ADMIN' } }, status: { not: 'FROZEN' } },
+    data: { status: 'FROZEN', frozenAt: new Date() },
+  });
+}
+
 describe('bootstrap первого администратора', () => {
   it('создаёт ровно одного администратора и не создаёт второго при повторе', async () => {
-    // База может уже содержать администратора от предыдущих тестов, поэтому
-    // проверяется именно неизменность их количества.
-    const before = await ctx.db.user.count({ where: { roles: { some: { role: 'ADMIN' } } } });
+    await withoutAnyAdmins();
 
     const first = await bootstrapAdmin(ctx.db, ctx.config, {
       phone: uniquePhone(),
       name: 'Первый администратор',
       reissue: false,
     });
+    expect(first.kind).toBe('created');
 
-    const afterFirst = await ctx.db.user.count({ where: { roles: { some: { role: 'ADMIN' } } } });
+    const created = await ctx.db.user.count({
+      where: { roles: { some: { role: 'ADMIN' } }, status: { not: 'FROZEN' } },
+    });
+    expect(created).toBe(1);
 
     const second = await bootstrapAdmin(ctx.db, ctx.config, {
       phone: uniquePhone(),
@@ -59,58 +75,70 @@ describe('bootstrap первого администратора', () => {
       reissue: false,
     });
 
-    const afterSecond = await ctx.db.user.count({ where: { roles: { some: { role: 'ADMIN' } } } });
-
-    if (before === 0) {
-      expect(first.kind).toBe('created');
-      expect(afterFirst).toBe(1);
-    }
     expect(second.kind).toBe('already-exists');
-    expect(afterSecond).toBe(afterFirst);
+    // Второго администратора не появилось, прежний код не раскрыт.
+    expect(
+      await ctx.db.user.count({
+        where: { roles: { some: { role: 'ADMIN' } }, status: { not: 'FROZEN' } },
+      }),
+    ).toBe(1);
+    expect(JSON.stringify(second)).not.toContain('code');
   });
 
-  it('повторный запуск не раскрывает прежний код', async () => {
-    const outcome = await bootstrapAdmin(ctx.db, ctx.config, {
-      phone: uniquePhone(),
-      name: 'Ещё один',
+  it('--reissue выдаёт новый код только ожидающему администратору с тем же телефоном', async () => {
+    await withoutAnyAdmins();
+
+    const phone = uniquePhone();
+    const created = await bootstrapAdmin(ctx.db, ctx.config, {
+      phone,
+      name: 'Первый администратор',
       reissue: false,
     });
+    expect(created.kind).toBe('created');
 
-    expect(outcome.kind).toBe('already-exists');
-    expect(JSON.stringify(outcome)).not.toContain('code');
+    // Чужой телефон — отказ.
+    const wrongPhone = await bootstrapAdmin(ctx.db, ctx.config, {
+      phone: uniquePhone(),
+      name: 'Не тот',
+      reissue: true,
+    });
+    expect(wrongPhone.kind).toBe('reissue-not-allowed');
+
+    // Тот же телефон — новый код, второй пользователь не создаётся.
+    const reissued = await bootstrapAdmin(ctx.db, ctx.config, {
+      phone,
+      name: 'Первый администратор',
+      reissue: true,
+    });
+    expect(reissued.kind).toBe('reissued');
+    expect(
+      await ctx.db.user.count({
+        where: { roles: { some: { role: 'ADMIN' } }, status: { not: 'FROZEN' } },
+      }),
+    ).toBe(1);
+
+    // Активных кодов по-прежнему ровно один: предыдущий инвалидирован.
+    const pendingAdmin = await ctx.db.user.findFirstOrThrow({
+      where: { phone },
+      select: { id: true },
+    });
+    expect(
+      await ctx.db.activationCode.count({
+        where: { userId: pendingAdmin.id, activeKey: { not: null } },
+      }),
+    ).toBe(1);
   });
 
-  it('--reissue отклоняется при чужом телефоне и при наличии активного администратора', async () => {
-    const pending = await ctx.db.user.findFirst({
-      where: { status: 'PENDING_ACTIVATION', roles: { some: { role: 'ADMIN' } } },
-      select: { phone: true },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    if (pending !== null) {
-      const wrongPhone = await bootstrapAdmin(ctx.db, ctx.config, {
-        phone: uniquePhone(),
-        name: 'Не тот',
-        reissue: true,
-      });
-      expect(wrongPhone.kind).toBe('reissue-not-allowed');
-
-      // Для того же телефона перевыпуск разрешён и инвалидирует предыдущий код.
-      const reissued = await bootstrapAdmin(ctx.db, ctx.config, {
-        phone: pending.phone,
-        name: 'Первый администратор',
-        reissue: true,
-      });
-      expect(reissued.kind).toBe('reissued');
-    }
-
-    // При активном администраторе перевыпуск запрещён.
+  it('--reissue запрещён при наличии активного администратора', async () => {
+    await withoutAnyAdmins();
     await seedUser(ctx.db, { roles: ['ADMIN'], status: 'ACTIVE' });
+
     const blocked = await bootstrapAdmin(ctx.db, ctx.config, {
       phone: uniquePhone(),
       name: 'После активации',
       reissue: true,
     });
+
     expect(blocked.kind).toBe('reissue-not-allowed');
   });
 });

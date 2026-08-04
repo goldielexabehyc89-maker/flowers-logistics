@@ -163,7 +163,9 @@ describe('конкурентная ротация refresh-токена', () => {
     expect(alive).toBe(0);
   });
 
-  it('копия преемника не хранится дольше grace-окна', async () => {
+  it('копия преемника обесценивается при следующей ротации в этой же семье', async () => {
+    // Название точное: очистка ленивая. Глобальной фоновой чистки просроченных
+    // копий в этой ветке нет — она обязательна до staging (см. ROADMAP, пункт 1.4).
     const { session } = await loginFresh();
 
     const rotated = await refresh(ctx, session.refreshToken, CONTEXT);

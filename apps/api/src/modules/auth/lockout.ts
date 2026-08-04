@@ -3,7 +3,7 @@
  *
  * Четырёхзначный PIN даёт всего 10 000 комбинаций, поэтому ограничение попыток —
  * основная защита входа. Счётчики живут в PostgreSQL: Redis в проекте нет намеренно,
- * а храненить их в памяти процесса нельзя — перезапуск обнулил бы защиту.
+ * а хранение в памяти процесса обнулялось бы при перезапуске.
  *
  * Счёт ведётся отдельно по телефону и по IP: атака с одного адреса по многим номерам
  * и атака по одному номеру с разных адресов — разные сценарии.
@@ -74,7 +74,15 @@ export async function checkLockout(
 }
 
 /**
- * Фиксирует неудачную попытку и при необходимости включает блокировку.
+ * Фиксирует неудачную попытку и при необходимости продлевает блокировку.
+ *
+ * Счётчик НЕ обнуляется по истечении блокировки: иначе злоумышленник, переждав
+ * тридцать секунд, вечно оставался бы на первом пороге, и уровни 5, 7 и 10
+ * оказались бы недостижимы. Сбрасывает счётчик только успешный вход или активация.
+ *
+ * Инкремент сериализуется advisory-блокировкой по ключу: параллельные неудачные
+ * попытки иначе прочитали бы одно и то же значение и потеряли часть счёта.
+ *
  * Открытый PIN или код сюда не передаётся и нигде не сохраняется.
  */
 export async function registerFailure(
@@ -84,23 +92,22 @@ export async function registerFailure(
   const now = new Date();
 
   for (const key of keys) {
+    await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`lockout:${key}`}))`;
+
     const existing = await db.authLockout.findUnique({
       where: { key },
-      select: { failedCount: true, lockedUntil: true },
+      select: { failedCount: true },
     });
 
-    // Истёкшая блокировка сбрасывает счётчик: иначе пользователь, однажды ошибшийся
-    // несколько раз, навсегда остался бы у верхнего порога.
-    const previousLock = existing?.lockedUntil ?? null;
-    const lockExpired = previousLock !== null && previousLock.getTime() <= now.getTime();
-    const previous = existing === null || lockExpired ? 0 : existing.failedCount;
-    const failedCount = previous + 1;
+    const failedCount = (existing?.failedCount ?? 0) + 1;
     const lockMs = lockDurationFor(failedCount);
     const lockedUntil = lockMs === null ? null : new Date(now.getTime() + lockMs);
 
     await db.authLockout.upsert({
       where: { key },
       create: { key, failedCount, firstFailedAt: now, lastFailedAt: now, lockedUntil },
+      // Существующая блокировка не укорачивается: при переходе на следующий порог
+      // время только растёт.
       update: { failedCount, lastFailedAt: now, lockedUntil },
     });
   }

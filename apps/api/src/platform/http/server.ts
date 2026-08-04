@@ -55,6 +55,16 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
         { err: error, code: error.code, details: error.details },
         'обработанная ошибка приложения',
       );
+
+      // При блокировке клиент должен узнать, когда повторять. Значение берётся
+      // из details, но сами details наружу не отдаются: в теле только код и текст.
+      if (error.code === 'RATE_LIMITED') {
+        const retryAfter = error.details?.['retryAfterSeconds'];
+        if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+          reply.header('Retry-After', String(Math.max(1, Math.ceil(retryAfter))));
+        }
+      }
+
       return reply.code(error.statusCode).send(error.toBody(request.id));
     }
 

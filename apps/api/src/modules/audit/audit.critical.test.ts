@@ -46,6 +46,64 @@ describe('защита аудита от секретов', () => {
     }
   });
 
+  it('находит секрет во вложенном объекте', async () => {
+    const { tx, create } = fakeTx();
+
+    await expect(
+      writeAudit(tx, {
+        action: 'USER_UPDATED',
+        entityType: 'User',
+        newValue: { changes: { profile: { credentials: { pinHash: 'argon2id$...' } } } },
+      }),
+    ).rejects.toBeInstanceOf(AuditSecretLeakError);
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('находит секрет внутри массива', async () => {
+    const { tx, create } = fakeTx();
+
+    await expect(
+      writeAudit(tx, {
+        action: 'USER_UPDATED',
+        entityType: 'User',
+        newValue: { devices: [{ label: 'Телефон' }, { token: 'abc' }] },
+      }),
+    ).rejects.toBeInstanceOf(AuditSecretLeakError);
+
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('отклоняет циклическое и чрезмерно глубокое значение', async () => {
+    const cyclic: Record<string, unknown> = { name: 'узел' };
+    cyclic['self'] = cyclic;
+
+    await expect(
+      writeAudit(fakeTx().tx, { action: 'USER_UPDATED', entityType: 'User', newValue: cyclic }),
+    ).rejects.toBeInstanceOf(AuditSecretLeakError);
+
+    let deep: Record<string, unknown> = { value: 1 };
+    for (let level = 0; level < 12; level += 1) {
+      deep = { nested: deep };
+    }
+
+    await expect(
+      writeAudit(fakeTx().tx, { action: 'USER_UPDATED', entityType: 'User', newValue: deep }),
+    ).rejects.toBeInstanceOf(AuditSecretLeakError);
+  });
+
+  it('пропускает допустимую вложенность без секретов', async () => {
+    const { tx, create } = fakeTx();
+
+    await writeAudit(tx, {
+      action: 'USER_UPDATED',
+      entityType: 'User',
+      newValue: { changes: { profile: { fullName: 'Иван' }, roles: ['COURIER'] } },
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
   it('проверяет и старое, и новое значение', async () => {
     const { tx } = fakeTx();
 

@@ -130,6 +130,40 @@ describe('охрана запросов', () => {
     expect(cookie).not.toContain(String(response.json().accessToken));
   });
 
+  it('при блокировке HTTP отвечает 429 с заголовком Retry-After и без деталей', async () => {
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE', pinHash });
+
+    // Три неверные попытки включают первый порог блокировки.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await ctx.app.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { phone: user.phone, pin: '0000' },
+      });
+    }
+
+    const blocked = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { phone: user.phone, pin },
+    });
+
+    expect(blocked.statusCode).toBe(429);
+
+    const retryAfter = blocked.headers['retry-after'];
+    expect(retryAfter).toBeDefined();
+    expect(Number(retryAfter)).toBeGreaterThan(0);
+    expect(Number(retryAfter)).toBeLessThanOrEqual(30);
+
+    // Тело содержит только код и понятный текст, без технических деталей.
+    const body = blocked.json();
+    expect(body).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+    expect(body.error).not.toHaveProperty('details');
+    expect(blocked.body).not.toContain('retryAfterSeconds');
+  });
+
   it('ответ входа не содержит хешей и токена обновления', async () => {
     const pin = '1234';
     const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);

@@ -83,6 +83,31 @@ function assertCanManage(actor: Actor, targetRoles: readonly Role[]): void {
 }
 
 /**
+ * Блокирует строку пользователя и заново проверяет права уже внутри транзакции.
+ *
+ * Проверка прав до транзакции создавала гонку: пока логист открывал карточку курьера,
+ * администратор мог выдать этому курьеру роль ADMIN, и операция логиста применилась бы
+ * к уже привилегированному сотруднику. `FOR UPDATE` по строке пользователя ждёт
+ * завершения конкурентного изменения ролей — оно тоже блокирует эту строку.
+ */
+async function lockAndAuthorize(
+  tx: TransactionClient,
+  actor: Actor,
+  userId: string,
+): Promise<UserView> {
+  await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId}::uuid FOR UPDATE`;
+
+  const user = await tx.user.findUnique({ where: { id: userId }, select: USER_SELECT });
+  if (user === null) {
+    throw new AppError('NOT_FOUND', { message: 'user not found' });
+  }
+
+  const view = toView(user);
+  assertCanManage(actor, view.roles);
+  return view;
+}
+
+/**
  * Не позволяет остаться без активного администратора.
  *
  * Advisory-блокировка нужна, потому что две параллельные заморозки двух последних
@@ -499,17 +524,15 @@ export async function freezeUser(
   userId: string,
   meta: RequestMeta,
 ): Promise<UserView> {
-  const current = await deps.db.user.findUnique({ where: { id: userId }, select: USER_SELECT });
-  if (current === null) {
-    throw new AppError('NOT_FOUND', { message: 'user not found' });
-  }
-  assertCanManage(actor, toView(current).roles);
-
-  if (current.status === 'FROZEN') {
-    return toView(current);
-  }
-
   return deps.db.$transaction(async (tx) => {
+    // Права проверяются здесь, а не до транзакции: роли пользователя могли
+    // измениться между открытием карточки и нажатием кнопки.
+    const current = await lockAndAuthorize(tx, actor, userId);
+
+    if (current.status === 'FROZEN') {
+      return current;
+    }
+
     await assertNotLastActiveAdmin(tx, userId);
 
     await tx.user.update({
@@ -548,21 +571,17 @@ export async function unfreezeUser(
   userId: string,
   meta: RequestMeta,
 ): Promise<UserView> {
-  const current = await deps.db.user.findUnique({ where: { id: userId }, select: USER_SELECT });
-  if (current === null) {
-    throw new AppError('NOT_FOUND', { message: 'user not found' });
-  }
-  assertCanManage(actor, toView(current).roles);
-
-  if (current.status !== 'FROZEN') {
-    return toView(current);
-  }
-
-  // Пользователь без PIN возвращается в ожидание активации, а не в ACTIVE:
-  // войти ему всё равно нечем.
-  const nextStatus = current.pinSetAt === null ? 'PENDING_ACTIVATION' : 'ACTIVE';
-
   return deps.db.$transaction(async (tx) => {
+    const current = await lockAndAuthorize(tx, actor, userId);
+
+    if (current.status !== 'FROZEN') {
+      return current;
+    }
+
+    // Пользователь без PIN возвращается в ожидание активации, а не в ACTIVE:
+    // войти ему всё равно нечем.
+    const nextStatus = current.pinSetAt === null ? 'PENDING_ACTIVATION' : 'ACTIVE';
+
     await tx.user.update({
       where: { id: userId },
       data: { status: nextStatus, frozenAt: null, version: { increment: 1 } },
@@ -592,22 +611,29 @@ export async function reissueActivationCode(
   userId: string,
   meta: RequestMeta,
 ): Promise<{ activationCode: string; expiresAt: Date }> {
-  const current = await deps.db.user.findUnique({ where: { id: userId }, select: USER_SELECT });
-  if (current === null) {
-    throw new AppError('NOT_FOUND', { message: 'user not found' });
-  }
-  assertCanManage(actor, toView(current).roles);
-
-  if (current.status === 'FROZEN') {
-    throw new AppError('CONFLICT', {
-      message: 'frozen user cannot receive activation code',
-      publicMessage: 'Сначала разморозьте пользователя.',
-    });
-  }
-
   const prepared = await prepareActivationCode(deps.config.AUTH_PIN_PEPPER);
 
   await deps.db.$transaction(async (tx) => {
+    const current = await lockAndAuthorize(tx, actor, userId);
+
+    if (current.status === 'FROZEN') {
+      throw new AppError('CONFLICT', {
+        message: 'frozen user cannot receive activation code',
+        publicMessage: 'Сначала разморозьте пользователя.',
+      });
+    }
+
+    // Действующему сотруднику код активации не выдаётся: иначе его PIN можно было бы
+    // заменить публичной активацией. Для него существует отдельная операция сброса PIN,
+    // которая аудируется как PIN_RESET и отзывает все сессии.
+    if (current.status !== 'PENDING_ACTIVATION') {
+      throw new AppError('CONFLICT', {
+        message: 'activation code is only for pending users',
+        publicMessage:
+          'Пользователь уже активирован. Чтобы выдать новый код, используйте сброс PIN.',
+      });
+    }
+
     await storeActivationCode(tx, userId, actor.userId, prepared);
 
     await writeAudit(tx, {
@@ -631,22 +657,18 @@ export async function resetPin(
   userId: string,
   meta: RequestMeta,
 ): Promise<{ activationCode: string; expiresAt: Date }> {
-  const current = await deps.db.user.findUnique({ where: { id: userId }, select: USER_SELECT });
-  if (current === null) {
-    throw new AppError('NOT_FOUND', { message: 'user not found' });
-  }
-  assertCanManage(actor, toView(current).roles);
-
-  if (current.status === 'FROZEN') {
-    throw new AppError('CONFLICT', {
-      message: 'frozen user requires unfreeze first',
-      publicMessage: 'Сначала разморозьте пользователя, затем сбрасывайте PIN.',
-    });
-  }
-
   const prepared = await prepareActivationCode(deps.config.AUTH_PIN_PEPPER);
 
   await deps.db.$transaction(async (tx) => {
+    const target = await lockAndAuthorize(tx, actor, userId);
+
+    if (target.status === 'FROZEN') {
+      throw new AppError('CONFLICT', {
+        message: 'frozen user requires unfreeze first',
+        publicMessage: 'Сначала разморозьте пользователя, затем сбрасывайте PIN.',
+      });
+    }
+
     await assertNotLastActiveAdmin(tx, userId);
 
     await tx.user.update({
@@ -669,7 +691,7 @@ export async function resetPin(
       entityId: userId,
       actorUserId: actor.userId,
       actorRoles: actor.roles,
-      oldValue: { status: current.status },
+      oldValue: { status: target.status },
       newValue: { status: 'PENDING_ACTIVATION' },
       ip: meta.ip,
       userAgent: meta.userAgent,

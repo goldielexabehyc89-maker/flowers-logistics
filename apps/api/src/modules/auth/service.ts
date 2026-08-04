@@ -145,9 +145,17 @@ export async function activate(
 
   const activeCode = user?.activationCodes[0];
 
-  // Неизвестный телефон, замороженный пользователь и отсутствие кода обрабатываются
+  // Активация доступна ТОЛЬКО пользователю в ожидании активации.
+  // Без этого условия код активации превращался бы в способ заменить PIN
+  // действующему сотруднику в обход сброса PIN администратором.
+  // Неизвестный телефон, неподходящий статус и отсутствие кода обрабатываются
   // одинаково по времени и по ответу.
-  if (user === undefined || user === null || user.status === 'FROZEN' || activeCode === undefined) {
+  if (
+    user === undefined ||
+    user === null ||
+    user.status !== 'PENDING_ACTIVATION' ||
+    activeCode === undefined
+  ) {
     await verifySecretCode(
       await getDummyPinHash(config.AUTH_PIN_PEPPER),
       input.code,
@@ -195,19 +203,42 @@ export async function activate(
   const pinHash = await hashSecretCode(input.pin, config.AUTH_PIN_PEPPER);
 
   const result = await db.$transaction(async (tx) => {
-    await tx.activationCode.update({
-      where: { id: activeCode.id },
+    // Погашение кода условное: он должен быть всё ещё активным, непогашенным,
+    // неинвалидированным и не истёкшим. Два одновременных запроса с одним кодом
+    // выигрывает ровно один — второй получит count = 0 и откатит всю транзакцию,
+    // не создав ни сессии, ни успешной записи аудита.
+    const consumed = await tx.activationCode.updateMany({
+      where: {
+        id: activeCode.id,
+        activeKey: { not: null },
+        consumedAt: null,
+        invalidatedAt: null,
+        expiresAt: { gt: new Date() },
+      },
       data: { consumedAt: new Date(), activeKey: null },
     });
 
-    const updated = await tx.user.update({
-      where: { id: user.id },
+    if (consumed.count === 0) {
+      throw invalidCredentials();
+    }
+
+    // Смена статуса тоже условная: только из PENDING_ACTIVATION.
+    const activated = await tx.user.updateMany({
+      where: { id: user.id, status: 'PENDING_ACTIVATION' },
       data: {
         pinHash,
         pinSetAt: new Date(),
         status: 'ACTIVE',
         version: { increment: 1 },
       },
+    });
+
+    if (activated.count === 0) {
+      throw invalidCredentials();
+    }
+
+    const updated = await tx.user.findUniqueOrThrow({
+      where: { id: user.id },
       select: { id: true, phone: true, fullName: true, status: true, sessionVersion: true },
     });
 
@@ -370,7 +401,7 @@ export async function refresh(
     if (rotation.kind === 'reuse') {
       const actor = await tx.user.findUnique({
         where: { id: rotation.userId },
-        select: { roles: { select: { role: true } } },
+        select: { phone: true, roles: { select: { role: true } } },
       });
 
       await writeAudit(tx, {
@@ -386,7 +417,9 @@ export async function refresh(
 
       await tx.authAttempt.create({
         data: {
-          phone: '',
+          // Настоящий нормализованный телефон: без него запись бесполезна
+          // при расследовании и не находится по владельцу.
+          phone: actor?.phone ?? '',
           userId: rotation.userId,
           kind: 'REFRESH',
           success: false,
