@@ -108,14 +108,37 @@ async function lockAndAuthorize(
 }
 
 /**
- * Не позволяет остаться без активного администратора.
+ * ЕДИНЫЙ ПОРЯДОК БЛОКИРОВОК ВО ВСЁМ МОДУЛЕ:
  *
- * Advisory-блокировка нужна, потому что две параллельные заморозки двух последних
- * администраторов иначе прошли бы обе: каждая увидела бы «есть ещё один активный».
+ *   1) advisory-lock защиты последнего администратора
+ *   2) строка User (SELECT … FOR UPDATE)
+ *   3) связанные записи: ActivationCode, RefreshSession, аудит
+ *
+ * Обратный порядок в разных операциях приводил к взаимной блокировке: одна
+ * транзакция держала строку User и ждала advisory, другая держала advisory
+ * и ждала строку User. PostgreSQL снимал одну из них ошибкой deadlock,
+ * и наружу уходил 500.
  */
-async function assertNotLastActiveAdmin(tx: TransactionClient, userId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('flowers-logistics:last-active-admin'))`;
 
+/**
+ * Берёт advisory-блокировку защиты последнего администратора.
+ *
+ * Вызывается ПЕРВЫМ действием транзакции, до блокировки строки пользователя.
+ * Берётся безусловно: узнать, администратор ли цель, можно только прочитав её,
+ * а чтение до блокировки — это та самая гонка, от которой защищаемся.
+ */
+async function acquireLastAdminLock(tx: TransactionClient): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('flowers-logistics:last-active-admin'))`;
+}
+
+/**
+ * Проверяет, что система не останется без активного администратора.
+ * Вызывается, когда advisory-блокировка уже удерживается этой транзакцией.
+ */
+async function assertLastActiveAdminInvariant(
+  tx: TransactionClient,
+  userId: string,
+): Promise<void> {
   const target = await tx.user.findUnique({
     where: { id: userId },
     select: { status: true, roles: { select: { role: true } } },
@@ -423,9 +446,11 @@ export async function updateUser(
   }
 
   return deps.db.$transaction(async (tx) => {
-    // Снятие роли ADMIN у последнего активного администратора недопустимо.
+    // Порядок блокировок: advisory → строка User. Снятие роли ADMIN у последнего
+    // активного администратора недопустимо, поэтому блокировка берётся до записи.
     if (rolesChanged && !(input.roles ?? []).includes('ADMIN')) {
-      await assertNotLastActiveAdmin(tx, userId);
+      await acquireLastAdminLock(tx);
+      await assertLastActiveAdminInvariant(tx, userId);
     }
 
     // Оптимистическая блокировка: обновление проходит, только если версия не менялась.
@@ -525,6 +550,10 @@ export async function freezeUser(
   meta: RequestMeta,
 ): Promise<UserView> {
   return deps.db.$transaction(async (tx) => {
+    // Порядок блокировок: advisory → строка User. Обратный порядок в этой операции
+    // и в смене ролей приводил к взаимной блокировке.
+    await acquireLastAdminLock(tx);
+
     // Права проверяются здесь, а не до транзакции: роли пользователя могли
     // измениться между открытием карточки и нажатием кнопки.
     const current = await lockAndAuthorize(tx, actor, userId);
@@ -533,7 +562,7 @@ export async function freezeUser(
       return current;
     }
 
-    await assertNotLastActiveAdmin(tx, userId);
+    await assertLastActiveAdminInvariant(tx, userId);
 
     await tx.user.update({
       where: { id: userId },
@@ -660,6 +689,9 @@ export async function resetPin(
   const prepared = await prepareActivationCode(deps.config.AUTH_PIN_PEPPER);
 
   await deps.db.$transaction(async (tx) => {
+    // Порядок блокировок: advisory → строка User → ActivationCode → сессии и аудит.
+    await acquireLastAdminLock(tx);
+
     const target = await lockAndAuthorize(tx, actor, userId);
 
     if (target.status === 'FROZEN') {
@@ -669,7 +701,7 @@ export async function resetPin(
       });
     }
 
-    await assertNotLastActiveAdmin(tx, userId);
+    await assertLastActiveAdminInvariant(tx, userId);
 
     await tx.user.update({
       where: { id: userId },
@@ -682,8 +714,8 @@ export async function resetPin(
       },
     });
 
-    await revokeAllSessions(tx, userId, 'PIN_RESET');
     await storeActivationCode(tx, userId, actor.userId, prepared);
+    await revokeAllSessions(tx, userId, 'PIN_RESET');
 
     await writeAudit(tx, {
       action: 'PIN_RESET',

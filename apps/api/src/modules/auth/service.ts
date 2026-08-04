@@ -203,8 +203,23 @@ export async function activate(
   const pinHash = await hashSecretCode(input.pin, config.AUTH_PIN_PEPPER);
 
   const result = await db.$transaction(async (tx) => {
+    // Единый порядок блокировок: строка User → ActivationCode → сессия и аудит.
+    // Обратный порядок здесь и в перевыпуске кода приводил к взаимной блокировке.
+    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${user.id}::uuid FOR UPDATE`;
+
+    // Статус перечитывается под блокировкой: пока проверялся код, администратор мог
+    // активировать пользователя другим способом или заморозить его.
+    const locked = await tx.user.findUnique({
+      where: { id: user.id },
+      select: { status: true },
+    });
+
+    if (locked === null || locked.status !== 'PENDING_ACTIVATION') {
+      throw invalidCredentials();
+    }
+
     // Погашение кода условное: он должен быть всё ещё активным, непогашенным,
-    // неинвалидированным и не истёкшим. Два одновременных запроса с одним кодом
+    // неинвалидированным и не истёкшим. Из двух одновременных запросов с одним кодом
     // выигрывает ровно один — второй получит count = 0 и откатит всю транзакцию,
     // не создав ни сессии, ни успешной записи аудита.
     const consumed = await tx.activationCode.updateMany({
@@ -399,7 +414,9 @@ export async function refresh(
     const rotation = await rotateSession(tx, presentedToken, context, config.refreshReplayKey);
 
     if (rotation.kind === 'reuse') {
-      const actor = await tx.user.findUnique({
+      // Пользователь обязан существовать: идентификатор пришёл из его же сессии.
+      // Пустой телефон в журнале сделал бы запись бесполезной при расследовании.
+      const actor = await tx.user.findUniqueOrThrow({
         where: { id: rotation.userId },
         select: { phone: true, roles: { select: { role: true } } },
       });
@@ -409,7 +426,7 @@ export async function refresh(
         entityType: 'RefreshSession',
         entityId: rotation.familyId,
         actorUserId: rotation.userId,
-        actorRoles: actor?.roles.map((assignment) => assignment.role) ?? [],
+        actorRoles: actor.roles.map((assignment) => assignment.role),
         newValue: { familyRevoked: true },
         ip: context.ip,
         userAgent: context.userAgent,
@@ -419,7 +436,7 @@ export async function refresh(
         data: {
           // Настоящий нормализованный телефон: без него запись бесполезна
           // при расследовании и не находится по владельцу.
-          phone: actor?.phone ?? '',
+          phone: actor.phone,
           userId: rotation.userId,
           kind: 'REFRESH',
           success: false,
