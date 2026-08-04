@@ -59,20 +59,30 @@ describe('перепроверка прав внутри транзакции', 
       freezeUser(ctx, logisticianActor(logist.id), courier.id, META),
     ]);
 
-    expect(promotion.status).toBe('fulfilled');
+    // Побеждает ровно одна операция, и любой порядок законен:
+    //   * логист успел первым — заморозка проходит, повышение отклоняется по версии;
+    //   * администратор успел первым — роль выдана, заморозка получает отказ по правам.
+    const succeeded = [promotion, freeze].filter((result) => result.status === 'fulfilled');
+    expect(succeeded).toHaveLength(1);
 
     const finalState = await ctx.db.user.findUniqueOrThrow({
       where: { id: courier.id },
       select: { status: true, roles: { select: { role: true } } },
     });
     const isPrivileged = finalState.roles.some((assignment) => assignment.role === 'ADMIN');
-    expect(isPrivileged).toBe(true);
+    const isFrozen = finalState.status === 'FROZEN';
 
-    // Заморозка законна, только если успела выполниться до выдачи роли.
-    // Совпадение «пользователь привилегированный и при этом заморожен логистом»
-    // означало бы обход матрицы прав.
-    const frozenByLogistician = freeze.status === 'fulfilled' && finalState.status === 'FROZEN';
-    expect(frozenByLogistician && isPrivileged).toBe(false);
+    // Само свойство безопасности: логист не мог заморозить привилегированного
+    // пользователя. Состояние «привилегированный и замороженный логистом» недопустимо.
+    expect(isPrivileged && isFrozen).toBe(false);
+
+    if (promotion.status === 'fulfilled') {
+      expect(isPrivileged).toBe(true);
+      expect(freeze.status).toBe('rejected');
+    } else {
+      expect(isFrozen).toBe(true);
+      expect(isPrivileged).toBe(false);
+    }
   });
 
   it('после выдачи роли ADMIN логист получает отказ на всех операциях', async () => {
