@@ -38,10 +38,9 @@ async function login(page: Page, phone: string, pin: string): Promise<void> {
 }
 
 async function logout(page: Page): Promise<void> {
-  await page
-    .getByRole('button', { name: /^(?!Выйти).*$/ })
-    .first()
-    .click();
+  // Кнопка учётной записи подписана именем пользователя, поэтому берётся
+  // последняя кнопка верхней строки, а не угадывается текст.
+  await page.locator('.shell__topbar button').last().click();
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
 }
@@ -53,12 +52,12 @@ test('сквозной сценарий этапа 1', async ({ page, browser }:
 
   // 1. Первый вход администратора по одноразовому коду.
   await activate(page, ADMIN_PHONE, ADMIN_CODE, ADMIN_PIN);
-  await expect(page.getByRole('heading', { name: 'Сделки' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
   // 2. Обычный выход и вход по PIN.
   await logout(page);
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await expect(page.getByRole('heading', { name: 'Сделки' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
   // 3. Административная навигация: настройки доступны.
   await page.getByRole('link', { name: 'Настройки' }).click();
@@ -82,14 +81,14 @@ test('сквозной сценарий этапа 1', async ({ page, browser }:
   const courierContext = await browser.newContext();
   const courierPage = await courierContext.newPage();
   await activate(courierPage, courierPhone, courierCode, COURIER_PIN);
-  await expect(courierPage.getByRole('heading', { name: 'Активные' })).toBeVisible();
+  await expect(courierPage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
   await expect(courierPage.getByRole('link', { name: 'Настройки' })).toHaveCount(0);
   await expect(courierPage.getByRole('link', { name: 'Сотрудники и курьеры' })).toHaveCount(0);
 
   // 6. Обычный повторный вход курьера.
   await logout(courierPage);
   await login(courierPage, courierPhone, COURIER_PIN);
-  await expect(courierPage.getByRole('heading', { name: 'Активные' })).toBeVisible();
+  await expect(courierPage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
 
   // 7. Второй сеанс администратора: он должен узнать об изменении сам.
   const secondAdminContext = await browser.newContext();
