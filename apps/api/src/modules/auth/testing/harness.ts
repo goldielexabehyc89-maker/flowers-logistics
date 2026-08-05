@@ -12,6 +12,7 @@ import { createDatabase, type Database } from '../../../platform/db.js';
 import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.js';
 import { TEST_SECRETS } from '../../../platform/testing/secrets.js';
 import { buildServer } from '../../../platform/http/server.js';
+import type { Notifier } from '../../realtime/notifier.js';
 import type { AppServer } from '../../../platform/http/types.js';
 
 export { TEST_SECRETS };
@@ -32,6 +33,18 @@ function silentLogger() {
   return pino({ level: 'silent' });
 }
 
+/**
+ * Заглушка слушателя сигналов PostgreSQL.
+ * В тестах отдельное LISTEN-соединение не нужно: события читаются из базы напрямую.
+ */
+function stubNotifier(): Notifier {
+  return {
+    subscribe: () => () => undefined,
+    start: () => undefined,
+    stop: async () => undefined,
+  };
+}
+
 export interface TestContext {
   db: Database;
   config: AppConfig;
@@ -41,7 +54,12 @@ export interface TestContext {
 export async function createTestContext(): Promise<TestContext> {
   const config = testConfig();
   const db = createDatabase(config, silentLogger());
-  const app = await buildServer({ config, logger: silentLogger(), db });
+  const app = await buildServer({
+    config,
+    logger: silentLogger(),
+    db,
+    notifier: stubNotifier(),
+  });
   return { db, config, app };
 }
 
