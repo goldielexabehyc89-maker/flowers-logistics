@@ -307,9 +307,13 @@ require_ready() {
 }
 
 # Команда запуска Compose: файл, project name и переменные — из конфигурации.
+#
+# IMAGE_REPOSITORY передаётся вместе с остальными: Compose обязан поднять ровно
+# тот образ, который скрипт загрузил и у которого сверил OCI-метку. Зашитый
+# в Compose адрес позволил бы проверить один образ, а запустить другой.
 compose_command() {
-  printf "cd '%s' && IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' docker compose -f '%s' -p '%s'" \
-    "${REMOTE_DIR}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
+  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' docker compose -f '%s' -p '%s'" \
+    "${REMOTE_DIR}" "${IMAGE_REPOSITORY}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
     "${ENV_FILE}" "${DB_VOLUME}" "${COMPOSE_PROJECT}" "${COMPOSE_FILE}" "${COMPOSE_PROJECT}"
 }
 

@@ -30,8 +30,10 @@ services:
       retries: 20
 
   app:
-    # Только точная версия: latest не используется, чтобы выкатка была воспроизводимой.
-    image: ghcr.io/goldielexabehyc89-maker/flowers-logistics:${IMAGE_TAG}
+    # Репозиторий и версия приходят из конфигурации выкатки. Зашитый здесь адрес
+    # разошёлся бы с IMAGE_REPOSITORY: скрипт проверил бы OCI-метку одного образа,
+    # а Compose запустил бы другой. Тег latest не используется — только точная версия.
+    image: ${IMAGE_REPOSITORY}:${IMAGE_TAG}
     restart: unless-stopped
     env_file: ['./${ENV_FILE}']
     environment:

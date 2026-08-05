@@ -73,6 +73,7 @@ cmd="\${*: -1}"
 case "$cmd" in
   *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
   *"$PRODUCTION_DIR/ENVIRONMENT"*) printf '%s\\n' "\${PRODUCTION_MARKER_REPLY:-production}" ;;
+  *'docker image inspect'*) printf '%s\\n' "$VERSION_UNDER_TEST" ;;
   *"$STAGING_DIR/state/verified-versions"*)
     if [ "\${STAGING_HAS_VERSION:-0}" = "1" ]; then printf '%s\\n' "$VERSION_UNDER_TEST"; fi
     ;;
@@ -88,6 +89,7 @@ interface EnvironmentValues {
   COMPOSE_PROJECT: string;
   ENV_FILE: string;
   DB_VOLUME: string;
+  IMAGE_REPOSITORY: string;
 }
 
 const STAGING_DEFAULTS: EnvironmentValues = {
@@ -98,6 +100,7 @@ const STAGING_DEFAULTS: EnvironmentValues = {
   COMPOSE_PROJECT: 'fl-staging',
   ENV_FILE: 'staging.env',
   DB_VOLUME: 'fl-staging-db',
+  IMAGE_REPOSITORY: 'ghcr.io/example/app',
 };
 
 const PRODUCTION_DEFAULTS: EnvironmentValues = {
@@ -108,6 +111,7 @@ const PRODUCTION_DEFAULTS: EnvironmentValues = {
   COMPOSE_PROJECT: 'fl-production',
   ENV_FILE: 'production.env',
   DB_VOLUME: 'fl-production-db',
+  IMAGE_REPOSITORY: 'ghcr.io/example/app',
 };
 
 function configContent(values: EnvironmentValues, name: string): string {
@@ -120,7 +124,7 @@ function configContent(values: EnvironmentValues, name: string): string {
     `REMOTE_DIR="${values.REMOTE_DIR}"`,
     `APP_DOMAIN="${name}.invalid"`,
     `APP_HOST_PORT="${values.APP_HOST_PORT}"`,
-    'IMAGE_REPOSITORY="ghcr.io/example/app"',
+    `IMAGE_REPOSITORY="${values.IMAGE_REPOSITORY}"`,
     `COMPOSE_PROJECT="${values.COMPOSE_PROJECT}"`,
     'COMPOSE_FILE="docker-compose.deploy.yml"',
     `ENV_FILE="${values.ENV_FILE}"`,
@@ -394,6 +398,56 @@ describe('подтверждение версии на staging', () => {
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain('маркер окружения не совпал');
     expect(result.stdout).not.toContain('проверки пройдены');
+  });
+});
+
+describe('адрес образа', () => {
+  /** Заведомо нестандартный репозиторий: значение по умолчанию его не подменит. */
+  const CUSTOM_REPOSITORY = 'registry.example.invalid/team/custom-app';
+  const CUSTOM_REFERENCE = `${CUSTOM_REPOSITORY}:${VALID_SHA}`;
+
+  it('загрузка, сверка метки и запуск используют один и тот же образ', async () => {
+    const result = await runInSandbox({
+      production: { IMAGE_REPOSITORY: CUSTOM_REPOSITORY },
+      body: [
+        LOAD_BOTH,
+        'activate_environment PRODUCTION',
+        'prepare_known_hosts',
+        `remote "docker pull '$(image_reference)'"`,
+        'require_image_revision',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    const pull = lines.find((line) => line.includes('docker pull'));
+    const inspect = lines.find((line) => line.includes('docker image inspect'));
+    const compose = lines.find((line) => line.includes('docker compose'));
+
+    // Все три шага работают с одной и той же полной ссылкой на образ.
+    expect(pull).toContain(CUSTOM_REFERENCE);
+    expect(inspect).toContain(CUSTOM_REFERENCE);
+    expect(compose).toContain(`IMAGE_REPOSITORY='${CUSTOM_REPOSITORY}'`);
+    expect(compose).toContain(`IMAGE_TAG='${VALID_SHA}'`);
+
+    // Ни один шаг не подставил репозиторий по умолчанию.
+    expect(result.ssh).not.toContain(STAGING_DEFAULTS.IMAGE_REPOSITORY);
+  });
+
+  it('адрес образа задан только конфигурацией', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    expect(compose).toContain('image: ${IMAGE_REPOSITORY}:${IMAGE_TAG}');
+
+    // Второго, зашитого адреса нет ни в Compose, ни в скриптах: иначе скрипт
+    // проверил бы OCI-метку одного образа, а Compose запустил бы другой.
+    for (const file of [COMPOSE_FILE, COMMON_LIB, STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = withoutComments(await readFile(file, 'utf8'));
+      expect(content).not.toMatch(/[\w.-]+\.[a-z]{2,}\/[\w./-]+:\$\{IMAGE_TAG\}/);
+      expect(content).not.toContain('ghcr.io/');
+    }
   });
 });
 
