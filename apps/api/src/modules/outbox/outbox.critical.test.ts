@@ -17,6 +17,7 @@ import {
 import { enqueueOutbox, OutboxPayloadLeakError } from './producer.js';
 import {
   backoffDelayMs,
+  createOutboxWorker,
   processOutboxOnce,
   recoverStaleMessages,
   sanitizeError,
@@ -78,6 +79,24 @@ describe('постановка сообщений', () => {
     await enqueue(key);
 
     expect(await ctx.db.outboxMessage.count({ where: { idempotencyKey: key } })).toBe(1);
+  });
+
+  it('одновременная постановка одного ключа даёт одну строку и не падает', async () => {
+    const key = uniqueKey('parallel-enqueue');
+
+    // Проверка «сначала найти, потом создать» здесь была бы неверной: параллельные
+    // транзакции не видят незафиксированных вставок друг друга.
+    const results = await Promise.all(
+      Array.from({ length: 5 }, async () =>
+        ctx.db.$transaction(async (tx) =>
+          enqueueOutbox(tx, { topic: 'test.ping', idempotencyKey: key, payload: { n: 1 } }),
+        ),
+      ),
+    );
+
+    expect(await ctx.db.outboxMessage.count({ where: { idempotencyKey: key } })).toBe(1);
+    // Ровно одна постановка считается создавшей запись, остальные — повторными.
+    expect(results.filter((result) => result.created)).toHaveLength(1);
   });
 
   it('секретные поля в payload запрещены', async () => {
@@ -207,6 +226,149 @@ describe('обработка очереди', () => {
     const recovered = await recoverStaleMessages({ db: ctx.db, logger, handlers: {} });
     expect(recovered).toBeGreaterThanOrEqual(1);
     expect((await messageByKey(key)).status).toBe('PENDING');
+  });
+
+  it('обработчик дольше аренды не выполняется вторым воркером', async () => {
+    const key = uniqueKey('long-handler');
+    await enqueue(key);
+
+    // Аренда заведомо короче обработчика: без её продления второй воркер
+    // вернул бы сообщение в очередь и выполнил обработчик параллельно.
+    const lease = { leaseTimeoutMs: 200, leaseRenewIntervalMs: 40 };
+    // Долго обрабатывается только это сообщение: чужие остатки очереди
+    // не должны растягивать проверку.
+    const handler = vi.fn<OutboxHandler>(async (message) => {
+      if (message.idempotencyKey === key) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+      }
+    });
+
+    const first = processOutboxOnce({
+      db: ctx.db,
+      logger,
+      handlers: { 'test.ping': handler },
+      workerId: 'долгий',
+      ...lease,
+    });
+
+    // Второй воркер приходит несколько раз, пока первый ещё работает.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await processOutboxOnce({
+        db: ctx.db,
+        logger,
+        handlers: { 'test.ping': handler },
+        workerId: 'второй',
+        ...lease,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    const result = await first;
+
+    expect(callsFor(handler, key)).toBe(1);
+    expect(result.processed).toBeGreaterThanOrEqual(1);
+    expect(result.lost).toBe(0);
+    expect((await messageByKey(key)).status).toBe('DONE');
+  }, 20_000);
+
+  it('воркер, потерявший аренду, не перезаписывает чужой результат', async () => {
+    const key = uniqueKey('lost-lease');
+    await enqueue(key);
+
+    // Аренду перехватывают прямо во время работы обработчика.
+    const handler = vi.fn<OutboxHandler>(async (message) => {
+      await ctx.db.outboxMessage.update({
+        where: { id: message.id },
+        data: { status: 'PROCESSING', lockedBy: 'новый-владелец', lockedAt: new Date() },
+      });
+    });
+
+    const result = await processOutboxOnce({
+      db: ctx.db,
+      logger,
+      handlers: { 'test.ping': handler },
+      workerId: 'старый-владелец',
+    });
+
+    expect(result.lost).toBe(1);
+    expect(callsFor(handler, key)).toBe(1);
+
+    // Состояние принадлежит новому владельцу: старый его не тронул.
+    const message = await messageByKey(key);
+    expect(message.status).toBe('PROCESSING');
+    expect(message.lockedBy).toBe('новый-владелец');
+  });
+
+  it('потерявший аренду воркер не записывает и ошибку', async () => {
+    const key = uniqueKey('lost-lease-error');
+    await enqueue(key);
+
+    const handler: OutboxHandler = async (message) => {
+      await ctx.db.outboxMessage.update({
+        where: { id: message.id },
+        data: { status: 'PROCESSING', lockedBy: 'новый-владелец', lockedAt: new Date() },
+      });
+      throw new Error('обработчик упал уже без аренды');
+    };
+
+    const result = await processOutboxOnce({
+      db: ctx.db,
+      logger,
+      handlers: { 'test.ping': handler },
+      workerId: 'старый-владелец',
+    });
+
+    expect(result.lost).toBe(1);
+
+    const message = await messageByKey(key);
+    expect(message.status).toBe('PROCESSING');
+    expect(message.lastError).toBeNull();
+  });
+
+  it('ручной повтор не забирает сообщение у работающего обработчика', async () => {
+    const key = uniqueKey('retry-race');
+    await enqueue(key);
+    await ctx.db.outboxMessage.update({
+      where: { idempotencyKey: key },
+      data: { status: 'PROCESSING', lockedBy: 'занятый-воркер', lockedAt: new Date() },
+    });
+
+    const message = await messageByKey(key);
+    const adminToken = await tokenFor(['ADMIN']);
+
+    const retry = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/outbox/failures/${message.id}/retry`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    expect(retry.statusCode).toBe(409);
+    const after = await messageByKey(key);
+    expect(after.status).toBe('PROCESSING');
+    expect(after.lockedBy).toBe('занятый-воркер');
+  });
+
+  it('остановка воркера дожидается начатого прохода', async () => {
+    const key = uniqueKey('graceful-stop');
+    await enqueue(key);
+
+    let finished = false;
+    const handler: OutboxHandler = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      finished = true;
+    };
+
+    const deps = { db: ctx.db, logger, handlers: { 'test.ping': handler } };
+    const worker = createOutboxWorker(deps, 20);
+    worker.start();
+
+    // Останавливаем, пока проход заведомо идёт.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await worker.stop();
+
+    // Без ожидания обработчик продолжил бы работать с уже закрываемой базой.
+    expect(finished).toBe(true);
   });
 
   it('задержка повторов растёт и ограничена', () => {

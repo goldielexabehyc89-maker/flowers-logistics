@@ -55,7 +55,8 @@ export async function cleanupExpiredRealtimeEvents(deps: MaintenanceDeps): Promi
 
 export interface MaintenanceRunner {
   start: () => void;
-  stop: () => void;
+  /** Запрещает новые проходы и дожидается выполняющихся. */
+  stop: () => Promise<void>;
   /** Один проход обеих задач; используется при старте и в тестах. */
   runOnce: () => Promise<{ successorTokens: number; realtimeEvents: number }>;
 }
@@ -73,45 +74,56 @@ export function createMaintenanceRunner(
   },
 ): MaintenanceRunner {
   const timers: NodeJS.Timeout[] = [];
-  let successorRunning = false;
-  let realtimeRunning = false;
+  let stopped = false;
+  let successorInFlight: Promise<number> | null = null;
+  let realtimeInFlight: Promise<number> | null = null;
 
   const runSuccessorCleanup = async (): Promise<number> => {
-    if (successorRunning) {
+    if (successorInFlight !== null || stopped) {
       return 0;
     }
-    successorRunning = true;
-    try {
-      const cleaned = await cleanupExpiredSuccessorTokens(deps);
-      if (cleaned > 0) {
-        // В лог попадает только количество: содержимое поля секретно.
-        deps.logger.info({ cleaned }, 'затёрты просроченные копии токена-преемника');
+    const pass = (async (): Promise<number> => {
+      try {
+        const cleaned = await cleanupExpiredSuccessorTokens(deps);
+        if (cleaned > 0) {
+          // В лог попадает только количество: содержимое поля секретно.
+          deps.logger.info({ cleaned }, 'затёрты просроченные копии токена-преемника');
+        }
+        return cleaned;
+      } catch (error) {
+        deps.logger.error({ err: error }, 'очистка копий преемника завершилась ошибкой');
+        return 0;
       }
-      return cleaned;
-    } catch (error) {
-      deps.logger.error({ err: error }, 'очистка копий преемника завершилась ошибкой');
-      return 0;
+    })();
+    successorInFlight = pass;
+    try {
+      return await pass;
     } finally {
-      successorRunning = false;
+      successorInFlight = null;
     }
   };
 
   const runRealtimeCleanup = async (): Promise<number> => {
-    if (realtimeRunning) {
+    if (realtimeInFlight !== null || stopped) {
       return 0;
     }
-    realtimeRunning = true;
-    try {
-      const removed = await cleanupExpiredRealtimeEvents(deps);
-      if (removed > 0) {
-        deps.logger.info({ removed }, 'удалены просроченные realtime-события');
+    const pass = (async (): Promise<number> => {
+      try {
+        const removed = await cleanupExpiredRealtimeEvents(deps);
+        if (removed > 0) {
+          deps.logger.info({ removed }, 'удалены просроченные realtime-события');
+        }
+        return removed;
+      } catch (error) {
+        deps.logger.error({ err: error }, 'очистка realtime-событий завершилась ошибкой');
+        return 0;
       }
-      return removed;
-    } catch (error) {
-      deps.logger.error({ err: error }, 'очистка realtime-событий завершилась ошибкой');
-      return 0;
+    })();
+    realtimeInFlight = pass;
+    try {
+      return await pass;
     } finally {
-      realtimeRunning = false;
+      realtimeInFlight = null;
     }
   };
 
@@ -120,6 +132,7 @@ export function createMaintenanceRunner(
       if (timers.length > 0) {
         return;
       }
+      stopped = false;
       const successorTimer = setInterval(
         () => void runSuccessorCleanup(),
         intervals.successorCleanup,
@@ -129,11 +142,19 @@ export function createMaintenanceRunner(
       realtimeTimer.unref();
       timers.push(successorTimer, realtimeTimer);
     },
-    stop() {
+    /**
+     * Снимает таймеры и дожидается уже начатых проходов.
+     *
+     * Иначе очистка продолжила бы работать с базой, которую вызывающая
+     * сторона закрывает сразу после остановки.
+     */
+    async stop() {
+      stopped = true;
       for (const timer of timers) {
         clearInterval(timer);
       }
       timers.length = 0;
+      await Promise.allSettled([successorInFlight, realtimeInFlight]);
     },
     async runOnce() {
       return {

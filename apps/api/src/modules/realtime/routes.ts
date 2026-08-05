@@ -17,8 +17,6 @@ import { parseLastEventId, readEventsForViewer } from './reader.js';
 export const HEARTBEAT_INTERVAL_MS = 15_000;
 /** Резервный опрос базы на случай, если сигнал не дошёл. */
 export const POLL_INTERVAL_MS = 2_000;
-/** Как часто перепроверяется, жива ли ещё сессия. */
-export const SESSION_RECHECK_INTERVAL_MS = 30_000;
 
 export interface RealtimeDeps {
   db: Database;
@@ -51,7 +49,6 @@ export function startEventStream(
   deps: RealtimeDeps,
   viewer: {
     userId: string;
-    roles: Parameters<typeof readEventsForViewer>[1]['roles'];
     familyId: string;
     sessionVersion: number;
   },
@@ -60,7 +57,6 @@ export function startEventStream(
   intervals = {
     heartbeat: HEARTBEAT_INTERVAL_MS,
     poll: POLL_INTERVAL_MS,
-    sessionRecheck: SESSION_RECHECK_INTERVAL_MS,
   },
 ): StreamHandle {
   let cursor = lastEventId;
@@ -82,6 +78,23 @@ export function startEventStream(
     writer.end();
   };
 
+  const closeAsInvalid = (): void => {
+    writer.write(formatEvent('0', 'session-closed', { reason: 'session-invalid' }));
+    stop();
+  };
+
+  /**
+   * Проверяет сессию и читает очередную пачку — в одной транзакции.
+   *
+   * Проверка и чтение обязаны видеть одно и то же состояние базы. Если делать
+   * их разными запросами, между ними успевает пройти смена ролей, и клиент
+   * получит пачку по уже отобранным правам. Поэтому статус, `sessionVersion`,
+   * семья и **актуальные роли** читаются в том же снимке, что и события,
+   * а уровень изоляции repeatable read гарантирует, что снимок не сдвинется.
+   *
+   * Роли берутся из базы, а не из токена: токен был выдан раньше и мог
+   * описывать доступ, которого у пользователя уже нет.
+   */
   const drain = async (): Promise<void> => {
     // Пока идёт чтение, повторный вход не нужен: следующий сигнал прочитает остаток.
     if (closed || draining) {
@@ -89,7 +102,50 @@ export function startEventStream(
     }
     draining = true;
     try {
-      const result = await readEventsForViewer(deps.db, viewer, cursor);
+      const outcome = await deps.db.$transaction(
+        async (tx) => {
+          const user = await tx.user.findUnique({
+            where: { id: viewer.userId },
+            select: {
+              status: true,
+              sessionVersion: true,
+              roles: { select: { role: true } },
+            },
+          });
+
+          const familyAlive = await tx.refreshSession.count({
+            where: { familyId: viewer.familyId, revokedAt: null },
+          });
+
+          // Заморозка, сброс PIN и выход со всех устройств обязаны закрывать
+          // уже открытый канал, а не ждать, пока клиент сам переподключится.
+          if (
+            user === null ||
+            user.status !== 'ACTIVE' ||
+            user.sessionVersion !== viewer.sessionVersion ||
+            familyAlive === 0
+          ) {
+            return { valid: false as const };
+          }
+
+          const result = await readEventsForViewer(
+            tx,
+            { userId: viewer.userId, roles: user.roles.map((assignment) => assignment.role) },
+            cursor,
+          );
+
+          return { valid: true as const, result };
+        },
+        { isolationLevel: 'RepeatableRead' },
+      );
+
+      if (!outcome.valid) {
+        // Ни одно новое событие не отправляется: канал закрывается раньше.
+        closeAsInvalid();
+        return;
+      }
+
+      const { result } = outcome;
 
       if (result.resyncRequired) {
         // Курсор старше окна хранения: клиент обязан перезапросить данные,
@@ -109,47 +165,30 @@ export function startEventStream(
         cursor = BigInt(result.lastId);
       }
     } catch {
-      // Ошибка чтения не рвёт поток: следующий проход повторит попытку.
+      // Сбой базы не рвёт поток и не роняет процесс: следующий проход повторит
+      // попытку. Ошибка проглатывается намеренно — это фоновый вызов без
+      // владельца, необработанный rejection здесь остановил бы приложение.
     } finally {
       draining = false;
     }
   };
 
-  const recheckSession = async (): Promise<void> => {
-    if (closed) {
-      return;
-    }
-    const user = await deps.db.user.findUnique({
-      where: { id: viewer.userId },
-      select: { status: true, sessionVersion: true },
-    });
-
-    const familyAlive = await deps.db.refreshSession.count({
-      where: { familyId: viewer.familyId, revokedAt: null },
-    });
-
-    // Заморозка, сброс PIN и выход со всех устройств обязаны закрывать уже
-    // открытый канал, а не ждать, пока клиент сам переподключится.
-    if (
-      user === null ||
-      user.status !== 'ACTIVE' ||
-      user.sessionVersion !== viewer.sessionVersion ||
-      familyAlive === 0
-    ) {
-      writer.write(formatEvent('0', 'session-closed', { reason: 'session-invalid' }));
-      stop();
-    }
+  writer.onClose(stop);
+  // Ошибка внутри drain уже перехвачена, но обёртка защищает и от синхронного
+  // исключения в самом планировщике.
+  const safeDrain = (): void => {
+    void drain().catch(() => undefined);
   };
 
-  writer.onClose(stop);
-  unsubscribe = deps.notifier.subscribe(() => void drain());
+  unsubscribe = deps.notifier.subscribe(safeDrain);
 
-  timers.push(setInterval(() => void drain(), intervals.poll));
+  // Отдельного таймера перепроверки сессии больше нет: каждый проход очереди
+  // сам проверяет права, поэтому отзыв замечается не позже следующего опроса.
+  timers.push(setInterval(safeDrain, intervals.poll));
   timers.push(setInterval(() => writer.write(': heartbeat\n\n'), intervals.heartbeat));
-  timers.push(setInterval(() => void recheckSession(), intervals.sessionRecheck));
 
   // Первый проход выполняется сразу: клиент не должен ждать интервала.
-  void drain();
+  safeDrain();
 
   return { stop };
 }
@@ -203,7 +242,6 @@ export async function registerRealtimeRoutes(app: AppServer, deps: RealtimeDeps)
       deps,
       {
         userId: actor.userId,
-        roles: actor.roles,
         familyId: actor.familyId,
         sessionVersion: user.sessionVersion,
       },

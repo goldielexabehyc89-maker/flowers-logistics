@@ -42,6 +42,19 @@ is_dry_run() { [ "${DRY_RUN}" = "1" ]; }
 
 # --- Конфигурация --------------------------------------------------------
 
+# Проверяет, что перечисленные значения заполнены, а не остались шаблонами.
+require_config_values() {
+  local config_file="$1"
+  shift
+  local name value
+  for name in "$@"; do
+    value="${!name:-}"
+    if [ -z "${value}" ] || [[ "${value}" == CHANGE_ME* ]]; then
+      fail "конфигурация «${config_file}» не заполнена: ${name}. Серверы ещё не настроены."
+    fi
+  done
+}
+
 # Загружает конфигурацию окружения и проверяет, что она действительно заполнена.
 # Пока значения остаются шаблонными, обычная выкатка обязана отказать до SSH.
 load_config() {
@@ -51,13 +64,9 @@ load_config() {
   # shellcheck disable=SC1090
   source "${config_file}"
 
-  local required=(ENVIRONMENT_MARKER SSH_HOST SSH_USER SSH_PORT HOST_FINGERPRINT REMOTE_DIR APP_DOMAIN IMAGE_REPOSITORY COMPOSE_PROJECT)
-  for name in "${required[@]}"; do
-    local value="${!name:-}"
-    if [ -z "${value}" ] || [[ "${value}" == CHANGE_ME* ]]; then
-      fail "конфигурация «${config_file}» не заполнена: ${name}. Серверы ещё не настроены."
-    fi
-  done
+  require_config_values "${config_file}" \
+    ENVIRONMENT_MARKER SSH_HOST SSH_USER SSH_PORT HOST_FINGERPRINT \
+    REMOTE_DIR APP_DOMAIN IMAGE_REPOSITORY COMPOSE_PROJECT
 }
 
 # --- Проверки версии -----------------------------------------------------
@@ -117,6 +126,53 @@ remote() {
       -o BatchMode=yes \
       -p "${SSH_PORT}" \
       "${SSH_USER}@${SSH_HOST}" "$@"
+}
+
+# --- Подтверждение проверки на staging ------------------------------------
+
+# Отдельное соединение со staging.
+#
+# Функция remote() настроена на целевой хост команды. Для production это
+# production-сервер, поэтому читать через неё файл со списком проверенных
+# версий бессмысленно: production подтверждал бы сам себя. Здесь используется
+# собственная конфигурация SSH и собственный файл known_hosts.
+remote_staging() {
+  ssh -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile="${STAGING_KNOWN_HOSTS_FILE}" \
+      -o BatchMode=yes \
+      -p "${STAGING_SSH_PORT}" \
+      "${STAGING_SSH_USER}@${STAGING_SSH_HOST}" "$@"
+}
+
+# Подключается к staging и подтверждает, что версия там действительно
+# проверялась. Отказ на любом шаге останавливает выкатку.
+require_staging_verification() {
+  local config_file="$1"
+
+  require_config_values "${config_file}" \
+    STAGING_SSH_HOST STAGING_SSH_USER STAGING_SSH_PORT STAGING_HOST_FINGERPRINT \
+    STAGING_REMOTE_DIR STAGING_VERIFIED_FILE
+
+  [ "${STAGING_SSH_HOST}" != "${SSH_HOST}" ] \
+    || fail "staging и production указывают на один хост: подтверждение было бы фиктивным"
+
+  STAGING_KNOWN_HOSTS_FILE="${REPO_ROOT}/deploy/state/known_hosts.staging-verification"
+  mkdir -p "${REPO_ROOT}/deploy/state"
+  printf '%s\n' "${STAGING_HOST_FINGERPRINT}" > "${STAGING_KNOWN_HOSTS_FILE}"
+  chmod 600 "${STAGING_KNOWN_HOSTS_FILE}"
+
+  local marker
+  marker="$(remote_staging "cat '${STAGING_REMOTE_DIR}/ENVIRONMENT' 2>/dev/null || true")"
+  [ -n "${marker}" ] || fail "на staging-хосте нет файла ENVIRONMENT"
+  [ "${marker}" = "staging" ] \
+    || fail "хост подтверждения помечен как «${marker}», а должен быть staging"
+
+  local verified
+  verified="$(remote_staging "grep -Fx '${VERSION}' '${STAGING_VERIFIED_FILE}' 2>/dev/null || true")"
+  [ -n "${verified}" ] \
+    || fail "версия ${VERSION} не была успешно проверена на staging"
+
+  log "версия подтверждена staging-хостом ${STAGING_SSH_USER}@${STAGING_SSH_HOST}"
 }
 
 # Маркер окружения на целевом хосте должен совпадать с ожидаемым.

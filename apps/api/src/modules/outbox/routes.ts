@@ -62,12 +62,21 @@ export async function registerOutboxRoutes(app: AppServer, deps: OutboxDeps): Pr
     const { id } = idParamSchema.parse(request.params);
 
     return deps.db.$transaction(async (tx) => {
-      const message = await tx.outboxMessage.findUnique({
-        where: { id },
-        select: { id: true, topic: true, status: true, attempts: true },
-      });
+      // Строка берётся под блокировку: без неё воркер мог захватить сообщение
+      // между чтением и записью, и ручной повтор перевёл бы в PENDING то,
+      // что прямо сейчас обрабатывается. Тогда обработчик выполнился бы дважды.
+      const locked = await tx.$queryRaw<
+        { id: string; topic: string; status: string; attempts: number }[]
+      >`
+        SELECT "id"::text AS "id", "topic", "status"::text AS "status", "attempts"
+        FROM "OutboxMessage"
+        WHERE "id" = ${id}::uuid
+        FOR UPDATE
+      `;
 
-      if (message === null) {
+      const message = locked[0];
+
+      if (message === undefined) {
         throw new AppError('NOT_FOUND', { message: 'outbox message not found' });
       }
 
@@ -78,8 +87,10 @@ export async function registerOutboxRoutes(app: AppServer, deps: OutboxDeps): Pr
         });
       }
 
-      await tx.outboxMessage.update({
-        where: { id },
+      // Условие по статусу повторяется и в самой записи: блокировка защищает
+      // от гонки, условие — от любой ошибки в рассуждении о ней.
+      const updated = await tx.outboxMessage.updateMany({
+        where: { id, status: { in: ['ERROR', 'DEAD'] } },
         data: {
           status: 'PENDING',
           // Счётчик попыток обнуляется: администратор осознанно даёт новый шанс,
@@ -90,6 +101,13 @@ export async function registerOutboxRoutes(app: AppServer, deps: OutboxDeps): Pr
           lockedBy: null,
         },
       });
+
+      if (updated.count !== 1) {
+        throw new AppError('CONFLICT', {
+          message: 'message state changed',
+          publicMessage: 'Состояние сообщения изменилось, повторите позже.',
+        });
+      }
 
       await writeAudit(tx, {
         action: 'OUTBOX_MESSAGE_RETRIED',

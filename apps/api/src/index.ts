@@ -56,8 +56,10 @@ async function main(): Promise<void> {
     forceExit.unref();
 
     try {
-      outbox.stop();
-      maintenance.stop();
+      // Сначала фоновые задачи: они дожидаются начатого прохода, поэтому
+      // к моменту закрытия соединения с базой ни один обработчик уже не работает.
+      // Общий лимит остановки при этом не меняется — он висит выше по коду.
+      await Promise.all([outbox.stop(), maintenance.stop()]);
       await app.close();
       await notifier.stop();
       await db.$disconnect();

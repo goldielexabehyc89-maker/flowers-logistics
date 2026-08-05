@@ -111,13 +111,90 @@ jobs:
       # Публикация в GHCR требует права записи пакетов; в pull_request не используется.
       packages: write
 
+    services:
+      # Отдельная одноразовая база: на ней проверяется, что миграции
+      # действительно применяются из собранного образа.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fl_app
+          POSTGRES_PASSWORD: fl_image_password
+          POSTGRES_DB: fl_image
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fl_app -d fl_image"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      IMAGE_LOCAL_TAG: flowers-logistics:ci
+      IMAGE_DATABASE_URL: postgresql://fl_app:fl_image_password@127.0.0.1:5432/fl_image?schema=public
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Собрать образ и загрузить его в локальный демон
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Публикации здесь нет: сначала образ обязан пройти проверку ниже.
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_LOCAL_TAG }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Применить миграции из образа на чистую PostgreSQL 16
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --no-install: если бы Prisma не входила в образ, npx попытался бы
+          # скачать её из реестра. Здесь это запрещено — команда должна
+          # выполниться исключительно тем, что уже лежит внутри образа.
+          docker run --rm --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" \
+            "$IMAGE_LOCAL_TAG" \
+            npx --no-install prisma migrate deploy
+
+      - name: Запустить приложение из образа и дождаться /ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name fl-image-check --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" \
+            -e APP_ENV=local \
+            -e APP_ENVIRONMENT_MARKER=local \
+            -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
+            -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
+            -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
+            "$IMAGE_LOCAL_TAG"
+
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:3000/ready > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" != "1" ]; then
+            echo "приложение из образа не ответило на /ready" >&2
+            docker logs fl-image-check >&2
+            docker rm -f fl-image-check > /dev/null
+            exit 1
+          fi
+
+          docker rm -f fl-image-check > /dev/null
+
       - name: Войти в GitHub Container Registry
-        # В pull request образ только собирается: публикация делается лишь для main.
+        # В pull request образ только собирается и проверяется:
+        # публикация делается лишь для main.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
@@ -125,18 +202,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Собрать и, для main, опубликовать образ
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          # Docker Hub не используется: образ приватный и лежит в GHCR.
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Опубликовать проверенный образ
+        # Публикуется ровно тот образ, который только что прошёл проверку,
+        # а не пересобранный. Docker Hub не используется: образ приватный.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
           # Только точная версия: тег latest не публикуется, чтобы выкатка
           # всегда указывала на конкретный коммит.
-          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
-          labels: org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          target="ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_SHA}"
+          docker tag "$IMAGE_LOCAL_TAG" "$target"
+          docker push "$target"
 
   e2e:
     name: Браузерный smoke

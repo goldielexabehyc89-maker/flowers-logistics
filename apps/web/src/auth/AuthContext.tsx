@@ -29,6 +29,12 @@ interface AuthApi {
   activate: (input: { phone: string; code: string; pin: string }) => Promise<void>;
   logout: () => Promise<void>;
   logoutEverywhere: () => Promise<void>;
+  /**
+   * Единый механизм потери сессии: очищает токен, пользователя и кэш запросов.
+   * Вызывается и клиентом API при окончательном 401, и realtime-каналом,
+   * когда сервер сообщил, что сессия больше не действительна.
+   */
+  endSession: () => void;
 }
 
 const AuthContext = createContext<AuthApi | null>(null);
@@ -116,8 +122,17 @@ export function AuthProvider({ children }: { children: ReactNode }): React.JSX.E
   }, [client, finishSession]);
 
   const api = useMemo<AuthApi>(
-    () => ({ status, user, client, login, activate, logout, logoutEverywhere }),
-    [status, user, client, login, activate, logout, logoutEverywhere],
+    () => ({
+      status,
+      user,
+      client,
+      login,
+      activate,
+      logout,
+      logoutEverywhere,
+      endSession: finishSession,
+    }),
+    [status, user, client, login, activate, logout, logoutEverywhere, finishSession],
   );
 
   return <AuthContext.Provider value={api}>{children}</AuthContext.Provider>;

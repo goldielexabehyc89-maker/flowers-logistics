@@ -13,7 +13,7 @@
  */
 
 import { isEventVisibleTo, type Role } from '@fl/shared';
-import type { Database } from '../../platform/db.js';
+import type { TransactionClient } from '../auth/sessions.js';
 
 /** Окно видимости: событие выдаётся, только когда стало старше этого срока. */
 export const VISIBILITY_LAG_MS = 300;
@@ -47,7 +47,7 @@ export interface ReadResult {
  * Если самое старое сохранённое событие новее курсора более чем на одну позицию,
  * между ними были события, которые уже удалены.
  */
-async function isCursorStale(db: Database, afterId: bigint): Promise<boolean> {
+async function isCursorStale(db: TransactionClient, afterId: bigint): Promise<boolean> {
   if (afterId === 0n) {
     return false;
   }
@@ -65,7 +65,7 @@ async function isCursorStale(db: Database, afterId: bigint): Promise<boolean> {
 }
 
 export async function readEventsForViewer(
-  db: Database,
+  db: TransactionClient,
   viewer: EventViewer,
   afterId: bigint,
   now: Date = new Date(),

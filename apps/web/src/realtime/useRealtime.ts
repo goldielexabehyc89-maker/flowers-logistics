@@ -17,7 +17,7 @@ export type RealtimeState = 'connecting' | 'connected' | 'reconnecting' | 'stopp
 const STREAM_PATH = '/api/realtime/events';
 
 export function useRealtime(): RealtimeState {
-  const { status, client } = useAuth();
+  const { status, client, endSession } = useAuth();
   const queryClient = useQueryClient();
   const [state, setState] = useState<RealtimeState>('stopped');
   const lastEventIdRef = useRef<string | null>(null);
@@ -33,16 +33,34 @@ export function useRealtime(): RealtimeState {
     let controller: AbortController | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
+    /**
+     * Единая точка потери сессии.
+     *
+     * Канал закрывается, а состояние приложения приводится в порядок общим
+     * механизмом AuthContext: токен, пользователь и кэш запросов очищаются,
+     * после чего маршрутизация сама показывает экран входа. Перезагрузка
+     * страницы не нужна и не выполняется.
+     */
+    const loseSession = (): void => {
+      stopped = true;
+      controller?.abort();
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      setState('stopped');
+      endSession();
+    };
+
     const handleEvent = (event: { event: string; data: string; id: string | null }): void => {
       if (event.id !== null) {
         lastEventIdRef.current = event.id;
       }
 
-      if (event.event === 'session-closed') {
-        // Сервер закрыл канал: сессия больше не действительна.
-        stopped = true;
-        controller?.abort();
-        setState('stopped');
+      // session-closed приходит от сервера, session.revoked — из журнала событий
+      // и адресовано лично этому пользователю. Смысл один: доступа больше нет.
+      if (event.event === 'session-closed' || event.event === 'session.revoked') {
+        loseSession();
         return;
       }
 
@@ -96,11 +114,11 @@ export function useRealtime(): RealtimeState {
           }
         }
       } catch (error) {
-        // Окончательная потеря сессии обрабатывается клиентом API:
-        // он очищает память и возвращает пользователя на вход.
+        // 401 здесь означает, что обновить сессию уже не удалось: клиент API
+        // выполняет single-flight refresh и ровно один повтор до того,
+        // как отдать эту ошибку.
         if (error instanceof ApiError && error.status === 401) {
-          stopped = true;
-          setState('stopped');
+          loseSession();
           return;
         }
       }
@@ -123,7 +141,7 @@ export function useRealtime(): RealtimeState {
         clearTimeout(retryTimer);
       }
     };
-  }, [status, client, queryClient]);
+  }, [status, client, queryClient, endSession]);
 
   return state;
 }

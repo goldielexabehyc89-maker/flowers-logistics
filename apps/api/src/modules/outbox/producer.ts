@@ -47,23 +47,23 @@ export async function enqueueOutbox(
   assertOutboxPayloadIsSafe(input.payload);
 
   // Повторная постановка — не ошибка: продюсер мог выполниться дважды.
-  const existing = await tx.outboxMessage.findUnique({
-    where: { idempotencyKey: input.idempotencyKey },
-    select: { id: true },
+  //
+  // Проверка «сначала найти, потом создать» здесь неприменима: две параллельные
+  // транзакции не видят незафиксированных вставок друг друга, обе решают, что
+  // ключа нет, и вторая падает на уникальном индексе. Вставка с пропуском
+  // дубликатов выполняется одним запросом (`ON CONFLICT DO NOTHING`): при гонке
+  // вторая транзакция дожидается первой и вставляет ноль строк, не поднимая ошибку.
+  const inserted = await tx.outboxMessage.createMany({
+    data: [
+      {
+        topic: input.topic,
+        idempotencyKey: input.idempotencyKey,
+        payload: input.payload,
+        ...(input.maxAttempts === undefined ? {} : { maxAttempts: input.maxAttempts }),
+      },
+    ],
+    skipDuplicates: true,
   });
 
-  if (existing !== null) {
-    return { created: false };
-  }
-
-  await tx.outboxMessage.create({
-    data: {
-      topic: input.topic,
-      idempotencyKey: input.idempotencyKey,
-      payload: input.payload,
-      ...(input.maxAttempts === undefined ? {} : { maxAttempts: input.maxAttempts }),
-    },
-  });
-
-  return { created: true };
+  return { created: inserted.count === 1 };
 }

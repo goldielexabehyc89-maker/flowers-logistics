@@ -65,16 +65,15 @@ step "Подготовка соединения"
 prepare_known_hosts
 acquire_local_lock "production"
 
+step "Проверка версии на staging"
+# На production попадает только то, что уже работало на staging.
+# Подтверждение читается со staging-хоста отдельным соединением: производится
+# оно раньше, чем команда вообще обращается к production.
+require_staging_verification "${CONFIG_FILE}"
+
 step "Проверка цели"
 require_environment_marker
 log "маркер окружения совпал: ${ENVIRONMENT_MARKER}"
-
-step "Проверка версии на staging"
-# На production попадает только то, что уже работало на staging.
-STAGING_VERIFIED="$(remote "grep -Fx '${VERSION}' '${STAGING_VERIFIED_FILE}' 2>/dev/null || true")"
-[ -n "${STAGING_VERIFIED}" ] \
-  || fail "версия ${VERSION} не была успешно проверена на staging"
-log "версия подтверждена staging"
 
 acquire_remote_lock
 trap 'release_remote_lock; release_local_lock' EXIT

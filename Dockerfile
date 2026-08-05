@@ -26,9 +26,14 @@ RUN npx prisma generate \
   && npm run build -w @fl/api
 
 # ---------- Этап 3: production-зависимости ----------
+# CLI Prisma входит в обычные зависимости, а не в dev: миграции применяются
+# из этого же образа командой `npx prisma migrate deploy`. Будь он dev-зависимостью,
+# npx попытался бы скачать пакет во время выкатки — то есть выкатка зависела бы
+# от доступности реестра npm и ставила бы неизвестно какую версию.
 FROM deps AS prod-deps
 WORKDIR /app
-RUN npm ci --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund \
+  && grep -qE '"version"[[:space:]]*:[[:space:]]*"7\.9\.1"' node_modules/prisma/package.json
 
 # ---------- Этап 4: рантайм ----------
 FROM node:24.19.0-bookworm-slim AS runtime
