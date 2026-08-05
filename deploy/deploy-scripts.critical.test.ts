@@ -27,6 +27,14 @@ interface RunResult {
   stderr: string;
 }
 
+/** Убирает строки-комментарии: в них запрещённые конструкции упоминаются намеренно. */
+function withoutComments(content: string): string {
+  return content
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+}
+
 async function run(script: string, args: string[]): Promise<RunResult> {
   try {
     const { stdout, stderr } = await execFileAsync(script, args, { cwd: REPO_ROOT });
@@ -110,7 +118,9 @@ describe('содержимое конфигураций и скриптов', ()
   });
 
   it('скрипты не принимают accept-new и требуют известный отпечаток', async () => {
-    const common = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+    const common = withoutComments(
+      await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8'),
+    );
 
     expect(common).toContain('StrictHostKeyChecking=yes');
     expect(common).not.toContain('accept-new');
@@ -120,7 +130,7 @@ describe('содержимое конфигураций и скриптов', ()
   });
 
   it('универсальной команды deploy ENV=... не существует', async () => {
-    const makefile = await readFile(path.join(REPO_ROOT, 'Makefile'), 'utf8');
+    const makefile = withoutComments(await readFile(path.join(REPO_ROOT, 'Makefile'), 'utf8'));
 
     expect(makefile).toContain('deploy-staging');
     expect(makefile).toContain('deploy-production');

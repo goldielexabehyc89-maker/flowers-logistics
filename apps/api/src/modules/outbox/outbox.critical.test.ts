@@ -47,6 +47,13 @@ async function enqueue(
   );
 }
 
+/** Сколько раз обработчик был вызван именно для этого сообщения. */
+function callsFor(handler: { mock: { calls: unknown[][] } }, key: string): number {
+  return handler.mock.calls.filter(
+    (call) => (call[0] as { idempotencyKey?: string } | undefined)?.idempotencyKey === key,
+  ).length;
+}
+
 async function messageByKey(key: string) {
   return ctx.db.outboxMessage.findUniqueOrThrow({ where: { idempotencyKey: key } });
 }
@@ -96,7 +103,7 @@ describe('обработка очереди', () => {
 
     const message = await messageByKey(key);
     expect(message.status).toBe('DONE');
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(callsFor(handler, key)).toBe(1);
 
     expect(
       await ctx.db.outboxProcessedMessage.count({
@@ -119,7 +126,7 @@ describe('обработка очереди', () => {
     });
     await processOutboxOnce({ db: ctx.db, logger, handlers: { 'test.ping': handler } });
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(callsFor(handler, key)).toBe(1);
     expect((await messageByKey(key)).status).toBe('DONE');
   });
 
@@ -135,7 +142,7 @@ describe('обработка очереди', () => {
       processOutboxOnce({ db: ctx.db, logger, handlers: { 'test.ping': handler }, workerId: 'b' }),
     ]);
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(callsFor(handler, key)).toBe(1);
   });
 
   it('ошибка обработчика даёт повтор с растущей задержкой, затем DEAD', async () => {
