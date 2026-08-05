@@ -1,0 +1,41 @@
+# Шаблон конфигурации production.
+#
+# Рабочая копия: deploy/private/production.conf — этот каталог игнорируется Git.
+# В самом репозитории хранится только шаблон: реальные адреса и отпечатки
+# в Git не попадают, а заполнение отслеживаемого файла сделало бы рабочее
+# дерево грязным, после чего выкатка запретила бы сама себя.
+#
+#   mkdir -p deploy/private
+#   cp deploy/production.conf.example deploy/private/production.conf
+#
+# Секреты приложения (пароль базы, ключи, pepper) здесь НЕ хранятся:
+# они лежат только в файле окружения на самом сервере.
+#
+# SSH_HOST может совпадать со staging: один сервер разрешён. Тогда изоляцию
+# обеспечивают каталог, Compose-проект, внешний порт, том и файл окружения —
+# все они обязаны отличаться, иначе команда откажет до обращения к серверу.
+
+ENVIRONMENT_MARKER="production"
+
+SSH_HOST="CHANGE_ME_production_host"
+SSH_USER="CHANGE_ME_production_user"
+SSH_PORT="22"
+
+# Строка формата known_hosts, полученная из доверенного источника.
+HOST_FINGERPRINT="CHANGE_ME_production_known_hosts_line"
+
+REMOTE_DIR="/srv/flowers-logistics-production"
+
+APP_DOMAIN="CHANGE_ME_production_domain"
+
+# Внешний порт на хосте. У окружений он обязан быть разным.
+APP_HOST_PORT="3000"
+
+IMAGE_REPOSITORY="ghcr.io/goldielexabehyc89-maker/flowers-logistics"
+
+COMPOSE_PROJECT="fl-production"
+
+COMPOSE_FILE="docker-compose.deploy.yml"
+
+ENV_FILE="production.env"
+DB_VOLUME="fl-production-db"
