@@ -216,8 +216,13 @@ remote_on() {
   local host_var="${prefix}_SSH_HOST" user_var="${prefix}_SSH_USER"
   local port_var="${prefix}_SSH_PORT" hosts_var="${prefix}_KNOWN_HOSTS_FILE"
 
+  # Путь закавычен ВНУТРИ значения опции: UserKnownHostsFile принимает список
+  # файлов через пробел, а путь репозитория пробелы содержит. Без внутренних
+  # кавычек ssh дробит его на несколько несуществующих путей, не находит ключ
+  # хоста и отказывает. Кавычек на уровне shell недостаточно — значение
+  # разбирает собственный парсер ssh.
   ssh -o StrictHostKeyChecking=yes \
-      -o UserKnownHostsFile="${!hosts_var}" \
+      -o UserKnownHostsFile="\"${!hosts_var}\"" \
       -o BatchMode=yes \
       -p "${!port_var}" \
       "${!user_var}@${!host_var}" "$@"

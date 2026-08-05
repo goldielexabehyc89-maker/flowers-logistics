@@ -66,9 +66,37 @@ async function run(script: string, args: string[], env?: NodeJS.ProcessEnv): Pro
  *
  * Отвечает по содержимому команды: маркер окружения зависит от каталога,
  * подтверждение версии выдаётся только для файла в staging-каталоге.
+ *
+ * Дополнительно ведёт себя как настоящий ssh в одном важном месте: значение
+ * `UserKnownHostsFile` — это список файлов, разделённых пробелами. Путь
+ * с пробелами без буквальных внутренних кавычек настоящий ssh разобрал бы
+ * как несколько путей и не нашёл бы ключ хоста, поэтому заглушка такой вызов
+ * отвергает. Каждое переданное значение записывается отдельным журналом,
+ * чтобы тест мог проверить кавычки явно, а не только по коду возврата.
  */
 const FAKE_SSH = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$SSH_LOG"
+
+for arg in "$@"; do
+  case "$arg" in
+    UserKnownHostsFile=*)
+      value="\${arg#UserKnownHostsFile=}"
+      printf '%s\\n' "$value" >> "\${KNOWN_HOSTS_ARG_LOG:-/dev/null}"
+      case "$value" in
+        *" "*)
+          case "$value" in
+            '"'*'"') ;;
+            *)
+              printf 'ssh: путь known_hosts с пробелами передан без внутренних кавычек: %s\\n' "$value" >&2
+              exit 2
+              ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+done
+
 cmd="\${*: -1}"
 case "$cmd" in
   *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
@@ -147,13 +175,18 @@ interface SandboxOptions {
 
 /**
  * Выполняет фрагмент на настоящем common.sh с подменённым ssh.
- * Возвращает результат и полный журнал обращений к ssh.
+ * Возвращает результат, журнал обращений к ssh и переданные пути known_hosts.
+ *
+ * Каталог песочницы намеренно содержит пробел: рабочая папка проекта тоже
+ * содержит пробелы, и путь без пробелов скрыл бы ошибки цитирования.
  */
-async function runInSandbox(options: SandboxOptions): Promise<RunResult & { ssh: string }> {
+async function runInSandbox(
+  options: SandboxOptions,
+): Promise<RunResult & { ssh: string; knownHostsArgs: string[] }> {
   const staging = { ...STAGING_DEFAULTS, ...options.staging };
   const production = { ...PRODUCTION_DEFAULTS, ...options.production };
 
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'fl-deploy-'));
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'fl deploy '));
   const binDir = path.join(dir, 'bin');
   await mkdir(binDir, { recursive: true });
 
@@ -163,6 +196,9 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult & { ssh:
 
   const sshLog = path.join(dir, 'ssh.log');
   await writeFile(sshLog, '', 'utf8');
+
+  const knownHostsLog = path.join(dir, 'known-hosts-args.log');
+  await writeFile(knownHostsLog, '', 'utf8');
 
   if (options.configs !== 'none') {
     await mkdir(path.join(dir, 'deploy/private'), { recursive: true });
@@ -199,6 +235,7 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult & { ssh:
     ...process.env,
     PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
     SSH_LOG: sshLog,
+    KNOWN_HOSTS_ARG_LOG: knownHostsLog,
     VERSION_UNDER_TEST: VALID_SHA,
     STAGING_DIR: staging.REMOTE_DIR,
     PRODUCTION_DIR: production.REMOTE_DIR,
@@ -211,7 +248,11 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult & { ssh:
       : { PRODUCTION_MARKER_REPLY: options.productionMarkerReply }),
   });
 
-  return { ...result, ssh: await readFile(sshLog, 'utf8') };
+  return {
+    ...result,
+    ssh: await readFile(sshLog, 'utf8'),
+    knownHostsArgs: (await readFile(knownHostsLog, 'utf8')).split('\n').filter((v) => v !== ''),
+  };
 }
 
 /** Загрузка обеих конфигураций и проверка изоляции — общее начало сценариев. */
@@ -332,6 +373,46 @@ describe('staging и production на одном сервере', () => {
       expect(result.ssh).toBe('');
     });
   }
+});
+
+/**
+ * Регрессия: рабочая папка проекта содержит пробелы, и путь к known_hosts
+ * обязан доходить до ssh закавыченным. Без внутренних кавычек ssh считает
+ * значение списком файлов, не находит ключ хоста и отказывает — выкатка
+ * останавливалась на проверке маркера окружения.
+ */
+describe('путь known_hosts с пробелами', () => {
+  it('оба окружения передают путь в ssh закавыченным', async () => {
+    const result = await runInSandbox({
+      body: [
+        LOAD_BOTH,
+        'activate_environment PRODUCTION',
+        'prepare_known_hosts',
+        // Обращается к staging через remote_on.
+        'require_staging_verification',
+        // Обращается к production через тот же remote_on.
+        'require_environment_marker',
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('проверки пройдены');
+
+    // Обращались к обоим окружениям, и каждое передало свой файл known_hosts.
+    expect(result.knownHostsArgs.length).toBeGreaterThanOrEqual(2);
+    expect(result.knownHostsArgs.some((value) => value.includes('known_hosts.staging'))).toBe(true);
+    expect(result.knownHostsArgs.some((value) => value.includes('known_hosts.production'))).toBe(
+      true,
+    );
+
+    for (const value of result.knownHostsArgs) {
+      // Путь песочницы содержит пробел — иначе проверка ничего не значила бы.
+      expect(value).toContain(' ');
+      // Буквальные кавычки внутри значения опции: их разбирает сам ssh.
+      expect(value.startsWith('"')).toBe(true);
+      expect(value.endsWith('"')).toBe(true);
+    }
+  });
 });
 
 describe('подтверждение версии на staging', () => {
