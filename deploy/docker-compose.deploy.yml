@@ -1,0 +1,55 @@
+# Compose для серверных окружений.
+#
+# Файл один и параметризован: имя проекта, внешний порт, файл окружения, том базы
+# и маркер окружения приходят из конфигурации выкатки (deploy/private/*.conf).
+# Так значение задаётся ровно в одном месте и не может разъехаться между копиями.
+#
+# Staging и production могут стоять на одном сервере. Изоляция обеспечивается
+# разными значениями этих переменных: у окружений разные project name (а значит,
+# разные контейнеры и сеть), разные тома, разные файлы окружения и разные внешние
+# порты. Совпадение любого из них команда выкатки отвергает до запуска Compose.
+#
+# Секреты читаются из файла окружения на сервере и в Git не попадают.
+
+name: '${COMPOSE_PROJECT}'
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: ['./${ENV_FILE}']
+    environment:
+      TZ: Europe/Moscow
+      PGTZ: Europe/Moscow
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  app:
+    # Репозиторий и версия приходят из конфигурации выкатки. Зашитый здесь адрес
+    # разошёлся бы с IMAGE_REPOSITORY: скрипт проверил бы OCI-метку одного образа,
+    # а Compose запустил бы другой. Тег latest не используется — только точная версия.
+    image: ${IMAGE_REPOSITORY}:${IMAGE_TAG}
+    restart: unless-stopped
+    env_file: ['./${ENV_FILE}']
+    environment:
+      APP_ENV: ${APP_ENV_NAME}
+      APP_ENVIRONMENT_MARKER: ${APP_ENV_NAME}
+      NODE_ENV: production
+      TZ: Europe/Moscow
+    ports:
+      # Только петлевой интерфейс: наружу приложение выводится обратным прокси
+      # при настройке сервера. Внешний порт свой у каждого окружения.
+      - '127.0.0.1:${APP_HOST_PORT}:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db:
+    # Явное имя: тома окружений не должны пересекаться даже на одном сервере.
+    name: '${DB_VOLUME}'

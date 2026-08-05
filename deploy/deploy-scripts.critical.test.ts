@@ -1,9 +1,14 @@
 /**
  * Критические проверки команд выкатки.
  *
- * Скрипты обязаны отказывать, пока серверы не настроены, и не выполнять
- * сетевых действий в сухом прогоне. Проверяется поведение самих файлов,
- * а не их описание в документации.
+ * Staging и production могут стоять на одном физическом сервере. Это допустимо
+ * только при полной изоляции ресурсов, поэтому здесь проверяется настоящий код
+ * из common.sh: что изоляция требуется, что подтверждение прохождения staging
+ * читается из staging-каталога и что без реальной конфигурации команда
+ * отказывает, не дойдя до SSH.
+ *
+ * ssh подменяется заглушкой, которая записывает каждый вызов и отвечает заранее
+ * заданным текстом. Реальных подключений тесты не выполняют.
  */
 
 import { execFile } from 'node:child_process';
@@ -19,8 +24,13 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STAGING_SCRIPT = path.join(REPO_ROOT, 'deploy/scripts/deploy-staging.sh');
 const PRODUCTION_SCRIPT = path.join(REPO_ROOT, 'deploy/scripts/deploy-production.sh');
+const COMMON_LIB = path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh');
+const COMPOSE_FILE = path.join(REPO_ROOT, 'deploy/docker-compose.deploy.yml');
 
 const VALID_SHA = '0123456789abcdef0123456789abcdef01234567';
+
+/** Один сервер на оба окружения: именно этот случай и разрешается. */
+const SHARED_HOST = 'server.invalid';
 
 interface RunResult {
   code: number;
@@ -36,15 +46,180 @@ function withoutComments(content: string): string {
     .join('\n');
 }
 
-async function run(script: string, args: string[]): Promise<RunResult> {
+async function run(script: string, args: string[], env?: NodeJS.ProcessEnv): Promise<RunResult> {
   try {
-    const { stdout, stderr } = await execFileAsync(script, args, { cwd: REPO_ROOT });
+    const { stdout, stderr } = await execFileAsync(script, args, {
+      cwd: REPO_ROOT,
+      ...(env === undefined ? {} : { env }),
+    });
     return { code: 0, stdout, stderr };
   } catch (error) {
     const failure = error as { code?: number; stdout?: string; stderr?: string };
     return { code: failure.code ?? 1, stdout: failure.stdout ?? '', stderr: failure.stderr ?? '' };
   }
 }
+
+// --- Песочница с подменённым ssh -----------------------------------------
+
+/**
+ * Заглушка ssh.
+ *
+ * Отвечает по содержимому команды: маркер окружения зависит от каталога,
+ * подтверждение версии выдаётся только для файла в staging-каталоге.
+ */
+const FAKE_SSH = `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$SSH_LOG"
+cmd="\${*: -1}"
+case "$cmd" in
+  *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
+  *"$PRODUCTION_DIR/ENVIRONMENT"*) printf '%s\\n' "\${PRODUCTION_MARKER_REPLY:-production}" ;;
+  *'docker image inspect'*) printf '%s\\n' "$VERSION_UNDER_TEST" ;;
+  *"$STAGING_DIR/state/verified-versions"*)
+    if [ "\${STAGING_HAS_VERSION:-0}" = "1" ]; then printf '%s\\n' "$VERSION_UNDER_TEST"; fi
+    ;;
+esac
+exit 0
+`;
+
+interface EnvironmentValues {
+  ENVIRONMENT_MARKER: string;
+  SSH_HOST: string;
+  REMOTE_DIR: string;
+  APP_HOST_PORT: string;
+  COMPOSE_PROJECT: string;
+  ENV_FILE: string;
+  DB_VOLUME: string;
+  IMAGE_REPOSITORY: string;
+}
+
+const STAGING_DEFAULTS: EnvironmentValues = {
+  ENVIRONMENT_MARKER: 'staging',
+  SSH_HOST: SHARED_HOST,
+  REMOTE_DIR: '/srv/flowers-logistics-staging',
+  APP_HOST_PORT: '3001',
+  COMPOSE_PROJECT: 'fl-staging',
+  ENV_FILE: 'staging.env',
+  DB_VOLUME: 'fl-staging-db',
+  IMAGE_REPOSITORY: 'ghcr.io/example/app',
+};
+
+const PRODUCTION_DEFAULTS: EnvironmentValues = {
+  ENVIRONMENT_MARKER: 'production',
+  SSH_HOST: SHARED_HOST,
+  REMOTE_DIR: '/srv/flowers-logistics-production',
+  APP_HOST_PORT: '3000',
+  COMPOSE_PROJECT: 'fl-production',
+  ENV_FILE: 'production.env',
+  DB_VOLUME: 'fl-production-db',
+  IMAGE_REPOSITORY: 'ghcr.io/example/app',
+};
+
+function configContent(values: EnvironmentValues, name: string): string {
+  return [
+    `ENVIRONMENT_MARKER="${values.ENVIRONMENT_MARKER}"`,
+    `SSH_HOST="${values.SSH_HOST}"`,
+    `SSH_USER="deploy-${name}"`,
+    'SSH_PORT="22"',
+    `HOST_FINGERPRINT="${values.SSH_HOST} ssh-ed25519 AAAATEST"`,
+    `REMOTE_DIR="${values.REMOTE_DIR}"`,
+    `APP_DOMAIN="${name}.invalid"`,
+    `APP_HOST_PORT="${values.APP_HOST_PORT}"`,
+    `IMAGE_REPOSITORY="${values.IMAGE_REPOSITORY}"`,
+    `COMPOSE_PROJECT="${values.COMPOSE_PROJECT}"`,
+    'COMPOSE_FILE="docker-compose.deploy.yml"',
+    `ENV_FILE="${values.ENV_FILE}"`,
+    `DB_VOLUME="${values.DB_VOLUME}"`,
+    '',
+  ].join('\n');
+}
+
+interface SandboxOptions {
+  staging?: Partial<EnvironmentValues>;
+  production?: Partial<EnvironmentValues>;
+  /** Какие конфигурации создать. По умолчанию обе. */
+  configs?: 'both' | 'none';
+  stagingHasVersion?: boolean;
+  stagingMarkerReply?: string;
+  productionMarkerReply?: string;
+  /** Строки, выполняемые после загрузки конфигураций. */
+  body: string;
+}
+
+/**
+ * Выполняет фрагмент на настоящем common.sh с подменённым ssh.
+ * Возвращает результат и полный журнал обращений к ssh.
+ */
+async function runInSandbox(options: SandboxOptions): Promise<RunResult & { ssh: string }> {
+  const staging = { ...STAGING_DEFAULTS, ...options.staging };
+  const production = { ...PRODUCTION_DEFAULTS, ...options.production };
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'fl-deploy-'));
+  const binDir = path.join(dir, 'bin');
+  await mkdir(binDir, { recursive: true });
+
+  const sshPath = path.join(binDir, 'ssh');
+  await writeFile(sshPath, FAKE_SSH, 'utf8');
+  await chmod(sshPath, 0o755);
+
+  const sshLog = path.join(dir, 'ssh.log');
+  await writeFile(sshLog, '', 'utf8');
+
+  if (options.configs !== 'none') {
+    await mkdir(path.join(dir, 'deploy/private'), { recursive: true });
+    await writeFile(
+      path.join(dir, 'deploy/private/staging.conf'),
+      configContent(staging, 'staging'),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'deploy/private/production.conf'),
+      configContent(production, 'production'),
+      'utf8',
+    );
+  }
+
+  const harnessPath = path.join(dir, 'harness.sh');
+  await writeFile(
+    harnessPath,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      `source "${COMMON_LIB}"`,
+      `REPO_ROOT="${dir}"`,
+      `VERSION="${VALID_SHA}"`,
+      options.body,
+      "printf 'проверки пройдены\\n'",
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await chmod(harnessPath, 0o755);
+
+  const result = await run(harnessPath, [], {
+    ...process.env,
+    PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+    SSH_LOG: sshLog,
+    VERSION_UNDER_TEST: VALID_SHA,
+    STAGING_DIR: staging.REMOTE_DIR,
+    PRODUCTION_DIR: production.REMOTE_DIR,
+    STAGING_HAS_VERSION: options.stagingHasVersion === false ? '0' : '1',
+    ...(options.stagingMarkerReply === undefined
+      ? {}
+      : { STAGING_MARKER_REPLY: options.stagingMarkerReply }),
+    ...(options.productionMarkerReply === undefined
+      ? {}
+      : { PRODUCTION_MARKER_REPLY: options.productionMarkerReply }),
+  });
+
+  return { ...result, ssh: await readFile(sshLog, 'utf8') };
+}
+
+/** Загрузка обеих конфигураций и проверка изоляции — общее начало сценариев. */
+const LOAD_BOTH = [
+  'load_environment_config STAGING "$(staging_config_file)"',
+  'load_environment_config PRODUCTION "$(production_config_file)"',
+  'require_isolated_environments',
+].join('\n');
 
 describe('сухой прогон', () => {
   it('staging показывает план и не выполняет изменений', async () => {
@@ -67,6 +242,30 @@ describe('сухой прогон', () => {
     expect(result.stdout).toContain('PRODUCTION');
     expect(result.stdout).toContain('Изменений не выполнено');
   });
+
+  it('сухой прогон не обращается к сети даже с доступным ssh', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'fl-dry-'));
+    const binDir = path.join(dir, 'bin');
+    await mkdir(binDir, { recursive: true });
+    const sshLog = path.join(dir, 'ssh.log');
+    await writeFile(sshLog, '', 'utf8');
+    await writeFile(path.join(binDir, 'ssh'), FAKE_SSH, 'utf8');
+    await chmod(path.join(binDir, 'ssh'), 0o755);
+
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const result = await run(script, ['--version', VALID_SHA, '--dry-run'], {
+        ...process.env,
+        PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+        SSH_LOG: sshLog,
+        STAGING_DIR: '/srv/x',
+        PRODUCTION_DIR: '/srv/y',
+      });
+      expect(result.code).toBe(0);
+    }
+
+    // Ни одного обращения к ssh: план печатается локально.
+    expect(await readFile(sshLog, 'utf8')).toBe('');
+  });
 });
 
 describe('отказ до обращения к серверу', () => {
@@ -86,153 +285,191 @@ describe('отказ до обращения к серверу', () => {
     }
   });
 
-  it('обычная выкатка отказывает, пока конфигурация не заполнена', async () => {
-    // Конфигурации содержат только шаблоны, поэтому команда обязана остановиться
-    // до любого обращения к серверу.
-    const result = await run(STAGING_SCRIPT, ['--version', VALID_SHA]);
+  it('без реальной конфигурации команда отказывает и не идёт в ssh', async () => {
+    const result = await runInSandbox({
+      configs: 'none',
+      body: 'load_environment_config STAGING "$(staging_config_file)"',
+    });
+
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain('ОТКАЗ');
+    expect(result.stderr).toContain('не найдена конфигурация');
+    expect(result.stderr).toContain('deploy/private/');
+    expect(result.ssh).toBe('');
   });
 });
 
-/**
- * Проверка подтверждения версии на staging.
- *
- * ssh подменяется заглушкой: она записывает, к какому хосту обращались и с какой
- * командой, и отвечает заранее заданным текстом. Реальных подключений нет,
- * проверяется настоящий код из common.sh, а не его пересказ.
- */
-describe('подтверждение проверки на staging', () => {
-  const PRODUCTION_TARGET = 'produser@production.invalid';
-  const STAGING_TARGET = 'stguser@staging.invalid';
+describe('staging и production на одном сервере', () => {
+  it('один SSH-хост разрешён, когда ресурсы изолированы', async () => {
+    const result = await runInSandbox({ body: LOAD_BOTH });
 
-  const FAKE_SSH = `#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$SSH_LOG"
-target=""
-for arg in "$@"; do
-  case "$arg" in *@*) target="$arg" ;; esac
-done
-cmd="\${*: -1}"
-case "$cmd" in
-  *ENVIRONMENT*)
-    case "$target" in
-      *staging*) printf 'staging\\n' ;;
-      *) printf 'production\\n' ;;
-    esac
-    ;;
-  *verified-versions*)
-    if [ "\${STAGING_HAS_VERSION:-0}" = "1" ]; then printf '%s\\n' "$VERSION_UNDER_TEST"; fi
-    ;;
-esac
-exit 0
-`;
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('на одном сервере');
+    expect(result.stdout).toContain('проверки пройдены');
+    // Проверка выполняется до сети.
+    expect(result.ssh).toBe('');
+  });
 
-  const HARNESS = `#!/usr/bin/env bash
-set -euo pipefail
-source "$1/deploy/scripts/lib/common.sh"
+  const collisions: { field: keyof EnvironmentValues; expected: string }[] = [
+    { field: 'REMOTE_DIR', expected: 'каталог развёртывания' },
+    { field: 'COMPOSE_PROJECT', expected: 'имя Compose-проекта' },
+    { field: 'APP_HOST_PORT', expected: 'внешний порт приложения' },
+    { field: 'DB_VOLUME', expected: 'том базы данных' },
+    { field: 'ENV_FILE', expected: 'файл окружения' },
+    { field: 'ENVIRONMENT_MARKER', expected: 'маркер окружения' },
+  ];
 
-REPO_ROOT="$2"
-VERSION="$3"
+  for (const collision of collisions) {
+    it(`совпадение ${collision.field} останавливает выкатку`, async () => {
+      const production: Partial<EnvironmentValues> = {};
+      production[collision.field] = STAGING_DEFAULTS[collision.field];
 
-ENVIRONMENT_MARKER="production"
-SSH_HOST="production.invalid"
-SSH_USER="produser"
-SSH_PORT="22"
-HOST_FINGERPRINT="production.invalid ssh-ed25519 AAAAPROD"
-REMOTE_DIR="/srv/flowers-logistics-production"
+      const result = await runInSandbox({ production, body: LOAD_BOTH });
 
-STAGING_SSH_HOST="staging.invalid"
-STAGING_SSH_USER="stguser"
-STAGING_SSH_PORT="2222"
-STAGING_HOST_FINGERPRINT="staging.invalid ssh-ed25519 AAAASTG"
-STAGING_REMOTE_DIR="/srv/flowers-logistics-staging"
-STAGING_VERIFIED_FILE="/srv/flowers-logistics-staging/state/verified-versions"
-
-prepare_known_hosts
-require_staging_verification "тестовая-конфигурация"
-require_environment_marker
-printf 'проверки пройдены\\n'
-`;
-
-  async function runVerification(hasVersion: boolean): Promise<RunResult & { ssh: string }> {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'fl-deploy-'));
-    const binDir = path.join(dir, 'bin');
-    await mkdir(binDir, { recursive: true });
-
-    const sshPath = path.join(binDir, 'ssh');
-    await writeFile(sshPath, FAKE_SSH, 'utf8');
-    await chmod(sshPath, 0o755);
-
-    const harnessPath = path.join(dir, 'harness.sh');
-    await writeFile(harnessPath, HARNESS, 'utf8');
-    await chmod(harnessPath, 0o755);
-
-    const sshLog = path.join(dir, 'ssh.log');
-    await writeFile(sshLog, '', 'utf8');
-
-    const env = {
-      ...process.env,
-      PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
-      SSH_LOG: sshLog,
-      VERSION_UNDER_TEST: VALID_SHA,
-      STAGING_HAS_VERSION: hasVersion ? '1' : '0',
-    };
-
-    let result: RunResult;
-    try {
-      const { stdout, stderr } = await execFileAsync(harnessPath, [REPO_ROOT, dir, VALID_SHA], {
-        env,
-      });
-      result = { code: 0, stdout, stderr };
-    } catch (error) {
-      const failure = error as { code?: number; stdout?: string; stderr?: string };
-      result = {
-        code: failure.code ?? 1,
-        stdout: failure.stdout ?? '',
-        stderr: failure.stderr ?? '',
-      };
-    }
-
-    return { ...result, ssh: await readFile(sshLog, 'utf8') };
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain(collision.expected);
+      expect(result.stdout).not.toContain('проверки пройдены');
+      // Отказ произошёл до любого обращения к серверу.
+      expect(result.ssh).toBe('');
+    });
   }
+});
 
-  it('список проверенных версий читается со staging, а не с production', async () => {
-    const result = await runVerification(true);
+describe('подтверждение версии на staging', () => {
+  const CONFIRM = [
+    LOAD_BOTH,
+    'activate_environment PRODUCTION',
+    'prepare_known_hosts',
+    'require_staging_verification',
+    'require_environment_marker',
+  ].join('\n');
+
+  it('подтверждение читается из staging-каталога, маркер production проверяется отдельно', async () => {
+    const result = await runInSandbox({ body: CONFIRM });
 
     expect(result.code).toBe(0);
 
     const lines = result.ssh.split('\n').filter((line) => line !== '');
-    const verifiedCall = lines.find((line) => line.includes('verified-versions'));
-    expect(verifiedCall).toBeDefined();
-    // Подтверждение спрашивается у staging-хоста и только у него.
-    expect(verifiedCall).toContain(STAGING_TARGET);
-    expect(verifiedCall).not.toContain(PRODUCTION_TARGET);
+    const verified = lines.find((line) => line.includes('verified-versions'));
+    expect(verified).toBeDefined();
+    // Список проверенных версий берётся только из staging-каталога.
+    expect(verified).toContain(STAGING_DEFAULTS.REMOTE_DIR);
+    expect(verified).not.toContain(PRODUCTION_DEFAULTS.REMOTE_DIR);
 
-    // Контакт с production тоже был — отдельным соединением.
-    expect(lines.some((line) => line.includes(PRODUCTION_TARGET))).toBe(true);
+    // Маркер каждого окружения проверяется в его собственном каталоге.
+    expect(
+      lines.some(
+        (line) =>
+          line.includes(`${STAGING_DEFAULTS.REMOTE_DIR}/ENVIRONMENT`) &&
+          !line.includes(PRODUCTION_DEFAULTS.REMOTE_DIR),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((line) => line.includes(`${PRODUCTION_DEFAULTS.REMOTE_DIR}/ENVIRONMENT`)),
+    ).toBe(true);
 
-    // Отпечатки хостов не смешиваются: у каждого окружения свой known_hosts.
-    expect(result.ssh).toContain('known_hosts.staging-verification');
+    // Отдельные known_hosts у каждого окружения и никакого accept-new.
+    expect(result.ssh).toContain('known_hosts.staging');
     expect(result.ssh).toContain('known_hosts.production');
-    // Ни одно соединение не принимает неизвестный ключ.
     for (const line of lines) {
       expect(line).toContain('StrictHostKeyChecking=yes');
     }
   });
 
-  it('без подтверждения на staging выкатка останавливается', async () => {
-    const result = await runVerification(false);
+  it('без записи в verified-versions выкатка останавливается', async () => {
+    const result = await runInSandbox({ stagingHasVersion: false, body: CONFIRM });
 
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain('не была успешно проверена на staging');
-    // До проверки цели production дело не дошло.
+    expect(result.stdout).not.toContain('проверки пройдены');
+  });
+
+  it('чужой маркер в staging-каталоге останавливает выкатку', async () => {
+    const result = await runInSandbox({ stagingMarkerReply: 'production', body: CONFIRM });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('маркер окружения не совпал');
+    // До чтения подтверждения дело не дошло.
+    expect(result.ssh).not.toContain('verified-versions');
+  });
+
+  it('чужой маркер в production-каталоге останавливает выкатку', async () => {
+    const result = await runInSandbox({ productionMarkerReply: 'staging', body: CONFIRM });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('маркер окружения не совпал');
     expect(result.stdout).not.toContain('проверки пройдены');
   });
 });
 
-describe('содержимое конфигураций и скриптов', () => {
+describe('адрес образа', () => {
+  /** Заведомо нестандартный репозиторий: значение по умолчанию его не подменит. */
+  const CUSTOM_REPOSITORY = 'registry.example.invalid/team/custom-app';
+  const CUSTOM_REFERENCE = `${CUSTOM_REPOSITORY}:${VALID_SHA}`;
+
+  it('загрузка, сверка метки и запуск используют один и тот же образ', async () => {
+    const result = await runInSandbox({
+      production: { IMAGE_REPOSITORY: CUSTOM_REPOSITORY },
+      body: [
+        LOAD_BOTH,
+        'activate_environment PRODUCTION',
+        'prepare_known_hosts',
+        `remote "docker pull '$(image_reference)'"`,
+        'require_image_revision',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    const pull = lines.find((line) => line.includes('docker pull'));
+    const inspect = lines.find((line) => line.includes('docker image inspect'));
+    const compose = lines.find((line) => line.includes('docker compose'));
+
+    // Все три шага работают с одной и той же полной ссылкой на образ.
+    expect(pull).toContain(CUSTOM_REFERENCE);
+    expect(inspect).toContain(CUSTOM_REFERENCE);
+    expect(compose).toContain(`IMAGE_REPOSITORY='${CUSTOM_REPOSITORY}'`);
+    expect(compose).toContain(`IMAGE_TAG='${VALID_SHA}'`);
+
+    // Ни один шаг не подставил репозиторий по умолчанию.
+    expect(result.ssh).not.toContain(STAGING_DEFAULTS.IMAGE_REPOSITORY);
+  });
+
+  it('адрес образа задан только конфигурацией', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    expect(compose).toContain('image: ${IMAGE_REPOSITORY}:${IMAGE_TAG}');
+
+    // Второго, зашитого адреса нет ни в Compose, ни в скриптах: иначе скрипт
+    // проверил бы OCI-метку одного образа, а Compose запустил бы другой.
+    for (const file of [COMPOSE_FILE, COMMON_LIB, STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = withoutComments(await readFile(file, 'utf8'));
+      expect(content).not.toMatch(/[\w.-]+\.[a-z]{2,}\/[\w./-]+:\$\{IMAGE_TAG\}/);
+      expect(content).not.toContain('ghcr.io/');
+    }
+  });
+});
+
+describe('хранение конфигураций', () => {
+  it('в Git лежат только шаблоны, а реальные конфигурации игнорируются', async () => {
+    const tracked = await run('git', ['ls-files', 'deploy']);
+    expect(tracked.stdout).toContain('deploy/staging.conf.example');
+    expect(tracked.stdout).toContain('deploy/production.conf.example');
+    // Отслеживаемых рабочих конфигураций больше нет: их заполнение делало бы
+    // рабочее дерево грязным, а выкатка запрещает грязное дерево.
+    expect(tracked.stdout).not.toMatch(/^deploy\/staging\.conf$/m);
+    expect(tracked.stdout).not.toMatch(/^deploy\/production\.conf$/m);
+    expect(tracked.stdout).not.toContain('deploy/private/');
+
+    for (const candidate of ['deploy/private/staging.conf', 'deploy/private/production.conf']) {
+      const ignored = await run('git', ['check-ignore', candidate]);
+      expect(ignored.code).toBe(0);
+    }
+  });
+
   it('в шаблонах нет реальных адресов, отпечатков и секретов', async () => {
-    for (const file of ['deploy/staging.conf', 'deploy/production.conf']) {
+    for (const file of ['deploy/staging.conf.example', 'deploy/production.conf.example']) {
       const content = await readFile(path.join(REPO_ROOT, file), 'utf8');
 
       expect(content).toContain('CHANGE_ME');
@@ -243,40 +480,82 @@ describe('содержимое конфигураций и скриптов', ()
     }
   });
 
-  it('окружения полностью разделены', async () => {
-    const staging = await readFile(path.join(REPO_ROOT, 'deploy/staging.conf'), 'utf8');
-    const production = await readFile(path.join(REPO_ROOT, 'deploy/production.conf'), 'utf8');
+  it('шаблоны описывают изолированные окружения', async () => {
+    const staging = await readFile(path.join(REPO_ROOT, 'deploy/staging.conf.example'), 'utf8');
+    const production = await readFile(
+      path.join(REPO_ROOT, 'deploy/production.conf.example'),
+      'utf8',
+    );
 
     expect(staging).toContain('ENVIRONMENT_MARKER="staging"');
     expect(production).toContain('ENVIRONMENT_MARKER="production"');
-    expect(staging).toContain('COMPOSE_PROJECT="fl-staging"');
-    expect(production).toContain('COMPOSE_PROJECT="fl-production"');
-  });
 
+    // Порты, тома, файлы окружения, каталоги и Compose-проекты не совпадают.
+    for (const key of ['APP_HOST_PORT', 'DB_VOLUME', 'ENV_FILE', 'REMOTE_DIR', 'COMPOSE_PROJECT']) {
+      const pattern = new RegExp(`^${key}="([^"]+)"`, 'm');
+      const stagingValue = pattern.exec(staging)?.[1];
+      const productionValue = pattern.exec(production)?.[1];
+
+      expect(stagingValue).toBeDefined();
+      expect(productionValue).toBeDefined();
+      expect(stagingValue).not.toBe(productionValue);
+    }
+  });
+});
+
+describe('содержимое скриптов и Compose', () => {
   it('скрипты не принимают accept-new и требуют известный отпечаток', async () => {
-    const common = withoutComments(
-      await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8'),
-    );
+    const common = withoutComments(await readFile(COMMON_LIB, 'utf8'));
 
     expect(common).toContain('StrictHostKeyChecking=yes');
     expect(common).not.toContain('accept-new');
     expect(common).toContain('UserKnownHostsFile');
     // Развёрнутая версия сверяется по метке образа, а не по тегу.
     expect(common).toContain('org.opencontainers.image.revision');
+    // Безусловного запрета одинакового хоста больше нет: его заменила
+    // проверка изоляции критических ресурсов.
+    expect(common).toContain('require_isolated_environments');
   });
 
-  it('production читает подтверждение отдельным соединением со staging', async () => {
+  it('production читает подтверждение из staging-каталога', async () => {
     const script = withoutComments(await readFile(PRODUCTION_SCRIPT, 'utf8'));
 
     expect(script).toContain('require_staging_verification');
-    // Файл со списком версий не должен читаться соединением с production.
-    expect(script).not.toMatch(/remote\s+"[^"]*STAGING_VERIFIED_FILE/);
+    // Production-каталог доказательством прохождения staging служить не может.
+    expect(script).not.toMatch(/remote[^\n]*verified-versions/);
 
-    const common = withoutComments(
-      await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8'),
-    );
-    expect(common).toContain('STAGING_KNOWN_HOSTS_FILE');
-    expect(common).toContain('remote_staging');
+    const common = withoutComments(await readFile(COMMON_LIB, 'utf8'));
+    expect(common).toMatch(/STAGING_REMOTE_DIR\}\/state\/verified-versions/);
+  });
+
+  it('окружения получают отдельные deploy lock', async () => {
+    const staging = withoutComments(await readFile(STAGING_SCRIPT, 'utf8'));
+    const production = withoutComments(await readFile(PRODUCTION_SCRIPT, 'utf8'));
+    const common = withoutComments(await readFile(COMMON_LIB, 'utf8'));
+
+    expect(staging).toContain('acquire_local_lock "staging"');
+    expect(production).toContain('acquire_local_lock "production"');
+    // Удалённый lock лежит в каталоге окружения, поэтому на общем сервере
+    // он тоже остаётся отдельным.
+    expect(common).toContain('${REMOTE_DIR}/deploy.lock.d');
+  });
+
+  it('Compose берёт порт, том и файл окружения из конфигурации', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    expect(compose).toContain('127.0.0.1:${APP_HOST_PORT}:3000');
+    expect(compose).toContain('${DB_VOLUME}');
+    expect(compose).toContain('${ENV_FILE}');
+    expect(compose).toContain('${COMPOSE_PROJECT}');
+
+    // Значения не зашиты в файл: иначе они разъехались бы с конфигурацией.
+    expect(compose).not.toMatch(/127\.0\.0\.1:\d+:\d+/);
+    expect(compose).not.toContain('staging.env');
+    expect(compose).not.toContain('production.env');
+
+    // Обратный прокси, DNS и TLS в этой ветке не добавляются.
+    expect(compose).not.toContain('nginx');
+    expect(compose).not.toContain('traefik');
   });
 
   it('универсальной команды deploy ENV=... не существует', async () => {

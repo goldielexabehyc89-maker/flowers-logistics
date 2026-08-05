@@ -1,0 +1,44 @@
+# Шаблон конфигурации staging.
+#
+# Рабочая копия: deploy/private/staging.conf — этот каталог игнорируется Git.
+# В самом репозитории хранится только шаблон: реальные адреса и отпечатки
+# в Git не попадают, а заполнение отслеживаемого файла сделало бы рабочее
+# дерево грязным, после чего выкатка запретила бы сама себя.
+#
+#   mkdir -p deploy/private
+#   cp deploy/staging.conf.example deploy/private/staging.conf
+#
+# Секреты приложения (пароль базы, ключи, pepper) здесь НЕ хранятся:
+# они лежат только в файле окружения на самом сервере.
+
+ENVIRONMENT_MARKER="staging"
+
+SSH_HOST="CHANGE_ME_staging_host"
+SSH_USER="CHANGE_ME_staging_user"
+SSH_PORT="22"
+
+# Строка формата known_hosts, полученная из доверенного источника.
+HOST_FINGERPRINT="CHANGE_ME_staging_known_hosts_line"
+
+# Каталог окружения на сервере. Когда staging и production стоят на одном
+# сервере, именно каталог является границей между ними: в нём лежат файл
+# ENVIRONMENT, файл окружения, deploy lock и список проверенных версий.
+REMOTE_DIR="/srv/flowers-logistics-staging"
+
+APP_DOMAIN="CHANGE_ME_staging_domain"
+
+# Внешний порт на хосте. У окружений он обязан быть разным.
+APP_HOST_PORT="3001"
+
+# Приватный реестр GitHub Container Registry.
+IMAGE_REPOSITORY="ghcr.io/goldielexabehyc89-maker/flowers-logistics"
+
+# Отдельный project name: контейнеры и сети не пересекаются с production.
+COMPOSE_PROJECT="fl-staging"
+
+# Общий параметризованный Compose-файл; различия задаются этой конфигурацией.
+COMPOSE_FILE="docker-compose.deploy.yml"
+
+# Файл окружения и том базы — свои у каждого окружения.
+ENV_FILE="staging.env"
+DB_VOLUME="fl-staging-db"

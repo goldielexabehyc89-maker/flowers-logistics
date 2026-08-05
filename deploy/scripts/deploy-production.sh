@@ -2,9 +2,10 @@
 #
 # Выкатка на production.
 #
-# Отдельная команда с дополнительными обязательными проверками. Работать
-# со staging-хостом эта команда отказывается. Выполняется только по прямому
-# распоряжению владельца.
+# Отдельная команда с дополнительными обязательными проверками. Сервер может
+# быть тем же, что у staging, но подтверждение прохождения staging читается
+# только из staging-каталога, а маркер production проверяется отдельно.
+# Выполняется только по прямому распоряжению владельца.
 #
 #   ./deploy/scripts/deploy-production.sh --version <полный-sha> [--dry-run]
 
@@ -26,23 +27,29 @@ step "Проверка версии"
 require_full_sha
 log "версия: ${VERSION}"
 
-step "Конфигурация окружения"
-CONFIG_FILE="${REPO_ROOT}/deploy/production.conf"
+CONFIG_FILE="$(production_config_file)"
+STAGING_CONFIG_FILE="$(staging_config_file)"
 
 if is_dry_run; then
-  log "режим DRY_RUN: сеть и изменения не выполняются"
+  # Сухой прогон ничего не читает и никуда не ходит: он только печатает план.
+  step "Сухой прогон"
+  log "режим DRY_RUN: конфигурация не читается, сеть и изменения не выполняются"
   cat <<PLAN
 
 План выкатки на production:
-  1. проверить маркер окружения цели (ожидается «${EXPECTED_MARKER}»)
-  2. убедиться, что версия ${VERSION} успешно проверена на staging
-  3. занять локальный и удалённый deploy lock
-  4. проверить свободное место (не меньше ${MIN_FREE_MB} МБ)
-  5. выполнить обязательную серверную команду резервного копирования
-  6. показать домен и хост, запросить ручной ввод слова PRODUCTION
-  7. загрузить образ ${VERSION} и сверить OCI-метку
-  8. применить миграции и перезапустить сервис
-  9. дождаться /ready и отчитаться о развёрнутом SHA
+  1. прочитать ${CONFIG_FILE} и ${STAGING_CONFIG_FILE}
+  2. отказать, если окружения делят каталог, Compose-проект, внешний порт,
+     том базы или файл окружения
+  3. убедиться, что версия ${VERSION} успешно проверена на staging: маркер
+     и state/verified-versions читаются из staging-каталога
+  4. проверить маркер окружения цели (ожидается «${EXPECTED_MARKER}»)
+  5. занять локальный и удалённый deploy lock production
+  6. проверить свободное место (не меньше ${MIN_FREE_MB} МБ)
+  7. выполнить обязательную серверную команду резервного копирования
+  8. показать домен и хост, запросить ручной ввод слова PRODUCTION
+  9. загрузить образ ${VERSION} и сверить OCI-метку
+ 10. применить миграции и перезапустить сервис
+ 11. дождаться /ready на внешнем порту production и отчитаться о развёрнутом SHA
 
 Изменений не выполнено: это сухой прогон.
 PLAN
@@ -54,26 +61,32 @@ require_clean_worktree
 require_commit_in_origin_main
 log "коммит найден в origin/main, рабочее дерево чистое"
 
-load_config "${CONFIG_FILE}"
+step "Конфигурация окружений"
+# Production всегда читает обе конфигурации: подтверждение прохождения staging
+# берётся из staging-каталога, а изоляция проверяется до обращения к серверу.
+load_environment_config PRODUCTION "${CONFIG_FILE}"
+require_config_values PRODUCTION "${CONFIG_FILE}" "${CONFIG_KEYS[@]}"
 
-[ "${ENVIRONMENT_MARKER}" = "${EXPECTED_MARKER}" ] \
-  || fail "конфигурация помечена как «${ENVIRONMENT_MARKER}», а это команда production"
-[ "${ENVIRONMENT_MARKER}" != "staging" ] \
-  || fail "production-команда не работает со staging-целью"
+load_environment_config STAGING "${STAGING_CONFIG_FILE}"
+require_config_values STAGING "${STAGING_CONFIG_FILE}" "${CONFIG_KEYS[@]}"
+
+[ "${PRODUCTION_ENVIRONMENT_MARKER}" = "${EXPECTED_MARKER}" ] \
+  || fail "конфигурация помечена как «${PRODUCTION_ENVIRONMENT_MARKER}», а это команда production"
+
+require_isolated_environments
+
+activate_environment PRODUCTION
 
 step "Подготовка соединения"
 prepare_known_hosts
 acquire_local_lock "production"
 
 step "Проверка версии на staging"
-# На production попадает только то, что уже работало на staging.
-# Подтверждение читается со staging-хоста отдельным соединением: производится
-# оно раньше, чем команда вообще обращается к production.
-require_staging_verification "${CONFIG_FILE}"
+require_staging_verification
 
 step "Проверка цели"
 require_environment_marker
-log "маркер окружения совпал: ${ENVIRONMENT_MARKER}"
+log "маркер окружения совпал в каталоге ${REMOTE_DIR}"
 
 acquire_remote_lock
 trap 'release_remote_lock; release_local_lock' EXIT
@@ -93,9 +106,11 @@ log "резервная копия создана"
 
 step "Подтверждение"
 printf '\n'
-printf '  Домен: %s\n' "${APP_DOMAIN}"
-printf '  Хост:  %s@%s:%s\n' "${SSH_USER}" "${SSH_HOST}" "${SSH_PORT}"
-printf '  Версия: %s\n\n' "${VERSION}"
+printf '  Домен:   %s\n' "${APP_DOMAIN}"
+printf '  Хост:    %s@%s:%s\n' "${SSH_USER}" "${SSH_HOST}" "${SSH_PORT}"
+printf '  Каталог: %s\n' "${REMOTE_DIR}"
+printf '  Порт:    %s\n' "${APP_HOST_PORT}"
+printf '  Версия:  %s\n\n' "${VERSION}"
 printf 'Для продолжения введите слово PRODUCTION: '
 read -r CONFIRMATION
 [ "${CONFIRMATION}" = "PRODUCTION" ] || fail "подтверждение не получено"
@@ -106,8 +121,8 @@ require_image_revision
 log "метка образа соответствует ${VERSION}"
 
 step "Миграции и запуск"
-remote "cd '${REMOTE_DIR}' && IMAGE_TAG='${VERSION}' docker compose -p '${COMPOSE_PROJECT}' run --rm app npx prisma migrate deploy"
-remote "cd '${REMOTE_DIR}' && IMAGE_TAG='${VERSION}' docker compose -p '${COMPOSE_PROJECT}' up -d --no-build app"
+remote "$(compose_command) run --rm app npx prisma migrate deploy"
+remote "$(compose_command) up -d --no-build app"
 
 step "Проверка готовности"
 require_ready

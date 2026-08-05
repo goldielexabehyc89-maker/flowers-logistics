@@ -2,8 +2,9 @@
 #
 # Выкатка на staging.
 #
-# Отдельная команда, отдельная конфигурация, отдельный SSH-target. Работать
-# с production-хостом эта команда отказывается.
+# Отдельная команда и отдельная конфигурация. Сервер может быть тем же, что
+# у production, но каталог, Compose-проект, внешний порт, том и файл окружения
+# обязаны отличаться — иначе команда откажет до обращения к серверу.
 #
 #   ./deploy/scripts/deploy-staging.sh --version <полный-sha> [--dry-run]
 
@@ -24,26 +25,26 @@ step "Проверка версии"
 require_full_sha
 log "версия: ${VERSION}"
 
-step "Конфигурация окружения"
-CONFIG_FILE="${REPO_ROOT}/deploy/staging.conf"
+CONFIG_FILE="$(staging_config_file)"
 
 if is_dry_run; then
-  # Сухой прогон не обращается к сети и не меняет ничего — только показывает план.
-  log "режим DRY_RUN: сеть и изменения не выполняются"
-  if [ -f "${CONFIG_FILE}" ]; then
-    log "конфигурация: ${CONFIG_FILE}"
-  fi
+  # Сухой прогон ничего не читает и никуда не ходит: он только печатает план.
+  # Конфигурация не открывается вовсе, поэтому прогон работает и на свежем клоне.
+  step "Сухой прогон"
+  log "режим DRY_RUN: конфигурация не читается, сеть и изменения не выполняются"
   cat <<PLAN
 
 План выкатки на staging:
-  1. проверить маркер окружения цели (ожидается «${EXPECTED_MARKER}»)
-  2. занять локальный и удалённый deploy lock
-  3. загрузить образ ${VERSION} из приватного реестра
-  4. сверить OCI-метку org.opencontainers.image.revision с ${VERSION}
-  5. применить миграции (prisma migrate deploy)
-  6. перезапустить сервис из точной версии образа
-  7. дождаться /ready
-  8. отчитаться о фактически развёрнутом SHA
+  1. прочитать ${CONFIG_FILE}
+  2. проверить изоляцию от production, если его конфигурация уже создана
+  3. проверить маркер окружения в каталоге цели (ожидается «${EXPECTED_MARKER}»)
+  4. занять локальный и удалённый deploy lock
+  5. загрузить образ ${VERSION} из приватного реестра
+  6. сверить OCI-метку org.opencontainers.image.revision с ${VERSION}
+  7. применить миграции (prisma migrate deploy)
+  8. перезапустить сервис из точной версии образа
+  9. дождаться /ready на внешнем порту staging
+ 10. записать версию в state/verified-versions и отчитаться о развёрнутом SHA
 
 Изменений не выполнено: это сухой прогон.
 PLAN
@@ -55,13 +56,26 @@ require_clean_worktree
 require_commit_in_origin_main
 log "коммит найден в origin/main, рабочее дерево чистое"
 
-load_config "${CONFIG_FILE}"
+step "Конфигурация окружения"
+load_environment_config STAGING "${CONFIG_FILE}"
+require_config_values STAGING "${CONFIG_FILE}" "${CONFIG_KEYS[@]}"
 
 # Ошибка в конфигурации не должна привести к выкатке staging-версии на production.
-[ "${ENVIRONMENT_MARKER}" = "${EXPECTED_MARKER}" ] \
-  || fail "конфигурация помечена как «${ENVIRONMENT_MARKER}», а это команда staging"
-[ "${ENVIRONMENT_MARKER}" != "production" ] \
-  || fail "staging-команда не работает с production-целью"
+[ "${STAGING_ENVIRONMENT_MARKER}" = "${EXPECTED_MARKER}" ] \
+  || fail "конфигурация помечена как «${STAGING_ENVIRONMENT_MARKER}», а это команда staging"
+
+# Изоляция проверяется, как только появилась вторая конфигурация. Пока
+# production ещё не настроен, staging разворачивается в одиночку.
+PRODUCTION_CONFIG_FILE="$(production_config_file)"
+if [ -f "${PRODUCTION_CONFIG_FILE}" ]; then
+  load_environment_config PRODUCTION "${PRODUCTION_CONFIG_FILE}"
+  require_config_values PRODUCTION "${PRODUCTION_CONFIG_FILE}" "${CONFIG_KEYS[@]}"
+  require_isolated_environments
+else
+  log "конфигурация production ещё не создана: проверка изоляции пропущена"
+fi
+
+activate_environment STAGING
 
 step "Подготовка соединения"
 prepare_known_hosts
@@ -69,7 +83,7 @@ acquire_local_lock "staging"
 
 step "Проверка цели"
 require_environment_marker
-log "маркер окружения совпал: ${ENVIRONMENT_MARKER}"
+log "маркер окружения совпал в каталоге ${REMOTE_DIR}"
 
 acquire_remote_lock
 trap 'release_remote_lock; release_local_lock' EXIT
@@ -81,13 +95,14 @@ log "метка образа соответствует ${VERSION}"
 
 step "Миграции и запуск"
 # Секреты лежат в файле окружения на сервере и не передаются аргументами команды.
-remote "cd '${REMOTE_DIR}' && IMAGE_TAG='${VERSION}' docker compose -p '${COMPOSE_PROJECT}' run --rm app npx prisma migrate deploy"
-remote "cd '${REMOTE_DIR}' && IMAGE_TAG='${VERSION}' docker compose -p '${COMPOSE_PROJECT}' up -d --no-build app"
+remote "$(compose_command) run --rm app npx prisma migrate deploy"
+remote "$(compose_command) up -d --no-build app"
 
 step "Проверка готовности"
 require_ready
 
 # Отметка о проверенной версии: production принимает только то, что прошло staging.
+# Файл лежит в staging-каталоге — именно он служит доказательством.
 remote "mkdir -p '${REMOTE_DIR}/state' && echo '${VERSION}' >> '${REMOTE_DIR}/state/verified-versions'"
 
 report_deployed_revision
