@@ -27,6 +27,7 @@ export const AUDIT_ACTIONS = [
   'USER_FROZEN',
   'USER_UNFROZEN',
   'PIN_RESET',
+  'OUTBOX_MESSAGE_RETRIED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -133,6 +133,32 @@ export class ApiClient {
     return this.#json<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
+  /**
+   * Открывает поток событий.
+   *
+   * Нативный EventSource не используется: он не позволяет передать заголовок
+   * Authorization, а токен в URL попал бы в логи прокси и историю браузера.
+   * При 401 выполняется тот же single-flight refresh, что и для обычных запросов.
+   */
+  async openEventStream(
+    path: string,
+    lastEventId: string | null,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    if (lastEventId !== null) {
+      headers['Last-Event-ID'] = lastEventId;
+    }
+
+    const response = await this.#requestWithRetry(path, { method: 'GET', headers, signal }, true);
+
+    if (!response.ok) {
+      throw await toApiError(response);
+    }
+
+    return response;
+  }
+
   /** Вход и активация возвращают access-токен: он сразу кладётся в память. */
   async authenticate<T extends { accessToken: string; user: SessionUser }>(
     path: string,

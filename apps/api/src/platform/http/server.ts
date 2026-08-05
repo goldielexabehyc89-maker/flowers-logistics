@@ -18,12 +18,17 @@ import type { Database } from '../db.js';
 import { registerHealthRoutes } from '../../modules/health/routes.js';
 import { registerAuthRoutes } from '../../modules/auth/routes.js';
 import { registerUserRoutes } from '../../modules/users/routes.js';
+import { registerRealtimeRoutes } from '../../modules/realtime/routes.js';
+import { registerOutboxRoutes } from '../../modules/outbox/routes.js';
+import type { Notifier } from '../../modules/realtime/notifier.js';
 import type { AppServer } from './types.js';
 
 export interface ServerDeps {
   config: AppConfig;
   logger: AppLogger;
   db: Database;
+  /** Слушатель сигналов PostgreSQL для realtime-канала. */
+  notifier: Notifier;
 }
 
 function resolveWebDist(config: AppConfig): string {
@@ -36,7 +41,7 @@ function resolveWebDist(config: AppConfig): string {
 }
 
 export async function buildServer(deps: ServerDeps): Promise<AppServer> {
-  const { config, logger, db } = deps;
+  const { config, logger, db, notifier } = deps;
 
   const app: AppServer = Fastify({
     loggerInstance: logger,
@@ -88,6 +93,8 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerHealthRoutes(app, { db, config });
   await registerAuthRoutes(app, { db, config });
   await registerUserRoutes(app, { db, config });
+  await registerRealtimeRoutes(app, { db, config, notifier });
+  await registerOutboxRoutes(app, { db, config });
 
   await app.register(async (api) => {
     api.get('/api/status', async () => ({

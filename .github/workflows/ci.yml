@@ -102,6 +102,214 @@ jobs:
         # шум низкого уровня — нет. Dev-зависимости в рантайм не попадают.
         run: npm audit --omit=dev --audit-level=high
 
+  image:
+    name: Production-образ
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # Публикация в GHCR требует права записи пакетов; в pull_request не используется.
+      packages: write
+
+    services:
+      # Отдельная одноразовая база: на ней проверяется, что миграции
+      # действительно применяются из собранного образа.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fl_app
+          POSTGRES_PASSWORD: fl_image_password
+          POSTGRES_DB: fl_image
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fl_app -d fl_image"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      IMAGE_LOCAL_TAG: flowers-logistics:ci
+      IMAGE_DATABASE_URL: postgresql://fl_app:fl_image_password@127.0.0.1:5432/fl_image?schema=public
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Собрать образ и загрузить его в локальный демон
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Публикации здесь нет: сначала образ обязан пройти проверку ниже.
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_LOCAL_TAG }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Применить миграции из образа на чистую PostgreSQL 16
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --no-install: если бы Prisma не входила в образ, npx попытался бы
+          # скачать её из реестра. Здесь это запрещено — команда должна
+          # выполниться исключительно тем, что уже лежит внутри образа.
+          docker run --rm --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" \
+            "$IMAGE_LOCAL_TAG" \
+            npx --no-install prisma migrate deploy
+
+      - name: Запустить приложение из образа и дождаться /ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name fl-image-check --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" \
+            -e APP_ENV=local \
+            -e APP_ENVIRONMENT_MARKER=local \
+            -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
+            -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
+            -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
+            "$IMAGE_LOCAL_TAG"
+
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:3000/ready > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" != "1" ]; then
+            echo "приложение из образа не ответило на /ready" >&2
+            docker logs fl-image-check >&2
+            docker rm -f fl-image-check > /dev/null
+            exit 1
+          fi
+
+          docker rm -f fl-image-check > /dev/null
+
+      - name: Войти в GitHub Container Registry
+        # В pull request образ только собирается и проверяется:
+        # публикация делается лишь для main.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Опубликовать проверенный образ
+        # Публикуется ровно тот образ, который только что прошёл проверку,
+        # а не пересобранный. Docker Hub не используется: образ приватный.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Только точная версия: тег latest не публикуется, чтобы выкатка
+          # всегда указывала на конкретный коммит.
+          target="ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_SHA}"
+          docker tag "$IMAGE_LOCAL_TAG" "$target"
+          docker push "$target"
+
+  e2e:
+    name: Браузерный smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fl_app
+          POSTGRES_PASSWORD: fl_e2e_password
+          POSTGRES_DB: fl_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fl_app -d fl_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    # Браузерные проверки выполняются только в зафиксированном образе Playwright.
+    # Версия образа обязана совпадать с версией пакета @playwright/test.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
+
+    env:
+      # Отдельная одноразовая база: fl_dev, staging и production недопустимы.
+      DATABASE_URL: postgresql://fl_app:fl_e2e_password@postgres:5432/fl_e2e?schema=public
+      APP_ENV: local
+      APP_ENVIRONMENT_MARKER: local
+      TZ: Europe/Moscow
+      AUTH_ACCESS_TOKEN_SECRET: ci-only-access-token-secret-000000000000
+      AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
+      AUTH_REFRESH_REPLAY_KEY: Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0=
+      E2E_ADMIN_PHONE: '+79990000001'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовить базу и сборку
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx prisma generate
+          npx prisma migrate deploy
+          npm run build
+
+      - name: Создать первого администратора
+        id: bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Код нужен тесту, но не должен попасть в журнал сборки.
+          output="$(npm run --silent bootstrap:admin -- --phone "$E2E_ADMIN_PHONE" --name "Администратор проверки")"
+          code="$(printf '%s' "$output" | sed -n 's/.*код:[[:space:]]*\([0-9]\{4\}\).*/\1/p' | head -1)"
+          if [ -z "$code" ]; then
+            echo "не удалось получить одноразовый код" >&2
+            exit 1
+          fi
+          echo "::add-mask::$code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Запустить приложение
+        shell: bash
+        env:
+          # NODE_ENV задаётся только процессу приложения: на уровне job он заставил бы
+          # npm ci пропустить dev-зависимости, без которых нет сборки и Playwright.
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          node apps/api/dist/index.js &
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:3000/ready > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "приложение не поднялось" >&2
+          exit 1
+
+      - name: Браузерный smoke
+        env:
+          E2E_BASE_URL: http://127.0.0.1:3000
+          E2E_ADMIN_CODE: ${{ steps.bootstrap.outputs.code }}
+        run: npm run test:e2e
+
   secrets-scan:
     name: Запрещённые файлы и поиск секретов
     runs-on: ubuntu-latest

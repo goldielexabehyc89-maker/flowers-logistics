@@ -11,8 +11,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['apps/**/*.critical.test.ts', 'packages/**/*.critical.test.ts'],
-    exclude: ['**/node_modules/**', '**/dist/**', '**/generated/**'],
+    include: [
+      'apps/**/*.critical.test.ts',
+      'packages/**/*.critical.test.ts',
+      'deploy/**/*.critical.test.ts',
+    ],
+    exclude: ['**/node_modules/**', '**/dist/**', '**/generated/**', 'e2e/**'],
     passWithNoTests: false,
     /**
      * Файлы выполняются последовательно.

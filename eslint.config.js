@@ -17,6 +17,7 @@ export default tseslint.config(
       // и вне модульной системы проекта. Его правила кэширования продублированы
       // из apps/web/src/pwa/cache-policy.ts, который покрыт критическими тестами.
       'apps/web/public/**',
+      'deploy/state/**',
     ],
   },
   js.configs.recommended,
