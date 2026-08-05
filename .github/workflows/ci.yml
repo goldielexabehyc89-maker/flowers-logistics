@@ -171,7 +171,6 @@ jobs:
       DATABASE_URL: postgresql://fl_app:fl_e2e_password@postgres:5432/fl_e2e?schema=public
       APP_ENV: local
       APP_ENVIRONMENT_MARKER: local
-      NODE_ENV: production
       TZ: Europe/Moscow
       AUTH_ACCESS_TOKEN_SECRET: ci-only-access-token-secret-000000000000
       AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
@@ -190,6 +189,7 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Подготовить базу и сборку
+        shell: bash
         run: |
           set -euo pipefail
           npx prisma generate
@@ -198,6 +198,7 @@ jobs:
 
       - name: Создать первого администратора
         id: bootstrap
+        shell: bash
         run: |
           set -euo pipefail
           # Код нужен тесту, но не должен попасть в журнал сборки.
@@ -211,6 +212,11 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Запустить приложение
+        shell: bash
+        env:
+          # NODE_ENV задаётся только процессу приложения: на уровне job он заставил бы
+          # npm ci пропустить dev-зависимости, без которых нет сборки и Playwright.
+          NODE_ENV: production
         run: |
           set -euo pipefail
           node apps/api/dist/index.js &
