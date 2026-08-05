@@ -1,13 +1,14 @@
 /**
  * Индикатор состояния связи и интеграций.
  *
- * Realtime-канал ещё не реализован (ветка 1.4), поэтому состояние «Подключено»
- * означает только доступность API. Показывать здесь ложное «realtime подключён»
- * нельзя: пользователь решил бы, что списки обновляются сами.
+ * Показывает реальное положение дел: состояние канала realtime и состояние
+ * внешних интеграций. Ложное «Подключено» при неработающем канале недопустимо —
+ * пользователь решил бы, что списки обновляются сами.
  */
 
 import { useQuery } from '@tanstack/react-query';
 import type { ApiClient } from '../lib/api-client';
+import type { RealtimeState } from '../realtime/useRealtime';
 import { StatusBadge, type StatusTone } from '../ui/components';
 
 interface IntegrationStatus {
@@ -31,12 +32,22 @@ export interface ConnectionView {
 export function describeConnection(
   data: StatusResponse | undefined,
   isError: boolean,
+  realtime: RealtimeState,
 ): ConnectionView {
   if (isError || data === undefined) {
     return {
       tone: 'error',
       label: 'Нет связи',
       title: 'Сервис не отвечает. Рабочие действия сейчас недоступны.',
+    };
+  }
+
+  if (realtime === 'reconnecting' || realtime === 'stopped') {
+    return {
+      tone: 'warning',
+      label: 'Переподключение',
+      title:
+        'Канал обновлений разорван: данные могут отставать. Приложение восстанавливает соединение.',
     };
   }
 
@@ -65,20 +76,25 @@ export function describeConnection(
   return {
     tone: 'success',
     label: 'Подключено',
-    title: 'Сервис отвечает, интеграции настроены.',
+    title: 'Сервис отвечает, канал обновлений активен, интеграции настроены.',
   };
 }
 
-export function ConnectionIndicator({ client }: { client: ApiClient }): React.JSX.Element {
+export function ConnectionIndicator({
+  client,
+  realtime,
+}: {
+  client: ApiClient;
+  realtime: RealtimeState;
+}): React.JSX.Element {
   const { data, isError } = useQuery({
     queryKey: ['status'],
     queryFn: () => client.get<StatusResponse>('/api/status'),
-    // Realtime ещё нет: состояние обновляется периодическим опросом.
     refetchInterval: 60_000,
     retry: 1,
   });
 
-  const view = describeConnection(data, isError);
+  const view = describeConnection(data, isError, realtime);
 
   return (
     <span title={view.title}>

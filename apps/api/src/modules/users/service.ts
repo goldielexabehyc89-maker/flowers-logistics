@@ -14,6 +14,7 @@ import { AppError } from '../../platform/errors.js';
 import { writeAudit } from '../audit/service.js';
 import { generateFourDigitCode, hashSecretCode } from '../auth/crypto.js';
 import { revokeAllSessions, type TransactionClient } from '../auth/sessions.js';
+import { managementAudienceFor, publishRealtimeEvent } from '../realtime/events.js';
 import { ACTIVATION_CODE_TTL_MS } from '../auth/service.js';
 
 export interface Actor {
@@ -385,6 +386,14 @@ export async function createUser(
       userAgent: meta.userAgent,
     });
 
+    // Событие пишется в этой же транзакции: откат не оставит уведомления
+    // о создании, которого не было.
+    await publishRealtimeEvent(tx, {
+      topic: 'user.created',
+      payload: { userId: user.id, version: user.version },
+      audienceRoles: managementAudienceFor(input.roles),
+    });
+
     return user;
   });
 
@@ -536,6 +545,38 @@ export async function updateUser(
       });
     }
 
+    const nextRoles = input.roles ?? currentView.roles;
+
+    // Изменение видят администраторы, а логист — только если сотрудник остался
+    // обычным курьером. Если роль стала привилегированной, логисту всё равно
+    // отправляется событие: иначе в его списке осталась бы недоступная карточка.
+    await publishRealtimeEvent(tx, {
+      topic: rolesChanged ? 'user.roles_changed' : 'user.updated',
+      payload: {
+        userId,
+        rolesChanged,
+        phoneChanged,
+        accessible: !rolesChanged || nextRoles.every((role) => role === 'COURIER'),
+      },
+      audienceRoles: rolesChanged
+        ? [
+            ...new Set([
+              ...managementAudienceFor(currentView.roles),
+              ...managementAudienceFor(nextRoles),
+            ]),
+          ]
+        : managementAudienceFor(currentView.roles),
+    });
+
+    if (phoneChanged || rolesChanged) {
+      // Персональное событие: сессии отозваны, клиенту пора на вход.
+      await publishRealtimeEvent(tx, {
+        topic: 'session.revoked',
+        payload: { userId, reason: phoneChanged ? 'phone-changed' : 'roles-changed' },
+        audienceUserId: userId,
+      });
+    }
+
     const updated = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: USER_SELECT });
     return toView(updated);
   });
@@ -591,6 +632,17 @@ export async function freezeUser(
       userAgent: meta.userAgent,
     });
 
+    await publishRealtimeEvent(tx, {
+      topic: 'user.frozen',
+      payload: { userId, status: 'FROZEN' },
+      audienceRoles: managementAudienceFor(current.roles),
+    });
+    await publishRealtimeEvent(tx, {
+      topic: 'session.revoked',
+      payload: { userId, reason: 'frozen' },
+      audienceUserId: userId,
+    });
+
     const updated = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: USER_SELECT });
     return toView(updated);
   });
@@ -629,6 +681,12 @@ export async function unfreezeUser(
       newValue: { status: nextStatus },
       ip: meta.ip,
       userAgent: meta.userAgent,
+    });
+
+    await publishRealtimeEvent(tx, {
+      topic: 'user.unfrozen',
+      payload: { userId, status: nextStatus },
+      audienceRoles: managementAudienceFor(current.roles),
     });
 
     const updated = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: USER_SELECT });
@@ -729,6 +787,17 @@ export async function resetPin(
       newValue: { status: 'PENDING_ACTIVATION' },
       ip: meta.ip,
       userAgent: meta.userAgent,
+    });
+
+    await publishRealtimeEvent(tx, {
+      topic: 'user.updated',
+      payload: { userId, status: 'PENDING_ACTIVATION', reason: 'pin-reset' },
+      audienceRoles: managementAudienceFor(target.roles),
+    });
+    await publishRealtimeEvent(tx, {
+      topic: 'session.revoked',
+      payload: { userId, reason: 'pin-reset' },
+      audienceUserId: userId,
     });
   });
 

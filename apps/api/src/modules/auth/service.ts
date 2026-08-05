@@ -25,6 +25,7 @@ import {
   type SessionContext,
 } from './sessions.js';
 import { signAccessToken } from './tokens.js';
+import { managementAudienceFor, publishRealtimeEvent } from '../realtime/events.js';
 
 /** Срок жизни одноразового кода активации. */
 export const ACTIVATION_CODE_TTL_MS = 30 * 60 * 1000;
@@ -268,6 +269,12 @@ export async function activate(
         ip: context.ip,
         userAgent: context.userAgent,
       },
+    });
+
+    await publishRealtimeEvent(tx, {
+      topic: 'user.updated',
+      payload: { userId: user.id, status: 'ACTIVE', reason: 'activated' },
+      audienceRoles: managementAudienceFor(user.roles.map((assignment) => assignment.role)),
     });
 
     await writeAudit(tx, {
@@ -563,6 +570,12 @@ export async function logoutAll(
       data: { sessionVersion: { increment: 1 } },
     });
     await revokeAllSessions(tx, actor.userId, 'LOGOUT_ALL');
+    await publishRealtimeEvent(tx, {
+      topic: 'session.revoked',
+      payload: { userId: actor.userId, reason: 'logout-all' },
+      audienceUserId: actor.userId,
+    });
+
     await writeAudit(tx, {
       action: 'AUTH_LOGOUT_ALL',
       entityType: 'User',

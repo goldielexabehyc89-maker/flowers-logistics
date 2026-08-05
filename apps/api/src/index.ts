@@ -1,8 +1,9 @@
 /**
  * Точка входа приложения.
  *
- * Запуск: загрузка конфигурации → логгер → подключение к БД → HTTP-сервер.
- * Остановка: корректное завершение по SIGTERM/SIGINT, чтобы деплой не рвал активные запросы.
+ * Запуск: конфигурация → логгер → БД → слушатель сигналов → HTTP-сервер →
+ * фоновые задачи. Остановка по SIGTERM/SIGINT корректно гасит таймеры,
+ * очередь и открытые realtime-каналы, чтобы деплой не рвал активные соединения.
  */
 
 import { loadConfig } from './platform/config.js';
@@ -10,6 +11,10 @@ import { createLogger } from './platform/logging/logger.js';
 import { redactString } from './platform/logging/redact.js';
 import { createDatabase } from './platform/db.js';
 import { buildServer } from './platform/http/server.js';
+import { createMaintenanceRunner } from './platform/maintenance.js';
+import { createNotifier } from './modules/realtime/notifier.js';
+import { createOutboxWorker } from './modules/outbox/worker.js';
+import { createTestPingHandler } from './modules/outbox/handlers.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -17,7 +22,23 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger(config);
   const db = createDatabase(config, logger);
-  const app = await buildServer({ config, logger, db });
+
+  const notifier = createNotifier(config.DATABASE_URL, logger);
+  notifier.start();
+
+  const app = await buildServer({ config, logger, db, notifier });
+
+  const maintenance = createMaintenanceRunner({ db, logger });
+  // Первый проход сразу при старте: процесс мог быть остановлен надолго.
+  await maintenance.runOnce();
+  maintenance.start();
+
+  const outbox = createOutboxWorker({
+    db,
+    logger,
+    handlers: { 'test.ping': createTestPingHandler(logger) },
+  });
+  outbox.start();
 
   let shuttingDown = false;
 
@@ -35,7 +56,10 @@ async function main(): Promise<void> {
     forceExit.unref();
 
     try {
+      outbox.stop();
+      maintenance.stop();
       await app.close();
+      await notifier.stop();
       await db.$disconnect();
       logger.info('работа завершена');
       process.exit(0);

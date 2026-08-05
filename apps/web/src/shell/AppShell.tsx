@@ -14,6 +14,7 @@ import { ROLE_LABELS } from '@fl/shared';
 import { useAuth } from '../auth/AuthContext';
 import { splitMobileNavigation, visibleSections } from '../navigation/navigation';
 import { Button, Modal } from '../ui/components';
+import { useRealtime } from '../realtime/useRealtime';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import './shell.css';
 
@@ -22,6 +23,8 @@ export function AppShell(): React.JSX.Element {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  // Один канал обновлений на всё приложение.
+  const realtime = useRealtime();
 
   const roles = user?.roles ?? [];
   const sections = visibleSections(roles);
@@ -55,7 +58,7 @@ export function AppShell(): React.JSX.Element {
       <header className="shell__topbar">
         <h1 className="shell__title">{currentTitle}</h1>
         <div className="row">
-          <ConnectionIndicator client={client} />
+          <ConnectionIndicator client={client} realtime={realtime} />
           <Button variant="ghost" onClick={() => setAccountOpen(true)}>
             {user?.fullName ?? 'Пользователь'}
           </Button>

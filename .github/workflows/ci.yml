@@ -102,6 +102,131 @@ jobs:
         # шум низкого уровня — нет. Dev-зависимости в рантайм не попадают.
         run: npm audit --omit=dev --audit-level=high
 
+  image:
+    name: Production-образ
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # Публикация в GHCR требует права записи пакетов; в pull_request не используется.
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Войти в GitHub Container Registry
+        # В pull request образ только собирается: публикация делается лишь для main.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Собрать и, для main, опубликовать образ
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Docker Hub не используется: образ приватный и лежит в GHCR.
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # Только точная версия: тег latest не публикуется, чтобы выкатка
+          # всегда указывала на конкретный коммит.
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  e2e:
+    name: Браузерный smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fl_app
+          POSTGRES_PASSWORD: fl_e2e_password
+          POSTGRES_DB: fl_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fl_app -d fl_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    # Браузерные проверки выполняются только в зафиксированном образе Playwright.
+    # Версия образа обязана совпадать с версией пакета @playwright/test.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
+
+    env:
+      # Отдельная одноразовая база: fl_dev, staging и production недопустимы.
+      DATABASE_URL: postgresql://fl_app:fl_e2e_password@postgres:5432/fl_e2e?schema=public
+      APP_ENV: local
+      APP_ENVIRONMENT_MARKER: local
+      NODE_ENV: production
+      TZ: Europe/Moscow
+      AUTH_ACCESS_TOKEN_SECRET: ci-only-access-token-secret-000000000000
+      AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
+      AUTH_REFRESH_REPLAY_KEY: Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0=
+      E2E_ADMIN_PHONE: '+79990000001'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Установить зависимости
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовить базу и сборку
+        run: |
+          set -euo pipefail
+          npx prisma generate
+          npx prisma migrate deploy
+          npm run build
+
+      - name: Создать первого администратора
+        id: bootstrap
+        run: |
+          set -euo pipefail
+          # Код нужен тесту, но не должен попасть в журнал сборки.
+          output="$(npm run --silent bootstrap:admin -- --phone "$E2E_ADMIN_PHONE" --name "Администратор проверки")"
+          code="$(printf '%s' "$output" | sed -n 's/.*код:[[:space:]]*\([0-9]\{4\}\).*/\1/p' | head -1)"
+          if [ -z "$code" ]; then
+            echo "не удалось получить одноразовый код" >&2
+            exit 1
+          fi
+          echo "::add-mask::$code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Запустить приложение
+        run: |
+          set -euo pipefail
+          node apps/api/dist/index.js &
+          for _ in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:3000/ready > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "приложение не поднялось" >&2
+          exit 1
+
+      - name: Браузерный smoke
+        env:
+          E2E_BASE_URL: http://127.0.0.1:3000
+          E2E_ADMIN_CODE: ${{ steps.bootstrap.outputs.code }}
+        run: npm run test:e2e
+
   secrets-scan:
     name: Запрещённые файлы и поиск секретов
     runs-on: ubuntu-latest
