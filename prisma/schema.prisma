@@ -547,6 +547,12 @@ model IntegrationCursor {
   initialLoadCompletedAt DateTime?
   lastReconciliationAt   DateTime?
 
+  /// Состояние восстановления после сбоя: переживает перезапуск процесса,
+  /// поэтому backoff не обнуляется рестартом и не превращается в частый повтор.
+  lastAttemptAt       DateTime?
+  consecutiveFailures Int       @default(0)
+  nextAttemptAt       DateTime?
+
   /// Техническая версия для безопасного конкурентного обновления.
   version   Int      @default(0)
   createdAt DateTime @default(now())

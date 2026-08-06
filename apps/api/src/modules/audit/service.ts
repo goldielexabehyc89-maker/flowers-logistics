@@ -28,6 +28,14 @@ export const AUDIT_ACTIONS = [
   'USER_UNFROZEN',
   'PIN_RESET',
   'OUTBOX_MESSAGE_RETRIED',
+  // Системные действия синхронизации заказов. Автор — не пользователь,
+  // поэтому actorUserId у них пуст, а source = 'worker'.
+  'ORDER_IMPORTED',
+  'ORDER_SYNCED',
+  'ORDER_SCOPE_ENTERED',
+  'ORDER_SCOPE_EXITED',
+  'ORDER_SOURCE_MISSING',
+  'ORDER_SOURCE_RESTORED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

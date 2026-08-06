@@ -15,6 +15,13 @@ import { createMaintenanceRunner } from './platform/maintenance.js';
 import { createNotifier } from './modules/realtime/notifier.js';
 import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
+import { MoyskladClient } from './modules/integrations/moysklad/client.js';
+import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
+import {
+  createSyncWorker,
+  reportStartupStatus,
+  shouldRunAutomatically,
+} from './modules/integrations/moysklad/worker.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -40,6 +47,29 @@ async function main(): Promise<void> {
   });
   outbox.start();
 
+  // Синхронизация МоегоСклада. Токен существует только в production, поэтому
+  // в остальных окружениях worker не создаётся и ни одного сетевого обращения
+  // не выполняется — интеграция честно остаётся ненастроенной.
+  const moysklad = {
+    db,
+    client: new MoyskladClient({
+      config: {
+        baseUrl: MOYSKLAD_BASE_URL,
+        token: config.MOYSKLAD_TOKEN ?? null,
+        ids: MOYSKLAD_IDS,
+      },
+    }),
+    logger,
+    ids: MOYSKLAD_IDS,
+    overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,
+  };
+  await reportStartupStatus(moysklad, config);
+
+  const syncWorker = shouldRunAutomatically(config)
+    ? createSyncWorker(moysklad, config.MOYSKLAD_SYNC_INTERVAL_SECONDS * 1000)
+    : null;
+  syncWorker?.start();
+
   let shuttingDown = false;
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -59,7 +89,11 @@ async function main(): Promise<void> {
       // Сначала фоновые задачи: они дожидаются начатого прохода, поэтому
       // к моменту закрытия соединения с базой ни один обработчик уже не работает.
       // Общий лимит остановки при этом не меняется — он висит выше по коду.
-      await Promise.all([outbox.stop(), maintenance.stop()]);
+      await Promise.all([
+        outbox.stop(),
+        maintenance.stop(),
+        syncWorker?.stop() ?? Promise.resolve(),
+      ]);
       await app.close();
       await notifier.stop();
       await db.$disconnect();

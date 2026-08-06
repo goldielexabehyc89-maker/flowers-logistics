@@ -18,6 +18,11 @@ export const REALTIME_TOPICS = [
   'user.unfrozen',
   'user.roles_changed',
   'session.revoked',
+  // Заказы. Адресуются только ADMIN и LOGISTICIAN: курьер глобальные события
+  // заказов не получает — ему видны лишь его собственные доставки.
+  'order.created',
+  'order.updated',
+  'order.scope_changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;
