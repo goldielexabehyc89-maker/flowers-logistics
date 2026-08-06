@@ -103,7 +103,7 @@ async function claimPass(deps: SyncDeps, now: Date): Promise<CursorState | null>
   await ensureCursor(deps.db);
 
   return deps.db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint)`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint)`;
 
     const cursor = await tx.integrationCursor.findUniqueOrThrow({ where: { provider: PROVIDER } });
     if (cursor.nextAttemptAt !== null && cursor.nextAttemptAt > now) {
@@ -127,7 +127,7 @@ async function releasePass(
   intervalMs: number,
 ): Promise<void> {
   await deps.db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint)`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint)`;
     const cursor = await tx.integrationCursor.findUniqueOrThrow({ where: { provider: PROVIDER } });
 
     const failures = outcome.ok ? 0 : cursor.consecutiveFailures + 1;
