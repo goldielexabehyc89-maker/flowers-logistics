@@ -19,6 +19,7 @@ import type { TransactionClient } from '../../auth/sessions.js';
 import { writeAudit, type AuditAction } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
 import { toDateColumn } from './delivery-date.js';
+import { parseMoscow } from './moscow-time.js';
 import { diffSnapshots, snapshotHash, type OrderSnapshot } from './mapper.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
@@ -86,8 +87,8 @@ async function lockByExternalId(
 function orderData(snapshot: OrderSnapshot, now: Date): Prisma.DeliveryOrderUncheckedUpdateInput {
   return {
     externalName: snapshot.externalName,
-    externalUpdated: new Date(snapshot.externalUpdated),
-    externalMoment: snapshot.externalMoment === null ? null : new Date(snapshot.externalMoment),
+    externalUpdated: parseMoscow(snapshot.externalUpdated),
+    externalMoment: snapshot.externalMoment === null ? null : parseMoscow(snapshot.externalMoment),
     externalStateId: snapshot.externalStateId,
     externalStateName: snapshot.externalStateName,
     externalStateType: snapshot.externalStateType,
@@ -154,41 +155,57 @@ async function updateOrder(
   const previous = await previousSnapshot(tx, existing.id);
   const changedFields = diffSnapshots(previous, snapshot);
 
-  if (changedFields.length === 0) {
+  // Заказ, найденный снова после контрольной сверки, обязан вернуться в работу
+  // даже если внешний снимок не изменился ни одним полем: пропал он не из-за
+  // изменения данных, а из-за отсутствия в выборке.
+  const restoring = existing.sourceMissing && snapshot.inScope;
+
+  if (changedFields.length === 0 && !restoring) {
     // Та же версия пришла повторно в overlap-окне: ни ревизии, ни аудита,
     // ни события. Иначе перекрытие порождало бы поток пустых уведомлений.
     return { outcome: 'UNCHANGED', changedFields: [] };
   }
 
+  // Заказ, который был и остаётся вне нашей области. Обновляются только
+  // технические поля, нужные для определения области: полная ревизия сохранила бы
+  // адрес, получателя и суммы чужого склада, а хранить их мы не имеем оснований.
+  if (!snapshot.inScope && !existing.inScope) {
+    await tx.deliveryOrder.update({
+      where: { id: existing.id },
+      data: scopeOnlyData(snapshot, now),
+    });
+    return { outcome: 'SKIPPED_OUT_OF_SCOPE', changedFields: [] };
+  }
+
   const enteredScope = snapshot.inScope && (!existing.inScope || existing.sourceMissing);
   const exitedScope = !snapshot.inScope && existing.inScope;
 
-  // Заказ, уже находящийся вне области, не накапливает бизнес-данные чужого склада:
-  // обновляются только технические сведения, нужные для определения области
-  // и последующего восстановления.
-  const data =
-    !snapshot.inScope && !existing.inScope
-      ? scopeOnlyData(snapshot, now)
-      : orderData(snapshot, now);
-
   await tx.deliveryOrder.update({
     where: { id: existing.id },
-    data: { ...data, version: existing.version + 1 },
+    data: { ...orderData(snapshot, now), version: existing.version + 1 },
   });
 
-  const reason = enteredScope ? 'SCOPE_ENTERED' : exitedScope ? 'SCOPE_EXITED' : 'EXTERNAL_UPDATE';
+  const reason = restoring
+    ? 'SOURCE_RESTORED'
+    : enteredScope
+      ? 'SCOPE_ENTERED'
+      : exitedScope
+        ? 'SCOPE_EXITED'
+        : 'EXTERNAL_UPDATE';
   await writeRevision(tx, existing.id, snapshot, changedFields, reason);
 
-  const action: AuditAction = enteredScope
-    ? 'ORDER_SCOPE_ENTERED'
-    : exitedScope
-      ? 'ORDER_SCOPE_EXITED'
-      : 'ORDER_SYNCED';
+  const action: AuditAction = restoring
+    ? 'ORDER_SOURCE_RESTORED'
+    : enteredScope
+      ? 'ORDER_SCOPE_ENTERED'
+      : exitedScope
+        ? 'ORDER_SCOPE_EXITED'
+        : 'ORDER_SYNCED';
   await writeOrderAudit(tx, action, existing.id, snapshot, changedFields, existing.version + 1);
 
   await publishOrderEvent(
     tx,
-    enteredScope || exitedScope ? 'order.scope_changed' : 'order.updated',
+    restoring || enteredScope || exitedScope ? 'order.scope_changed' : 'order.updated',
     existing.id,
     snapshot,
   );
@@ -205,7 +222,7 @@ function scopeOnlyData(
   now: Date,
 ): Prisma.DeliveryOrderUncheckedUpdateInput {
   return {
-    externalUpdated: new Date(snapshot.externalUpdated),
+    externalUpdated: parseMoscow(snapshot.externalUpdated),
     storeId: snapshot.storeId,
     deliveryMethodId: snapshot.deliveryMethodId,
     sourceArchived: snapshot.sourceArchived,
@@ -221,7 +238,9 @@ async function previousSnapshot(
 ): Promise<OrderSnapshot | null> {
   const revision = await tx.deliveryOrderRevision.findFirst({
     where: { orderId },
-    orderBy: { receivedAt: 'desc' },
+    // Одинаковые миллисекунды реальны при пакетной обработке, поэтому
+    // порядок доопределяется идентификатором.
+    orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
     select: { snapshot: true },
   });
   return revision === null ? null : (revision.snapshot as unknown as OrderSnapshot);
@@ -238,7 +257,7 @@ async function writeRevision(
   await tx.deliveryOrderRevision.create({
     data: {
       orderId,
-      externalUpdated: new Date(snapshot.externalUpdated),
+      externalUpdated: parseMoscow(snapshot.externalUpdated),
       snapshot: snapshot as unknown as Prisma.InputJsonValue,
       snapshotHash: snapshotHash(snapshot),
       changedFields,

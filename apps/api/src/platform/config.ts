@@ -175,18 +175,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
  * молча стартовавшее с production-токеном в staging, однажды сходит в чужие данные.
  */
 function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
-  const isProductionMarker = data.APP_ENVIRONMENT_MARKER === 'production';
+  // Оба признака обязаны совпасть: смешанная конфигурация вроде
+  // APP_ENV=staging с production-маркером означает ошибку развёртывания,
+  // и продолжать с рабочим токеном в такой ситуации нельзя.
+  const isProductionMarker =
+    data.APP_ENVIRONMENT_MARKER === 'production' && data.APP_ENV === 'production';
 
   if (data.MOYSKLAD_TOKEN !== undefined && !isProductionMarker) {
     throw new Error(
-      'MOYSKLAD_TOKEN допустим только при APP_ENVIRONMENT_MARKER=production: ' +
-        'рабочий токен не размещается в local, CI и staging',
+      'MOYSKLAD_TOKEN допустим только при APP_ENV=production и ' +
+        'APP_ENVIRONMENT_MARKER=production: рабочий токен не размещается в local, CI и staging',
     );
   }
 
   if (data.MOYSKLAD_SYNC_ENABLED && !isProductionMarker) {
     throw new Error(
-      'MOYSKLAD_SYNC_ENABLED=true допустим только при APP_ENVIRONMENT_MARKER=production',
+      'MOYSKLAD_SYNC_ENABLED=true допустим только при APP_ENV=production и APP_ENVIRONMENT_MARKER=production',
     );
   }
 

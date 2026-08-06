@@ -27,6 +27,7 @@ import type { MOYSKLAD_IDS } from './config.js';
 import { deltaFilter, initialLoadFilter } from './filters.js';
 import { applyOrderSnapshot, markSourceMissing } from './import-service.js';
 import { mapOrder } from './mapper.js';
+import { acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
 
 export const PROVIDER = 'moysklad';
 /** Размер страницы. Больше нельзя: `expand` разрешён для выборки не более 100. */
@@ -51,6 +52,8 @@ export interface SyncDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Перекрытие окна delta. Стартовое значение — пять минут. */
   overlapSeconds?: number;
+  /** Соединение для глобальной блокировки прохода. */
+  lock: LockDeps;
 }
 
 export interface PassResult {
@@ -93,11 +96,11 @@ async function ensureCursor(db: Database): Promise<CursorState> {
 }
 
 /**
- * Пытается занять проход.
+ * Читает курсор и проверяет, не действует ли ещё backoff.
  *
- * Возвращает `null`, если другой процесс уже работает или ещё действует backoff.
- * Проверка и захват выполняются под одним advisory-lock, поэтому два процесса
- * не могут одновременно решить, что проход свободен.
+ * Взаимным исключением это НЕ является: его обеспечивает блокировка уровня сессии
+ * на отдельном соединении (`sync-lock.ts`), удерживаемая весь проход. Здесь
+ * проверяется только право начать проход по времени следующей попытки.
  */
 async function claimPass(deps: SyncDeps, now: Date): Promise<CursorState | null> {
   await ensureCursor(deps.db);
@@ -398,14 +401,37 @@ export async function runSyncOnce(
   deps: SyncDeps,
   options: RunOnceOptions = {},
 ): Promise<PassResult> {
-  const now = (deps.now ?? (() => new Date()))();
+  const clock = deps.now ?? (() => new Date());
+  const now = clock();
   const intervalMs = options.intervalMs ?? 30_000;
 
-  const cursor = await claimPass(deps, now);
-  if (cursor === null) {
+  // Блокировка берётся ДО чтения курсора и держится весь проход. Второй worker
+  // или ручной запуск немедленно получают «занято» и в сеть не идут.
+  const lock: SyncLock | null = await acquireSyncLock(deps.lock);
+  if (lock === null) {
     return emptyResult('skipped');
   }
 
+  try {
+    const cursor = await claimPass(deps, now);
+    if (cursor === null) {
+      return emptyResult('skipped');
+    }
+    return await runClaimedPass(deps, cursor, options, now, intervalMs, clock);
+  } finally {
+    // Освобождение обязательно: иначе замок жил бы до конца процесса.
+    await lock.release();
+  }
+}
+
+async function runClaimedPass(
+  deps: SyncDeps,
+  cursor: CursorState,
+  options: RunOnceOptions,
+  now: Date,
+  intervalMs: number,
+  clock: () => Date,
+): Promise<PassResult> {
   try {
     const needsReconciliation =
       options.allowReconciliation === true &&
@@ -420,7 +446,9 @@ export async function runSyncOnce(
         : await runInitialLoad(deps);
 
     await setIntegrationStatus(deps, 'OK', { pass: result.kind, processed: result.processed });
-    await releasePass(deps, { ok: true }, now, intervalMs);
+    // Следующая попытка отсчитывается от ФАКТИЧЕСКОГО завершения: у долгого
+    // прохода пауза, отсчитанная от старта, истекла бы ещё до его конца.
+    await releasePass(deps, { ok: true }, clock(), intervalMs);
     return result;
   } catch (error) {
     const failure = classify(error);
@@ -429,7 +457,7 @@ export async function runSyncOnce(
       attempt: cursor.consecutiveFailures + 1,
       backoffMs: failure.retryAfterMs ?? backoffForAttempt(cursor.consecutiveFailures),
     });
-    await releasePass(deps, { ok: false, retryAfterMs: failure.retryAfterMs }, now, intervalMs);
+    await releasePass(deps, { ok: false, retryAfterMs: failure.retryAfterMs }, clock(), intervalMs);
     throw error;
   }
 }

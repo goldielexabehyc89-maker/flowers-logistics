@@ -20,6 +20,7 @@ export interface SyncWorker {
 
 export function shouldRunAutomatically(config: AppConfig): boolean {
   return (
+    config.APP_ENV === 'production' &&
     config.APP_ENVIRONMENT_MARKER === 'production' &&
     config.MOYSKLAD_TOKEN !== undefined &&
     config.MOYSKLAD_SYNC_ENABLED

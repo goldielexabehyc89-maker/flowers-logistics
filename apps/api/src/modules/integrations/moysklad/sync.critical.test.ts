@@ -15,7 +15,9 @@ import {
 } from '../../auth/testing/harness.js';
 import { MoyskladClient, MoyskladError } from './client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
-import { deltaFilter, initialLoadFilter } from './filters.js';
+import { deltaFilter, formatMoment, initialLoadFilter } from './filters.js';
+import { formatMoscow, moscowDate, MoscowTimeParseError, parseMoscow } from './moscow-time.js';
+import { SYNC_LOCK_KEY, acquireSyncLock } from './sync-lock.js';
 import {
   backoffForAttempt,
   initialLoadSince,
@@ -115,6 +117,31 @@ function fakeApi(
   return { calls, fetch: fetchImpl };
 }
 
+/** Реестр занятых ключей: заменяет соединение PostgreSQL в тестах. */
+const heldLocks = new Set<string>();
+let closedConnections = 0;
+
+function fakeLock() {
+  return {
+    connectionString: 'postgres://fake',
+    connect: async () => ({
+      tryLock: async (key: bigint) => {
+        if (heldLocks.has(key.toString())) {
+          return false;
+        }
+        heldLocks.add(key.toString());
+        return true;
+      },
+      unlock: async (key: bigint) => {
+        heldLocks.delete(key.toString());
+      },
+      close: async () => {
+        closedConnections += 1;
+      },
+    }),
+  };
+}
+
 function deps(api: FakeApi, now = new Date('2026-08-06T09:00:00.000Z')): SyncDeps {
   return {
     db: ctx.db,
@@ -130,6 +157,7 @@ function deps(api: FakeApi, now = new Date('2026-08-06T09:00:00.000Z')): SyncDep
     now: () => now,
     sleep: async () => undefined,
     overlapSeconds: 300,
+    lock: fakeLock(),
   };
 }
 
@@ -138,6 +166,10 @@ describe('нижняя граница первоначальной загруз�
     // 06.08.2026 09:00 UTC = 12:00 Москвы. Начало дня Москвы минус 3 дня — 03.08 00:00 МСК.
     expect(initialLoadSince(new Date('2026-08-06T09:00:00.000Z')).toISOString()).toBe(
       '2026-08-02T21:00:00.000Z',
+    );
+    // То же значение, отправленное в фильтр, обязано быть московским.
+    expect(formatMoment(initialLoadSince(new Date('2026-08-06T09:00:00.000Z')))).toBe(
+      '2026-08-03 00:00:00',
     );
   });
 
@@ -167,7 +199,8 @@ describe('фильтры', () => {
       `${MOYSKLAD_BASE_URL}/entity/customerorder/metadata/attributes/${IDS.deliveryMethodAttribute}=` +
         `${MOYSKLAD_BASE_URL}/entity/customentity/${IDS.deliveryMethodDictionary}/${IDS.deliveryMethodDelivery}`,
     );
-    expect(filter).toContain('deliveryPlannedMoment>=2026-08-02 21:00:00');
+    // Московское время, а не UTC: иначе окно уехало бы на три часа назад.
+    expect(filter).toContain('deliveryPlannedMoment>=2026-08-03 00:00:00');
     expect(filter).not.toContain('state');
     expect(filter).not.toContain('updated<=');
   });
@@ -178,7 +211,7 @@ describe('фильтры', () => {
       new Date('2026-08-06T09:00:00.000Z'),
     );
 
-    expect(filter).toBe('updated>=2026-08-06 08:55:00;updated<=2026-08-06 09:00:00');
+    expect(filter).toBe('updated>=2026-08-06 11:55:00;updated<=2026-08-06 12:00:00');
     expect(filter).not.toContain('store');
     expect(filter).not.toContain('attributes');
     expect(filter).not.toContain('state');
@@ -383,5 +416,131 @@ describe('состояние интеграции', () => {
     expect(details).not.toContain('test-token');
     expect(details).not.toContain('moysklad.ru');
     expect(details).not.toContain('Москва');
+  });
+});
+
+describe('московское время на границе интеграции', () => {
+  it('фильтр всегда московский, а не UTC', () => {
+    expect(formatMoscow(new Date('2026-08-02T21:00:00.000Z'))).toBe('2026-08-03 00:00:00');
+    expect(formatMoscow(new Date('2026-08-06T09:00:00.000Z'))).toBe('2026-08-06 12:00:00');
+  });
+
+  it('границы суток, месяца и года не съезжают', () => {
+    // 20:59:59 UTC — ещё вчера по Москве; 21:00:00 UTC — уже следующий день.
+    expect(formatMoscow(new Date('2026-08-06T20:59:59.000Z'))).toBe('2026-08-06 23:59:59');
+    expect(formatMoscow(new Date('2026-08-06T21:00:00.000Z'))).toBe('2026-08-07 00:00:00');
+    expect(formatMoscow(new Date('2026-02-28T21:00:00.000Z'))).toBe('2026-03-01 00:00:00');
+    expect(formatMoscow(new Date('2025-12-31T21:00:00.000Z'))).toBe('2026-01-01 00:00:00');
+  });
+
+  it('время МоегоСклада разбирается как московское, а не по TZ процесса', () => {
+    expect(parseMoscow('2026-08-06 12:00:00.000').toISOString()).toBe('2026-08-06T09:00:00.000Z');
+    expect(parseMoscow('2026-01-01 00:00:00').toISOString()).toBe('2025-12-31T21:00:00.000Z');
+    // Разбор и обратное форматирование дают исходную строку.
+    expect(formatMoscow(parseMoscow('2026-08-06 12:00:00'))).toBe('2026-08-06 12:00:00');
+  });
+
+  it('невалидное время отвергается без вывода значения', () => {
+    for (const value of ['вчера', '2026-13-01 10:00', '']) {
+      let error: unknown = null;
+      try {
+        parseMoscow(value);
+      } catch (thrown) {
+        error = thrown;
+      }
+      expect(error, value).toBeInstanceOf(MoscowTimeParseError);
+      expect((error as Error).message).not.toContain(value === '' ? 'пусто' : value);
+    }
+  });
+
+  it('календарная дата Москвы считается от смещения, а не от UTC', () => {
+    expect(moscowDate(new Date('2026-08-06T21:30:00.000Z'))).toBe('2026-08-07');
+  });
+});
+
+describe('глобальная блокировка прохода', () => {
+  it('второй проход получает skipped даже после истечения аренды', async () => {
+    // Первый проход держит блокировку и «застревает» внутри поддельного API.
+    let releaseFirst: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const slowApi: FakeApi = {
+      calls: [],
+      fetch: (async () => {
+        slowApi.calls.push({ url: '', filter: '', limit: '', offset: '0', expand: '' });
+        await gate;
+        return new Response(JSON.stringify({ rows: [], meta: { size: 0 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    };
+
+    const first = runSyncOnce(deps(slowApi));
+    // Даём первому проходу дойти до сетевого вызова.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Часы второго прохода — далеко за пределами десятиминутной аренды.
+    const second = fakeApi([[row()]]);
+    const result = await runSyncOnce(deps(second, new Date('2026-08-06T23:00:00.000Z')));
+
+    expect(result.kind).toBe('skipped');
+    expect(second.calls).toHaveLength(0);
+
+    releaseFirst?.();
+    await first;
+  });
+
+  it('после успеха блокировка освобождена', async () => {
+    await runSyncOnce(deps(fakeApi([[]])));
+    expect(heldLocks.has(SYNC_LOCK_KEY.toString())).toBe(false);
+  });
+
+  it('после ошибки блокировка освобождена', async () => {
+    const failing = fakeApi([[]], { failAtPage: 0, status: 500 });
+    await expect(
+      runSyncOnce(deps(failing, new Date('2026-08-06T12:00:00.000Z'))),
+    ).rejects.toThrow();
+    expect(heldLocks.has(SYNC_LOCK_KEY.toString())).toBe(false);
+  });
+
+  it('соединение закрывается и при занятой блокировке', async () => {
+    const before = closedConnections;
+    const lock = await acquireSyncLock(fakeLock());
+    expect(lock).not.toBeNull();
+
+    // Второй захватчик того же ключа обязан закрыть соединение, а не оставить его.
+    expect(await acquireSyncLock(fakeLock())).toBeNull();
+    expect(closedConnections).toBeGreaterThan(before);
+
+    await lock?.release();
+    expect(heldLocks.has(SYNC_LOCK_KEY.toString())).toBe(false);
+  });
+});
+
+describe('backoff отсчитывается от завершения прохода', () => {
+  it('долгий проход планирует следующую попытку от момента окончания', async () => {
+    // Часы двигаются вперёд на два часа между стартом и завершением.
+    const times = [
+      new Date('2026-08-06T09:00:00.000Z'),
+      new Date('2026-08-06T11:00:00.000Z'),
+      new Date('2026-08-06T11:00:00.000Z'),
+    ];
+    let index = 0;
+    const base = deps(fakeApi([[]]));
+    const slowClock: SyncDeps = {
+      ...base,
+      now: () => times[Math.min(index++, times.length - 1)] ?? times[0]!,
+    };
+
+    await runSyncOnce(slowClock, { intervalMs: 30_000 });
+
+    const cursor = await ctx.db.integrationCursor.findUniqueOrThrow({
+      where: { provider: PROVIDER },
+    });
+    // 11:00 завершение + 30 секунд, а не 09:00 + 30 секунд.
+    expect(cursor.nextAttemptAt?.toISOString()).toBe('2026-08-06T11:00:30.000Z');
   });
 });

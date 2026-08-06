@@ -15,15 +15,19 @@
  */
 
 import { MOYSKLAD_BASE_URL, type MOYSKLAD_IDS } from './config.js';
+import { formatMoscow } from './moscow-time.js';
 
 type Ids = typeof MOYSKLAD_IDS;
 
 const entity = (kind: string, id: string): string => `${MOYSKLAD_BASE_URL}/entity/${kind}/${id}`;
 
-/** Формат даты и времени МоегоСклада. Пробел закодирует URLSearchParams. */
+/**
+ * Формат даты и времени МоегоСклада — всегда московское время.
+ * Отправленное в UTC значение сдвинуло бы окно на три часа, и синхронизация
+ * молча отставала бы. Пробел закодирует URLSearchParams.
+ */
 export function formatMoment(date: Date): string {
-  const iso = date.toISOString();
-  return `${iso.slice(0, 10)} ${iso.slice(11, 19)}`;
+  return formatMoscow(date);
 }
 
 /**

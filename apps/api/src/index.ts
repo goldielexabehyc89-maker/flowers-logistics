@@ -62,6 +62,7 @@ async function main(): Promise<void> {
     logger,
     ids: MOYSKLAD_IDS,
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,
+    lock: { connectionString: config.DATABASE_URL },
   };
   await reportStartupStatus(moysklad, config);
 
