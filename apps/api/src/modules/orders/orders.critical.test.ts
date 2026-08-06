@@ -307,10 +307,33 @@ describe('конфигурация fail closed', () => {
     expect(() =>
       loadConfig({
         ...base,
+        APP_ENV: 'production',
         APP_ENVIRONMENT_MARKER: 'production',
         MOYSKLAD_SYNC_ENABLED: 'true',
       } as NodeJS.ProcessEnv),
     ).toThrow(/требует MOYSKLAD_TOKEN/);
+  });
+
+  it('несовпадение APP_ENV и маркера останавливает запуск', () => {
+    // Смешанная конфигурация — признак ошибки развёртывания. Продолжать
+    // с рабочим токеном в такой ситуации нельзя ни в одну сторону.
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'staging',
+        APP_ENVIRONMENT_MARKER: 'production',
+        MOYSKLAD_TOKEN: 'x',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_TOKEN/);
+
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'production',
+        APP_ENVIRONMENT_MARKER: 'staging',
+        MOYSKLAD_TOKEN: 'x',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_TOKEN/);
   });
 
   it('staging без токена запускается и worker не стартует', () => {
@@ -324,6 +347,7 @@ describe('конфигурация fail closed', () => {
   it('production с токеном и выключенной синхронизацией допустим, но worker не стартует', () => {
     const config = loadConfig({
       ...base,
+      APP_ENV: 'production',
       APP_ENVIRONMENT_MARKER: 'production',
       MOYSKLAD_TOKEN: 'x',
     } as NodeJS.ProcessEnv);
@@ -334,6 +358,7 @@ describe('конфигурация fail closed', () => {
   it('worker стартует только при production, токене и включённой синхронизации', () => {
     const config = loadConfig({
       ...base,
+      APP_ENV: 'production',
       APP_ENVIRONMENT_MARKER: 'production',
       MOYSKLAD_TOKEN: 'x',
       MOYSKLAD_SYNC_ENABLED: 'true',
