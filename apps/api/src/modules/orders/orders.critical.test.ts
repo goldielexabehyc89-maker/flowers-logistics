@@ -910,6 +910,167 @@ describe('клиент остаётся read-only', () => {
   });
 });
 
+describe('явно выбранный день и заказы без даты', () => {
+  async function tokenFor(roles: Parameters<typeof seedUser>[1]['roles']): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  it('при ?deliveryDate заказ без даты остаётся видимым', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-10-15';
+
+    const onDay = snapshotOf({ deliveryPlannedMoment: `${day} 12:00:00.000` });
+    await apply(onDay);
+    const noDate = snapshotOf({ deliveryPlannedMoment: null });
+    await apply(noDate);
+    const otherDay = snapshotOf({ deliveryPlannedMoment: '2026-10-16 12:00:00.000' });
+    await apply(otherDay);
+
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders?deliveryDate=${day}&limit=100`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const numbers = (response.json() as { items: { number: string }[] }).items.map(
+      (item) => item.number,
+    );
+    const nameOf = async (externalId: string): Promise<string> =>
+      (await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { externalId } })).externalName;
+
+    expect(numbers).toContain(await nameOf(onDay.externalId));
+    // Заказ без распознанной даты обязан остаться в выборке: он в «Требует
+    // внимания» именно потому, что даты у него нет.
+    expect(numbers).toContain(await nameOf(noDate.externalId));
+    expect(numbers).not.toContain(await nameOf(otherDay.externalId));
+  });
+});
+
+describe('инвариант ручного интервала в базе', () => {
+  /** Прямая запись в обход API: проверяется именно ограничение PostgreSQL. */
+  async function writeManualInterval(
+    orderId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    await ctx.db.deliveryOrder.update({ where: { id: orderId }, data });
+  }
+
+  async function freshOrder(): Promise<string> {
+    const snapshot = snapshotOf();
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    return order.id;
+  }
+
+  it('половинчатый интервал отклоняется базой', async () => {
+    const orderId = await freshOrder();
+
+    await expect(
+      writeManualInterval(orderId, { manualIntervalStartMinute: 600 }),
+    ).rejects.toThrow();
+    await expect(writeManualInterval(orderId, { manualIntervalEndMinute: 720 })).rejects.toThrow();
+    // Значения без отметки времени — тоже половинчатое состояние.
+    await expect(
+      writeManualInterval(orderId, {
+        manualIntervalStartMinute: 600,
+        manualIntervalEndMinute: 720,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('невозможный интервал отклоняется базой', async () => {
+    const orderId = await freshOrder();
+
+    for (const data of [
+      { manualIntervalStartMinute: 720, manualIntervalEndMinute: 600 },
+      { manualIntervalStartMinute: 600, manualIntervalEndMinute: 600 },
+      { manualIntervalStartMinute: -1, manualIntervalEndMinute: 600 },
+      { manualIntervalStartMinute: 600, manualIntervalEndMinute: 1440 },
+    ]) {
+      await expect(
+        writeManualInterval(orderId, { ...data, manualIntervalSetAt: NOW }),
+        JSON.stringify(data),
+      ).rejects.toThrow();
+    }
+  });
+
+  it('полный корректный интервал и полная очистка разрешены', async () => {
+    const orderId = await freshOrder();
+
+    await writeManualInterval(orderId, {
+      manualIntervalStartMinute: 600,
+      manualIntervalEndMinute: 720,
+      manualIntervalSetAt: NOW,
+    });
+    await writeManualInterval(orderId, {
+      manualIntervalStartMinute: null,
+      manualIntervalEndMinute: null,
+      manualIntervalSetAt: null,
+    });
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: orderId } });
+    expect(stored.manualIntervalStartMinute).toBeNull();
+  });
+});
+
+describe('публичное состояние приложения', () => {
+  it('без авторизации технических счётчиков нет', async () => {
+    const response = await ctx.app.inject({ method: 'GET', url: '/api/status' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain('pendingOperations');
+    expect(response.body).not.toContain('lastErrorAt');
+  });
+
+  it('технические подробности доступны только администратору', async () => {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+
+    const tokenFor = async (roles: Parameters<typeof seedUser>[1]['roles']): Promise<string> => {
+      const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+      const session = await login(
+        ctx,
+        { phone: user.phone, pin },
+        { ip: null, userAgent: 'vitest', deviceLabel: null },
+      );
+      return session.accessToken;
+    };
+
+    const anonymous = await ctx.app.inject({ method: 'GET', url: '/api/status/integrations' });
+    expect(anonymous.statusCode).toBe(401);
+
+    const logistician = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/status/integrations',
+      headers: { authorization: `Bearer ${await tokenFor(['LOGISTICIAN'])}` },
+    });
+    expect(logistician.statusCode).toBe(403);
+
+    const admin = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/status/integrations',
+      headers: { authorization: `Bearer ${await tokenFor(['ADMIN'])}` },
+    });
+    expect(admin.statusCode).toBe(200);
+    expect(admin.body).toContain('pendingOperations');
+  });
+});
+
 describe('снимок заказов для staging', () => {
   it('в снимке нет адресов, получателей, комментариев и внешних идентификаторов', async () => {
     const marker = `Секрет-${Date.now()}`;
@@ -929,6 +1090,7 @@ describe('снимок заказов для staging', () => {
       ],
     });
     await apply(snapshot);
+    await apply(snapshotOf({ deliveryPlannedMoment: null }));
 
     const { exportOrdersSnapshot, assertSnapshotIsSafe, alias } =
       await import('./snapshot-export.js');
@@ -942,6 +1104,9 @@ describe('снимок заказов для staging', () => {
 
     const serialized = JSON.stringify(exported);
     expect(serialized).not.toContain(marker);
+    // Заказы без даты нужны для проверки «Требует внимания» и обязаны попасть
+    // в снимок: нижняя граница даты не должна их отсекать.
+    expect(exported.orders.some((row) => row.deliveryDate === null)).toBe(true);
     expect(serialized).not.toContain('Москва');
     expect(serialized).not.toContain(snapshot.externalId);
 

@@ -44,7 +44,7 @@ import './deals.css';
 const PAGE_SIZE = 50;
 
 interface StatusResponse {
-  integrations: { provider: string; state: IntegrationState; pendingOperations: number }[];
+  integrations: { provider: string; state: IntegrationState }[];
 }
 
 export function DealsScreen(): React.JSX.Element {
@@ -137,10 +137,10 @@ export function DealsScreen(): React.JSX.Element {
           <StatusBadge tone={integration.tone}>{integration.label}</StatusBadge>
           <span className="text-sm muted">{integration.hint}</span>
           {isAdmin && moysklad !== undefined && (
-            // Технические подробности — только администратору.
-            <span className="text-sm muted">
-              состояние: {moysklad.state}, операций в очереди: {moysklad.pendingOperations}
-            </span>
+            // Администратору дополнительно видно техническое состояние. Счётчики
+            // очереди живут на отдельном админском маршруте и показаны
+            // в «Настройках»: сюда они не тянутся ради одной строки.
+            <span className="text-sm muted">состояние интеграции: {moysklad.state}</span>
           )}
         </div>
       </header>

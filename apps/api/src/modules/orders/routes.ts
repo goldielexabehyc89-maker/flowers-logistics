@@ -144,30 +144,38 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       where['needsAttention'] = query.needsAttention === 'true';
     }
 
-    if (query.search !== undefined && query.search !== '') {
+    // Условия собираются в AND: у поиска и у дня свои наборы OR, и записать их
+    // в одно поле `OR` нельзя — второй набор молча вытеснил бы первый.
+    const conditions: Record<string, unknown>[] = [];
+    const searching = query.search !== undefined && query.search !== '';
+
+    if (searching) {
       // Поиск идёт по тем полям, которые логист реально помнит: номер заказа,
       // адрес и получатель. Регистр не важен — номер часто набирают латиницей
       // и в нижнем регистре.
-      where['OR'] = [
-        { externalName: { contains: query.search, mode: 'insensitive' } },
-        { address: { contains: query.search, mode: 'insensitive' } },
-        { recipient: { contains: query.search, mode: 'insensitive' } },
-      ];
+      conditions.push({
+        OR: [
+          { externalName: { contains: query.search, mode: 'insensitive' } },
+          { address: { contains: query.search, mode: 'insensitive' } },
+          { recipient: { contains: query.search, mode: 'insensitive' } },
+        ],
+      });
     }
 
-    if (query.deliveryDate !== undefined) {
-      where['deliveryDate'] = toDateColumn(query.deliveryDate);
-    } else if (inScope && (query.search === undefined || query.search === '')) {
-      // По умолчанию — текущий день. Но заказ без распознанной даты обязан
-      // оставаться видимым: иначе он исчез бы из «Требует внимания» именно тогда,
-      // когда им нужно заняться.
-      //
-      // При поиске фильтр по дню не применяется: логист ищет конкретный заказ,
-      // и ограничение сегодняшним днём просто не нашло бы его.
-      where['OR'] = [
-        { deliveryDate: toDateColumn(moscowToday(new Date())) },
-        { deliveryDate: null },
-      ];
+    // Заказ без распознанной даты виден при ЛЮБОМ выбранном дне — и при дне
+    // по умолчанию, и при явно указанном. Иначе он исчезал бы из «Требует
+    // внимания» именно тогда, когда им нужно заняться, а даты у него нет
+    // ровно потому, что с ним что-то не так.
+    const day = query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date()));
+
+    if (day !== null) {
+      conditions.push({
+        OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }],
+      });
+    }
+
+    if (conditions.length > 0) {
+      where['AND'] = conditions;
     }
 
     const [rows, total] = await Promise.all([

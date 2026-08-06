@@ -101,7 +101,10 @@ export async function exportOrdersSnapshot(
   options: ExportOptions,
 ): Promise<OrdersSnapshot> {
   const rows = await db.deliveryOrder.findMany({
-    where: { deliveryDate: { gte: options.since } },
+    // Заказы без даты включаются намеренно: именно они наполняют «Требует
+    // внимания», ради проверки которого снимок и нужен. Фильтр по нижней
+    // границе отсекал бы их вместе со старыми заказами.
+    where: { OR: [{ deliveryDate: { gte: options.since } }, { deliveryDate: null }] },
     orderBy: [{ deliveryDate: 'asc' }, { id: 'asc' }],
     take: options.limit,
     select: {
