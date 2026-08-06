@@ -53,6 +53,20 @@ function toMinutes(hours: string, minutes: string): number {
 }
 
 /**
+ * Обязательная группа совпадения.
+ *
+ * Выражение уже совпало, поэтому группа существует. Проверка нужна не для рантайма,
+ * а чтобы правка регулярного выражения не превратилась в тихий разбор мусора.
+ */
+function group(match: RegExpExecArray, index: number): string {
+  const value = match[index];
+  if (value === undefined) {
+    throw new Error('регулярное выражение интервала изменилось: группа отсутствует');
+  }
+  return value;
+}
+
+/**
  * Разбирает текст интервала.
  *
  * Возвращает MISSING для пустого значения, RANGE для корректного диапазона,
@@ -72,9 +86,8 @@ export function parseDeliveryInterval(input: string | null | undefined): ParsedI
 
   const range = RANGE_RE.exec(text);
   if (range !== null) {
-    const [, startHour, startMinute, endHour, endMinute] = range;
-    const start = toMinutes(startHour, startMinute);
-    const end = toMinutes(endHour, endMinute);
+    const start = toMinutes(group(range, 1), group(range, 2));
+    const end = toMinutes(group(range, 3), group(range, 4));
 
     // Обратный и нулевой диапазон — не интервал. «с 19:00 по 16:00» может быть
     // как опечаткой, так и переходом через полночь; угадывать между ними нельзя.
@@ -86,8 +99,12 @@ export function parseDeliveryInterval(input: string | null | undefined): ParsedI
 
   const exact = EXACT_RE.exec(text);
   if (exact !== null) {
-    const [, hour, minute] = exact;
-    return { kind: 'EXACT', startMinute: toMinutes(hour, minute), endMinute: null, raw };
+    return {
+      kind: 'EXACT',
+      startMinute: toMinutes(group(exact, 1), group(exact, 2)),
+      endMinute: null,
+      raw,
+    };
   }
 
   // Произвольный комментарий может содержать числа, похожие на время. Вытаскивать

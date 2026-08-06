@@ -89,7 +89,9 @@ export function fromDecimalString(value: string): bigint {
   if (match === null) {
     throw new MoneyParseError('ожидается десятичная строка с двумя знаками');
   }
-  const [, sign, whole, fraction = '0'] = match;
+  const sign = match[1] ?? '';
+  const whole = match[2] ?? '0';
+  const fraction = match[3] ?? '0';
   const minor = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
   return sign === '-' ? -minor : minor;
 }

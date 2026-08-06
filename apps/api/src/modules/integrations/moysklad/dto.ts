@@ -25,32 +25,30 @@ const attributeSchema = z.object({
   value: z.unknown().optional(),
 });
 
-export const moyskladOrderSchema = z
-  .object({
-    id: z.string().uuid(),
-    name: z.string().min(1),
-    updated: z.string().min(1),
-    moment: z.string().min(1).optional(),
-    /** Адрес одной строкой — единственный источник адреса. */
-    shipmentAddress: z.string().optional(),
-    /** Комментарий документа. Наш комментарий берётся не отсюда, но поле валидируем. */
-    description: z.string().optional(),
-    deliveryPlannedMoment: z.string().optional(),
-    sum: z.number(),
-    payedSum: z.number(),
-    applicable: z.boolean().optional(),
-    archived: z.boolean().optional(),
-    store: linkSchema.optional(),
-    state: linkSchema.extend({ name: z.string().optional() }).optional(),
-    attributes: z.array(attributeSchema).optional(),
-  })
-  .passthrough();
+export const moyskladOrderSchema = z.looseObject({
+  id: z.uuid(),
+  name: z.string().min(1),
+  updated: z.string().min(1),
+  moment: z.string().min(1).optional(),
+  /** Адрес одной строкой — единственный источник адреса. */
+  shipmentAddress: z.string().optional(),
+  /** Комментарий документа. Наш комментарий берётся не отсюда, но поле валидируем. */
+  description: z.string().optional(),
+  deliveryPlannedMoment: z.string().optional(),
+  sum: z.number(),
+  payedSum: z.number(),
+  applicable: z.boolean().optional(),
+  archived: z.boolean().optional(),
+  store: linkSchema.optional(),
+  state: linkSchema.extend({ name: z.string().optional() }).optional(),
+  attributes: z.array(attributeSchema).optional(),
+});
 
 export type MoyskladOrderDto = z.infer<typeof moyskladOrderSchema>;
 
 /** Развёрнутый статус: приходит при `expand=state`. */
 export const moyskladStateSchema = z.object({
-  id: z.string().uuid(),
+  id: z.uuid(),
   name: z.string().optional(),
   stateType: z.string().optional(),
 });
@@ -60,6 +58,7 @@ export function idFromHref(href: string | undefined): string | null {
   if (href === undefined) {
     return null;
   }
-  const last = href.split('?')[0].split('/').filter(Boolean).pop();
+  const path = href.split('?')[0] ?? href;
+  const last = path.split('/').filter(Boolean).pop();
   return last !== undefined && /^[0-9a-f-]{36}$/i.test(last) ? last : null;
 }
