@@ -168,3 +168,41 @@ test('заморозка доходит до открытых сеансов б�
   await courierContext.close();
   await secondAdminContext.close();
 });
+
+test('экран «Сделки»: список, поиск и ручной интервал', async ({ page }: { page: Page }) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
+  test.skip(orderNumber === '', 'не передан номер проверочного заказа (E2E_ORDER_NUMBER)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+
+  // Заказ без распознанного интервала обязан оказаться в блоке «Требуют внимания».
+  const attention = page.locator('.deals__group--attention');
+  await expect(attention).toBeVisible();
+  const row = attention.locator('.deals__row', { hasText: orderNumber });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('Время доставки не распознано');
+  // Исходный текст источника показан рядом и не подменяется.
+  await expect(row).toContainText('уточнить у клиента');
+  // Получатель показан целиком, без сокращений.
+  await expect(row).toContainText('Проверочный Получатель');
+
+  // Ручное исправление интервала.
+  await row.getByRole('button', { name: 'Интервал' }).click();
+  await page.getByLabel('Начало').fill('10:00');
+  await page.getByLabel('Окончание').fill('14:00');
+  await page.getByRole('button', { name: 'Сохранить интервал' }).click();
+
+  // Заказ уходит из «Требуют внимания» и показывает фактический интервал.
+  const updated = page.locator('.deals__row', { hasText: orderNumber });
+  await expect(updated).toContainText('10:00 – 14:00');
+  await expect(updated).toContainText('исправлено вручную');
+  await expect(updated).not.toContainText('Время доставки не распознано');
+
+  // Поиск по номеру находит заказ.
+  await page.getByLabel('Поиск по номеру, адресу или получателю').fill(orderNumber);
+  await page.getByRole('button', { name: 'Найти' }).click();
+  await expect(page.locator('.deals__row', { hasText: orderNumber })).toBeVisible();
+});

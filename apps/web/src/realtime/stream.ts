@@ -77,5 +77,10 @@ export function invalidationKeysFor(topic: string): string[][] {
   if (topic === 'session.revoked') {
     return [];
   }
+  if (topic.startsWith('order.')) {
+    // Событие не несёт данных заказа: список перезапрашивается целиком.
+    // Ни звука, ни всплывающего уведомления — обычный новый заказ рутина.
+    return [['orders'], ['status']];
+  }
   return [['status']];
 }

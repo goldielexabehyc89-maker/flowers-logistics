@@ -485,6 +485,406 @@ describe('API заказов', () => {
   });
 });
 
+describe('ручной локальный интервал', () => {
+  async function tokenFor(roles: Parameters<typeof seedUser>[1]['roles']): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  /** Заказ без распознанного интервала: именно он требует ручного исправления. */
+  async function orderWithoutInterval() {
+    const snapshot = snapshotOf({
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'позвонить заранее' },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+    await apply(snapshot);
+    return ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+  }
+
+  async function setInterval(
+    token: string,
+    orderId: string,
+    body: Record<string, unknown>,
+  ): Promise<{ statusCode: number; json: () => unknown }> {
+    return ctx.app.inject({
+      method: 'PUT',
+      url: `/api/orders/${orderId}/interval`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: body,
+    });
+  }
+
+  it('курьеру ручной интервал недоступен, логисту — доступен', async () => {
+    const order = await orderWithoutInterval();
+    expect(order.needsAttention).toBe(true);
+    expect(order.attentionReasons).toContain('UNRECOGNIZED_INTERVAL');
+
+    const courier = await setInterval(await tokenFor(['COURIER']), order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+    expect(courier.statusCode).toBe(403);
+
+    const logistician = await setInterval(await tokenFor(['LOGISTICIAN']), order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+    expect(logistician.statusCode).toBe(200);
+  });
+
+  it('корректный интервал снимает интервальную причину, остальные остаются', async () => {
+    // Заказ без интервала И без адреса: ручным интервалом закрывается только первое.
+    const snapshot = snapshotOf({
+      shipmentAddress: null,
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(order.attentionReasons).toContain('MISSING_INTERVAL');
+    expect(order.attentionReasons).toContain('MISSING_ADDRESS');
+
+    const response = await setInterval(await tokenFor(['ADMIN']), order.id, {
+      startMinute: 660,
+      endMinute: 780,
+      version: order.version,
+    });
+    expect(response.statusCode).toBe(200);
+
+    const updated = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(updated.attentionReasons).not.toContain('MISSING_INTERVAL');
+    expect(updated.attentionReasons).toContain('MISSING_ADDRESS');
+    expect(updated.needsAttention).toBe(true);
+    // Исходное значение источника сохраняется: его никто не переписывает.
+    expect(updated.intervalKind).toBe('MISSING');
+    expect(updated.manualIntervalStartMinute).toBe(660);
+    expect(updated.manualIntervalEndMinute).toBe(780);
+  });
+
+  it('ручной интервал переживает следующую синхронизацию', async () => {
+    const snapshot = snapshotOf({
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'уточнить' },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    await setInterval(await tokenFor(['LOGISTICIAN']), order.id, {
+      startMinute: 540,
+      endMinute: 660,
+      version: order.version,
+    });
+
+    // Приходит новая версия заказа: изменился адрес, интервал источника прежний.
+    await apply({
+      ...snapshot,
+      address: 'Москва, уточнённый адрес',
+      externalUpdated: '2026-08-06 12:00:00.000',
+    });
+
+    const synced = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(synced.manualIntervalStartMinute).toBe(540);
+    expect(synced.manualIntervalEndMinute).toBe(660);
+    expect(synced.attentionReasons).not.toContain('UNRECOGNIZED_INTERVAL');
+    expect(synced.needsAttention).toBe(false);
+    expect(synced.address).toBe('Москва, уточнённый адрес');
+  });
+
+  it('повторное исправление заменяет предыдущее', async () => {
+    const order = await orderWithoutInterval();
+    const token = await tokenFor(['LOGISTICIAN']);
+
+    await setInterval(token, order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+    const afterFirst = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+
+    await setInterval(token, order.id, {
+      startMinute: 780,
+      endMinute: 900,
+      version: afterFirst.version,
+    });
+
+    const afterSecond = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(afterSecond.manualIntervalStartMinute).toBe(780);
+    expect(afterSecond.manualIntervalEndMinute).toBe(900);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { entityId: order.id, action: 'ORDER_INTERVAL_SET' },
+      }),
+    ).toBe(2);
+  });
+
+  it('устаревшая версия отклоняется с 409', async () => {
+    const order = await orderWithoutInterval();
+    const token = await tokenFor(['LOGISTICIAN']);
+
+    const first = await setInterval(token, order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+    expect(first.statusCode).toBe(200);
+
+    const stale = await setInterval(token, order.id, {
+      startMinute: 640,
+      endMinute: 760,
+      version: order.version,
+    });
+    expect(stale.statusCode).toBe(409);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.manualIntervalStartMinute).toBe(600);
+  });
+
+  it('обратный и нулевой интервал отклоняются', async () => {
+    const order = await orderWithoutInterval();
+    const token = await tokenFor(['LOGISTICIAN']);
+
+    for (const body of [
+      { startMinute: 720, endMinute: 600 },
+      { startMinute: 600, endMinute: 600 },
+      { startMinute: -1, endMinute: 600 },
+      { startMinute: 600, endMinute: 24 * 60 },
+    ]) {
+      const response = await setInterval(token, order.id, { ...body, version: order.version });
+      expect(response.statusCode, JSON.stringify(body)).toBe(400);
+    }
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.manualIntervalStartMinute).toBeNull();
+  });
+
+  it('изменение, аудит и событие пишутся одной транзакцией', async () => {
+    const order = await orderWithoutInterval();
+    const eventsBefore = await ctx.db.realtimeEvent.count();
+
+    await setInterval(await tokenFor(['LOGISTICIAN']), order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+
+    const audit = await ctx.db.auditLog.findFirstOrThrow({
+      where: { entityId: order.id, action: 'ORDER_INTERVAL_SET' },
+    });
+    expect(audit.actorUserId).not.toBeNull();
+    // Ни адреса, ни получателя в аудите нет: только факт и значения интервала.
+    const serialized = JSON.stringify(audit.newValue);
+    expect(serialized).not.toContain('Москва');
+    expect(serialized).not.toContain('Получатель');
+
+    expect(await ctx.db.realtimeEvent.count()).toBe(eventsBefore + 1);
+    const event = await ctx.db.realtimeEvent.findFirstOrThrow({ orderBy: { id: 'desc' } });
+    expect(event.topic).toBe('order.updated');
+    expect(JSON.stringify(event.payload)).not.toContain('Москва');
+  });
+
+  it('конфликт версии не оставляет ни аудита, ни события', async () => {
+    const order = await orderWithoutInterval();
+    const token = await tokenFor(['LOGISTICIAN']);
+    await setInterval(token, order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+
+    const auditsBefore = await ctx.db.auditLog.count({
+      where: { entityId: order.id, action: 'ORDER_INTERVAL_SET' },
+    });
+    const eventsBefore = await ctx.db.realtimeEvent.count();
+
+    const stale = await setInterval(token, order.id, {
+      startMinute: 900,
+      endMinute: 960,
+      version: order.version,
+    });
+    expect(stale.statusCode).toBe(409);
+
+    expect(
+      await ctx.db.auditLog.count({ where: { entityId: order.id, action: 'ORDER_INTERVAL_SET' } }),
+    ).toBe(auditsBefore);
+    expect(await ctx.db.realtimeEvent.count()).toBe(eventsBefore);
+  });
+
+  it('заказ вне области не редактируется', async () => {
+    const snapshot = snapshotOf();
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    await apply({
+      ...snapshot,
+      storeId: '33333333-3333-4333-8333-333333333333',
+      inScope: false,
+      scopeExitReason: 'STORE_CHANGED',
+      externalUpdated: '2026-08-06 13:00:00.000',
+    });
+
+    const response = await setInterval(await tokenFor(['LOGISTICIAN']), order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version + 1,
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('история карточки показывает ручные исправления без сырых снимков', async () => {
+    const order = await orderWithoutInterval();
+    const token = await tokenFor(['LOGISTICIAN']);
+    await setInterval(token, order.id, {
+      startMinute: 600,
+      endMinute: 720,
+      version: order.version,
+    });
+
+    const card = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders/${order.id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(card.statusCode).toBe(200);
+
+    const body = card.json() as {
+      order: { interval: { manualStartMinute: number | null } };
+      revisions: Record<string, unknown>[];
+      manualIntervalChanges: { startMinute: number; endMinute: number }[];
+    };
+    expect(body.order.interval.manualStartMinute).toBe(600);
+    expect(body.manualIntervalChanges[0]?.startMinute).toBe(600);
+    expect(body.manualIntervalChanges[0]?.endMinute).toBe(720);
+    // Сырой снимок ревизии наружу не отдаётся.
+    for (const revision of body.revisions) {
+      expect(Object.keys(revision)).not.toContain('snapshot');
+    }
+  });
+});
+
+describe('поиск и дата по умолчанию', () => {
+  async function tokenFor(roles: Parameters<typeof seedUser>[1]['roles']): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  async function list(token: string, query: string) {
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders${query}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return response.json() as { items: { id: string; number: string }[]; total: number };
+  }
+
+  it('по умолчанию видны сегодняшние заказы и заказы без даты', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+
+    // День берётся по реальным часам: сервер по умолчанию фильтрует по текущей
+    // московской дате, а фиксированный NOW тестов с ней не совпадает.
+    const today = snapshotOf({ deliveryPlannedMoment: `${moscowToday(new Date())} 12:00:00.000` });
+    await apply(today);
+    const noDate = snapshotOf({ deliveryPlannedMoment: null });
+    await apply(noDate);
+    const otherDay = snapshotOf({ deliveryPlannedMoment: '2026-09-15 12:00:00.000' });
+    await apply(otherDay);
+
+    const items = (await list(token, '')).items.map((item) => item.number);
+    expect(items).toContain(
+      (await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { externalId: today.externalId } }))
+        .externalName,
+    );
+    expect(items).toContain(
+      (await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { externalId: noDate.externalId } }))
+        .externalName,
+    );
+    expect(items).not.toContain(
+      (await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { externalId: otherDay.externalId } }))
+        .externalName,
+    );
+  });
+
+  it('поиск ищет по номеру, адресу и получателю и не ограничен днём', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const marker = `Уникальный-${Date.now()}`;
+    const snapshot = snapshotOf({
+      deliveryPlannedMoment: '2026-09-20 12:00:00.000',
+      shipmentAddress: `Москва, ${marker}`,
+    });
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    // По адресу — находится, несмотря на то что дата не сегодняшняя.
+    expect(
+      (await list(token, `?search=${encodeURIComponent(marker)}`)).items.map((i) => i.id),
+    ).toContain(order.id);
+    // По номеру — в другом регистре.
+    expect(
+      (
+        await list(token, `?search=${encodeURIComponent(order.externalName.toLowerCase())}`)
+      ).items.map((i) => i.id),
+    ).toContain(order.id);
+    // По получателю.
+    expect(
+      (await list(token, `?search=${encodeURIComponent('Получатель Тестовый')}`)).items.length,
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe('клиент остаётся read-only', () => {
   it('в модуле интеграции нет методов записи и управления webhooks', async () => {
     const { readFile } = await import('node:fs/promises');
@@ -507,5 +907,99 @@ describe('клиент остаётся read-only', () => {
       expect(code, file).not.toMatch(/method:\s*'(POST|PUT|PATCH|DELETE)'/);
       expect(code, file).not.toContain('entity/webhook');
     }
+  });
+});
+
+describe('снимок заказов для staging', () => {
+  it('в снимке нет адресов, получателей, комментариев и внешних идентификаторов', async () => {
+    const marker = `Секрет-${Date.now()}`;
+    const snapshot = snapshotOf({
+      shipmentAddress: `Москва, ${marker}`,
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
+        { id: IDS.recipientAttribute, value: `Получатель ${marker}` },
+        { id: IDS.commentAttribute, value: `Комментарий ${marker}` },
+      ],
+    });
+    await apply(snapshot);
+
+    const { exportOrdersSnapshot, assertSnapshotIsSafe, alias } =
+      await import('./snapshot-export.js');
+
+    const exported = await exportOrdersSnapshot(ctx.db, {
+      since: new Date('2026-01-01T00:00:00.000Z'),
+      limit: 500,
+      aliasSalt: 'test-salt',
+      now: NOW,
+    });
+
+    const serialized = JSON.stringify(exported);
+    expect(serialized).not.toContain(marker);
+    expect(serialized).not.toContain('Москва');
+    expect(serialized).not.toContain(snapshot.externalId);
+
+    // Псевдоним устойчив: одно значение — один и тот же псевдоним.
+    expect(alias('addr', 'Москва, дом 1', 'test-salt')).toBe(
+      alias('addr', 'Москва, дом 1', 'test-salt'),
+    );
+    expect(alias('addr', 'Москва, дом 1', 'test-salt')).not.toBe(
+      alias('addr', 'Москва, дом 2', 'test-salt'),
+    );
+
+    // Соль в снимок не попадает — только её отпечаток.
+    expect(serialized).not.toContain('test-salt');
+    assertSnapshotIsSafe(exported);
+  });
+
+  it('импорт снимка чужого формата и снимка с настоящими данными отклоняется', async () => {
+    const { assertSnapshotIsSafe, SNAPSHOT_FORMAT } = await import('./snapshot-export.js');
+
+    expect(() =>
+      assertSnapshotIsSafe({
+        format: 'что-то другое' as typeof SNAPSHOT_FORMAT,
+        takenAt: NOW.toISOString(),
+        aliasSaltId: 'x',
+        orders: [],
+      }),
+    ).toThrow(/формат/i);
+
+    const withRealAddress = {
+      format: SNAPSHOT_FORMAT,
+      takenAt: NOW.toISOString(),
+      aliasSaltId: 'x',
+      orders: [
+        {
+          key: 'order-1',
+          number: 'A-1',
+          deliveryDate: '2026-08-07',
+          intervalKind: 'RANGE',
+          intervalStartMinute: 600,
+          intervalEndMinute: 720,
+          manualIntervalStartMinute: null,
+          manualIntervalEndMinute: null,
+          addressAlias: 'Москва, настоящая улица',
+          recipientAlias: null,
+          hasComment: false,
+          externalStateName: null,
+          externalStateType: null,
+          sumMinor: '0',
+          payedSumMinor: '0',
+          cashCollectable: false,
+          cashToCollectMinor: '0',
+          cashAnomaly: false,
+          inScope: true,
+          needsAttention: false,
+          attentionReasons: [],
+        },
+      ],
+    };
+    expect(() => assertSnapshotIsSafe(withRealAddress)).toThrow(/псевдоним/i);
   });
 });

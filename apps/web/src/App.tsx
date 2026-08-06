@@ -11,6 +11,7 @@ import { useAuth } from './auth/AuthContext';
 import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
 import { PLACEHOLDERS, PlaceholderScreen, WarehousePlaceholder } from './screens/PlaceholderScreen';
+import { DealsScreen } from './screens/deals/DealsScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { UsersScreen } from './screens/users/UsersScreen';
 import { AppShell } from './shell/AppShell';
@@ -79,6 +80,14 @@ export function App(): React.JSX.Element {
             }
           />
         ))}
+        <Route
+          path="/deals"
+          element={
+            <SectionRoute>
+              <DealsScreen />
+            </SectionRoute>
+          }
+        />
         <Route
           path="/couriers"
           element={

@@ -36,6 +36,9 @@ export const AUDIT_ACTIONS = [
   'ORDER_SCOPE_EXITED',
   'ORDER_SOURCE_MISSING',
   'ORDER_SOURCE_RESTORED',
+  // Ручное локальное исправление интервала логистом или администратором:
+  // единственное изменение заказа, у которого есть человек-автор.
+  'ORDER_INTERVAL_SET',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

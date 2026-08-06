@@ -21,6 +21,11 @@ import { publishRealtimeEvent } from '../../realtime/events.js';
 import { toDateColumn } from './delivery-date.js';
 import { parseMoscow } from './moscow-time.js';
 import { diffSnapshots, snapshotHash, type OrderSnapshot } from './mapper.js';
+import {
+  effectiveAttentionReasons,
+  type AttentionReason,
+  type ManualInterval,
+} from '../../orders/attention.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
 const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
@@ -38,6 +43,9 @@ interface StoredOrder {
   version: number;
   inScope: boolean;
   sourceMissing: boolean;
+  /// Ручной интервал логиста: синхронизация обязана его учитывать и не затирать.
+  manualIntervalStartMinute: number | null;
+  manualIntervalEndMinute: number | null;
 }
 
 /**
@@ -75,7 +83,8 @@ async function lockByExternalId(
   externalId: string,
 ): Promise<StoredOrder | null> {
   const rows = await tx.$queryRaw<StoredOrder[]>`
-    SELECT "id", "version", "inScope", "sourceMissing"
+    SELECT "id", "version", "inScope", "sourceMissing",
+           "manualIntervalStartMinute", "manualIntervalEndMinute"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
     FOR UPDATE
@@ -83,8 +92,20 @@ async function lockByExternalId(
   return rows[0] ?? null;
 }
 
-/** Поля карточки из снимка. Ручной интервал сюда не входит намеренно. */
-function orderData(snapshot: OrderSnapshot, now: Date): Prisma.DeliveryOrderUncheckedUpdateInput {
+/**
+ * Поля карточки из снимка.
+ *
+ * Сам ручной интервал сюда не входит намеренно — синхронизация его не трогает.
+ * Но на расчёт «Требует внимания» он влияет: иначе следующий же проход вернул бы
+ * причину, которую логист уже закрыл руками.
+ */
+function orderData(
+  snapshot: OrderSnapshot,
+  now: Date,
+  manual: ManualInterval | null,
+): Prisma.DeliveryOrderUncheckedUpdateInput {
+  const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual);
+
   return {
     externalName: snapshot.externalName,
     externalUpdated: parseMoscow(snapshot.externalUpdated),
@@ -112,8 +133,8 @@ function orderData(snapshot: OrderSnapshot, now: Date): Prisma.DeliveryOrderUnch
     cashAnomaly: snapshot.cashAnomaly,
     sourceArchived: snapshot.sourceArchived,
     inScope: snapshot.inScope,
-    needsAttention: snapshot.attentionReasons.length > 0,
-    attentionReasons: snapshot.attentionReasons,
+    needsAttention: reasons.length > 0,
+    attentionReasons: reasons,
     scopeExitReason: snapshot.inScope ? null : snapshot.scopeExitReason,
     scopeExitedAt: snapshot.inScope ? null : now,
     // Возвращение в область снимает признак отсутствия источника.
@@ -129,7 +150,8 @@ async function createOrder(
 ): Promise<ApplyResult> {
   const created = await tx.deliveryOrder.create({
     data: {
-      ...(orderData(snapshot, now) as Prisma.DeliveryOrderUncheckedCreateInput),
+      // Новый заказ ручного интервала иметь не может: он появляется только руками.
+      ...(orderData(snapshot, now, null) as Prisma.DeliveryOrderUncheckedCreateInput),
       // Ключ идемпотентности и версия задаются после общих полей: они не входят
       // в набор, который переиспользуется при обновлении.
       externalId: snapshot.externalId,
@@ -140,8 +162,12 @@ async function createOrder(
 
   const changedFields = diffSnapshots(null, snapshot);
   await writeRevision(tx, created.id, snapshot, changedFields, 'INITIAL_IMPORT');
-  await writeOrderAudit(tx, 'ORDER_IMPORTED', created.id, snapshot, changedFields, 1);
-  await publishOrderEvent(tx, 'order.created', created.id, snapshot);
+  await writeOrderAudit(tx, 'ORDER_IMPORTED', created.id, snapshot, changedFields, 1, [
+    ...snapshot.attentionReasons,
+  ]);
+  await publishOrderEvent(tx, 'order.created', created.id, snapshot, [
+    ...snapshot.attentionReasons,
+  ]);
 
   return { outcome: 'CREATED', changedFields };
 }
@@ -179,10 +205,17 @@ async function updateOrder(
 
   const enteredScope = snapshot.inScope && (!existing.inScope || existing.sourceMissing);
   const exitedScope = !snapshot.inScope && existing.inScope;
+  // Аудит и событие показывают то же, что увидит логист в карточке, а не сырой
+  // набор причин из снимка: иначе уведомление противоречило бы экрану.
+  const manual: ManualInterval = {
+    startMinute: existing.manualIntervalStartMinute,
+    endMinute: existing.manualIntervalEndMinute,
+  };
+  const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual);
 
   await tx.deliveryOrder.update({
     where: { id: existing.id },
-    data: { ...orderData(snapshot, now), version: existing.version + 1 },
+    data: { ...orderData(snapshot, now, manual), version: existing.version + 1 },
   });
 
   const reason = restoring
@@ -201,13 +234,22 @@ async function updateOrder(
       : exitedScope
         ? 'ORDER_SCOPE_EXITED'
         : 'ORDER_SYNCED';
-  await writeOrderAudit(tx, action, existing.id, snapshot, changedFields, existing.version + 1);
+  await writeOrderAudit(
+    tx,
+    action,
+    existing.id,
+    snapshot,
+    changedFields,
+    existing.version + 1,
+    reasons,
+  );
 
   await publishOrderEvent(
     tx,
     restoring || enteredScope || exitedScope ? 'order.scope_changed' : 'order.updated',
     existing.id,
     snapshot,
+    reasons,
   );
 
   return {
@@ -279,6 +321,7 @@ async function writeOrderAudit(
   snapshot: OrderSnapshot,
   changedFields: string[],
   version: number,
+  reasons: AttentionReason[],
 ): Promise<void> {
   await writeAudit(tx, {
     action,
@@ -291,8 +334,8 @@ async function writeOrderAudit(
       version,
       inScope: snapshot.inScope,
       scopeExitReason: snapshot.scopeExitReason,
-      needsAttention: snapshot.attentionReasons.length > 0,
-      attentionReasons: snapshot.attentionReasons,
+      needsAttention: reasons.length > 0,
+      attentionReasons: reasons,
       externalStateType: snapshot.externalStateType,
     },
   });
@@ -309,13 +352,14 @@ async function publishOrderEvent(
   topic: 'order.created' | 'order.updated' | 'order.scope_changed',
   orderId: string,
   snapshot: OrderSnapshot,
+  reasons: AttentionReason[],
 ): Promise<void> {
   await publishRealtimeEvent(tx, {
     topic,
     payload: {
       orderId,
       inScope: snapshot.inScope,
-      needsAttention: snapshot.attentionReasons.length > 0,
+      needsAttention: reasons.length > 0,
       deliveryDate: snapshot.deliveryDate,
     },
     audienceRoles: [...ORDER_AUDIENCE],

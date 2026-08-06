@@ -1,0 +1,193 @@
+/*
+ * Экран «Сделки».
+ *
+ * Плотная рабочая таблица: у логиста на экране должно помещаться как можно
+ * больше строк, поэтому отступы минимальные, а декоративных элементов нет.
+ * Выделяется ровно одно — блок «Требуют внимания».
+ */
+
+.deals__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.deals__integration {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+  text-align: right;
+}
+
+.deals__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+}
+
+.deals__filters .field {
+  min-width: 14rem;
+}
+
+.deals__filter-actions {
+  display: flex;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+}
+
+.deals__group {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.deals__group--attention {
+  border-color: var(--color-warning);
+  box-shadow: inset 4px 0 0 0 var(--color-warning);
+}
+
+.deals__group-header {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.deals__group-header h3 {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: 0;
+}
+
+.deals__count {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.deals__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.deals__row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.deals__row:last-child {
+  border-bottom: none;
+}
+
+.deals__row--attention {
+  background: var(--color-warning-soft);
+}
+
+.deals__row-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.deals__row-head,
+.deals__row-body,
+.deals__row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.deals__number {
+  font-weight: 600;
+}
+
+.deals__interval {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+}
+
+.deals__manual {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.deals__address {
+  font-weight: 500;
+}
+
+.deals__recipient,
+.deals__comment {
+  color: var(--color-text-muted);
+}
+
+.deals__reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+  color: var(--color-warning);
+}
+
+.deals__reasons li::before {
+  content: '• ';
+}
+
+.deals__row-actions {
+  flex-shrink: 0;
+}
+
+.deals__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.deals__facts > div {
+  display: contents;
+}
+
+.deals__facts dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.deals__facts dd {
+  margin: 0;
+}
+
+.deals__interval-inputs {
+  display: flex;
+  gap: var(--space-3);
+}
+
+/* На мобильном строка перестраивается в колонку: горизонтальная прокрутка
+   в рабочем списке недопустима. */
+@media (max-width: 720px) {
+  .deals__row {
+    flex-direction: column;
+  }
+
+  .deals__integration {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .deals__row-actions {
+    width: 100%;
+  }
+}
