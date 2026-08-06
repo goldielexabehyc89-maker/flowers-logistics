@@ -11,13 +11,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   closeTestContext,
   createTestContext,
+  testConfig,
   type TestContext,
 } from '../../auth/testing/harness.js';
+import type { AppConfig } from '../../../platform/config.js';
 import { MoyskladClient, MoyskladError } from './client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
 import { deltaFilter, formatMoment, initialLoadFilter } from './filters.js';
 import { formatMoscow, moscowDate, MoscowTimeParseError, parseMoscow } from './moscow-time.js';
 import { SYNC_LOCK_KEY, acquireSyncLock } from './sync-lock.js';
+import { checkSyncOnceEnvironment, performSyncOnce } from './sync-once.js';
 import {
   backoffForAttempt,
   initialLoadSince,
@@ -522,19 +525,18 @@ describe('глобальная блокировка прохода', () => {
 
 describe('backoff отсчитывается от завершения прохода', () => {
   it('долгий проход планирует следующую попытку от момента окончания', async () => {
-    // Часы двигаются вперёд на два часа между стартом и завершением.
-    const times = [
-      new Date('2026-08-06T09:00:00.000Z'),
-      new Date('2026-08-06T11:00:00.000Z'),
-      new Date('2026-08-06T11:00:00.000Z'),
-    ];
-    let index = 0;
-    const base = deps(fakeApi([[]]));
-    const slowClock: SyncDeps = {
-      ...base,
-      now: () => times[Math.min(index++, times.length - 1)] ?? times[0]!,
+    // Часы двигаются вперёд в момент сетевого вызова: проход длится два часа.
+    let current = new Date('2026-08-06T09:00:00.000Z');
+    const api = fakeApi([[]]);
+    const slowApi: FakeApi = {
+      calls: api.calls,
+      fetch: (async (url: string) => {
+        current = new Date('2026-08-06T11:00:00.000Z');
+        return (api.fetch as unknown as (input: string) => Promise<Response>)(url);
+      }) as unknown as typeof globalThis.fetch,
     };
 
+    const slowClock: SyncDeps = { ...deps(slowApi), now: () => current };
     await runSyncOnce(slowClock, { intervalMs: 30_000 });
 
     const cursor = await ctx.db.integrationCursor.findUniqueOrThrow({
@@ -542,5 +544,278 @@ describe('backoff отсчитывается от завершения прох�
     });
     // 11:00 завершение + 30 секунд, а не 09:00 + 30 секунд.
     expect(cursor.nextAttemptAt?.toISOString()).toBe('2026-08-06T11:00:30.000Z');
+  });
+});
+
+describe('контрольная сверка', () => {
+  /** Импорт заказа и подготовка курсора к сверке: аренда снята, сверки ещё не было. */
+  async function importThenAllowReconciliation(source: Record<string, unknown>): Promise<void> {
+    await runSyncOnce(deps(fakeApi([[source]])));
+    await ctx.db.integrationCursor.update({
+      where: { provider: PROVIDER },
+      data: { nextAttemptAt: null, lastReconciliationAt: null },
+    });
+  }
+
+  it('заказ, отсутствующий в полностью прочитанной выборке, помечается пропавшим', async () => {
+    const source = row();
+    await importThenAllowReconciliation(source);
+
+    const api = fakeApi([[]]);
+    const result = await runSyncOnce(deps(api, new Date('2026-08-06T10:00:00.000Z')), {
+      allowReconciliation: true,
+    });
+
+    expect(result.kind).toBe('reconciliation');
+    expect(result.missing).toBe(1);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+    expect(order.sourceMissing).toBe(true);
+    expect(order.inScope).toBe(false);
+    expect(order.scopeExitReason).toBe('SOURCE_MISSING');
+  });
+
+  it('ошибка сверки никого не помечает и не двигает отметку сверки', async () => {
+    const source = row();
+    await importThenAllowReconciliation(source);
+
+    const failing = fakeApi([[]], { failAtPage: 0, status: 500 });
+    await expect(
+      runSyncOnce(deps(failing, new Date('2026-08-06T10:00:00.000Z')), {
+        allowReconciliation: true,
+      }),
+    ).rejects.toBeInstanceOf(MoyskladError);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+    // Ни один заказ не объявлен пропавшим по неполной выборке.
+    expect(order.sourceMissing).toBe(false);
+    expect(order.inScope).toBe(true);
+
+    const cursor = await ctx.db.integrationCursor.findUniqueOrThrow({
+      where: { provider: PROVIDER },
+    });
+    expect(cursor.lastReconciliationAt).toBeNull();
+  });
+
+  it('заказ восстанавливается даже при полностью идентичном снимке', async () => {
+    const source = row();
+    await importThenAllowReconciliation(source);
+
+    // Сверка не нашла заказ — он помечен пропавшим.
+    await runSyncOnce(deps(fakeApi([[]]), new Date('2026-08-06T10:00:00.000Z')), {
+      allowReconciliation: true,
+    });
+    const missing = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+    expect(missing.sourceMissing).toBe(true);
+
+    await ctx.db.integrationCursor.update({
+      where: { provider: PROVIDER },
+      data: { nextAttemptAt: null, lastReconciliationAt: null },
+    });
+
+    // Тот же самый заказ, ни одно поле не изменилось.
+    await runSyncOnce(deps(fakeApi([[source]]), new Date('2026-08-06T11:00:00.000Z')), {
+      allowReconciliation: true,
+    });
+
+    const restored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+    expect(restored.sourceMissing).toBe(false);
+    expect(restored.inScope).toBe(true);
+    expect(restored.scopeExitReason).toBeNull();
+
+    const reasons = (
+      await ctx.db.deliveryOrderRevision.findMany({
+        where: { orderId: restored.id },
+        select: { reason: true },
+      })
+    ).map((revision) => revision.reason);
+    expect(reasons).toContain('SOURCE_RESTORED');
+
+    expect(
+      await ctx.db.auditLog.count({
+        where: { entityId: restored.id, action: 'ORDER_SOURCE_RESTORED' },
+      }),
+    ).toBe(1);
+  });
+});
+
+describe('заказ вне области не накапливает PII', () => {
+  it('обновления чужого заказа не попадают ни в ревизии, ни в аудит, ни в события', async () => {
+    const source = row();
+    await runSyncOnce(deps(fakeApi([[source]])));
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+
+    // Шаг 1: заказ уходит на чужой склад. Выход из области фиксируется.
+    const foreignStore = { meta: { href: href('store', '33333333-3333-4333-8333-333333333333') } };
+    await runSyncOnce(
+      deps(
+        fakeApi([[{ ...source, updated: '2026-08-06 10:15:00.000', store: foreignStore }]]),
+        new Date('2026-08-06T10:20:00.000Z'),
+      ),
+    );
+    const exited = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(exited.inScope).toBe(false);
+    const revisionsAfterExit = await ctx.db.deliveryOrderRevision.count({
+      where: { orderId: order.id },
+    });
+
+    // Шаг 2: чужой заказ продолжает меняться. Контрольная строка не должна
+    // оказаться нигде в наших данных.
+    const SECRET = 'Контрольная-строка-чужого-склада-7731';
+    await runSyncOnce(
+      deps(
+        fakeApi([
+          [
+            {
+              ...source,
+              updated: '2026-08-06 10:40:00.000',
+              store: foreignStore,
+              shipmentAddress: SECRET,
+              attributes: [
+                { id: IDS.intervalAttribute, value: 'с 10:00 по 12:00' },
+                { id: IDS.recipientAttribute, value: SECRET },
+              ],
+            },
+          ],
+        ]),
+        new Date('2026-08-06T10:45:00.000Z'),
+      ),
+    );
+
+    // Новых ревизий у заказа вне области не появилось.
+    expect(await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } })).toBe(
+      revisionsAfterExit,
+    );
+
+    const revisions = await ctx.db.deliveryOrderRevision.findMany({ where: { orderId: order.id } });
+    expect(JSON.stringify(revisions)).not.toContain(SECRET);
+
+    const audit = await ctx.db.auditLog.findMany({ where: { entityId: order.id } });
+    expect(JSON.stringify(audit)).not.toContain(SECRET);
+
+    const events = await ctx.db.realtimeEvent.findMany({
+      where: { topic: { startsWith: 'order' } },
+    });
+    expect(JSON.stringify(events)).not.toContain(SECRET);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.address).not.toBe(SECRET);
+    expect(stored.recipient).not.toBe(SECRET);
+  });
+});
+
+describe('последняя ревизия определяется устойчиво', () => {
+  it('при одинаковом receivedAt берётся ревизия с большим идентификатором', async () => {
+    const source = row();
+    await runSyncOnce(deps(fakeApi([[source]])));
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+
+    const first = await ctx.db.deliveryOrderRevision.findFirstOrThrow({
+      where: { orderId: order.id },
+    });
+
+    // Вторая ревизия с ТЕМ ЖЕ receivedAt: при пакетной обработке одинаковые
+    // миллисекунды реальны. Отличается только адрес.
+    // Круговой JSON: снимок хранится как jsonb, работать с ним как с объектом
+    // проще, чем сужать тип Prisma.
+    const snapshot = JSON.parse(JSON.stringify(first.snapshot));
+    await ctx.db.deliveryOrderRevision.create({
+      data: {
+        orderId: order.id,
+        receivedAt: first.receivedAt,
+        externalUpdated: first.externalUpdated,
+        snapshot: { ...snapshot, address: 'Промежуточный адрес' },
+        snapshotHash: 'f'.repeat(64),
+        changedFields: ['address'],
+        reason: 'EXTERNAL_UPDATE',
+      },
+    });
+
+    // Приходит исходный заказ. Относительно НОВЕЙШЕЙ ревизии адрес изменился,
+    // относительно первой — нет. Правильный порядок обязан заметить изменение.
+    await runSyncOnce(
+      deps(
+        fakeApi([[{ ...source, updated: '2026-08-06 10:30:00.000' }]]),
+        new Date('2026-08-06T10:35:00.000Z'),
+      ),
+    );
+
+    const latest = await ctx.db.deliveryOrderRevision.findFirstOrThrow({
+      where: { orderId: order.id },
+      orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
+    });
+    expect(latest.changedFields).toContain('address');
+    expect(JSON.parse(JSON.stringify(latest.snapshot)).address).toBe(source['shipmentAddress']);
+  });
+});
+
+describe('ручной проход moysklad:sync-once', () => {
+  const productionConfig = (overrides: Record<string, string> = {}): AppConfig =>
+    testConfig({
+      APP_ENV: 'production',
+      APP_ENVIRONMENT_MARKER: 'production',
+      MOYSKLAD_TOKEN: 'test-token',
+      ...overrides,
+    });
+
+  it('вне production команда отказывает до создания любых ресурсов', () => {
+    expect(checkSyncOnceEnvironment(testConfig())?.code).toBe(2);
+    // Совпадать обязаны ОБА признака: одного маркера мало.
+    expect(
+      checkSyncOnceEnvironment(testConfig({ APP_ENVIRONMENT_MARKER: 'production' }))?.code,
+    ).toBe(2);
+  });
+
+  it('без токена команда отказывает', () => {
+    const withoutToken = testConfig({
+      APP_ENV: 'production',
+      APP_ENVIRONMENT_MARKER: 'production',
+    });
+    expect(withoutToken.MOYSKLAD_TOKEN).toBeUndefined();
+    expect(checkSyncOnceEnvironment(withoutToken)?.code).toBe(2);
+  });
+
+  it('выключенная автоматическая синхронизация ручному проходу не мешает', async () => {
+    const config = productionConfig();
+    expect(config.MOYSKLAD_SYNC_ENABLED).toBe(false);
+
+    const report = await performSyncOnce(config, deps(fakeApi([[]])));
+    expect(report.code).toBe(0);
+    expect(report.result?.kind).toBe('initial');
+  });
+
+  it('занятая блокировка даёт отдельный код возврата, а не ошибку', async () => {
+    const busy = await acquireSyncLock(fakeLock());
+    try {
+      const api = fakeApi([[row()]]);
+      const report = await performSyncOnce(productionConfig(), deps(api));
+
+      expect(report.code).toBe(3);
+      expect(api.calls).toHaveLength(0);
+    } finally {
+      await busy?.release();
+    }
+  });
+
+  it('ошибка прохода даёт код 1 без текста внешней ошибки', async () => {
+    const failing = fakeApi([[]], { failAtPage: 0, status: 500 });
+    const report = await performSyncOnce(productionConfig(), deps(failing));
+
+    expect(report.code).toBe(1);
+    expect(report.result).toBeNull();
+    expect(report.reason).not.toContain('moysklad.ru');
+    expect(report.reason).not.toContain('test-token');
   });
 });

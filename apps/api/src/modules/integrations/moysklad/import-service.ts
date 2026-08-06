@@ -14,7 +14,7 @@
  * адрес, получателя, комментарий, номер заказа и суммы.
  */
 
-import type { Prisma } from '../../../generated/prisma/client.js';
+import type { $Enums, Prisma } from '../../../generated/prisma/client.js';
 import type { TransactionClient } from '../../auth/sessions.js';
 import { writeAudit, type AuditAction } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
@@ -251,8 +251,8 @@ async function writeRevision(
   orderId: string,
   snapshot: OrderSnapshot,
   changedFields: string[],
-  reason:
-    'INITIAL_IMPORT' | 'EXTERNAL_UPDATE' | 'SCOPE_ENTERED' | 'SCOPE_EXITED' | 'SOURCE_MISSING',
+  // Тип берётся из сгенерированного клиента: перечисление и код не могут разойтись.
+  reason: $Enums.OrderRevisionReason,
 ): Promise<void> {
   await tx.deliveryOrderRevision.create({
     data: {
