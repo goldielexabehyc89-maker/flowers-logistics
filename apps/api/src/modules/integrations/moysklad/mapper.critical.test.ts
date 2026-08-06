@@ -268,8 +268,13 @@ describe('деньги', () => {
     expect(isOverpaid(669000n, 669000n)).toBe(false);
   });
 
-  it('переплата даёт ноль и признак аномалии', () => {
-    const base = order({ sum: 100000, payedSum: 150000 });
+  it('переплата наличными даёт ноль и признак аномалии', () => {
+    // Аномалия имеет смысл только там, где курьер вообще берёт деньги,
+    // поэтому тип оплаты обязан быть наличным.
+    const base = withAttribute(order({ sum: 100000, payedSum: 150000 }), IDS.paymentTypeAttribute, {
+      name: 'Наличные/карта на ТТ',
+      meta: { href: href('customentity', IDS.paymentTypeCash) },
+    });
     const { snapshot } = mapOrder(base, IDS);
 
     expect(snapshot.cashToCollectMinor).toBe('0');
