@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Ручной запуск без параметров: нужен, когда событие push или pull_request
+  # потерялось во время аварии GitHub Actions и прогон не был создан вовсе.
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
