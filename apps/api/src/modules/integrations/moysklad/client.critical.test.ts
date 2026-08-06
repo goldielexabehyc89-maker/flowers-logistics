@@ -197,3 +197,68 @@ describe('безопасность ошибок', () => {
     }
   });
 });
+
+describe('загрузка заказов', () => {
+  /** Минимально валидный заказ для схемы. */
+  const validRow = {
+    id: '11111111-1111-4111-8111-111111111111',
+    name: 'A-1',
+    updated: '2026-08-06 10:00:00.000',
+    sum: 499000,
+    payedSum: 0,
+    state: {
+      meta: {
+        href: 'https://api.moysklad.ru/api/remap/1.2/entity/state/22222222-2222-4222-8222-222222222222',
+      },
+      id: '22222222-2222-4222-8222-222222222222',
+      name: 'Новый',
+      stateType: 'Regular',
+    },
+  };
+
+  it('запрос всегда разворачивает статус', async () => {
+    let requestedUrl = '';
+    const fetchImpl = (async (url: string) => {
+      requestedUrl = String(url);
+      return jsonResponse({ rows: [], meta: { size: 0 } });
+    }) as unknown as typeof globalThis.fetch;
+
+    const { instance } = client(fetchImpl);
+    await instance.listCustomerOrders({ limit: 100 });
+
+    const params = new URL(requestedUrl).searchParams;
+    expect(params.get('expand')).toBe('state');
+    expect(params.get('limit')).toBe('100');
+  });
+
+  it('строки проверяются схемой и возвращаются типизированными', async () => {
+    const fetchImpl = (async () =>
+      jsonResponse({ rows: [validRow], meta: { size: 1 } })) as unknown as typeof globalThis.fetch;
+
+    const { instance } = client(fetchImpl);
+    const page = await instance.listCustomerOrders({ limit: 1 });
+
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]?.state?.stateType).toBe('Regular');
+    expect(page.size).toBe(1);
+  });
+
+  it('невалидная строка даёт BAD_RESPONSE без сырого ответа и PII', async () => {
+    const fetchImpl = (async () =>
+      jsonResponse({
+        rows: [{ ...validRow, sum: 'не число', shipmentAddress: 'Москва, Тестовая улица, 1' }],
+        meta: { size: 1 },
+      })) as unknown as typeof globalThis.fetch;
+
+    const { instance } = client(fetchImpl);
+    const error = (await instance
+      .listCustomerOrders({ limit: 1 })
+      .catch((e: unknown) => e)) as MoyskladError;
+
+    expect(error.code).toBe('BAD_RESPONSE');
+    const serialized = `${error.message} ${error.stack ?? ''}`;
+    expect(serialized).not.toContain('Тестовая улица');
+    expect(serialized).not.toContain('не число');
+    expect(serialized).not.toContain('A-1');
+  });
+});

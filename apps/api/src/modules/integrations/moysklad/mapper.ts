@@ -12,12 +12,14 @@
 
 import { createHash } from 'node:crypto';
 import { idFromHref, type MoyskladOrderDto } from './dto.js';
+import { parseDeliveryDate, type ParsedDeliveryDate } from './delivery-date.js';
 import { parseDeliveryInterval, type ParsedInterval } from './interval.js';
 import { cashToCollect, isOverpaid, toMinorUnits } from './money.js';
 import type { MOYSKLAD_IDS } from './config.js';
 
 export type AttentionReason =
   | 'MISSING_DELIVERY_DATE'
+  | 'UNRECOGNIZED_DELIVERY_DATE'
   | 'MISSING_INTERVAL'
   | 'UNRECOGNIZED_INTERVAL'
   | 'MISSING_ADDRESS'
@@ -41,6 +43,8 @@ export interface OrderSnapshot {
   storeId: string | null;
   deliveryMethodId: string | null;
   deliveryDateRaw: string | null;
+  /** Календарная дата Москвы `YYYY-MM-DD`; из неё пишется колонка типа DATE. */
+  deliveryDate: string | null;
   intervalRaw: string | null;
   intervalKind: ParsedInterval['kind'];
   intervalStartMinute: number | null;
@@ -74,6 +78,7 @@ const SNAPSHOT_KEYS: (keyof OrderSnapshot)[] = [
   'storeId',
   'deliveryMethodId',
   'deliveryDateRaw',
+  'deliveryDate',
   'intervalRaw',
   'intervalKind',
   'intervalStartMinute',
@@ -134,6 +139,7 @@ function attribute(order: MoyskladOrderDto, attributeId: string): AttributeValue
 export interface MapOrderResult {
   snapshot: OrderSnapshot;
   interval: ParsedInterval;
+  deliveryDate: ParsedDeliveryDate;
 }
 
 /**
@@ -153,8 +159,13 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
 
   const sumMinor = toMinorUnits(order.sum);
   const payedSumMinor = toMinorUnits(order.payedSum);
-  const cashAnomaly = isOverpaid(sumMinor, payedSumMinor);
+
+  // Наличные существуют ТОЛЬКО при точном типе оплаты «Наличные/карта на ТТ».
+  // При любом другом типе денег у курьера нет, поэтому нет ни суммы к получению,
+  // ни денежной аномалии: онлайн-переплата к долгу курьера отношения не имеет.
   const cashCollectable = paymentType.id === ids.paymentTypeCash;
+  const cashToCollectMinor = cashCollectable ? cashToCollect(sumMinor, payedSumMinor) : 0n;
+  const cashAnomaly = cashCollectable && isOverpaid(sumMinor, payedSumMinor);
 
   const sourceArchived = order.archived === true;
   const storeMatches = storeId === ids.store;
@@ -174,7 +185,7 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
     }
   }
 
-  const deliveryDateRaw = text(order.deliveryPlannedMoment);
+  const deliveryDate = parseDeliveryDate(order.deliveryPlannedMoment);
   const address = text(order.shipmentAddress);
   const recipient = attribute(order, ids.recipientAttribute).text;
   const comment = attribute(order, ids.commentAttribute).text;
@@ -184,12 +195,13 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
     externalName: order.name,
     externalUpdated: order.updated,
     externalMoment: text(order.moment),
-    externalStateId: idFromHref(order.state?.meta.href),
+    externalStateId: order.state?.id ?? idFromHref(order.state?.meta.href),
     externalStateName: text(order.state?.name),
-    externalStateType: null,
+    externalStateType: text(order.state?.stateType),
     storeId,
     deliveryMethodId: deliveryMethod.id,
-    deliveryDateRaw,
+    deliveryDateRaw: deliveryDate.raw,
+    deliveryDate: deliveryDate.date,
     intervalRaw: interval.raw,
     intervalKind: interval.kind,
     intervalStartMinute: interval.startMinute,
@@ -202,7 +214,7 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
     sumMinor: sumMinor.toString(),
     payedSumMinor: payedSumMinor.toString(),
     cashCollectable,
-    cashToCollectMinor: cashToCollect(sumMinor, payedSumMinor).toString(),
+    cashToCollectMinor: cashToCollectMinor.toString(),
     cashAnomaly,
     sourceArchived,
     inScope,
@@ -211,7 +223,7 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
   };
 
   snapshot.attentionReasons = attentionReasonsFor(snapshot);
-  return { snapshot, interval };
+  return { snapshot, interval, deliveryDate };
 }
 
 /**
@@ -223,6 +235,10 @@ export function attentionReasonsFor(snapshot: OrderSnapshot): AttentionReason[] 
 
   if (snapshot.deliveryDateRaw === null) {
     reasons.push('MISSING_DELIVERY_DATE');
+  } else if (snapshot.deliveryDate === null) {
+    // Значение есть, но разобрать его не удалось: считать такой заказ нормальным
+    // нельзя — без даты он не попадёт ни в один маршрут.
+    reasons.push('UNRECOGNIZED_DELIVERY_DATE');
   }
   if (snapshot.intervalKind === 'MISSING') {
     reasons.push('MISSING_INTERVAL');

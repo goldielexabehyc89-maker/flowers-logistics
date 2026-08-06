@@ -382,6 +382,9 @@ enum DeliveryIntervalKind {
 /// из канонического снимка и денежного результата, но не из внешнего статуса.
 enum OrderAttentionReason {
   MISSING_DELIVERY_DATE
+  /// Значение даты есть, но разобрать его не удалось. Молча считать такой заказ
+  /// нормальным нельзя: дата — обязательное поле планирования.
+  UNRECOGNIZED_DELIVERY_DATE
   MISSING_INTERVAL
   UNRECOGNIZED_INTERVAL
   MISSING_ADDRESS
@@ -433,11 +436,15 @@ model DeliveryOrder {
   externalStateType String?
 
   /// Склад и способ доставки — два условия принадлежности к нашей области.
-  storeId          String  @db.Uuid
+  ///
+  /// Оба nullable: у ранее импортированного заказа значение может исчезнуть, и тогда
+  /// заказ обязан сохраниться с inScope = false, а не уронить проход синхронизации.
+  storeId          String? @db.Uuid
   deliveryMethodId String? @db.Uuid
 
-  /// Плановая дата доставки из `deliveryPlannedMoment`.
-  deliveryDate    DateTime?
+  /// Плановая дата доставки — КАЛЕНДАРНАЯ дата Москвы, тип DATE.
+  /// Момент времени здесь хранить нельзя: перевод часовых поясов сдвинул бы день.
+  deliveryDate    DateTime? @db.Date
   /// Исходная строка `deliveryPlannedMoment` без потери: нужна для воспроизводимого
   /// сравнения с МоимСкладом.
   deliveryDateRaw String?

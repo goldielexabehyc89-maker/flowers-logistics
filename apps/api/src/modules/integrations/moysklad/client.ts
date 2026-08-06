@@ -15,6 +15,7 @@
  */
 
 import type { MoyskladConfig } from './config.js';
+import { moyskladOrderSchema, type MoyskladOrderDto } from './dto.js';
 
 export type MoyskladErrorCode =
   | 'NOT_CONFIGURED'
@@ -87,7 +88,8 @@ export interface OrderPageQuery {
 }
 
 export interface OrderPage {
-  rows: unknown[];
+  /** Проверенные заказы. Непроверенный ответ наружу не выходит. */
+  rows: MoyskladOrderDto[];
   size: number;
   rateLimit: RateLimitSnapshot;
 }
@@ -121,10 +123,19 @@ export class MoyskladClient {
     return this.lastRateLimit;
   }
 
-  /** Одна страница заказов покупателя. Других операций записи и чтения нет. */
+  /**
+   * Одна страница заказов покупателя. Других операций записи и чтения нет.
+   *
+   * Статус всегда запрашивается развёрнутым: без `expand=state` приходит только
+   * ссылка, и `stateType` навсегда остался бы пустым.
+   *
+   * Каждая строка проверяется схемой. Непроверенный ответ наружу не выходит:
+   * иначе изменение чужого API тихо превратилось бы в испорченные данные заказа.
+   */
   async listCustomerOrders(query: OrderPageQuery): Promise<OrderPage> {
     const params = new URLSearchParams();
     params.set('limit', String(query.limit));
+    params.set('expand', 'state');
     if (query.offset !== undefined) {
       params.set('offset', String(query.offset));
     }
@@ -142,9 +153,20 @@ export class MoyskladClient {
       throw new MoyskladError('BAD_RESPONSE');
     }
 
+    const rows: MoyskladOrderDto[] = [];
+    for (const row of parsed.rows) {
+      const result = moyskladOrderSchema.safeParse(row);
+      if (!result.success) {
+        // Текст ошибки zod содержит фактические значения полей, то есть PII.
+        // Наружу уходит только безопасный код.
+        throw new MoyskladError('BAD_RESPONSE');
+      }
+      rows.push(result.data);
+    }
+
     return {
-      rows: parsed.rows,
-      size: typeof parsed.meta?.size === 'number' ? parsed.meta.size : parsed.rows.length,
+      rows,
+      size: typeof parsed.meta?.size === 'number' ? parsed.meta.size : rows.length,
       rateLimit: this.lastRateLimit,
     };
   }

@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { MOYSKLAD_IDS } from './config.js';
+import { parseDeliveryDate } from './delivery-date.js';
 import { parseDeliveryInterval } from './interval.js';
 import {
   cashToCollect,
@@ -43,7 +44,12 @@ function order(overrides: Partial<MoyskladOrderDto> = {}): MoyskladOrderDto {
     sum: 499000,
     payedSum: 0,
     store: { meta: { href: href('store', IDS.store) } },
-    state: { meta: { href: href('state', '22222222-2222-4222-8222-222222222222') }, name: 'Новый' },
+    state: {
+      meta: { href: href('state', '22222222-2222-4222-8222-222222222222') },
+      id: '22222222-2222-4222-8222-222222222222',
+      name: 'Новый',
+      stateType: 'Regular',
+    },
     attributes: [
       {
         id: IDS.deliveryMethodAttribute,
@@ -122,7 +128,9 @@ describe('принадлежность заказа нашей области', 
     const withState = order({
       state: {
         meta: { href: href('state', '7bd65371-176f-11ee-0a80-13af00160cb5') },
+        id: '7bd65371-176f-11ee-0a80-13af00160cb5',
         name: 'Самовывоз Завершен',
+        stateType: 'Regular',
       },
     });
     const { snapshot } = mapOrder(withState, IDS);
@@ -135,7 +143,9 @@ describe('принадлежность заказа нашей области', 
     const cancelled = order({
       state: {
         meta: { href: href('state', '45533b00-2ea3-11ed-0a80-09c5000d6027') },
+        id: '45533b00-2ea3-11ed-0a80-09c5000d6027',
         name: 'Отменен',
+        stateType: 'Unsuccessful',
       },
     });
     const { snapshot } = mapOrder(cancelled, IDS);
@@ -420,5 +430,140 @@ describe('канонический снимок и diff', () => {
   it('первая ревизия помечает все поля изменившимися', () => {
     const snapshot = mapOrder(order(), IDS).snapshot;
     expect(diffSnapshots(null, snapshot).length).toBeGreaterThan(20);
+  });
+});
+
+describe('внешний статус сохраняется полностью', () => {
+  it('UUID, название и stateType попадают в снимок', () => {
+    const { snapshot } = mapOrder(order(), IDS);
+
+    expect(snapshot.externalStateId).toBe('22222222-2222-4222-8222-222222222222');
+    expect(snapshot.externalStateName).toBe('Новый');
+    expect(snapshot.externalStateType).toBe('Regular');
+  });
+
+  it('stateType не влияет ни на область, ни на причины внимания', () => {
+    const unsuccessful = order({
+      state: {
+        meta: { href: href('state', '45533b00-2ea3-11ed-0a80-09c5000d6027') },
+        id: '45533b00-2ea3-11ed-0a80-09c5000d6027',
+        name: 'Отменен',
+        stateType: 'Unsuccessful',
+      },
+    });
+    const { snapshot } = mapOrder(unsuccessful, IDS);
+
+    expect(snapshot.externalStateType).toBe('Unsuccessful');
+    expect(snapshot.inScope).toBe(true);
+    expect(snapshot.attentionReasons).toEqual([]);
+  });
+
+  it('изменение статуса попадает в diff', () => {
+    const previous = mapOrder(order(), IDS).snapshot;
+    const changed = mapOrder(
+      order({
+        state: {
+          meta: { href: href('state', '4cf29373-38f4-11ed-0a80-0c0500153e5a') },
+          id: '4cf29373-38f4-11ed-0a80-0c0500153e5a',
+          name: 'Завершен',
+          stateType: 'Successful',
+        },
+      }),
+      IDS,
+    ).snapshot;
+
+    const diff = diffSnapshots(previous, changed);
+    expect(diff).toContain('externalStateId');
+    expect(diff).toContain('externalStateName');
+    expect(diff).toContain('externalStateType');
+  });
+});
+
+describe('наличные возникают только при точном типе оплаты', () => {
+  /** Оплата, при которой курьер принимает деньги. */
+  const cash = (overrides: Partial<MoyskladOrderDto> = {}) =>
+    withAttribute(order(overrides), IDS.paymentTypeAttribute, {
+      name: 'Наличные/карта на ТТ',
+      meta: { href: href('customentity', IDS.paymentTypeCash) },
+    });
+
+  it('другой тип оплаты при неполной оплате не создаёт долга курьеру', () => {
+    const { snapshot } = mapOrder(order({ sum: 500000, payedSum: 100000 }), IDS);
+
+    expect(snapshot.cashCollectable).toBe(false);
+    expect(snapshot.cashToCollectMinor).toBe('0');
+  });
+
+  it('другой тип оплаты при переплате не создаёт денежной аномалии', () => {
+    const { snapshot } = mapOrder(order({ sum: 100000, payedSum: 150000 }), IDS);
+
+    expect(snapshot.cashCollectable).toBe(false);
+    expect(snapshot.cashAnomaly).toBe(false);
+    expect(snapshot.attentionReasons).not.toContain('CASH_OVERPAYMENT');
+    expect(snapshot.cashToCollectMinor).toBe('0');
+  });
+
+  it('наличные при неполной оплате дают долг курьеру', () => {
+    const { snapshot } = mapOrder(cash({ sum: 500000, payedSum: 100000 }), IDS);
+
+    expect(snapshot.cashCollectable).toBe(true);
+    expect(snapshot.cashToCollectMinor).toBe('400000');
+    expect(snapshot.cashAnomaly).toBe(false);
+  });
+
+  it('наличные при переплате дают ноль и аномалию', () => {
+    const { snapshot } = mapOrder(cash({ sum: 100000, payedSum: 150000 }), IDS);
+
+    expect(snapshot.cashToCollectMinor).toBe('0');
+    expect(snapshot.cashAnomaly).toBe(true);
+    expect(snapshot.attentionReasons).toContain('CASH_OVERPAYMENT');
+  });
+});
+
+describe('плановая дата — календарная дата Москвы', () => {
+  it('отсутствующая дата даёт MISSING и причину внимания', () => {
+    const { snapshot } = mapOrder(order({ deliveryPlannedMoment: undefined }), IDS);
+
+    expect(snapshot.deliveryDate).toBeNull();
+    expect(snapshot.deliveryDateRaw).toBeNull();
+    expect(snapshot.attentionReasons).toContain('MISSING_DELIVERY_DATE');
+    expect(snapshot.attentionReasons).not.toContain('UNRECOGNIZED_DELIVERY_DATE');
+  });
+
+  it('обычная дата берётся из строки без пересчёта', () => {
+    const { snapshot } = mapOrder(order({ deliveryPlannedMoment: '2026-08-07 12:00:00.000' }), IDS);
+
+    expect(snapshot.deliveryDate).toBe('2026-08-07');
+    expect(snapshot.deliveryDateRaw).toBe('2026-08-07 12:00:00.000');
+    expect(snapshot.attentionReasons).toEqual([]);
+  });
+
+  it('значения у границ суток остаются в своём дне', () => {
+    // Именно здесь пересчёт через UTC перенёс бы доставку на соседний день:
+    // Москва опережает UTC на три часа.
+    expect(parseDeliveryDate('2026-08-07 00:15:00.000').date).toBe('2026-08-07');
+    expect(parseDeliveryDate('2026-08-07 23:45:00.000').date).toBe('2026-08-07');
+    expect(parseDeliveryDate('2026-01-01 02:00:00.000').date).toBe('2026-01-01');
+    expect(parseDeliveryDate('2025-12-31 23:59:59.999').date).toBe('2025-12-31');
+  });
+
+  it('непустое неразбираемое значение поднимает заказ в «Требует внимания»', () => {
+    for (const raw of [
+      'завтра',
+      '07.08.2026',
+      '2026-13-01 10:00:00.000',
+      '2026-02-30 10:00:00.000',
+    ]) {
+      const { snapshot } = mapOrder(order({ deliveryPlannedMoment: raw }), IDS);
+
+      expect(snapshot.deliveryDate, raw).toBeNull();
+      expect(snapshot.deliveryDateRaw, raw).toBe(raw);
+      expect(snapshot.attentionReasons, raw).toContain('UNRECOGNIZED_DELIVERY_DATE');
+      expect(snapshot.attentionReasons, raw).not.toContain('MISSING_DELIVERY_DATE');
+    }
+  });
+
+  it('дата без времени принимается', () => {
+    expect(parseDeliveryDate('2026-08-07').date).toBe('2026-08-07');
   });
 });

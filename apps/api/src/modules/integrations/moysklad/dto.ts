@@ -40,7 +40,19 @@ export const moyskladOrderSchema = z.looseObject({
   applicable: z.boolean().optional(),
   archived: z.boolean().optional(),
   store: linkSchema.optional(),
-  state: linkSchema.extend({ name: z.string().optional() }).optional(),
+  /**
+   * Статус запрашивается развёрнутым (`expand=state`), поэтому здесь есть и `name`,
+   * и `stateType`. Без expand приходила бы только ссылка, и `stateType` навсегда
+   * остался бы пустым.
+   */
+  state: z
+    .looseObject({
+      meta: metaSchema,
+      id: z.uuid().optional(),
+      name: z.string().optional(),
+      stateType: z.string().optional(),
+    })
+    .optional(),
   attributes: z.array(attributeSchema).optional(),
 });
 

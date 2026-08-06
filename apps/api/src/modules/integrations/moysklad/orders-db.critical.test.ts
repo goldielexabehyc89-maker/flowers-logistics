@@ -33,9 +33,13 @@ async function seedOrder(overrides: Record<string, unknown> = {}) {
       externalName: `T-${process.hrtime.bigint() % 1_000_000n}`,
       externalUpdated: new Date(),
       storeId: STORE_ID,
+      // Тип оплаты не наличный, поэтому долга курьера нет: seed обязан
+      // соответствовать тем же финансовым инвариантам, что и рабочий код.
       sumMinor: 499000n,
       payedSumMinor: 0n,
-      cashToCollectMinor: 499000n,
+      cashCollectable: false,
+      cashToCollectMinor: 0n,
+      cashAnomaly: false,
       ...overrides,
     },
   });
@@ -130,6 +134,7 @@ describe('денежный контракт базы и API', () => {
     const order = await seedOrder({
       sumMinor: huge,
       payedSumMinor: 1n,
+      cashCollectable: true,
       cashToCollectMinor: huge - 1n,
     });
 
@@ -146,6 +151,7 @@ describe('денежный контракт базы и API', () => {
     const order = await seedOrder({
       sumMinor: 100050n,
       payedSumMinor: 50n,
+      cashCollectable: true,
       cashToCollectMinor: 100000n,
     });
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
@@ -162,5 +168,125 @@ describe('курсор интеграции', () => {
 
     await expect(ctx.db.integrationCursor.create({ data: { provider } })).rejects.toThrow();
     expect(await ctx.db.integrationCursor.count({ where: { provider } })).toBe(1);
+  });
+});
+
+describe('финансовые инварианты защищены базой', () => {
+  it('без наличных долг курьера обязан быть нулевым', async () => {
+    await expect(
+      seedOrder({
+        cashCollectable: false,
+        sumMinor: 500000n,
+        payedSumMinor: 0n,
+        cashToCollectMinor: 500000n,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('без наличных денежной аномалии быть не может', async () => {
+    await expect(
+      seedOrder({
+        cashCollectable: false,
+        sumMinor: 100000n,
+        payedSumMinor: 150000n,
+        cashAnomaly: true,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('при наличных долг обязан равняться max(0, sum - payed)', async () => {
+    await expect(
+      seedOrder({
+        cashCollectable: true,
+        sumMinor: 500000n,
+        payedSumMinor: 100000n,
+        cashToCollectMinor: 500000n,
+      }),
+    ).rejects.toThrow();
+
+    // Корректное сочетание проходит.
+    const ok = await seedOrder({
+      cashCollectable: true,
+      sumMinor: 500000n,
+      payedSumMinor: 100000n,
+      cashToCollectMinor: 400000n,
+    });
+    expect(ok.cashToCollectMinor).toBe(400000n);
+  });
+
+  it('переплата при наличных обязана быть отмечена аномалией', async () => {
+    await expect(
+      seedOrder({
+        cashCollectable: true,
+        sumMinor: 100000n,
+        payedSumMinor: 150000n,
+        cashToCollectMinor: 0n,
+        cashAnomaly: false,
+      }),
+    ).rejects.toThrow();
+
+    const ok = await seedOrder({
+      cashCollectable: true,
+      sumMinor: 100000n,
+      payedSumMinor: 150000n,
+      cashToCollectMinor: 0n,
+      cashAnomaly: true,
+    });
+    expect(ok.cashAnomaly).toBe(true);
+  });
+
+  it('отрицательные денежные значения отклоняются', async () => {
+    await expect(seedOrder({ sumMinor: -1n })).rejects.toThrow();
+    await expect(seedOrder({ payedSumMinor: -1n })).rejects.toThrow();
+  });
+});
+
+describe('идентичность и выход из области', () => {
+  it('внешний идентификатор нельзя изменить', async () => {
+    const order = await seedOrder();
+
+    await expect(
+      ctx.db.deliveryOrder.update({ where: { id: order.id }, data: { externalId: randomUUID() } }),
+    ).rejects.toThrow();
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.externalId).toBe(order.externalId);
+  });
+
+  it('обновление прочих полей при этом разрешено', async () => {
+    const order = await seedOrder();
+
+    const updated = await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { externalName: 'A-999', externalId: order.externalId },
+    });
+    expect(updated.externalName).toBe('A-999');
+  });
+
+  it('потеря склада сохраняется как выход из области, а не ломает запись', async () => {
+    const order = await seedOrder();
+
+    const updated = await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        storeId: null,
+        inScope: false,
+        scopeExitReason: 'STORE_CHANGED',
+        scopeExitedAt: new Date(),
+      },
+    });
+
+    expect(updated.storeId).toBeNull();
+    expect(updated.inScope).toBe(false);
+    expect(updated.scopeExitReason).toBe('STORE_CHANGED');
+  });
+});
+
+describe('плановая дата хранится как календарная', () => {
+  it('дата не смещается на соседний день при чтении', async () => {
+    const order = await seedOrder({ deliveryDate: new Date('2026-08-07T00:00:00.000Z') });
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+
+    expect(stored.deliveryDate?.toISOString().slice(0, 10)).toBe('2026-08-07');
   });
 });
