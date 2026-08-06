@@ -9,6 +9,21 @@
 
 import { z } from 'zod';
 
+/**
+ * Идентификатор сущности МоегоСклада.
+ *
+ * Строгая проверка `z.uuid()` здесь неприменима: она требует вариант RFC 4122,
+ * а МойСклад выдаёт значения вида `4553382b-2ea3-11ed-0a80-09c5000d6021`
+ * с вариантом `0`. Такая проверка отвергала бы все боевые идентификаторы аккаунта.
+ * Проверяется форма — восемь групп шестнадцатеричных цифр нужной длины.
+ */
+const uuidLike = z
+  .string()
+  .regex(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    'ожидается идентификатор',
+  );
+
 /** Ссылка на связанную сущность: нас интересует только UUID из href. */
 const metaSchema = z.object({ href: z.string().min(1), type: z.string().optional() });
 
@@ -26,7 +41,7 @@ const attributeSchema = z.object({
 });
 
 export const moyskladOrderSchema = z.looseObject({
-  id: z.uuid(),
+  id: uuidLike,
   name: z.string().min(1),
   updated: z.string().min(1),
   moment: z.string().min(1).optional(),
@@ -48,7 +63,7 @@ export const moyskladOrderSchema = z.looseObject({
   state: z
     .looseObject({
       meta: metaSchema,
-      id: z.uuid().optional(),
+      id: uuidLike.optional(),
       name: z.string().optional(),
       stateType: z.string().optional(),
     })
@@ -60,7 +75,7 @@ export type MoyskladOrderDto = z.infer<typeof moyskladOrderSchema>;
 
 /** Развёрнутый статус: приходит при `expand=state`. */
 export const moyskladStateSchema = z.object({
-  id: z.uuid(),
+  id: uuidLike,
   name: z.string().optional(),
   stateType: z.string().optional(),
 });

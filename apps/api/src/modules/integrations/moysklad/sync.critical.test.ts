@@ -294,7 +294,7 @@ describe('область заказа', () => {
     ).toBe(0);
   });
 
-  it('статус Unsuccessful на область не влияет', async () => {
+  it('реальный идентификатор МоегоСклада принимается, статус Unsuccessful область не меняет', async () => {
     const cancelled = row({
       state: {
         meta: { href: href('state', '45533b00-2ea3-11ed-0a80-09c5000d6027') },
