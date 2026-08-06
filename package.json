@@ -27,6 +27,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "bootstrap:admin": "tsx apps/api/src/scripts/bootstrap-admin.ts",
+    "moysklad:sync-once": "tsx apps/api/src/scripts/moysklad-sync-once.ts",
     "start": "node apps/api/dist/index.js"
   },
   "dependencies": {

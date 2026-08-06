@@ -19,6 +19,7 @@ import { moyskladOrderSchema, type MoyskladOrderDto } from './dto.js';
 
 export type MoyskladErrorCode =
   | 'NOT_CONFIGURED'
+  | 'INVALID_QUERY'
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'
   | 'NOT_FOUND'
@@ -53,6 +54,7 @@ export class MoyskladError extends Error {
 
 const MESSAGES: Record<MoyskladErrorCode, string> = {
   NOT_CONFIGURED: 'Интеграция с МоимСкладом не настроена',
+  INVALID_QUERY: 'Некорректные параметры запроса к МоемуСкладу',
   UNAUTHORIZED: 'МойСклад отклонил авторизацию',
   FORBIDDEN: 'У пользователя интеграции нет прав на эту операцию',
   NOT_FOUND: 'Запрошенный объект в МоемСкладе не найден',
@@ -94,6 +96,16 @@ export interface OrderPage {
   rateLimit: RateLimitSnapshot;
 }
 
+/**
+ * Предел размера страницы при развёрнутых полях.
+ *
+ * Официальное ограничение МоегоСклада: `expand` разрешён для выборки не более 100.
+ * Клиент всегда запрашивает `expand=state`, поэтому больший `limit` невозможен.
+ * Проверка выполняется ДО сетевого обращения: незачем тратить общий лимит аккаунта
+ * на заведомо отвергаемый запрос.
+ */
+export const MAX_EXPANDED_PAGE_SIZE = 100;
+
 const DEFAULT_MIN_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
@@ -133,6 +145,13 @@ export class MoyskladClient {
    * иначе изменение чужого API тихо превратилось бы в испорченные данные заказа.
    */
   async listCustomerOrders(query: OrderPageQuery): Promise<OrderPage> {
+    if (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > MAX_EXPANDED_PAGE_SIZE) {
+      throw new MoyskladError('INVALID_QUERY');
+    }
+
+    // Значения собираются обычными строками и кодируются один раз здесь.
+    // Ручное кодирование частей дало бы двойное кодирование, и фильтр по href
+    // перестал бы совпадать с идентификатором на стороне МоегоСклада.
     const params = new URLSearchParams();
     params.set('limit', String(query.limit));
     params.set('expand', 'state');

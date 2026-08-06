@@ -411,6 +411,8 @@ enum OrderRevisionReason {
   SCOPE_ENTERED
   SCOPE_EXITED
   SOURCE_MISSING
+  /// Заказ найден снова после того, как считался отсутствующим.
+  SOURCE_RESTORED
 }
 
 /// Заказ доставки — текущее состояние импортированной карточки.
@@ -546,6 +548,12 @@ model IntegrationCursor {
   initialLoadCompleted   Boolean   @default(false)
   initialLoadCompletedAt DateTime?
   lastReconciliationAt   DateTime?
+
+  /// Состояние восстановления после сбоя: переживает перезапуск процесса,
+  /// поэтому backoff не обнуляется рестартом и не превращается в частый повтор.
+  lastAttemptAt       DateTime?
+  consecutiveFailures Int       @default(0)
+  nextAttemptAt       DateTime?
 
   /// Техническая версия для безопасного конкурентного обновления.
   version   Int      @default(0)

@@ -49,6 +49,20 @@ const configSchema = z.object({
     .string()
     .min(32, 'AUTH_ACCESS_TOKEN_SECRET должен быть не короче 32 символов'),
   AUTH_PIN_PEPPER: z.string().min(32, 'AUTH_PIN_PEPPER должен быть не короче 32 символов'),
+  // --- МойСклад ---
+  // Рабочий токен существует ТОЛЬКО в production. Локальная разработка, CI и staging
+  // работают на фикстурах и поддельном HTTP: настоящие заказы туда не попадают,
+  // а случайно оставленный в чужом окружении токен — это доступ к живому аккаунту.
+  MOYSKLAD_TOKEN: z.string().min(1).optional(),
+  /** Автоматический фоновый опрос. По умолчанию выключен во всех окружениях. */
+  MOYSKLAD_SYNC_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  MOYSKLAD_SYNC_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).default(30),
+  /** Перекрытие окна delta-синхронизации. Стартовое значение — пять минут. */
+  MOYSKLAD_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
+
   /** Ключ AES-256-GCM в base64: ровно 32 байта после декодирования. */
   AUTH_REFRESH_REPLAY_KEY: z
     .string()
@@ -142,6 +156,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`Некорректная конфигурация окружения:\n  ${problems}`);
   }
 
+  assertMoyskladEnvironment(parsed.data);
+
   return Object.freeze({
     ...parsed.data,
     isProduction: parsed.data.NODE_ENV === 'production',
@@ -149,6 +165,38 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     trustProxy: parseTrustProxy(parsed.data.TRUST_PROXY),
     refreshReplayKey: Buffer.from(parsed.data.AUTH_REFRESH_REPLAY_KEY, 'base64'),
   });
+}
+
+/**
+ * Fail closed для интеграции с МоимСкладом.
+ *
+ * Рабочий токен даёт полный доступ к живому аккаунту с реальными заказами.
+ * Поэтому запуск останавливается, а не продолжается с предупреждением: приложение,
+ * молча стартовавшее с production-токеном в staging, однажды сходит в чужие данные.
+ */
+function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
+  // Оба признака обязаны совпасть: смешанная конфигурация вроде
+  // APP_ENV=staging с production-маркером означает ошибку развёртывания,
+  // и продолжать с рабочим токеном в такой ситуации нельзя.
+  const isProductionMarker =
+    data.APP_ENVIRONMENT_MARKER === 'production' && data.APP_ENV === 'production';
+
+  if (data.MOYSKLAD_TOKEN !== undefined && !isProductionMarker) {
+    throw new Error(
+      'MOYSKLAD_TOKEN допустим только при APP_ENV=production и ' +
+        'APP_ENVIRONMENT_MARKER=production: рабочий токен не размещается в local, CI и staging',
+    );
+  }
+
+  if (data.MOYSKLAD_SYNC_ENABLED && !isProductionMarker) {
+    throw new Error(
+      'MOYSKLAD_SYNC_ENABLED=true допустим только при APP_ENV=production и APP_ENVIRONMENT_MARKER=production',
+    );
+  }
+
+  if (data.MOYSKLAD_SYNC_ENABLED && data.MOYSKLAD_TOKEN === undefined) {
+    throw new Error('MOYSKLAD_SYNC_ENABLED=true требует MOYSKLAD_TOKEN');
+  }
 }
 
 export function getConfig(): AppConfig {
