@@ -353,3 +353,202 @@ model IntegrationStatus {
   details           Json?
   updatedAt         DateTime         @updatedAt
 }
+
+// ---------------------------------------------------------------------------
+// Этап 3.1 — заказы доставки из МоегоСклада.
+//
+// Импортируется только подтверждённый исследованием набор полей (docs/MOYSKLAD_MAPPING.md).
+// Полные сырые ответы API не хранятся: они содержат больше персональных данных,
+// чем нужно логистике, и их состав может измениться на стороне МоегоСклада.
+//
+// Деньги хранятся ЦЕЛЫМИ копейками в BigInt. Единица подтверждена сверкой с карточкой
+// заказа: API отдаёт минорные единицы. Тип с плавающей точкой не используется нигде —
+// от него зависят долг курьера и сверка наличных.
+// ---------------------------------------------------------------------------
+
+/// Результат разбора свободного текста «Время доставки».
+enum DeliveryIntervalKind {
+  /// Поле пустое.
+  MISSING
+  /// Распознан диапазон: заданы начало и конец.
+  RANGE
+  /// Указано одно время. Диапазон из него НЕ достраивается.
+  EXACT
+  /// Текст есть, но интервалом не является. Исходное значение сохраняется как есть.
+  UNRECOGNIZED
+}
+
+/// Почему заказ попал в «Требует внимания». Вычисляется детерминированно
+/// из канонического снимка и денежного результата, но не из внешнего статуса.
+enum OrderAttentionReason {
+  MISSING_DELIVERY_DATE
+  /// Значение даты есть, но разобрать его не удалось. Молча считать такой заказ
+  /// нормальным нельзя: дата — обязательное поле планирования.
+  UNRECOGNIZED_DELIVERY_DATE
+  MISSING_INTERVAL
+  UNRECOGNIZED_INTERVAL
+  MISSING_ADDRESS
+  MISSING_RECIPIENT
+  CASH_OVERPAYMENT
+}
+
+/// Почему заказ перестал относиться к нашей области.
+enum OrderScopeExitReason {
+  /// Заказ перенесён на другой склад.
+  STORE_CHANGED
+  /// Способ доставки изменён с «Доставка» на другой.
+  DELIVERY_METHOD_CHANGED
+  /// Источник архивирован в МоемСкладе.
+  SOURCE_ARCHIVED
+  /// Источник не найден контрольной сверкой (возможное физическое удаление).
+  SOURCE_MISSING
+}
+
+/// Причина создания неизменяемой ревизии заказа.
+enum OrderRevisionReason {
+  INITIAL_IMPORT
+  EXTERNAL_UPDATE
+  SCOPE_ENTERED
+  SCOPE_EXITED
+  SOURCE_MISSING
+}
+
+/// Заказ доставки — текущее состояние импортированной карточки.
+///
+/// Физическое удаление запрещено триггером базы: заказ может быть исключён
+/// из активного планирования, но не стёрт из истории.
+model DeliveryOrder {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// UUID `customerorder` МоегоСклада. Ключ идемпотентности импорта: уникален
+  /// и после создания не меняется.
+  externalId      String   @unique @db.Uuid
+  /// Отображаемый номер заказа. Используется для показа и поиска, но не как ключ.
+  externalName    String
+  /// Значение `updated` МоегоСклада: курсор delta-синхронизации.
+  externalUpdated DateTime
+  /// `moment` документа МоегоСклада.
+  externalMoment  DateTime?
+
+  /// Внешний статус сохраняется и отображается, но внутренним состоянием не управляет.
+  externalStateId   String? @db.Uuid
+  externalStateName String?
+  externalStateType String?
+
+  /// Склад и способ доставки — два условия принадлежности к нашей области.
+  ///
+  /// Оба nullable: у ранее импортированного заказа значение может исчезнуть, и тогда
+  /// заказ обязан сохраниться с inScope = false, а не уронить проход синхронизации.
+  storeId          String? @db.Uuid
+  deliveryMethodId String? @db.Uuid
+
+  /// Плановая дата доставки — КАЛЕНДАРНАЯ дата Москвы, тип DATE.
+  /// Момент времени здесь хранить нельзя: перевод часовых поясов сдвинул бы день.
+  deliveryDate    DateTime? @db.Date
+  /// Исходная строка `deliveryPlannedMoment` без потери: нужна для воспроизводимого
+  /// сравнения с МоимСкладом.
+  deliveryDateRaw String?
+
+  /// Исходный текст «Время доставки» — сохраняется всегда, даже нераспознанный.
+  intervalRaw         String?
+  intervalKind        DeliveryIntervalKind @default(MISSING)
+  /// Минуты от полуночи. Для EXACT заполняется только начало.
+  intervalStartMinute Int?
+  intervalEndMinute   Int?
+
+  /// Интервал, заданный логистом вручную. Хранится ОТДЕЛЬНО от текста МоегоСклада,
+  /// чтобы следующий импорт его не затёр. Заполняется в ветке 3.3.
+  manualIntervalStartMinute Int?
+  manualIntervalEndMinute   Int?
+  manualIntervalSetAt       DateTime?
+
+  /// Адрес только из `shipmentAddress`; резервных источников нет.
+  address   String?
+  /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
+  recipient String?
+  /// Только «Комментарий по доставке». Необязателен.
+  comment   String?
+
+  paymentTypeId   String? @db.Uuid
+  paymentTypeName String?
+
+  /// Деньги целыми копейками.
+  sumMinor      BigInt @default(0)
+  payedSumMinor BigInt @default(0)
+  /// Курьер принимает деньги только при точном типе оплаты «Наличные/карта на ТТ».
+  cashCollectable Boolean @default(false)
+  /// max(0, sumMinor - payedSumMinor). Ниже нуля не опускается.
+  cashToCollectMinor BigInt @default(0)
+  /// payedSum > sum: переплата или ошибка данных, требует проверки.
+  cashAnomaly Boolean @default(false)
+
+  /// Относится ли заказ к нашей области прямо сейчас.
+  inScope         Boolean               @default(true)
+  scopeExitReason OrderScopeExitReason?
+  scopeExitedAt   DateTime?
+  sourceArchived  Boolean               @default(false)
+  /// Источник не найден контрольной сверкой: физическое удаление опросом не видно.
+  sourceMissing   Boolean               @default(false)
+
+  needsAttention   Boolean                @default(false)
+  attentionReasons OrderAttentionReason[]
+
+  /// Оптимистическая блокировка для будущих конкурентных изменений.
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  revisions DeliveryOrderRevision[]
+
+  @@index([inScope, deliveryDate])
+  @@index([needsAttention])
+  @@index([externalUpdated])
+  @@index([storeId, deliveryMethodId])
+}
+
+/// Неизменяемая история внешних версий заказа.
+///
+/// Здесь лежат значения полей заказа, поэтому запись защищена триггерами от UPDATE
+/// и DELETE: общий `AuditLog` фиксирует только факт и список изменённых полей,
+/// но не дублирует персональные данные.
+model DeliveryOrderRevision {
+  id      String        @id @default(uuid(7)) @db.Uuid
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Значение `updated` МоегоСклада на момент этой версии.
+  externalUpdated DateTime
+  receivedAt      DateTime @default(now())
+
+  /// Канонический снимок только подтверждённых импортируемых полей.
+  /// Сырой ответ API целиком не сохраняется.
+  snapshot     Json
+  /// SHA-256 канонического снимка: дешёвая дедупликация без сравнения JSON.
+  snapshotHash String
+  /// Поля, реально изменившиеся относительно предыдущей ревизии.
+  changedFields String[]
+  reason        OrderRevisionReason
+
+  @@index([orderId, receivedAt])
+  @@index([orderId, externalUpdated])
+}
+
+/// Курсор фоновой синхронизации. Отделён от `IntegrationStatus.details`:
+/// это рабочее состояние процесса, а не отображаемая диагностика.
+///
+/// В ветке 3.1 только моделируется; планировщик и проходы появятся в 3.2.
+model IntegrationCursor {
+  id       String @id @default(uuid(7)) @db.Uuid
+  provider String @unique
+
+  /// Верхняя граница обработанного окна по `updated`.
+  updatedCursor          DateTime?
+  initialLoadCompleted   Boolean   @default(false)
+  initialLoadCompletedAt DateTime?
+  lastReconciliationAt   DateTime?
+
+  /// Техническая версия для безопасного конкурентного обновления.
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
