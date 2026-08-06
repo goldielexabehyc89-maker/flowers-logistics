@@ -443,8 +443,24 @@ describe('московское время на границе интеграци
     expect(formatMoscow(parseMoscow('2026-08-06 12:00:00'))).toBe('2026-08-06 12:00:00');
   });
 
-  it('невалидное время отвергается без вывода значения', () => {
-    for (const value of ['вчера', '2026-13-01 10:00', '']) {
+  it('несуществующее время отвергается, а не нормализуется молча', () => {
+    // `Date.UTC` сам превратил бы 13-й месяц в январь следующего года,
+    // 30 февраля — в март, а 24:00 — в полночь следующих суток.
+    const invalid = [
+      'вчера',
+      '',
+      '2026-13-01 10:00',
+      '2026-02-30 10:00',
+      '2025-02-29 10:00',
+      '2026-08-06 24:00',
+      '2026-08-06 10:60',
+      '2026-08-06 10:00:60',
+      '2026-00-10 10:00',
+      '2026-08-00 10:00',
+      '2026-08-32 10:00',
+    ];
+
+    for (const value of invalid) {
       let error: unknown = null;
       try {
         parseMoscow(value);
@@ -452,8 +468,16 @@ describe('московское время на границе интеграци
         error = thrown;
       }
       expect(error, value).toBeInstanceOf(MoscowTimeParseError);
-      expect((error as Error).message).not.toContain(value === '' ? 'пусто' : value);
+      // Значение приходит из внешнего ответа и в сообщение попасть не должно.
+      if (value !== '') {
+        expect((error as Error).message).not.toContain(value);
+      }
     }
+  });
+
+  it('високосный день принимается', () => {
+    expect(parseMoscow('2024-02-29 12:00:00').toISOString()).toBe('2024-02-29T09:00:00.000Z');
+    expect(parseMoscow('2026-08-06 23:59:59').toISOString()).toBe('2026-08-06T20:59:59.000Z');
   });
 
   it('календарная дата Москвы считается от смещения, а не от UTC', () => {
@@ -817,5 +841,76 @@ describe('ручной проход moysklad:sync-once', () => {
     expect(report.result).toBeNull();
     expect(report.reason).not.toContain('moysklad.ru');
     expect(report.reason).not.toContain('test-token');
+  });
+});
+
+describe('блокировка на настоящей PostgreSQL', () => {
+  /**
+   * Технический предохранитель: без него зависший проход держал бы тест
+   * до общего таймаута прогона. Реальных пауз здесь нет — таймер срабатывает
+   * только при дефекте.
+   */
+  async function withTimeout<T>(promise: Promise<T>, hint: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const guard = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`проход завис: ${hint}`)), 15_000);
+    });
+    try {
+      return await Promise.race([promise, guard]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  it('проход с настоящей блокировкой доходит до API, а параллельный получает skipped', async () => {
+    // Настоящее соединение PostgreSQL и настоящий pg_try_advisory_lock.
+    // Ключ тот же, что раньше брался транзакционно внутри прохода: старая
+    // реализация ждала бы его на соединении Prisma и не дошла бы до API.
+    const realLock = { connectionString: ctx.config.DATABASE_URL };
+
+    let openGate: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let markReached: (() => void) | null = null;
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+
+    const slowApi: FakeApi = {
+      calls: [],
+      fetch: (async () => {
+        slowApi.calls.push({ url: '', filter: '', limit: '', offset: '0', expand: '' });
+        markReached?.();
+        await gate;
+        return new Response(JSON.stringify({ rows: [], meta: { size: 0 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as unknown as typeof globalThis.fetch,
+    };
+
+    const first = runSyncOnce({ ...deps(slowApi), lock: realLock });
+    // Самоблокировки нет: проход дошёл до поддельного API, удерживая замок.
+    await withTimeout(reached, 'первый проход не дошёл до API');
+
+    const second = fakeApi([[row()]]);
+    const skipped = await withTimeout(
+      runSyncOnce({ ...deps(second, new Date('2026-08-06T23:00:00.000Z')), lock: realLock }),
+      'параллельный проход не завершился',
+    );
+
+    expect(skipped.kind).toBe('skipped');
+    expect(second.calls).toHaveLength(0);
+
+    openGate?.();
+    const result = await withTimeout(first, 'первый проход не завершился');
+    expect(result.kind).toBe('initial');
+    expect(slowApi.calls).toHaveLength(1);
+
+    // Замок снят: следующий захватчик получает его сразу.
+    const after = await withTimeout(acquireSyncLock(realLock), 'замок не освобождён');
+    expect(after).not.toBeNull();
+    await after?.release();
   });
 });

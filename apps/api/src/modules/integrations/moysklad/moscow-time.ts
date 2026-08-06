@@ -46,21 +46,57 @@ export function parseMoscow(value: string): Date {
   }
 
   const [, year, month, day, hour, minute, second = '00', millis = '0'] = match;
-  const asUtc = Date.UTC(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second),
-    Number(millis.padEnd(3, '0')),
-  );
+  const parts = {
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    hour: Number(hour),
+    minute: Number(minute),
+    second: Number(second),
+    millis: Number(millis.padEnd(3, '0')),
+  };
 
-  const parsed = new Date(asUtc - MOSCOW_OFFSET_MS);
-  if (Number.isNaN(parsed.getTime())) {
+  // Диапазоны проверяются до создания Date: `Date.UTC` молча нормализует
+  // несуществующее значение — 13-й месяц становится январём следующего года,
+  // а 24:00 — полуночью следующих суток. Для внешних данных это опасно:
+  // ошибочное время выглядело бы как обычное.
+  if (
+    parts.month < 1 ||
+    parts.month > 12 ||
+    parts.day < 1 ||
+    parts.day > 31 ||
+    parts.hour > 23 ||
+    parts.minute > 59 ||
+    parts.second > 59
+  ) {
     throw new MoscowTimeParseError();
   }
-  return parsed;
+
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+    parts.millis,
+  );
+  const asDate = new Date(asUtc);
+  if (Number.isNaN(asDate.getTime())) {
+    throw new MoscowTimeParseError();
+  }
+
+  // Обратная сверка ловит несуществующие календарные даты: 30 февраля
+  // и 29 февраля невисокосного года диапазонной проверкой не отсекаются.
+  if (
+    asDate.getUTCFullYear() !== parts.year ||
+    asDate.getUTCMonth() !== parts.month - 1 ||
+    asDate.getUTCDate() !== parts.day
+  ) {
+    throw new MoscowTimeParseError();
+  }
+
+  return new Date(asUtc - MOSCOW_OFFSET_MS);
 }
 
 /** Календарная дата Москвы для момента времени. */

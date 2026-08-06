@@ -6,15 +6,18 @@
  * с ограничением темпа — параллельных обращений к МоемуСкладу не бывает.
  *
  * Взаимное исключение проходов.
- * Проход длится минуты и содержит сетевые вызовы, поэтому держать всё это время
- * открытую транзакцию нельзя: соединение простаивало бы в состоянии
- * idle-in-transaction. Вместо этого проход берёт аренду в короткой транзакции,
- * защищённой глобальным `pg_advisory_xact_lock`: пока аренда не истекла,
- * второй worker или ручной запуск проход не начнёт. Аренда продлевается
- * по ходу работы и снимается в конце.
+ * Единственный механизм — блокировка уровня сессии на отдельном соединении
+ * (`sync-lock.ts`), удерживаемая весь проход. Транзакционного advisory-lock
+ * здесь нет намеренно: он берётся из общего пространства ключей, поэтому
+ * транзакция Prisma ждала бы ключ, уже удерживаемый соединением этого же
+ * прохода, и проход зависал бы на самом себе.
  *
- * Порядок блокировок единый: advisory-lock курсора → строка `DeliveryOrder`
- * (`FOR UPDATE` по `externalId`) → вставки ревизии, аудита и события.
+ * Аренда в курсоре решает другую задачу — планирование следующей попытки
+ * и backoff, а не взаимное исключение.
+ *
+ * Порядок блокировок единый: сессионная блокировка прохода → строка
+ * `DeliveryOrder` (`FOR UPDATE` по `externalId`) → вставки ревизии, аудита
+ * и события.
  */
 
 import type { Database } from '../../../platform/db.js';
@@ -32,8 +35,6 @@ import { acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
 export const PROVIDER = 'moysklad';
 /** Размер страницы. Больше нельзя: `expand` разрешён для выборки не более 100. */
 export const PAGE_SIZE = 100;
-/** Ключ глобального advisory-lock синхронизации. */
-const SYNC_LOCK_KEY = 730_201n;
 /** Сколько держится аренда прохода, если процесс умер и не снял её. */
 const LEASE_MS = 10 * 60 * 1000;
 /** Пауза, когда остаток лимита аккаунта почти исчерпан. */
@@ -100,14 +101,14 @@ async function ensureCursor(db: Database): Promise<CursorState> {
  *
  * Взаимным исключением это НЕ является: его обеспечивает блокировка уровня сессии
  * на отдельном соединении (`sync-lock.ts`), удерживаемая весь проход. Здесь
- * проверяется только право начать проход по времени следующей попытки.
+ * проверяется только право начать проход по времени следующей попытки, поэтому
+ * дополнительный advisory-lock не берётся: он ждал бы ключ, уже занятый
+ * соединением этого же прохода.
  */
 async function claimPass(deps: SyncDeps, now: Date): Promise<CursorState | null> {
   await ensureCursor(deps.db);
 
   return deps.db.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint)`;
-
     const cursor = await tx.integrationCursor.findUniqueOrThrow({ where: { provider: PROVIDER } });
     if (cursor.nextAttemptAt !== null && cursor.nextAttemptAt > now) {
       return null;
@@ -130,7 +131,6 @@ async function releasePass(
   intervalMs: number,
 ): Promise<void> {
   await deps.db.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint)`;
     const cursor = await tx.integrationCursor.findUniqueOrThrow({ where: { provider: PROVIDER } });
 
     const failures = outcome.ok ? 0 : cursor.consecutiveFailures + 1;
