@@ -128,9 +128,11 @@ async function createOrder(
 ): Promise<ApplyResult> {
   const created = await tx.deliveryOrder.create({
     data: {
+      ...(orderData(snapshot, now) as Prisma.DeliveryOrderUncheckedCreateInput),
+      // Ключ идемпотентности и версия задаются после общих полей: они не входят
+      // в набор, который переиспользуется при обновлении.
       externalId: snapshot.externalId,
       version: 1,
-      ...(orderData(snapshot, now) as Prisma.DeliveryOrderUncheckedCreateInput),
     },
     select: { id: true },
   });
