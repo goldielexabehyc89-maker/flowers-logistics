@@ -64,7 +64,7 @@ async function connectPg(connectionString: string): Promise<LockConnection> {
 export async function acquireSyncLock(deps: LockDeps): Promise<SyncLock | null> {
   const connection = await (deps.connect ?? connectPg)(deps.connectionString);
 
-  let locked = false;
+  let locked: boolean;
   try {
     locked = await connection.tryLock(SYNC_LOCK_KEY);
   } catch (error) {
