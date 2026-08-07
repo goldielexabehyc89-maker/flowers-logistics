@@ -48,40 +48,47 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // Сколько заказов создать. Сценарию маршрутов нужен не один: порядок остановок
+  // проверяется только там, где остановок хотя бы две.
+  const countArg = process.argv.find((argument) => argument.startsWith('--count='));
+  const count = Math.min(Math.max(Number(countArg?.split('=')[1] ?? '1') || 1, 1), 10);
+
   const db = createDatabase(config, logger);
   try {
-    const number = `E2E-${String(Date.now() % 1_000_000).padStart(6, '0')}`;
-    const order = await db.deliveryOrder.create({
-      data: {
-        // Внешние идентификаторы выдуманы намеренно: настоящих заказов здесь нет.
-        externalId: crypto.randomUUID(),
-        externalName: number,
-        externalUpdated: new Date(),
-        externalStateName: 'Новый',
-        externalStateType: 'Regular',
-        deliveryDate: toDateColumn(moscowToday(new Date())),
-        deliveryDateRaw: `${moscowToday(new Date())} 12:00:00.000`,
-        // Интервал намеренно не распознан: сценарий проверяет ручное исправление.
-        intervalRaw: 'уточнить у клиента',
-        intervalKind: 'UNRECOGNIZED',
-        address: 'Москва, проверочный адрес 1',
-        recipient: 'Проверочный Получатель',
-        comment: 'Проверочный заказ браузерного сценария',
-        sumMinor: 499000n,
-        payedSumMinor: 0n,
-        cashCollectable: true,
-        cashToCollectMinor: 499000n,
-        inScope: true,
-        needsAttention: true,
-        attentionReasons: ['UNRECOGNIZED_INTERVAL'],
-        version: 1,
-      },
-      select: { id: true, externalName: true },
-    });
+    for (let index = 0; index < count; index += 1) {
+      const number = `E2E-${String((Date.now() + index) % 1_000_000).padStart(6, '0')}`;
+      const order = await db.deliveryOrder.create({
+        data: {
+          // Внешние идентификаторы выдуманы намеренно: настоящих заказов здесь нет.
+          externalId: crypto.randomUUID(),
+          externalName: number,
+          externalUpdated: new Date(),
+          externalStateName: 'Новый',
+          externalStateType: 'Regular',
+          deliveryDate: toDateColumn(moscowToday(new Date())),
+          deliveryDateRaw: `${moscowToday(new Date())} 12:00:00.000`,
+          // Интервал намеренно не распознан: сценарий проверяет ручное исправление.
+          intervalRaw: 'уточнить у клиента',
+          intervalKind: 'UNRECOGNIZED',
+          address: 'Москва, проверочный адрес 1',
+          recipient: 'Проверочный Получатель',
+          comment: 'Проверочный заказ браузерного сценария',
+          sumMinor: 499000n,
+          payedSumMinor: 0n,
+          cashCollectable: true,
+          cashToCollectMinor: 499000n,
+          inScope: true,
+          needsAttention: true,
+          attentionReasons: ['UNRECOGNIZED_INTERVAL'],
+          version: 1,
+        },
+        select: { id: true, externalName: true },
+      });
 
-    logger.info({ number: order.externalName }, 'проверочный заказ создан');
-    // Номер нужен браузерному сценарию, поэтому печатается отдельной строкой.
-    process.stdout.write(`номер: ${order.externalName}\n`);
+      logger.info({ number: order.externalName }, 'проверочный заказ создан');
+      // Номер нужен браузерному сценарию, поэтому печатается отдельной строкой.
+      process.stdout.write(`номер: ${order.externalName}\n`);
+    }
     return 0;
   } finally {
     await db.$disconnect();

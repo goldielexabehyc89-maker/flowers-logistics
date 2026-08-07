@@ -20,7 +20,12 @@ export interface SessionUser {
 }
 
 export interface ApiErrorBodyShape {
-  error?: { code?: string; message?: string; requestId?: string };
+  error?: {
+    code?: string;
+    message?: string;
+    requestId?: string;
+    conflict?: { kind: string; routeNumber?: string; orderIds?: string[] };
+  };
 }
 
 /** Ошибка запроса с кодом и понятным текстом от сервера. */
@@ -29,10 +34,23 @@ export class ApiError extends Error {
   readonly code: string;
   /** Секунды до следующей попытки: заполняется при 429 из заголовка Retry-After. */
   readonly retryAfterSeconds: number | null;
+  /**
+   * Машинная причина конфликта. Общего кода `CONFLICT` интерфейсу мало: устаревшую
+   * версию достаточно перезапросить, а занятый чужой маршрут требует другого текста
+   * и другой кнопки. Разбирать ради этого сообщение для человека нельзя.
+   */
+  readonly conflict: { kind: string; routeNumber?: string; orderIds?: string[] } | null;
 
-  constructor(status: number, code: string, message: string, retryAfterSeconds: number | null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    retryAfterSeconds: number | null,
+    conflict: { kind: string; routeNumber?: string; orderIds?: string[] } | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
+    this.conflict = conflict;
     this.status = status;
     this.code = code;
     this.retryAfterSeconds = retryAfterSeconds;
@@ -282,16 +300,18 @@ export class ApiClient {
 async function toApiError(response: Response): Promise<ApiError> {
   let code = 'INTERNAL_ERROR';
   let message = 'Не удалось выполнить запрос.';
+  let conflict: { kind: string; routeNumber?: string; orderIds?: string[] } | null = null;
 
   try {
     const body = (await response.json()) as ApiErrorBodyShape;
     code = body.error?.code ?? code;
     message = body.error?.message ?? message;
+    conflict = body.error?.conflict ?? null;
   } catch {
     // Тело может отсутствовать или быть не JSON — остаются значения по умолчанию.
   }
 
-  return new ApiError(response.status, code, message, parseRetryAfter(response));
+  return new ApiError(response.status, code, message, parseRetryAfter(response), conflict);
 }
 
 /** Разбирает Retry-After: сервер присылает его в секундах при блокировке. */

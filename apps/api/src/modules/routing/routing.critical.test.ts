@@ -343,6 +343,150 @@ describe('календарная дата маршрута', () => {
   });
 });
 
+describe('выборка нераспределённых заказов для экрана', () => {
+  async function tokenFor(roles: Role[]): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  async function unassigned(token: string, day: string): Promise<string[]> {
+    const response = await call(
+      'GET',
+      `/api/orders?unassigned=true&deliveryDate=${day}&limit=100`,
+      token,
+    );
+    expect(response.statusCode).toBe(200);
+    return (response.json() as { items: { id: string }[] }).items.map((item) => item.id);
+  }
+
+  it('отдаёт только пригодные и действительно свободные заказы', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-20';
+    const at = (date: string): Record<string, unknown> => ({
+      deliveryPlannedMoment: `${date} 12:00:00.000`,
+    });
+
+    const free = await seedOrder(at(day));
+    const otherDay = await seedOrder(at('2026-11-21'));
+    const withoutDate = await seedOrder({ deliveryPlannedMoment: null });
+
+    const outOfScope = await seedOrder(at(day));
+    await ctx.db.deliveryOrder.update({
+      where: { id: outOfScope },
+      data: { inScope: false, scopeExitReason: 'STORE_CHANGED' },
+    });
+
+    const missing = await seedOrder(at(day));
+    await ctx.db.deliveryOrder.update({ where: { id: missing }, data: { sourceMissing: true } });
+
+    const archived = await seedOrder(at(day));
+    await ctx.db.deliveryOrder.update({ where: { id: archived }, data: { sourceArchived: true } });
+
+    // Уже распределённый заказ в выборку попадать не должен.
+    const assigned = await seedOrder(at(day));
+    const route = await createRoute(token, day);
+    await call('POST', `/api/routes/${route.id}/orders`, token, {
+      orderIds: [assigned],
+      expectedVersion: route.version,
+    });
+
+    const ids = await unassigned(token, day);
+
+    expect(ids).toContain(free);
+    for (const [name, id] of [
+      ['другой день', otherDay],
+      ['без даты', withoutDate],
+      ['вне области', outOfScope],
+      ['пропавший', missing],
+      ['архивный', archived],
+      ['уже распределён', assigned],
+    ] as const) {
+      expect(ids, name).not.toContain(id);
+    }
+  });
+
+  it('возвращённый заказ снова становится доступным', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-22';
+    const orderId = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
+    const route = await createRoute(token, day);
+
+    const added = await call('POST', `/api/routes/${route.id}/orders`, token, {
+      orderIds: [orderId],
+      expectedVersion: route.version,
+    });
+    expect(await unassigned(token, day)).not.toContain(orderId);
+
+    await call('POST', `/api/routes/${route.id}/orders/return`, token, {
+      orderIds: [orderId],
+      expectedVersion: (added.json() as RouteCard).version,
+    });
+    expect(await unassigned(token, day)).toContain(orderId);
+  });
+
+  it('курьер и склад выборку не получают', async () => {
+    for (const roles of [['COURIER'], ['WAREHOUSE']] as Role[][]) {
+      const response = await call(
+        'GET',
+        '/api/orders?unassigned=true&deliveryDate=2026-11-20',
+        await tokenFor(roles),
+      );
+      expect(response.statusCode, roles.join()).toBe(403);
+    }
+  });
+
+  it('карточка маршрута отдаёт сумму к получению строкой и без лишних финансов', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-23';
+    const orderId = await seedOrder({
+      deliveryPlannedMoment: `${day} 12:00:00.000`,
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
+        { id: IDS.recipientAttribute, value: 'Получатель Маршрутный' },
+        {
+          id: IDS.paymentTypeAttribute,
+          value: {
+            name: 'Наличные/карта на ТТ',
+            meta: { href: href('customentity', IDS.paymentTypeCash) },
+          },
+        },
+      ],
+    });
+    const route = await createRoute(token, day);
+    const added = await call('POST', `/api/routes/${route.id}/orders`, token, {
+      orderIds: [orderId],
+      expectedVersion: route.version,
+    });
+
+    const body = added.json() as {
+      orders: { order: { cashToCollect: string | null } }[];
+    };
+    expect(body.orders[0]?.order.cashToCollect).toBe('4990.00');
+
+    const serialized = added.body;
+    // Ни сырого снимка, ни копеек, ни хешей: печатному листу нужна одна сумма.
+    expect(serialized).not.toContain('sumMinor');
+    expect(serialized).not.toContain('snapshotHash');
+    expect(serialized).not.toContain('payedSum');
+  });
+});
+
 // --- Права ------------------------------------------------------------------
 
 describe('права', () => {

@@ -12,6 +12,8 @@ import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
 import { PLACEHOLDERS, PlaceholderScreen, WarehousePlaceholder } from './screens/PlaceholderScreen';
 import { DealsScreen } from './screens/deals/DealsScreen';
+import { RoutingScreen } from './screens/routing/RoutingScreen';
+import { RouteSheetsScreen } from './screens/routing/RouteSheetsScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { UsersScreen } from './screens/users/UsersScreen';
 import { AppShell } from './shell/AppShell';
@@ -85,6 +87,22 @@ export function App(): React.JSX.Element {
           element={
             <SectionRoute>
               <DealsScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/routing"
+          element={
+            <SectionRoute>
+              <RoutingScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/route-sheets"
+          element={
+            <SectionRoute>
+              <RouteSheetsScreen />
             </SectionRoute>
           }
         />

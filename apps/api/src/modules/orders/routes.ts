@@ -34,6 +34,14 @@ const listQuerySchema = z.object({
   inScope: z.enum(['true', 'false']).optional(),
   /** Поиск по номеру, адресу и получателю. Пустая строка ищет всё. */
   search: z.string().trim().max(200).optional(),
+  /**
+   * Только заказы, пригодные для распределения на выбранный день.
+   *
+   * Экран маршрутизации не должен выгружать все заказы и вычитать из них состав
+   * маршрутов на клиенте: при сотнях заказов это лишний трафик и гарантированное
+   * расхождение с сервером в момент чужой правки.
+   */
+  unassigned: z.enum(['true', 'false']).optional(),
 });
 
 const setIntervalBodySchema = z.object({
@@ -162,16 +170,32 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       });
     }
 
+    const unassignedOnly = query.unassigned === 'true';
+
     // Заказ без распознанной даты виден при ЛЮБОМ выбранном дне — и при дне
     // по умолчанию, и при явно указанном. Иначе он исчезал бы из «Требует
     // внимания» именно тогда, когда им нужно заняться, а даты у него нет
     // ровно потому, что с ним что-то не так.
+    //
+    // Исключение — выборка для распределения: заказ без даты положить в маршрут
+    // нельзя, и на экране маршрутизации он был бы ложным обещанием. Он остаётся
+    // в «Сделках → Требуют внимания», где им и занимаются.
     const day = query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date()));
 
     if (day !== null) {
-      conditions.push({
-        OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }],
-      });
+      conditions.push(
+        unassignedOnly
+          ? { deliveryDate: toDateColumn(day) }
+          : { OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }] },
+      );
+    }
+
+    if (unassignedOnly) {
+      // Пригодность считает сервер: клиент не знает ни о пропавших заказах,
+      // ни о чужих активных маршрутах, и его версия «свободного» заказа
+      // устаревала бы к моменту нажатия кнопки.
+      conditions.push({ sourceMissing: false, sourceArchived: false, deliveryDate: { not: null } });
+      conditions.push({ routeOrders: { none: { removedAt: null } } });
     }
 
     if (conditions.length > 0) {

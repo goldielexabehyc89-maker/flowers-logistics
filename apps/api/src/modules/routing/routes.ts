@@ -16,6 +16,7 @@ import type { AppConfig } from '../../platform/config.js';
 import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
 import { fromDateColumn, isCalendarDate } from '../integrations/moysklad/delivery-date.js';
+import { toDecimalString } from '../integrations/moysklad/money.js';
 import { assignmentStateOf, calendarDate } from './eligibility.js';
 import {
   addOrders,
@@ -464,6 +465,10 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
               inScope: true,
               sourceMissing: true,
               sourceArchived: true,
+              // Единственное денежное поле маршрутного листа: курьеру нужно знать,
+              // сколько взять. Суммы заказа, оплаты и признаки аномалии здесь лишние.
+              cashCollectable: true,
+              cashToCollectMinor: true,
             },
           },
         },
@@ -530,6 +535,10 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
         comment: item.order.comment,
         needsAttention: item.order.needsAttention,
         attentionReasons: item.order.attentionReasons,
+        // Десятичной строкой: bigint не сериализуется, а number теряет точность.
+        cashToCollect: item.order.cashCollectable
+          ? toDecimalString(item.order.cashToCollectMinor)
+          : null,
         scope: {
           inScope: item.order.inScope,
           sourceMissing: item.order.sourceMissing,

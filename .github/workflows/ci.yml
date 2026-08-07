@@ -314,19 +314,24 @@ jobs:
           set -euo pipefail
           # Заказ создаётся напрямую: токена МоегоСклада в проверках нет,
           # и ни одного сетевого обращения к нему быть не должно.
-          output="$(npm run --silent seed:e2e-order)"
-          number="$(printf '%s' "$output" | sed -n 's/^номер:[[:space:]]*//p' | head -1)"
-          if [ -z "$number" ]; then
-            echo "не удалось создать проверочный заказ" >&2
+          # Два заказа: сценарию маршрутов нужен порядок остановок, а он проверяется
+          # только там, где остановок хотя бы две.
+          output="$(npm run --silent seed:e2e-order -- --count=2)"
+          number="$(printf '%s' "$output" | sed -n 's/^номер:[[:space:]]*//p' | sed -n '1p')"
+          second="$(printf '%s' "$output" | sed -n 's/^номер:[[:space:]]*//p' | sed -n '2p')"
+          if [ -z "$number" ] || [ -z "$second" ]; then
+            echo "не удалось создать проверочные заказы" >&2
             exit 1
           fi
           echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "second=$second" >> "$GITHUB_OUTPUT"
 
       - name: Браузерный smoke
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
           E2E_ADMIN_CODE: ${{ steps.bootstrap.outputs.code }}
           E2E_ORDER_NUMBER: ${{ steps.seed-order.outputs.number }}
+          E2E_ORDER_NUMBER_2: ${{ steps.seed-order.outputs.second }}
         run: npm run test:e2e
 
   secrets-scan:

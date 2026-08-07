@@ -206,3 +206,106 @@ test('экран «Сделки»: список, поиск и ручной ин
   await page.getByRole('button', { name: 'Найти' }).click();
   await expect(page.locator('.deals__row', { hasText: orderNumber })).toBeVisible();
 });
+
+test('маршрут: черновик → состав → порядок → подтверждение → маршрутный лист', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
+  const second = process.env['E2E_ORDER_NUMBER_2'] ?? '';
+  test.skip(first === '' || second === '', 'нужны два проверочных заказа');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  // Черновик создаётся и сразу открывается: аренда выдаётся создателю.
+  await page.getByRole('button', { name: 'Создать черновик' }).click();
+  const card = page.locator('.routes__card');
+  await expect(card).toBeVisible();
+  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
+
+  // Оба заказа отмечаются и добавляются в маршрут.
+  await page.getByLabel(`Выбрать заказ ${first}`).check();
+  await page.getByLabel(`Выбрать заказ ${second}`).check();
+  await page.getByLabel('Маршрут для добавления').selectOption({ index: 1 });
+  await page.getByRole('button', { name: /Добавить выбранные/ }).click();
+
+  const stops = card.locator('.routes__stop');
+  await expect(stops).toHaveCount(2);
+  const firstStopBefore = await stops.first().innerText();
+
+  // Порядок меняется кнопками: перетаскивание не требуется.
+  await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
+  await expect(stops.first()).not.toHaveText(firstStopBefore);
+
+  // Подтверждение: блокировок быть не должно.
+  await card.getByRole('button', { name: 'Подтвердить маршрут' }).click();
+  await page.getByRole('button', { name: 'Подтвердить', exact: true }).last().click();
+  // Подсказка карточки однозначна: значок состояния встречается и в истории.
+  await expect(card.locator('.routes__hint')).toContainText('Маршрут подтверждён');
+  // Подтверждённый маршрут не редактируется обычными операциями.
+  await expect(card.getByRole('button', { name: /Вернуть выбранные/ })).toBeDisabled();
+
+  // Тот же маршрут появляется в маршрутных листах.
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await page
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть лист' })
+    .click();
+
+  const sheet = page.locator('.sheet');
+  await expect(sheet).toContainText(routeNumber);
+  await expect(sheet.locator('.sheet__stop')).toHaveCount(2);
+  await expect(sheet).toContainText('К получению');
+  // В листе есть адрес и получатель, но нет служебных технических полей.
+  await expect(sheet).toContainText('Москва, проверочный адрес 1');
+  await expect(sheet).not.toContainText('sumMinor');
+  await expect(sheet).not.toContainText('routeOrderId');
+});
+
+test('перехват блокировки переводит прежнего редактора в режим просмотра', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Первый сеанс создаёт черновик и держит его в работе.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await page.getByRole('button', { name: 'Создать черновик' }).click();
+
+  const card = page.locator('.routes__card');
+  await expect(card).toBeVisible();
+  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeEnabled();
+
+  // Второй сеанс того же администратора — другое устройство, другая семья сессий.
+  const secondContext = await browser.newContext();
+  const secondPage = await secondContext.newPage();
+  await login(secondPage, ADMIN_PHONE, ADMIN_PIN);
+  await secondPage.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await secondPage
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+
+  const secondCard = secondPage.locator('.routes__card');
+  await expect(secondCard.getByRole('button', { name: 'Перехватить' })).toBeVisible();
+  await secondCard.getByRole('button', { name: 'Перехватить' }).click();
+  await secondPage.getByLabel('Причина').fill('Продолжаю работу с другого устройства');
+  await secondPage.getByRole('button', { name: 'Продолжить' }).click();
+
+  // Первый сеанс узнаёт об этом сам, без перезагрузки страницы.
+  await expect(card.getByText(/Маршрут редактирует/)).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeDisabled();
+
+  await secondContext.close();
+});

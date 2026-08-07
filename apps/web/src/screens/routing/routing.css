@@ -1,0 +1,309 @@
+/*
+ * Экраны маршрутизации и маршрутных листов.
+ *
+ * Две колонки на широком экране и одна на узком. Плотность та же, что в «Сделках»:
+ * логист работает с этим экраном весь день, и воздух здесь дороже, чем красота.
+ *
+ * Печать оформлена в конце файла: на бумагу уходит только сам лист.
+ */
+
+.routes__header,
+.routes__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.routes__filters .field {
+  min-width: 12rem;
+}
+
+.routes__filter-actions {
+  display: flex;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+}
+
+.routes__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.routes__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.routes__panel-header {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.routes__panel-header h3 {
+  margin: 0;
+}
+
+.routes__panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: flex-end;
+}
+
+.routes__orders,
+.routes__list,
+.routes__stops,
+.routes__conflicts,
+.routes__blockers,
+.routes__transitions,
+.routes__audit {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routes__order,
+.routes__list-item,
+.routes__stop {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.routes__order:last-child,
+.routes__list-item:last-child,
+.routes__stop:last-child {
+  border-bottom: none;
+}
+
+.routes__order-body,
+.routes__stop-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.routes__order-head,
+.routes__stop-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.routes__number {
+  font-weight: 600;
+}
+
+.routes__position,
+.sheet__position {
+  display: inline-flex;
+  min-width: 1.75rem;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.routes__stop-actions {
+  display: flex;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.routes__stop-body-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.routes__conflicts,
+.routes__blockers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-warning);
+}
+
+.routes__conflicts li::before,
+.routes__blockers li::before {
+  content: '• ';
+}
+
+.routes__card {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.routes__card-header {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.routes__card-header h3 {
+  margin: 0;
+}
+
+.routes__hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  font-size: var(--font-size-sm);
+}
+
+.routes__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.routes__actions--wrap {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.routes__history summary {
+  cursor: pointer;
+  padding: var(--space-2) 0;
+}
+
+.routes__transitions,
+.routes__audit {
+  font-size: var(--font-size-sm);
+}
+
+.routes__transitions li,
+.routes__audit li {
+  padding: 2px 0;
+}
+
+/* --- Маршрутный лист ------------------------------------------------------ */
+
+.sheet {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.sheet__header {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.sheet__header h3 {
+  margin: 0;
+}
+
+.sheet__controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.sheet__stops {
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sheet__stop {
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  break-inside: avoid;
+}
+
+.sheet__stop-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.sheet__stop-line {
+  padding-top: 2px;
+}
+
+.sheet__warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-top: 2px;
+  font-size: var(--font-size-sm);
+  color: var(--color-warning);
+}
+
+.sheet__footer {
+  padding-top: var(--space-3);
+}
+
+@media (max-width: 900px) {
+  .routes__layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .routes__order,
+  .routes__list-item,
+  .routes__stop {
+    flex-direction: column;
+  }
+}
+
+/*
+ * Печать. На бумагу уходит только маршрутный лист: меню, кнопки и фильтры
+ * занимали бы место и сбивали курьера, а рамки и фон тратили бы тонер.
+ */
+@media print {
+  .no-print,
+  .shell__sidebar,
+  .shell__topbar,
+  .shell__bottombar,
+  .toast-region,
+  button {
+    display: none !important;
+  }
+
+  .sheet {
+    border: none;
+    padding: 0;
+    background: none;
+  }
+
+  .sheet__stop {
+    border-bottom: 1px solid #000;
+  }
+
+  .badge {
+    border: 1px solid #000;
+    background: none;
+    color: #000;
+  }
+}
