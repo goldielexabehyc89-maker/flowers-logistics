@@ -28,6 +28,13 @@ export const REALTIME_TOPICS = [
   'route.created',
   'route.updated',
   'route.conflict_detected',
+  'route.confirmed',
+  'route.returned_to_draft',
+  'route.cancelled',
+  // Блокировка редактора. Payload несёт только идентификаторы: ни семьи сессий,
+  // ни причины перехвата, ни номера маршрута там нет.
+  'route.edit_lock_changed',
+  'route.edit_lock_taken_over',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

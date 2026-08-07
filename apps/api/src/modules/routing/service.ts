@@ -33,6 +33,7 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import { isCalendarDate, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { calendarDate, ineligibleReason, INELIGIBLE_MESSAGES } from './eligibility.js';
 import { nextRouteNumber } from './numbering.js';
+import { grantLease, requireLease } from './lease.js';
 
 /** Кому адресованы события маршрутов. Курьеру глобальная картина не нужна. */
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
@@ -50,6 +51,14 @@ export interface RequestContext {
   ip: string | null;
   userAgent: string | null;
 }
+
+/** Часы вынесены в зависимости: проверки истечения аренды не должны ждать реального времени. */
+export interface RoutingDeps {
+  db: Database;
+  now?: () => Date;
+}
+
+const clockOf = (deps: RoutingDeps): (() => Date) => deps.now ?? (() => new Date());
 
 interface LockedRoute {
   id: string;
@@ -332,7 +341,7 @@ export interface CreateDraftInput {
 }
 
 export async function createDraft(
-  deps: { db: Database },
+  deps: RoutingDeps,
   actor: AuthenticatedActor,
   input: CreateDraftInput,
   context: RequestContext,
@@ -360,6 +369,10 @@ export async function createDraft(
       select: { id: true, number: true, version: true },
     });
 
+    // Создатель сразу получает маршрут в работу: иначе между созданием и первым
+    // добавлением заказа его успел бы занять другой редактор.
+    await grantLease(tx, route.id, actor, clockOf(deps)());
+
     await auditRoute(tx, 'ROUTE_CREATED', route.id, actor, context, {
       number: route.number,
       deliveryDate: input.deliveryDate,
@@ -378,7 +391,7 @@ export interface OrdersInput {
 }
 
 export async function addOrders(
-  deps: { db: Database },
+  deps: RoutingDeps,
   actor: AuthenticatedActor,
   routeId: string,
   input: OrdersInput,
@@ -391,6 +404,7 @@ export async function addOrders(
       const route = requireRoute(await lockRoutes(tx, [routeId]), routeId);
       requireDraft(route);
       requireVersion(route, input.expectedVersion);
+      await requireLease(tx, routeId, actor, clockOf(deps)());
 
       const orders = await lockOrders(tx, orderIds);
       assertAllFound(orders, orderIds);
@@ -437,7 +451,7 @@ export async function addOrders(
 }
 
 export async function returnOrders(
-  deps: { db: Database },
+  deps: RoutingDeps,
   actor: AuthenticatedActor,
   routeId: string,
   input: OrdersInput,
@@ -449,6 +463,7 @@ export async function returnOrders(
     const route = requireRoute(await lockRoutes(tx, [routeId]), routeId);
     requireDraft(route);
     requireVersion(route, input.expectedVersion);
+    await requireLease(tx, routeId, actor, clockOf(deps)());
 
     await lockOrders(tx, orderIds);
     const participations = await activeParticipations(tx, routeId);
@@ -462,7 +477,7 @@ export async function returnOrders(
       });
     }
 
-    const now = new Date();
+    const now = clockOf(deps)();
     for (const item of target) {
       await tx.routeOrder.update({
         where: { id: item.id },
@@ -501,7 +516,7 @@ export interface MoveInput {
 }
 
 export async function moveOrders(
-  deps: { db: Database },
+  deps: RoutingDeps,
   actor: AuthenticatedActor,
   input: MoveInput,
   context: RequestContext,
@@ -528,6 +543,13 @@ export async function moveOrders(
       requireVersion(source, input.expectedSourceVersion);
       requireVersion(target, input.expectedTargetVersion);
 
+      // Перемещение меняет оба маршрута, поэтому оба должны быть у пользователя
+      // в работе. Аренды берутся в том же порядке, что и сами маршруты.
+      const now = clockOf(deps)();
+      for (const id of [input.fromRouteId, input.toRouteId].sort()) {
+        await requireLease(tx, id, actor, now);
+      }
+
       const orders = await lockOrders(tx, orderIds);
       assertAllFound(orders, orderIds);
       assertEligible(orders, calendarDate(target.deliveryDate));
@@ -542,7 +564,6 @@ export async function moveOrders(
         });
       }
 
-      const now = new Date();
       for (const item of moving) {
         await tx.routeOrder.update({
           where: { id: item.id },
@@ -611,7 +632,7 @@ export async function moveOrders(
 }
 
 export async function reorder(
-  deps: { db: Database },
+  deps: RoutingDeps,
   actor: AuthenticatedActor,
   routeId: string,
   input: OrdersInput,
@@ -621,6 +642,7 @@ export async function reorder(
     const route = requireRoute(await lockRoutes(tx, [routeId]), routeId);
     requireDraft(route);
     requireVersion(route, input.expectedVersion);
+    await requireLease(tx, routeId, actor, clockOf(deps)());
 
     const participations = await activeParticipations(tx, routeId);
     const current = participations.map((item) => item.orderId);
@@ -665,7 +687,7 @@ export interface CourierInput {
 }
 
 export async function setCourier(
-  deps: { db: Database },
+  deps: RoutingDeps,
   actor: AuthenticatedActor,
   routeId: string,
   input: CourierInput,
@@ -675,6 +697,7 @@ export async function setCourier(
     const route = requireRoute(await lockRoutes(tx, [routeId]), routeId);
     requireDraft(route);
     requireVersion(route, input.expectedVersion);
+    await requireLease(tx, routeId, actor, clockOf(deps)());
 
     if (input.courierUserId !== null) {
       await assertCourierAssignable(tx, actor, input.courierUserId);

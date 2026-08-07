@@ -107,6 +107,8 @@ model User {
   assignedRoutes   DeliveryRoute[] @relation("RouteCourier")
   addedRouteOrders RouteOrder[]    @relation("RouteOrderAddedBy")
   removedRouteOrders RouteOrder[]  @relation("RouteOrderRemovedBy")
+  routeTransitions RouteStateTransition[]
+  routeEditLeases  RouteEditLease[]
 
   @@index([status])
   @@index([createdAt])
@@ -592,6 +594,8 @@ enum RouteOrderRemovalReason {
   RETURNED_TO_UNASSIGNED
   /// Перемещён в другой маршрут; целевой маршрут записан в movedToRouteId.
   MOVED_TO_ANOTHER_ROUTE
+  /// Маршрут отменён: участие закрывается вместе с ним, история сохраняется.
+  ROUTE_CANCELLED
 }
 
 /// Известное расхождение уже распределённого заказа с маршрутом.
@@ -643,6 +647,8 @@ model DeliveryRoute {
 
   orders       RouteOrder[] @relation("RouteOrderRoute")
   movedInOrders RouteOrder[] @relation("RouteOrderMovedTo")
+  transitions RouteStateTransition[]
+  editLease   RouteEditLease?
 
   @@index([deliveryDate, state])
   @@index([courierUserId])
@@ -713,4 +719,64 @@ model RouteNumberCounter {
   deliveryDate DateTime @id @db.Date
   lastNumber   Int      @default(0)
   updatedAt    DateTime @updatedAt
+}
+
+
+/// Неизменяемая история переходов состояния маршрута.
+///
+/// `DeliveryRoute.state` — текущее состояние, эта таблица — доказательство того,
+/// кто, когда и почему его менял. Причина после записи не изменяется: переписанное
+/// объяснение отмены обесценило бы всю историю.
+model RouteStateTransition {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeId String        @db.Uuid
+  route   DeliveryRoute @relation(fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  fromState RouteState
+  toState   RouteState
+
+  actorUserId String @db.Uuid
+  actor       User   @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  occurredAt DateTime @default(now())
+
+  /// Обязательна при возврате в черновик и при отмене; при подтверждении отсутствует.
+  /// Длина ограничена базой: 3–500 символов.
+  reason String?
+
+  @@index([routeId, occurredAt])
+}
+
+/// Мягкая блокировка редактора черновика.
+///
+/// Одна строка на маршрут: это операционное состояние «кто сейчас редактирует»,
+/// а не история — история действий с блокировкой живёт в `AuditLog`.
+///
+/// Держатель определяется парой «пользователь + семья сессий»: один человек
+/// с двух устройств — это два редактора, и второе устройство не должно молча
+/// перехватывать правки первого.
+///
+/// Блокировка мягкая: она истекает по времени, её можно безопасно перехватить,
+/// и она не держит открытой транзакцию PostgreSQL между запросами.
+model RouteEditLease {
+  routeId String        @id @db.Uuid
+  route   DeliveryRoute @relation(fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  holderUserId String @db.Uuid
+  holder       User   @relation(fields: [holderUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Семья сессий устройства. Наружу не возвращается никогда.
+  holderFamilyId String @db.Uuid
+
+  acquiredAt  DateTime  @default(now())
+  heartbeatAt DateTime  @default(now())
+  expiresAt   DateTime
+  releasedAt  DateTime?
+
+  /// Версия для конкурентного перехвата: takeover обязан назвать ту, что видел.
+  version Int @default(1)
+
+  @@index([holderUserId])
+  @@index([expiresAt])
 }
