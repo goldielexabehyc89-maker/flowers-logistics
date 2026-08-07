@@ -23,6 +23,11 @@ export const REALTIME_TOPICS = [
   'order.created',
   'order.updated',
   'order.scope_changed',
+  // Маршруты. Тоже только ADMIN и LOGISTICIAN. В payload — идентификаторы и вид
+  // события: ни номера маршрута, ни адресов, ни денег там быть не должно.
+  'route.created',
+  'route.updated',
+  'route.conflict_detected',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

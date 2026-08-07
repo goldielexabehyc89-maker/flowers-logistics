@@ -103,6 +103,11 @@ model User {
   settingUpdates  SystemSetting[]
   realtimeEvents  RealtimeEvent[]
 
+  createdRoutes    DeliveryRoute[] @relation("RouteCreatedBy")
+  assignedRoutes   DeliveryRoute[] @relation("RouteCourier")
+  addedRouteOrders RouteOrder[]    @relation("RouteOrderAddedBy")
+  removedRouteOrders RouteOrder[]  @relation("RouteOrderRemovedBy")
+
   @@index([status])
   @@index([createdAt])
 }
@@ -505,7 +510,8 @@ model DeliveryOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  revisions DeliveryOrderRevision[]
+  revisions      DeliveryOrderRevision[]
+  routeOrders    RouteOrder[]
 
   @@index([inScope, deliveryDate])
   @@index([needsAttention])
@@ -564,4 +570,147 @@ model IntegrationCursor {
   version   Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+
+// --- Этап 4.1. Ручные маршруты-черновики -------------------------------------
+
+/// Состояние маршрута.
+///
+/// CONFIRMED и CANCELLED объявлены заранее: они нужны модели этапа 4 целиком,
+/// но переходы из DRAFT появятся только в ветке 4.2. ACTIVE и COMPLETED
+/// сознательно не добавляются — их введёт forward-only миграция этапа 6.
+enum RouteState {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+/// Почему заказ покинул состав маршрута.
+enum RouteOrderRemovalReason {
+  /// Возвращён в нераспределённые.
+  RETURNED_TO_UNASSIGNED
+  /// Перемещён в другой маршрут; целевой маршрут записан в movedToRouteId.
+  MOVED_TO_ANOTHER_ROUTE
+}
+
+/// Известное расхождение уже распределённого заказа с маршрутом.
+///
+/// Заказ при этом НЕ удаляется из маршрута автоматически: молчаливое исключение
+/// лишило бы логиста возможности заметить проблему. Разрешение всегда ручное.
+enum RouteOrderConflictKind {
+  /// Дата доставки в МоемСкладе перестала совпадать с датой маршрута.
+  DELIVERY_DATE_CHANGED
+  /// Заказ вышел из нашей области: другой склад или другой способ доставки.
+  SCOPE_LOST
+  /// Источник не найден контрольной сверкой.
+  SOURCE_MISSING
+  /// Источник архивирован в МоемСкладе.
+  SOURCE_ARCHIVED
+}
+
+/// Маршрут доставки. На этапе 4.1 создаётся только вручную и только как черновик.
+///
+/// Физическое удаление запрещено триггером: маршрут отменяется с причиной,
+/// но не стирается — иначе исчезла бы история распределения заказов.
+model DeliveryRoute {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Понятный человеку номер вида R-2026-08-07-003. PII не содержит.
+  /// Выдаётся атомарно через RouteNumberCounter в той же транзакции.
+  number String @unique
+
+  /// Календарная дата Москвы. После создания не изменяется (триггер базы):
+  /// перенос на другой день выполняется созданием другого черновика.
+  deliveryDate DateTime @db.Date
+
+  state       RouteState  @default(DRAFT)
+  vehicleType VehicleType
+
+  /// Назначенный курьер. Пустое значение допустимо: маршрут может существовать
+  /// без курьера, назначение состояние маршрута не меняет.
+  courierUserId String? @db.Uuid
+  courier       User?   @relation("RouteCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  createdById String @db.Uuid
+  createdBy   User   @relation("RouteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Оптимистическая блокировка. За одну логическую операцию увеличивается ровно один раз.
+  version Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders       RouteOrder[] @relation("RouteOrderRoute")
+  movedInOrders RouteOrder[] @relation("RouteOrderMovedTo")
+
+  @@index([deliveryDate, state])
+  @@index([courierUserId])
+}
+
+/// Участие заказа в маршруте с историей.
+///
+/// Строка не удаляется и не оживляется: повторное добавление ранее удалённого
+/// заказа создаёт НОВУЮ строку. Так история распределения остаётся доказательством
+/// того, кто, когда и куда переносил заказ.
+model RouteOrder {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeId String        @db.Uuid
+  route   DeliveryRoute @relation("RouteOrderRoute", fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Позиция в маршруте, начиная с 1. Уникальна среди активных участий маршрута.
+  position Int
+
+  addedById String   @db.Uuid
+  addedBy   User     @relation("RouteOrderAddedBy", fields: [addedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  addedAt   DateTime @default(now())
+
+  /// Три поля удаления заполняются вместе и после фиксации не изменяются.
+  removedById   String?                  @db.Uuid
+  removedBy     User?                    @relation("RouteOrderRemovedBy", fields: [removedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  removedAt     DateTime?
+  removalReason RouteOrderRemovalReason?
+
+  /// Куда ушёл заказ при перемещении. Обязателен ровно при MOVED_TO_ANOTHER_ROUTE.
+  movedToRouteId String?        @db.Uuid
+  movedToRoute   DeliveryRoute? @relation("RouteOrderMovedTo", fields: [movedToRouteId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  conflicts RouteOrderConflict[]
+
+  @@index([routeId, position])
+  @@index([orderId])
+}
+
+/// Конфликт распределённого заказа. Неизменяемая запись.
+///
+/// Отдельная таблица, а не поле участия: заказ может одновременно сменить дату,
+/// выйти из области и оказаться архивированным, и одно поле потеряло бы часть причин.
+/// Пара (участие, вид) уникальна, поэтому повторный overlap-проход синхронизации
+/// не создаёт дубликат и не уведомляет логистов второй раз.
+model RouteOrderConflict {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  kind       RouteOrderConflictKind
+  detectedAt DateTime               @default(now())
+
+  @@unique([routeOrderId, kind])
+  @@index([routeOrderId])
+}
+
+/// Счётчик номеров маршрутов по дням.
+///
+/// Инкремент выполняется одним оператором INSERT ... ON CONFLICT DO UPDATE
+/// в той же транзакции, что и создание маршрута: откат создания откатывает
+/// и номер. Сериализуются только маршруты одного дня.
+model RouteNumberCounter {
+  deliveryDate DateTime @id @db.Date
+  lastNumber   Int      @default(0)
+  updatedAt    DateTime @updatedAt
 }
