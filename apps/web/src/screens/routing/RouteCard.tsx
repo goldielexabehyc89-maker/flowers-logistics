@@ -119,9 +119,19 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
     void queryClient.invalidateQueries({ queryKey: ['unassigned-orders'] });
   };
 
-  const afterSuccess = (message: string): void => {
+  /**
+   * Успешная мутация.
+   *
+   * Сервер возвращает свежую карточку целиком, и она кладётся в кэш сразу:
+   * иначе между ответом и повторным запросом остаётся окно, в котором следующая
+   * кнопка отправила бы устаревшую версию и честно получила бы 409 на пустом месте.
+   */
+  const afterSuccess = (message: string, card?: RouteCardView): void => {
     showToast(message, 'success');
     setSelected([]);
+    if (card !== undefined) {
+      queryClient.setQueryData(['route', routeId], card);
+    }
     void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
     void queryClient.invalidateQueries({ queryKey: ['route-history', routeId] });
     void queryClient.invalidateQueries({ queryKey: ['routes'] });
@@ -141,56 +151,58 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
 
   const moveOrders = useMutation({
     mutationFn: (input: { targetId: string; targetVersion: number; orderIds: string[] }) =>
-      client.post('/api/routes/move', {
+      client.post<{ source: RouteCardView; target: RouteCardView }>('/api/routes/move', {
         fromRouteId: routeId,
         toRouteId: input.targetId,
         orderIds: input.orderIds,
         expectedSourceVersion: route?.version ?? 0,
         expectedTargetVersion: input.targetVersion,
       }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       setMoveTargetId('');
-      afterSuccess('Заказы перенесены в другой маршрут');
+      afterSuccess('Заказы перенесены в другой маршрут', result.source);
     },
     onError: handleFailure,
   });
 
   const returnOrders = useMutation({
     mutationFn: (orderIds: string[]) =>
-      client.post(`/api/routes/${routeId}/orders/return`, {
+      client.post<RouteCardView>(`/api/routes/${routeId}/orders/return`, {
         orderIds,
         expectedVersion: route?.version ?? 0,
       }),
-    onSuccess: () => afterSuccess('Заказы возвращены в нераспределённые'),
+    onSuccess: (card) => afterSuccess('Заказы возвращены в нераспределённые', card),
     onError: handleFailure,
   });
 
   const reorder = useMutation({
     mutationFn: (orderIds: string[]) =>
-      client.put(`/api/routes/${routeId}/orders/reorder`, {
+      client.put<RouteCardView>(`/api/routes/${routeId}/orders/reorder`, {
         orderIds,
         expectedVersion: route?.version ?? 0,
       }),
-    onSuccess: () => afterSuccess('Порядок сохранён'),
+    onSuccess: (card) => afterSuccess('Порядок сохранён', card),
     onError: handleFailure,
   });
 
   const setCourier = useMutation({
     mutationFn: (courierUserId: string | null) =>
-      client.put(`/api/routes/${routeId}/courier`, {
+      client.put<RouteCardView>(`/api/routes/${routeId}/courier`, {
         courierUserId,
         expectedVersion: route?.version ?? 0,
       }),
-    onSuccess: () => afterSuccess('Курьер обновлён'),
+    onSuccess: (card) => afterSuccess('Курьер обновлён', card),
     onError: handleFailure,
   });
 
   const confirmRoute = useMutation({
     mutationFn: () =>
-      client.post(`/api/routes/${routeId}/confirm`, { expectedVersion: route?.version ?? 0 }),
-    onSuccess: () => {
+      client.post<RouteCardView>(`/api/routes/${routeId}/confirm`, {
+        expectedVersion: route?.version ?? 0,
+      }),
+    onSuccess: (card) => {
       setConfirmOpen(false);
-      afterSuccess('Маршрут подтверждён');
+      afterSuccess('Маршрут подтверждён', card);
     },
     onError: (error: unknown) => {
       setConfirmOpen(false);
@@ -200,15 +212,16 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
 
   const withReason = useMutation({
     mutationFn: (input: { action: 'return-to-draft' | 'cancel'; reason: string }) =>
-      client.post(`/api/routes/${routeId}/${input.action}`, {
+      client.post<RouteCardView>(`/api/routes/${routeId}/${input.action}`, {
         expectedVersion: route?.version ?? 0,
         reason: input.reason,
       }),
-    onSuccess: (_data, variables) => {
+    onSuccess: (card, variables) => {
       setPendingAction(null);
       setReason('');
       afterSuccess(
         variables.action === 'cancel' ? 'Маршрут отменён' : 'Маршрут возвращён в черновик',
+        card,
       );
     },
     onError: (error: unknown) => {

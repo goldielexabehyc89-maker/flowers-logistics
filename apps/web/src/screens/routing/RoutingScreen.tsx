@@ -137,11 +137,16 @@ export function RoutingScreen(): React.JSX.Element {
 
   const addOrders = useMutation({
     mutationFn: (input: { routeId: string; version: number; orderIds: string[] }) =>
-      client.post(`/api/routes/${input.routeId}/orders`, {
+      client.post<{ id: string }>(`/api/routes/${input.routeId}/orders`, {
         orderIds: input.orderIds,
         expectedVersion: input.version,
       }),
-    onSuccess: () => success('Заказы добавлены в маршрут'),
+    onSuccess: (card) => {
+      // Сервер вернул свежую карточку: кладём её сразу, чтобы следующая операция
+      // не отправила устаревшую версию и не получила 409 на ровном месте.
+      queryClient.setQueryData(['route', card.id], card);
+      success('Заказы добавлены в маршрут');
+    },
     onError: failure,
   });
 
