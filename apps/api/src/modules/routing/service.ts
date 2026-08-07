@@ -30,7 +30,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
-import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { isCalendarDate, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { calendarDate, ineligibleReason, INELIGIBLE_MESSAGES } from './eligibility.js';
 import { nextRouteNumber } from './numbering.js';
 
@@ -337,6 +337,16 @@ export async function createDraft(
   input: CreateDraftInput,
   context: RequestContext,
 ): Promise<{ id: string; number: string; version: number }> {
+  // Проверка повторяется на сервисном слое намеренно: корректность даты не должна
+  // зависеть только от HTTP-схемы. Отказ происходит ДО транзакции, поэтому
+  // ни маршрут, ни счётчик номеров, ни аудит, ни событие не создаются.
+  if (!isCalendarDate(input.deliveryDate)) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'invalid calendar date',
+      publicMessage: 'Указана несуществующая дата доставки.',
+    });
+  }
+
   return deps.db.$transaction(async (tx) => {
     const number = await nextRouteNumber(tx, input.deliveryDate);
 

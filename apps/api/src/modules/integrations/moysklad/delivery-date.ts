@@ -75,6 +75,23 @@ export function parseDeliveryDate(input: string | null | undefined): ParsedDeliv
 }
 
 /**
+ * Существует ли такая календарная дата.
+ *
+ * Строгая проверка без единой нормализации: `new Date('2026-02-30')` молча даст
+ * первое марта, и несуществующий день превратился бы в реальный — либо в чужую
+ * выборку при фильтре, либо во внутреннюю ошибку PostgreSQL при записи.
+ * Проверяется ровно формат `YYYY-MM-DD`, месяц 1–12 и реальная длина месяца
+ * с учётом високосного года.
+ */
+export function isCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) {
+    return false;
+  }
+  return isRealDate(Number(match[1]), Number(match[2]), Number(match[3]));
+}
+
+/**
  * Значение для колонки типа DATE.
  *
  * Полночь UTC выбрана намеренно: PostgreSQL сохранит именно эту календарную дату,

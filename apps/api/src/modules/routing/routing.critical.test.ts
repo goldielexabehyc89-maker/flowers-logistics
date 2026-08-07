@@ -271,6 +271,78 @@ describe('инварианты базы', () => {
   });
 });
 
+describe('календарная дата маршрута', () => {
+  it('несуществующая дата отклоняется и ничего не создаёт', async () => {
+    const token = await tokenFor(['ADMIN']);
+    const routesBefore = await ctx.db.deliveryRoute.count();
+    const countersBefore = await ctx.db.routeNumberCounter.count();
+    const auditBefore = await ctx.db.auditLog.count({ where: { entityType: 'DeliveryRoute' } });
+    const eventsBefore = await ctx.db.realtimeEvent.count();
+
+    for (const deliveryDate of ['2026-02-30', '2026-13-01', '2025-02-29']) {
+      const response = await call('POST', '/api/routes', token, {
+        deliveryDate,
+        vehicleType: 'CAR',
+      });
+      expect(response.statusCode, deliveryDate).toBe(400);
+      expect((response.json() as { error: { code: string } }).error.code).toBe('VALIDATION_FAILED');
+    }
+
+    expect(await ctx.db.deliveryRoute.count()).toBe(routesBefore);
+    expect(await ctx.db.routeNumberCounter.count()).toBe(countersBefore);
+    expect(await ctx.db.auditLog.count({ where: { entityType: 'DeliveryRoute' } })).toBe(
+      auditBefore,
+    );
+    expect(await ctx.db.realtimeEvent.count()).toBe(eventsBefore);
+  });
+
+  it('високосный день принимается', async () => {
+    const token = await tokenFor(['ADMIN']);
+    const response = await call('POST', '/api/routes', token, {
+      deliveryDate: '2024-02-29',
+      vehicleType: 'CAR',
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect((response.json() as { number: string }).number).toBe('R-2024-02-29-001');
+  });
+
+  it('сервисный слой отвергает несуществующую дату и без HTTP', async () => {
+    const { createDraft } = await import('./service.js');
+    const actor = {
+      userId: (await seedUser(ctx.db, { roles: ['ADMIN'] })).id,
+      familyId: randomUUID(),
+      roles: ['ADMIN'] as Role[],
+      fullName: 'Проверка',
+      phone: '+79990000000',
+    };
+
+    await expect(
+      createDraft(
+        { db: ctx.db },
+        actor,
+        { deliveryDate: '2026-02-30', vehicleType: 'CAR' },
+        { ip: null, userAgent: null },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('несуществующая дата в фильтре списка не подменяется соседним днём', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    // Маршрут первого марта существует: нормализованная «30 февраля» вернула бы его.
+    const march = await createRoute(token, '2026-03-01');
+
+    const invalid = await call('GET', '/api/routes?deliveryDate=2026-02-30', token);
+    expect(invalid.statusCode).toBe(400);
+
+    const valid = await call('GET', '/api/routes?deliveryDate=2026-03-01', token);
+    expect(valid.statusCode).toBe(200);
+    expect((valid.json() as { items: { id: string }[] }).items.map((item) => item.id)).toContain(
+      march.id,
+    );
+  });
+});
+
 // --- Права ------------------------------------------------------------------
 
 describe('права', () => {

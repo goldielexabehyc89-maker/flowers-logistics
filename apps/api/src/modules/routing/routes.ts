@@ -15,7 +15,7 @@ import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
 import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
-import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { fromDateColumn, isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import { assignmentStateOf, calendarDate } from './eligibility.js';
 import {
   addOrders,
@@ -36,7 +36,16 @@ const uuid = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'Некорректный id');
 
-const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Ожидается дата в формате ГГГГ-ММ-ДД');
+/**
+ * Календарная дата с проверкой существования дня.
+ *
+ * Одной формы `ГГГГ-ММ-ДД` мало: `2026-02-30` прошла бы регулярное выражение,
+ * а дальше либо упала бы внутренней ошибкой базы, либо — в фильтре списка —
+ * молча превратилась бы в первое марта и вернула маршруты другого дня.
+ */
+const dateSchema = z
+  .string()
+  .refine(isCalendarDate, 'Ожидается существующая дата в формате ГГГГ-ММ-ДД');
 
 const idParamSchema = z.object({ id: uuid });
 
