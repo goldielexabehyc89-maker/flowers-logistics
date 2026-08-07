@@ -302,9 +302,13 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
     const { id } = idParamSchema.parse(request.params);
 
-    await acquireLease(deps, actor, id, contextOf(request));
+    // `granted` отличает выданную аренду от продления собственной. Клиенту это
+    // нужно, чтобы после разовой операции освободить ровно то, что он занял,
+    // и не отнять маршрут у своей же открытой карточки.
+    const result = await acquireLease(deps, actor, id, contextOf(request));
     return {
       editLock: await leaseView(deps, id, actor),
+      granted: result.granted,
       ttlMs: LEASE_TTL_MS,
       heartbeatMs: LEASE_HEARTBEAT_MS,
     };

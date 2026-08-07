@@ -433,6 +433,47 @@ describe('выборка нераспределённых заказов для 
     expect(await unassigned(token, day)).toContain(orderId);
   });
 
+  it('нераспределённые нельзя запросить вне нашей области', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+
+    // Несовместимые параметры отклоняются, а не «выигрывает последний».
+    const response = await call(
+      'GET',
+      '/api/orders?unassigned=true&inScope=false&deliveryDate=2026-11-20',
+      token,
+    );
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { error: { code: string } }).error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('поиск не отменяет ограничение выбранного дня', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-24';
+    const marker = `Маркер-${Date.now()}`;
+
+    const sameDay = await seedOrder({
+      deliveryPlannedMoment: `${day} 12:00:00.000`,
+      shipmentAddress: `Москва, ${marker}`,
+    });
+    const otherDay = await seedOrder({
+      deliveryPlannedMoment: '2026-11-25 12:00:00.000',
+      shipmentAddress: `Москва, ${marker}`,
+    });
+
+    const found = await call(
+      'GET',
+      `/api/orders?unassigned=true&deliveryDate=${day}&search=${encodeURIComponent(marker)}`,
+      token,
+    );
+    expect(found.statusCode).toBe(200);
+    const ids = (found.json() as { items: { id: string }[] }).items.map((item) => item.id);
+
+    expect(ids).toContain(sameDay);
+    // Заказ соседнего дня с тем же адресом в выборку попасть не должен:
+    // иначе он оказался бы в маршруте чужой даты.
+    expect(ids).not.toContain(otherDay);
+  });
+
   it('курьер и склад выборку не получают', async () => {
     for (const roles of [['COURIER'], ['WAREHOUSE']] as Role[][]) {
       const response = await call(
@@ -873,6 +914,95 @@ describe('перемещение между черновиками', () => {
 });
 
 // --- Курьер -----------------------------------------------------------------
+
+describe('перенос между черновиками с арендой обоих', () => {
+  async function tokenFor(roles: Role[]): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  it('захват целевого маршрута делает перенос выполнимым', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const from = await createRoute(token);
+    const to = await createRoute(token);
+    const orderId = await seedOrder();
+
+    const added = await call('POST', `/api/routes/${from.id}/orders`, token, {
+      orderIds: [orderId],
+      expectedVersion: from.version,
+    });
+
+    // Целевой маршрут берётся в работу ровно так, как это делает интерфейс.
+    const acquired = await call('POST', `/api/routes/${to.id}/edit-lock/acquire`, token, {});
+    expect(acquired.statusCode).toBe(200);
+    // Аренда была выдана этой операцией, а не продлена: её нужно вернуть после.
+    expect((acquired.json() as { granted: boolean }).granted).toBe(false);
+
+    const target = (await call('GET', `/api/routes/${to.id}`, token)).json() as {
+      version: number;
+    };
+
+    const moved = await call('POST', '/api/routes/move', token, {
+      fromRouteId: from.id,
+      toRouteId: to.id,
+      orderIds: [orderId],
+      expectedSourceVersion: (added.json() as RouteCard).version,
+      expectedTargetVersion: target.version,
+    });
+    expect(moved.statusCode).toBe(200);
+
+    expect(await ctx.db.routeOrder.count({ where: { routeId: to.id, removedAt: null } })).toBe(1);
+    expect(await ctx.db.routeOrder.count({ where: { routeId: from.id, removedAt: null } })).toBe(0);
+  });
+
+  it('без аренды целевого маршрута перенос не выполняется и состав не меняется', async () => {
+    const owner = await tokenFor(['LOGISTICIAN']);
+    const rival = await tokenFor(['LOGISTICIAN']);
+    const from = await createRoute(owner);
+    const to = await createRoute(rival);
+    const orderId = await seedOrder();
+
+    const added = await call('POST', `/api/routes/${from.id}/orders`, owner, {
+      orderIds: [orderId],
+      expectedVersion: from.version,
+    });
+
+    // Целевой маршрут держит другой редактор: захват отказывает.
+    const acquire = await call('POST', `/api/routes/${to.id}/edit-lock/acquire`, owner, {});
+    expect(acquire.statusCode).toBe(409);
+
+    const moved = await call('POST', '/api/routes/move', owner, {
+      fromRouteId: from.id,
+      toRouteId: to.id,
+      orderIds: [orderId],
+      expectedSourceVersion: (added.json() as RouteCard).version,
+      expectedTargetVersion: to.version,
+    });
+    expect(moved.statusCode).toBe(409);
+
+    expect(await ctx.db.routeOrder.count({ where: { routeId: from.id, removedAt: null } })).toBe(1);
+    expect(await ctx.db.routeOrder.count({ where: { routeId: to.id } })).toBe(0);
+  });
+
+  it('повторный захват собственного маршрута не выдаёт новую аренду', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const route = await createRoute(token);
+
+    // Создатель уже держит маршрут: интерфейс не должен освобождать его после операции.
+    const acquired = await call('POST', `/api/routes/${route.id}/edit-lock/acquire`, token, {});
+    expect(acquired.statusCode).toBe(200);
+    expect((acquired.json() as { granted: boolean }).granted).toBe(false);
+  });
+});
 
 describe('назначение курьера', () => {
   it('назначается только активный курьер', async () => {

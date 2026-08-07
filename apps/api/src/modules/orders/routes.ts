@@ -145,7 +145,21 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     await authenticateWithRoles(request, deps, ORDER_ROLES);
     const query = listQuerySchema.parse(request.query);
 
-    const inScope = query.inScope === undefined ? true : query.inScope === 'true';
+    const unassignedOnly = query.unassigned === 'true';
+
+    // Несовместимые параметры отклоняются, а не «выигрывает последний»: запрос
+    // «нераспределённые, но вне нашей доставки» бессмыслен, и молча подменять
+    // его смысл опаснее, чем отказать.
+    if (unassignedOnly && query.inScope === 'false') {
+      throw new AppError('VALIDATION_FAILED', {
+        message: 'unassigned=true is incompatible with inScope=false',
+        publicMessage: 'Нераспределённые заказы существуют только внутри нашей доставки.',
+      });
+    }
+
+    // Выборка для распределения всегда идёт по заказам нашей области.
+    const inScope =
+      unassignedOnly || (query.inScope === undefined ? true : query.inScope === 'true');
     const where: Record<string, unknown> = { inScope };
 
     if (query.needsAttention !== undefined) {
@@ -170,8 +184,6 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       });
     }
 
-    const unassignedOnly = query.unassigned === 'true';
-
     // Заказ без распознанной даты виден при ЛЮБОМ выбранном дне — и при дне
     // по умолчанию, и при явно указанном. Иначе он исчезал бы из «Требует
     // внимания» именно тогда, когда им нужно заняться, а даты у него нет
@@ -180,7 +192,12 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     // Исключение — выборка для распределения: заказ без даты положить в маршрут
     // нельзя, и на экране маршрутизации он был бы ложным обещанием. Он остаётся
     // в «Сделках → Требуют внимания», где им и занимаются.
-    const day = query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date()));
+    // День у выборки для распределения всегда ровно один: явный либо текущий
+    // московский. Поиск его не отменяет — иначе в маршрут одного дня попали бы
+    // заказы соседнего, и правило одной даты нарушилось бы ещё до сервера.
+    const day = unassignedOnly
+      ? (query.deliveryDate ?? moscowToday(new Date()))
+      : (query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date())));
 
     if (day !== null) {
       conditions.push(

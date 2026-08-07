@@ -5,7 +5,8 @@
  * увидит вместо кода конфликта и какой порядок получится после сдвига остановки.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHeartbeatController } from './lease-controller';
 import {
   blockerLabel,
   canEdit,
@@ -148,5 +149,101 @@ describe('отображение данных остановки', () => {
   it('текущий день считается по Москве', () => {
     expect(moscowToday(new Date('2026-08-06T21:30:00.000Z'))).toBe('2026-08-07');
     expect(moscowToday(new Date('2026-08-06T20:59:59.000Z'))).toBe('2026-08-06');
+  });
+});
+
+describe('сердцебиение аренды', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function controller(send: () => Promise<void>, onLost = (): void => undefined) {
+    return createHeartbeatController({
+      intervalMs: 30_000,
+      setInterval: (handler, ms) => globalThis.setInterval(handler, ms),
+      clearInterval: (handle) => globalThis.clearInterval(handle as number),
+      send,
+      onLost,
+    });
+  }
+
+  it('чужая карточка не отправляет ни одного сердцебиения', async () => {
+    const send = vi.fn(async () => undefined);
+    const lease = controller(send);
+
+    // Аренду держит другой редактор: таймер не запускается вовсе.
+    lease.setHeld(false);
+    expect(lease.isRunning()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('своя аренда подтверждается по расписанию', async () => {
+    const send = vi.fn(async () => undefined);
+    const lease = controller(send);
+
+    lease.setHeld(true);
+    expect(lease.isRunning()).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(send).toHaveBeenCalledTimes(3);
+
+    lease.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it('после перехвата таймер останавливается сразу, не дожидаясь следующего тика', async () => {
+    const send = vi.fn(async () => undefined);
+    const onLost = vi.fn();
+    const lease = controller(send, onLost);
+
+    lease.setHeld(true);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Карточка узнала о перехвате: аренда больше не наша.
+    lease.setHeld(false);
+    expect(lease.isRunning()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(onLost).not.toHaveBeenCalled();
+  });
+
+  it('отказ сервера останавливает сердцебиение и сообщает о потере', async () => {
+    const send = vi.fn(async () => {
+      throw new Error('409');
+    });
+    const onLost = vi.fn();
+    const lease = controller(send, onLost);
+
+    lease.setHeld(true);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(onLost).toHaveBeenCalledTimes(1);
+    expect(lease.isRunning()).toBe(false);
+
+    // Повторных попыток нет: стучаться в чужую аренду бессмысленно.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('повторное подтверждение удержания не плодит таймеры', async () => {
+    const send = vi.fn(async () => undefined);
+    const lease = controller(send);
+
+    lease.setHeld(true);
+    lease.setHeld(true);
+    lease.setHeld(true);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });

@@ -84,6 +84,7 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
     client,
     routeId,
     enabled: route?.state === 'DRAFT',
+    heldByCurrentSession: route?.editLock.heldByCurrentSession === true,
     onChanged: () => {
       void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
     },
@@ -149,15 +150,45 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
     enabled: route !== undefined && route.state === 'DRAFT',
   });
 
+  /**
+   * Перенос между черновиками.
+   *
+   * Сервер требует аренду ОБОИХ маршрутов: перенос меняет состав и там, и там.
+   * Поэтому целевой маршрут берётся в работу на время операции и освобождается
+   * сразу после неё — но только если аренду выдали именно под эту операцию.
+   * Если та же вкладка уже держала целевой маршрут открытым, освобождать его
+   * нельзя: пользователь потерял бы собственную блокировку.
+   *
+   * Версия целевого маршрута читается здесь же, после захвата: значение из списка
+   * могло устареть, пока логист выбирал заказы.
+   */
   const moveOrders = useMutation({
-    mutationFn: (input: { targetId: string; targetVersion: number; orderIds: string[] }) =>
-      client.post<{ source: RouteCardView; target: RouteCardView }>('/api/routes/move', {
-        fromRouteId: routeId,
-        toRouteId: input.targetId,
-        orderIds: input.orderIds,
-        expectedSourceVersion: route?.version ?? 0,
-        expectedTargetVersion: input.targetVersion,
-      }),
+    mutationFn: async (input: { targetId: string; orderIds: string[] }) => {
+      const acquired = await client.post<{ granted: boolean }>(
+        `/api/routes/${input.targetId}/edit-lock/acquire`,
+        {},
+      );
+
+      try {
+        const target = await client.get<RouteCardView>(`/api/routes/${input.targetId}`);
+        return await client.post<{ source: RouteCardView; target: RouteCardView }>(
+          '/api/routes/move',
+          {
+            fromRouteId: routeId,
+            toRouteId: input.targetId,
+            orderIds: input.orderIds,
+            expectedSourceVersion: route?.version ?? 0,
+            expectedTargetVersion: target.version,
+          },
+        );
+      } finally {
+        if (acquired.granted) {
+          await client
+            .post(`/api/routes/${input.targetId}/edit-lock/release`, {})
+            .catch(() => undefined);
+        }
+      }
+    },
     onSuccess: (result) => {
       setMoveTargetId('');
       afterSuccess('Заказы перенесены в другой маршрут', result.source);
@@ -503,13 +534,9 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
             onClick={() => {
               const target = (siblings.data?.items ?? []).find((item) => item.id === moveTargetId);
               if (target !== undefined) {
-                // Перенос требует аренды обоих маршрутов. Если целевой занят,
-                // сервер откажет, и локально ничего не переставляется.
-                moveOrders.mutate({
-                  targetId: target.id,
-                  targetVersion: target.version,
-                  orderIds: selected,
-                });
+                // Если целевой маршрут занят другим редактором, захват вернёт 409,
+                // перенос не выполнится и локальный состав не изменится.
+                moveOrders.mutate({ targetId: target.id, orderIds: selected });
               }
             }}
           >

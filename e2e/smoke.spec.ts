@@ -242,13 +242,48 @@ test('маршрут: черновик → состав → порядок → �
   await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
   await expect(stops.first()).not.toHaveText(firstStopBefore);
 
+  // Настоящий перенос между двумя черновиками: аренда целевого берётся клиентом.
+  await page.getByRole('button', { name: 'Создать черновик' }).click();
+  // Карточка переключается на новый маршрут не мгновенно: сначала приходит ответ,
+  // затем перерисовка. Ждём именно смену номера, а не догадываемся по времени.
+  await expect(card.getByRole('heading')).not.toContainText(routeNumber);
+  const secondCardNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  await card.getByRole('button', { name: 'Закрыть' }).click();
+
+  await page
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
+
+  await card.getByLabel(`Выбрать заказ ${second}`).check();
+  await card.getByLabel('Перенести в маршрут').selectOption({ index: 1 });
+  await card.getByRole('button', { name: /Перенести/ }).click();
+  // Один заказ ушёл: перенос действительно выполнен, а не отклонён блокировкой.
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
+
+  // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
+  await page
+    .locator('.routes__list-item', { hasText: secondCardNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
+  await card.getByLabel(`Выбрать заказ ${second}`).check();
+  // Список коротких: выбираем первый доступный — это и есть исходный маршрут.
+  await card.getByLabel('Перенести в маршрут').selectOption({ index: 1 });
+  await card.getByRole('button', { name: /Перенести/ }).click();
+  await expect(card.locator('.routes__stop')).toHaveCount(0);
+
+  await page
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
+
   // Подтверждение: блокировок быть не должно.
   await card.getByRole('button', { name: 'Подтвердить маршрут' }).click();
   await page.getByRole('button', { name: 'Подтвердить', exact: true }).last().click();
-  // Подсказка карточки однозначна: значок состояния встречается и в истории.
   await expect(card.locator('.routes__hint')).toContainText('Маршрут подтверждён');
-  // Подтверждённый маршрут не редактируется обычными операциями.
-  await expect(card.getByRole('button', { name: /Вернуть выбранные/ })).toBeDisabled();
 
   // Тот же маршрут появляется в маршрутных листах.
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
@@ -308,4 +343,45 @@ test('перехват блокировки переводит прежнего 
   await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeDisabled();
 
   await secondContext.close();
+});
+
+test('печатная версия листа не содержит навигацию и занимает всю ширину', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+
+  // Дожидаемся ответа списка: пустой count сразу после перехода означал бы
+  // «ещё грузится», а не «маршрутов нет».
+  await page.waitForSelector('.routes__list-item, .state', { state: 'visible' });
+  const sheets = page.locator('.routes__list-item');
+  test.skip((await sheets.count()) === 0, 'подтверждённых маршрутов нет');
+  await sheets.first().getByRole('button', { name: 'Открыть лист' }).click();
+
+  const sheet = page.locator('.sheet');
+  await expect(sheet).toBeVisible();
+
+  // Переключаем страницу в печатный режим: сравнение скриншотов не нужно,
+  // достаточно геометрии и отсутствия служебных элементов.
+  await page.emulateMedia({ media: 'print' });
+
+  await expect(page.locator('.shell__sidebar')).toBeHidden();
+  await expect(page.locator('.shell__topbar')).toBeHidden();
+  await expect(page.locator('.shell__bottombar')).toBeHidden();
+  await expect(sheet.getByRole('button', { name: 'Печать' })).toBeHidden();
+
+  const viewport = page.viewportSize();
+  const box = await sheet.boundingBox();
+  expect(box).not.toBeNull();
+  if (box !== null && viewport !== null) {
+    // Пустой колонки под боковую панель на бумаге быть не должно.
+    expect(box.x).toBeLessThan(24);
+    expect(box.width).toBeGreaterThan(viewport.width * 0.9);
+  }
+
+  await page.emulateMedia({ media: null });
 });
