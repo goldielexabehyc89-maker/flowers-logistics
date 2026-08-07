@@ -39,6 +39,17 @@ export const AUDIT_ACTIONS = [
   // Ручное локальное исправление интервала логистом или администратором:
   // единственное изменение заказа, у которого есть человек-автор.
   'ORDER_INTERVAL_SET',
+  // Ручные маршруты-черновики. Значения полей маршрута в аудит не попадают:
+  // только идентификаторы, позиции, транспорт и технические состояния.
+  'ROUTE_CREATED',
+  'ROUTE_ORDERS_ADDED',
+  'ROUTE_ORDERS_RETURNED',
+  'ROUTE_ORDERS_MOVED',
+  'ROUTE_ORDERS_REORDERED',
+  'ROUTE_COURIER_ASSIGNED',
+  'ROUTE_COURIER_UNASSIGNED',
+  // Конфликт распределённого заказа обнаруживает синхронизация, автор — не человек.
+  'ROUTE_ORDER_CONFLICT_DETECTED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -26,6 +26,7 @@ import {
   type AttentionReason,
   type ManualInterval,
 } from '../../orders/attention.js';
+import { recordOrderConflicts } from '../../routing/conflicts.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
 const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
@@ -252,6 +253,16 @@ async function updateOrder(
     reasons,
   );
 
+  // Заказ мог уже лежать в маршруте. Из маршрута он НЕ удаляется: участие и история
+  // сохраняются, а расхождение становится видимым конфликтом. Блокировка маршрута
+  // здесь не берётся — порядок импорта начинается с заказа (см. routing/conflicts.ts).
+  await recordOrderConflicts(tx, existing.id, {
+    deliveryDate: snapshot.deliveryDate === null ? null : toDateColumn(snapshot.deliveryDate),
+    inScope: snapshot.inScope,
+    sourceArchived: snapshot.sourceArchived,
+    sourceMissing: false,
+  });
+
   return {
     outcome: enteredScope ? 'SCOPE_ENTERED' : exitedScope ? 'SCOPE_EXITED' : 'UPDATED',
     changedFields,
@@ -400,5 +411,19 @@ export async function markSourceMissing(
     topic: 'order.scope_changed',
     payload: { orderId, inScope: false, sourceMissing: true },
     audienceRoles: [...ORDER_AUDIENCE],
+  });
+
+  // Пропавший заказ мог быть распределён. Этот путь не проходит через
+  // applyOrderSnapshot, поэтому конфликт фиксируется здесь отдельно.
+  // Строка заказа уже заблокирована обновлением выше — порядок соблюдён.
+  const stored = await tx.deliveryOrder.findUnique({
+    where: { id: orderId },
+    select: { deliveryDate: true },
+  });
+  await recordOrderConflicts(tx, orderId, {
+    deliveryDate: stored?.deliveryDate ?? null,
+    inScope: false,
+    sourceArchived: false,
+    sourceMissing: true,
   });
 }

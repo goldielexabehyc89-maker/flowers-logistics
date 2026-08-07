@@ -32,8 +32,14 @@ export class RealtimePayloadLeakError extends Error {
   }
 }
 
-/** Разрешённое содержимое payload: только идентификаторы, версии и признаки. */
-export type RealtimePayload = Record<string, string | number | boolean | null>;
+/**
+ * Разрешённое содержимое payload: только идентификаторы, версии и признаки.
+ *
+ * Список строк добавлен для событий маршрутов: одна операция затрагивает набор
+ * заказов, и клиенту важно знать, какие именно строки перезапросить. Вложенные
+ * объекты по-прежнему запрещены — payload обязан оставаться плоским и читаемым.
+ */
+export type RealtimePayload = Record<string, string | number | boolean | null | string[]>;
 
 export function assertPayloadIsSafe(payload: RealtimePayload): void {
   for (const key of Object.keys(payload)) {

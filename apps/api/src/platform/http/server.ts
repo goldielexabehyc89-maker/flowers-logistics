@@ -21,6 +21,7 @@ import { registerUserRoutes } from '../../modules/users/routes.js';
 import { registerRealtimeRoutes } from '../../modules/realtime/routes.js';
 import { registerOutboxRoutes } from '../../modules/outbox/routes.js';
 import { registerOrderRoutes } from '../../modules/orders/routes.js';
+import { registerRoutingRoutes } from '../../modules/routing/routes.js';
 import { authenticateWithRoles } from '../../modules/auth/guards.js';
 import type { Notifier } from '../../modules/realtime/notifier.js';
 import type { AppServer } from './types.js';
@@ -98,6 +99,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerRealtimeRoutes(app, { db, config, notifier });
   await registerOutboxRoutes(app, { db, config });
   await registerOrderRoutes(app, { db, config });
+  await registerRoutingRoutes(app, { db, config });
 
   await app.register(async (api) => {
     /**

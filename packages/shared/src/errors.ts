@@ -40,6 +40,39 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   SERVICE_UNAVAILABLE: 503,
 };
 
+/**
+ * Машинно-читаемые причины конфликта.
+ *
+ * Общий код `CONFLICT` отвечает на вопрос «почему 409» одинаково для всех случаев,
+ * а интерфейсу нужно разное поведение: устаревшую версию достаточно перезапросить,
+ * а заказ, уже лежащий в другом маршруте, нужно показать вместе с его номером.
+ * Разбирать текст сообщения ради этого нельзя — он предназначен человеку.
+ */
+export const CONFLICT_KINDS = [
+  /** Заказ уже состоит в другом активном маршруте. Возвращается его номер. */
+  'ORDER_ALREADY_IN_ROUTE',
+  /** Переданная версия записи устарела: кто-то изменил её раньше. */
+  'STALE_VERSION',
+  /** Заказ не пригоден для ручного распределения. */
+  'ORDER_NOT_ELIGIBLE',
+  /** Операция допустима только для черновика. */
+  'ROUTE_NOT_DRAFT',
+  /** Переданный порядок не совпадает с текущим активным составом маршрута. */
+  'ROUTE_ORDER_SET_MISMATCH',
+] as const;
+
+export type ConflictKind = (typeof CONFLICT_KINDS)[number];
+
+/**
+ * Подробности конфликта. Персональных данных не содержит:
+ * только вид, номер маршрута и идентификаторы заказов.
+ */
+export interface ConflictDetails {
+  kind: ConflictKind;
+  routeNumber?: string;
+  orderIds?: string[];
+}
+
 export interface ApiErrorBody {
   error: {
     code: ErrorCode;
@@ -47,5 +80,7 @@ export interface ApiErrorBody {
     message: string;
     /** Идентификатор запроса для сопоставления с логом. */
     requestId?: string;
+    /** Заполняется только для `CONFLICT`. */
+    conflict?: ConflictDetails;
   };
 }
