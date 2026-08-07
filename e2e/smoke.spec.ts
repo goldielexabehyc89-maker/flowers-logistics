@@ -206,3 +206,182 @@ test('экран «Сделки»: список, поиск и ручной ин
   await page.getByRole('button', { name: 'Найти' }).click();
   await expect(page.locator('.deals__row', { hasText: orderNumber })).toBeVisible();
 });
+
+test('маршрут: черновик → состав → порядок → подтверждение → маршрутный лист', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
+  const second = process.env['E2E_ORDER_NUMBER_2'] ?? '';
+  test.skip(first === '' || second === '', 'нужны два проверочных заказа');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  // Черновик создаётся и сразу открывается: аренда выдаётся создателю.
+  await page.getByRole('button', { name: 'Создать черновик' }).click();
+  const card = page.locator('.routes__card');
+  await expect(card).toBeVisible();
+  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
+
+  // Оба заказа отмечаются и добавляются в маршрут.
+  await page.getByLabel(`Выбрать заказ ${first}`).check();
+  await page.getByLabel(`Выбрать заказ ${second}`).check();
+  await page.getByLabel('Маршрут для добавления').selectOption({ index: 1 });
+  await page.getByRole('button', { name: /Добавить выбранные/ }).click();
+
+  const stops = card.locator('.routes__stop');
+  await expect(stops).toHaveCount(2);
+  const firstStopBefore = await stops.first().innerText();
+
+  // Порядок меняется кнопками: перетаскивание не требуется.
+  await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
+  await expect(stops.first()).not.toHaveText(firstStopBefore);
+
+  // Настоящий перенос между двумя черновиками: аренда целевого берётся клиентом.
+  await page.getByRole('button', { name: 'Создать черновик' }).click();
+  // Карточка переключается на новый маршрут не мгновенно: сначала приходит ответ,
+  // затем перерисовка. Ждём именно смену номера, а не догадываемся по времени.
+  await expect(card.getByRole('heading')).not.toContainText(routeNumber);
+  const secondCardNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  await card.getByRole('button', { name: 'Закрыть' }).click();
+
+  await page
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
+
+  await card.getByLabel(`Выбрать заказ ${second}`).check();
+  await card.getByLabel('Перенести в маршрут').selectOption({ index: 1 });
+  await card.getByRole('button', { name: /Перенести/ }).click();
+  // Один заказ ушёл: перенос действительно выполнен, а не отклонён блокировкой.
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
+
+  // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
+  await page
+    .locator('.routes__list-item', { hasText: secondCardNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
+  await card.getByLabel(`Выбрать заказ ${second}`).check();
+  // Список коротких: выбираем первый доступный — это и есть исходный маршрут.
+  await card.getByLabel('Перенести в маршрут').selectOption({ index: 1 });
+  await card.getByRole('button', { name: /Перенести/ }).click();
+  await expect(card.locator('.routes__stop')).toHaveCount(0);
+
+  await page
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
+
+  // Подтверждение: блокировок быть не должно.
+  await card.getByRole('button', { name: 'Подтвердить маршрут' }).click();
+  await page.getByRole('button', { name: 'Подтвердить', exact: true }).last().click();
+  await expect(card.locator('.routes__hint')).toContainText('Маршрут подтверждён');
+
+  // Тот же маршрут появляется в маршрутных листах.
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await page
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть лист' })
+    .click();
+
+  const sheet = page.locator('.sheet');
+  await expect(sheet).toContainText(routeNumber);
+  await expect(sheet.locator('.sheet__stop')).toHaveCount(2);
+  await expect(sheet).toContainText('К получению');
+  // В листе есть адрес и получатель, но нет служебных технических полей.
+  await expect(sheet).toContainText('Москва, проверочный адрес 1');
+  await expect(sheet).not.toContainText('sumMinor');
+  await expect(sheet).not.toContainText('routeOrderId');
+});
+
+test('перехват блокировки переводит прежнего редактора в режим просмотра', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Первый сеанс создаёт черновик и держит его в работе.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await page.getByRole('button', { name: 'Создать черновик' }).click();
+
+  const card = page.locator('.routes__card');
+  await expect(card).toBeVisible();
+  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeEnabled();
+
+  // Второй сеанс того же администратора — другое устройство, другая семья сессий.
+  const secondContext = await browser.newContext();
+  const secondPage = await secondContext.newPage();
+  await login(secondPage, ADMIN_PHONE, ADMIN_PIN);
+  await secondPage.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await secondPage
+    .locator('.routes__list-item', { hasText: routeNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+
+  const secondCard = secondPage.locator('.routes__card');
+  await expect(secondCard.getByRole('button', { name: 'Перехватить' })).toBeVisible();
+  await secondCard.getByRole('button', { name: 'Перехватить' }).click();
+  await secondPage.getByLabel('Причина').fill('Продолжаю работу с другого устройства');
+  await secondPage.getByRole('button', { name: 'Продолжить' }).click();
+
+  // Первый сеанс узнаёт об этом сам, без перезагрузки страницы.
+  await expect(card.getByText(/Маршрут редактирует/)).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeDisabled();
+
+  await secondContext.close();
+});
+
+test('печатная версия листа не содержит навигацию и занимает всю ширину', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+
+  // Дожидаемся ответа списка: пустой count сразу после перехода означал бы
+  // «ещё грузится», а не «маршрутов нет».
+  await page.waitForSelector('.routes__list-item, .state', { state: 'visible' });
+  const sheets = page.locator('.routes__list-item');
+  test.skip((await sheets.count()) === 0, 'подтверждённых маршрутов нет');
+  await sheets.first().getByRole('button', { name: 'Открыть лист' }).click();
+
+  const sheet = page.locator('.sheet');
+  await expect(sheet).toBeVisible();
+
+  // Переключаем страницу в печатный режим: сравнение скриншотов не нужно,
+  // достаточно геометрии и отсутствия служебных элементов.
+  await page.emulateMedia({ media: 'print' });
+
+  await expect(page.locator('.shell__sidebar')).toBeHidden();
+  await expect(page.locator('.shell__topbar')).toBeHidden();
+  await expect(page.locator('.shell__bottombar')).toBeHidden();
+  await expect(sheet.getByRole('button', { name: 'Печать' })).toBeHidden();
+
+  const viewport = page.viewportSize();
+  const box = await sheet.boundingBox();
+  expect(box).not.toBeNull();
+  if (box !== null && viewport !== null) {
+    // Пустой колонки под боковую панель на бумаге быть не должно.
+    expect(box.x).toBeLessThan(24);
+    expect(box.width).toBeGreaterThan(viewport.width * 0.9);
+  }
+
+  await page.emulateMedia({ media: null });
+});

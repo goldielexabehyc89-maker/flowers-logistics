@@ -80,7 +80,14 @@ export function invalidationKeysFor(topic: string): string[][] {
   if (topic.startsWith('order.')) {
     // Событие не несёт данных заказа: список перезапрашивается целиком.
     // Ни звука, ни всплывающего уведомления — обычный новый заказ рутина.
-    return [['orders'], ['status']];
+    return [['orders'], ['status'], ['unassigned-orders']];
+  }
+  if (topic.startsWith('route.')) {
+    // Сюда попадают и изменения состава, и жизненный цикл, и блокировка редактора.
+    // Карточка перезапрашивается целиком: событие намеренно не несёт содержимого,
+    // а перехват блокировки обязан немедленно перевести прежнего редактора
+    // в режим просмотра.
+    return [['routes'], ['route'], ['route-history'], ['unassigned-orders']];
   }
   return [['status']];
 }

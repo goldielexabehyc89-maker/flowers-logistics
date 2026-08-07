@@ -34,6 +34,14 @@ const listQuerySchema = z.object({
   inScope: z.enum(['true', 'false']).optional(),
   /** Поиск по номеру, адресу и получателю. Пустая строка ищет всё. */
   search: z.string().trim().max(200).optional(),
+  /**
+   * Только заказы, пригодные для распределения на выбранный день.
+   *
+   * Экран маршрутизации не должен выгружать все заказы и вычитать из них состав
+   * маршрутов на клиенте: при сотнях заказов это лишний трафик и гарантированное
+   * расхождение с сервером в момент чужой правки.
+   */
+  unassigned: z.enum(['true', 'false']).optional(),
 });
 
 const setIntervalBodySchema = z.object({
@@ -137,7 +145,21 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     await authenticateWithRoles(request, deps, ORDER_ROLES);
     const query = listQuerySchema.parse(request.query);
 
-    const inScope = query.inScope === undefined ? true : query.inScope === 'true';
+    const unassignedOnly = query.unassigned === 'true';
+
+    // Несовместимые параметры отклоняются, а не «выигрывает последний»: запрос
+    // «нераспределённые, но вне нашей доставки» бессмыслен, и молча подменять
+    // его смысл опаснее, чем отказать.
+    if (unassignedOnly && query.inScope === 'false') {
+      throw new AppError('VALIDATION_FAILED', {
+        message: 'unassigned=true is incompatible with inScope=false',
+        publicMessage: 'Нераспределённые заказы существуют только внутри нашей доставки.',
+      });
+    }
+
+    // Выборка для распределения всегда идёт по заказам нашей области.
+    const inScope =
+      unassignedOnly || (query.inScope === undefined ? true : query.inScope === 'true');
     const where: Record<string, unknown> = { inScope };
 
     if (query.needsAttention !== undefined) {
@@ -166,12 +188,31 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     // по умолчанию, и при явно указанном. Иначе он исчезал бы из «Требует
     // внимания» именно тогда, когда им нужно заняться, а даты у него нет
     // ровно потому, что с ним что-то не так.
-    const day = query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date()));
+    //
+    // Исключение — выборка для распределения: заказ без даты положить в маршрут
+    // нельзя, и на экране маршрутизации он был бы ложным обещанием. Он остаётся
+    // в «Сделках → Требуют внимания», где им и занимаются.
+    // День у выборки для распределения всегда ровно один: явный либо текущий
+    // московский. Поиск его не отменяет — иначе в маршрут одного дня попали бы
+    // заказы соседнего, и правило одной даты нарушилось бы ещё до сервера.
+    const day = unassignedOnly
+      ? (query.deliveryDate ?? moscowToday(new Date()))
+      : (query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date())));
 
     if (day !== null) {
-      conditions.push({
-        OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }],
-      });
+      conditions.push(
+        unassignedOnly
+          ? { deliveryDate: toDateColumn(day) }
+          : { OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }] },
+      );
+    }
+
+    if (unassignedOnly) {
+      // Пригодность считает сервер: клиент не знает ни о пропавших заказах,
+      // ни о чужих активных маршрутах, и его версия «свободного» заказа
+      // устаревала бы к моменту нажатия кнопки.
+      conditions.push({ sourceMissing: false, sourceArchived: false, deliveryDate: { not: null } });
+      conditions.push({ routeOrders: { none: { removedAt: null } } });
     }
 
     if (conditions.length > 0) {

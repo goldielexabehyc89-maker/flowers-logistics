@@ -16,6 +16,7 @@ import type { AppConfig } from '../../platform/config.js';
 import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
 import { fromDateColumn, isCalendarDate } from '../integrations/moysklad/delivery-date.js';
+import { toDecimalString } from '../integrations/moysklad/money.js';
 import { assignmentStateOf, calendarDate } from './eligibility.js';
 import {
   addOrders,
@@ -301,9 +302,13 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
     const { id } = idParamSchema.parse(request.params);
 
-    await acquireLease(deps, actor, id, contextOf(request));
+    // `granted` отличает выданную аренду от продления собственной. Клиенту это
+    // нужно, чтобы после разовой операции освободить ровно то, что он занял,
+    // и не отнять маршрут у своей же открытой карточки.
+    const result = await acquireLease(deps, actor, id, contextOf(request));
     return {
       editLock: await leaseView(deps, id, actor),
+      granted: result.granted,
       ttlMs: LEASE_TTL_MS,
       heartbeatMs: LEASE_HEARTBEAT_MS,
     };
@@ -464,6 +469,10 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
               inScope: true,
               sourceMissing: true,
               sourceArchived: true,
+              // Единственное денежное поле маршрутного листа: курьеру нужно знать,
+              // сколько взять. Суммы заказа, оплаты и признаки аномалии здесь лишние.
+              cashCollectable: true,
+              cashToCollectMinor: true,
             },
           },
         },
@@ -530,6 +539,10 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
         comment: item.order.comment,
         needsAttention: item.order.needsAttention,
         attentionReasons: item.order.attentionReasons,
+        // Десятичной строкой: bigint не сериализуется, а number теряет точность.
+        cashToCollect: item.order.cashCollectable
+          ? toDecimalString(item.order.cashToCollectMinor)
+          : null,
         scope: {
           inScope: item.order.inScope,
           sourceMissing: item.order.sourceMissing,
