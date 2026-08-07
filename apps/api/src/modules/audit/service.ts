@@ -50,6 +50,14 @@ export const AUDIT_ACTIONS = [
   'ROUTE_COURIER_UNASSIGNED',
   // Конфликт распределённого заказа обнаруживает синхронизация, автор — не человек.
   'ROUTE_ORDER_CONFLICT_DETECTED',
+  // Жизненный цикл маршрута и блокировка редактора. Heartbeat не аудируется
+  // намеренно: раз в тридцать секунд он превратил бы журнал в шум.
+  'ROUTE_CONFIRMED',
+  'ROUTE_RETURNED_TO_DRAFT',
+  'ROUTE_CANCELLED',
+  'ROUTE_EDIT_LOCK_ACQUIRED',
+  'ROUTE_EDIT_LOCK_RELEASED',
+  'ROUTE_EDIT_LOCK_TAKEN_OVER',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

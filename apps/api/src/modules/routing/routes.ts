@@ -26,6 +26,16 @@ import {
   setCourier,
   type RequestContext,
 } from './service.js';
+import {
+  acquireLease,
+  describeLease,
+  heartbeatLease,
+  LEASE_HEARTBEAT_MS,
+  LEASE_TTL_MS,
+  releaseLease,
+  takeoverLease,
+} from './lease.js';
+import { cancelRoute, confirmBlockers, confirmRoute, returnToDraft } from './lifecycle.js';
 
 const ROUTE_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const MAX_LIMIT = 100;
@@ -81,9 +91,30 @@ const courierSchema = z.object({
   expectedVersion: z.number().int().min(0),
 });
 
+const versionSchema = z.object({ expectedVersion: z.number().int().min(0) });
+
+const historyQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+/** Причина решения: слишком короткая ничего не объясняет, слишком длинная не читается. */
+const reasonSchema = z.object({
+  expectedVersion: z.number().int().min(0),
+  reason: z.string().trim().min(3).max(500),
+});
+
+const takeoverSchema = z.object({
+  confirm: z.literal(true),
+  reason: z.string().trim().min(3).max(500),
+  expectedLeaseVersion: z.number().int().min(1),
+});
+
 interface RoutingDeps {
   db: Database;
   config: AppConfig;
+  /** Часы вынесены наружу: тесты аренды не должны ждать реального времени. */
+  now?: () => Date;
 }
 
 interface IncomingRequest {
@@ -171,9 +202,9 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
   });
 
   app.get('/api/routes/:id', async (request) => {
-    await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
     const { id } = idParamSchema.parse(request.params);
-    return routeCard(deps.db, id);
+    return routeCard(deps.db, id, actor);
   });
 
   app.post('/api/routes/:id/orders', async (request) => {
@@ -182,7 +213,7 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const body = ordersSchema.parse(request.body);
 
     await addOrders(deps, actor, id, body, contextOf(request));
-    return routeCard(deps.db, id);
+    return routeCard(deps.db, id, actor);
   });
 
   app.post('/api/routes/:id/orders/return', async (request) => {
@@ -191,7 +222,7 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const body = ordersSchema.parse(request.body);
 
     await returnOrders(deps, actor, id, body, contextOf(request));
-    return routeCard(deps.db, id);
+    return routeCard(deps.db, id, actor);
   });
 
   /** Полный список активных заказов в нужном порядке. Частичная перестановка отклоняется. */
@@ -201,7 +232,7 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const body = ordersSchema.parse(request.body);
 
     await reorder(deps, actor, id, body, contextOf(request));
-    return routeCard(deps.db, id);
+    return routeCard(deps.db, id, actor);
   });
 
   app.post('/api/routes/move', async (request) => {
@@ -210,8 +241,8 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
 
     const result = await moveOrders(deps, actor, body, contextOf(request));
     return {
-      source: await routeCard(deps.db, body.fromRouteId),
-      target: await routeCard(deps.db, body.toRouteId),
+      source: await routeCard(deps.db, body.fromRouteId, actor),
+      target: await routeCard(deps.db, body.toRouteId, actor),
       versions: result,
     };
   });
@@ -222,7 +253,85 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const body = courierSchema.parse(request.body);
 
     await setCourier(deps, actor, id, body, contextOf(request));
-    return routeCard(deps.db, id);
+    return routeCard(deps.db, id, actor);
+  });
+
+  // --- Жизненный цикл ------------------------------------------------------
+
+  app.post('/api/routes/:id/confirm', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = versionSchema.parse(request.body);
+
+    await confirmRoute(deps, actor, id, body, contextOf(request));
+    return routeCard(deps.db, id, actor);
+  });
+
+  app.post('/api/routes/:id/return-to-draft', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = reasonSchema.parse(request.body);
+
+    await returnToDraft(deps, actor, id, body, contextOf(request));
+    return routeCard(deps.db, id, actor);
+  });
+
+  app.post('/api/routes/:id/cancel', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = reasonSchema.parse(request.body);
+
+    await cancelRoute(deps, actor, id, body, contextOf(request));
+    return routeCard(deps.db, id, actor);
+  });
+
+  // --- Мягкая блокировка редактора -----------------------------------------
+
+  app.get('/api/routes/:id/edit-lock', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return {
+      editLock: await leaseView(deps, id, actor),
+      ttlMs: LEASE_TTL_MS,
+      heartbeatMs: LEASE_HEARTBEAT_MS,
+    };
+  });
+
+  app.post('/api/routes/:id/edit-lock/acquire', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    await acquireLease(deps, actor, id, contextOf(request));
+    return {
+      editLock: await leaseView(deps, id, actor),
+      ttlMs: LEASE_TTL_MS,
+      heartbeatMs: LEASE_HEARTBEAT_MS,
+    };
+  });
+
+  app.post('/api/routes/:id/edit-lock/heartbeat', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    await heartbeatLease(deps, actor, id);
+    return { editLock: await leaseView(deps, id, actor) };
+  });
+
+  app.post('/api/routes/:id/edit-lock/release', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    await releaseLease(deps, actor, id, contextOf(request));
+    return { editLock: await leaseView(deps, id, actor) };
+  });
+
+  app.post('/api/routes/:id/edit-lock/takeover', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = takeoverSchema.parse(request.body);
+
+    await takeoverLease(deps, actor, id, body, contextOf(request));
+    return { editLock: await leaseView(deps, id, actor) };
   });
 
   app.get('/api/routes/:id/history', async (request) => {
@@ -234,21 +343,47 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
       throw new AppError('NOT_FOUND', { message: 'route not found' });
     }
 
-    const entries = await deps.db.auditLog.findMany({
-      where: { entityType: 'DeliveryRoute', entityId: id },
-      // Порядок доопределён идентификатором: у операции перемещения две записи
-      // с одинаковым временем, и без этого они менялись бы местами между запросами.
-      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
-      take: 100,
-      select: {
-        occurredAt: true,
-        action: true,
-        actorUserId: true,
-        actorRoles: true,
-        newValue: true,
-        source: true,
-      },
-    });
+    const query = historyQuerySchema.parse(request.query);
+
+    const [entries, total, transitions, transitionTotal] = await Promise.all([
+      deps.db.auditLog.findMany({
+        where: { entityType: 'DeliveryRoute', entityId: id },
+        // Порядок доопределён идентификатором: у операции перемещения две записи
+        // с одинаковым временем, и без этого они менялись бы местами между запросами.
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        take: query.limit,
+        skip: query.offset,
+        select: {
+          occurredAt: true,
+          action: true,
+          actorUserId: true,
+          actorRoles: true,
+          newValue: true,
+          source: true,
+        },
+      }),
+      deps.db.auditLog.count({ where: { entityType: 'DeliveryRoute', entityId: id } }),
+      // Переходы состояния показываются отдельно: причина решения хранится только
+      // здесь, в защищённой истории, и в realtime не уходит.
+      deps.db.routeStateTransition.findMany({
+        where: { routeId: id },
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        // Пагинация та же, что у аудита: без пропуска вторая страница повторяла бы
+        // переходы первой, и история выглядела бы длиннее, чем она есть.
+        take: query.limit,
+        skip: query.offset,
+        select: {
+          occurredAt: true,
+          fromState: true,
+          toState: true,
+          actorUserId: true,
+          reason: true,
+        },
+      }),
+      // Счётчики раздельные: у аудита и у переходов разное количество записей,
+      // и общий total не позволил бы клиенту понять, где заканчивается каждый список.
+      deps.db.routeStateTransition.count({ where: { routeId: id } }),
+    ]);
 
     return {
       items: entries.map((entry) => ({
@@ -259,6 +394,17 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
         source: entry.source,
         value: entry.newValue,
       })),
+      transitions: transitions.map((entry) => ({
+        occurredAt: entry.occurredAt.toISOString(),
+        fromState: entry.fromState,
+        toState: entry.toState,
+        actorUserId: entry.actorUserId,
+        reason: entry.reason,
+      })),
+      total,
+      transitionTotal,
+      limit: query.limit,
+      offset: query.offset,
     };
   });
 }
@@ -270,7 +416,15 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
  * состав — иначе интерфейсу пришлось бы делать второй запрос и он успел бы
  * показать устаревший порядок.
  */
-async function routeCard(db: Database, id: string) {
+async function leaseView(deps: RoutingDeps, routeId: string, actor: AuthenticatedActor) {
+  const lease = await deps.db.routeEditLease.findUnique({
+    where: { routeId },
+    include: { holder: { select: { id: true, fullName: true } } },
+  });
+  return describeLease(lease, actor, deps.now?.() ?? new Date());
+}
+
+async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
   const route = await db.deliveryRoute.findUnique({
     where: { id },
     select: {
@@ -322,6 +476,13 @@ async function routeCard(db: Database, id: string) {
   }
 
   const routeDate = calendarDate(route.deliveryDate);
+  const lease = await db.routeEditLease.findUnique({
+    where: { routeId: id },
+    include: { holder: { select: { id: true, fullName: true } } },
+  });
+  // Блокировки подтверждения показываются заранее: логист должен видеть причину
+  // до нажатия кнопки, а не узнавать о ней из отказа.
+  const blockers = route.state === 'DRAFT' ? await confirmBlockers(db, id) : [];
 
   return {
     id: route.id,
@@ -334,6 +495,8 @@ async function routeCard(db: Database, id: string) {
     updatedAt: route.updatedAt.toISOString(),
     courier: route.courier,
     conflictCount: route.orders.filter((item) => item.conflicts.length > 0).length,
+    editLock: describeLease(lease, actor, new Date()),
+    confirmBlockers: blockers,
     orders: route.orders.map((item) => ({
       routeOrderId: item.id,
       position: item.position,

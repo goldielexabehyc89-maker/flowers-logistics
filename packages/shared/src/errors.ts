@@ -59,6 +59,18 @@ export const CONFLICT_KINDS = [
   'ROUTE_NOT_DRAFT',
   /** Переданный порядок не совпадает с текущим активным составом маршрута. */
   'ROUTE_ORDER_SET_MISMATCH',
+  /** Пустой маршрут подтверждать нечего. */
+  'ROUTE_EMPTY',
+  /** У заказов маршрута есть известные расхождения с МоимСкладом. */
+  'ROUTE_HAS_CONFLICTS',
+  /** Назначенный курьер больше не может выполнять маршрут. */
+  'ROUTE_COURIER_UNAVAILABLE',
+  /** Операция требует активной блокировки редактора. */
+  'EDIT_LOCK_REQUIRED',
+  /** Маршрут сейчас редактирует другой человек или другое устройство. */
+  'EDIT_LOCK_HELD_BY_OTHER',
+  /** Переданная версия блокировки устарела: её успели перехватить. */
+  'EDIT_LOCK_STALE',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];
