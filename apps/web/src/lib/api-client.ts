@@ -133,6 +133,11 @@ export class ApiClient {
     return this.#json<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
   }
 
+  /** PUT используется там, где значение задаётся целиком и заменяет предыдущее. */
+  async put<T>(path: string, body: unknown): Promise<T> {
+    return this.#json<T>(path, { method: 'PUT', body: JSON.stringify(body) });
+  }
+
   /**
    * Открывает поток событий.
    *

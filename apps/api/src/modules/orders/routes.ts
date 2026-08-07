@@ -17,6 +17,7 @@ import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles } from '../auth/guards.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { toDecimalString } from '../integrations/moysklad/money.js';
+import { MAX_MINUTE, MIN_MINUTE, setManualInterval } from './service.js';
 
 const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const MAX_LIMIT = 100;
@@ -31,6 +32,14 @@ const listQuerySchema = z.object({
     .optional(),
   needsAttention: z.enum(['true', 'false']).optional(),
   inScope: z.enum(['true', 'false']).optional(),
+  /** Поиск по номеру, адресу и получателю. Пустая строка ищет всё. */
+  search: z.string().trim().max(200).optional(),
+});
+
+const setIntervalBodySchema = z.object({
+  startMinute: z.number().int().min(MIN_MINUTE).max(MAX_MINUTE),
+  endMinute: z.number().int().min(MIN_MINUTE).max(MAX_MINUTE),
+  version: z.number().int().min(0),
 });
 
 const idParamSchema = z.object({
@@ -54,6 +63,7 @@ function toListItem(order: {
   externalName: string;
   deliveryDate: Date | null;
   deliveryDateRaw: string | null;
+  intervalRaw: string | null;
   intervalKind: string;
   intervalStartMinute: number | null;
   intervalEndMinute: number | null;
@@ -75,6 +85,7 @@ function toListItem(order: {
   sourceMissing: boolean;
   needsAttention: boolean;
   attentionReasons: string[];
+  version: number;
   updatedAt: Date;
 }) {
   return {
@@ -83,6 +94,9 @@ function toListItem(order: {
     deliveryDate: order.deliveryDate === null ? null : fromDateColumn(order.deliveryDate),
     deliveryDateRaw: order.deliveryDateRaw,
     interval: {
+      // Исходный текст источника отдаётся всегда: логист должен видеть, что именно
+      // написано в МоемСкладе, даже когда интервал исправлен вручную.
+      raw: order.intervalRaw,
       kind: order.intervalKind,
       startMinute: order.intervalStartMinute,
       endMinute: order.intervalEndMinute,
@@ -111,6 +125,9 @@ function toListItem(order: {
     },
     needsAttention: order.needsAttention,
     attentionReasons: order.attentionReasons,
+    // Версия нужна интерфейсу: без неё ручное исправление не смогло бы
+    // сослаться на конкретное состояние заказа.
+    version: order.version,
     updatedAt: order.updatedAt.toISOString(),
   };
 }
@@ -127,16 +144,38 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       where['needsAttention'] = query.needsAttention === 'true';
     }
 
-    if (query.deliveryDate !== undefined) {
-      where['deliveryDate'] = toDateColumn(query.deliveryDate);
-    } else if (inScope) {
-      // По умолчанию — текущий день. Но заказ без распознанной даты обязан
-      // оставаться видимым: иначе он исчез бы из «Требует внимания» именно тогда,
-      // когда им нужно заняться.
-      where['OR'] = [
-        { deliveryDate: toDateColumn(moscowToday(new Date())) },
-        { deliveryDate: null },
-      ];
+    // Условия собираются в AND: у поиска и у дня свои наборы OR, и записать их
+    // в одно поле `OR` нельзя — второй набор молча вытеснил бы первый.
+    const conditions: Record<string, unknown>[] = [];
+    const searching = query.search !== undefined && query.search !== '';
+
+    if (searching) {
+      // Поиск идёт по тем полям, которые логист реально помнит: номер заказа,
+      // адрес и получатель. Регистр не важен — номер часто набирают латиницей
+      // и в нижнем регистре.
+      conditions.push({
+        OR: [
+          { externalName: { contains: query.search, mode: 'insensitive' } },
+          { address: { contains: query.search, mode: 'insensitive' } },
+          { recipient: { contains: query.search, mode: 'insensitive' } },
+        ],
+      });
+    }
+
+    // Заказ без распознанной даты виден при ЛЮБОМ выбранном дне — и при дне
+    // по умолчанию, и при явно указанном. Иначе он исчезал бы из «Требует
+    // внимания» именно тогда, когда им нужно заняться, а даты у него нет
+    // ровно потому, что с ним что-то не так.
+    const day = query.deliveryDate ?? (searching || !inScope ? null : moscowToday(new Date()));
+
+    if (day !== null) {
+      conditions.push({
+        OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }],
+      });
+    }
+
+    if (conditions.length > 0) {
+      where['AND'] = conditions;
     }
 
     const [rows, total] = await Promise.all([
@@ -171,12 +210,24 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
 
     // Снимок ревизии наружу не отдаётся: он дублировал бы персональные данные
     // и раскрывал внутренний формат. Клиенту нужны факт и перечень полей.
-    const revisions = await deps.db.deliveryOrderRevision.findMany({
-      where: { orderId: id },
-      orderBy: { receivedAt: 'desc' },
-      take: 50,
-      select: { receivedAt: true, externalUpdated: true, reason: true, changedFields: true },
-    });
+    const [revisions, manualChanges] = await Promise.all([
+      deps.db.deliveryOrderRevision.findMany({
+        where: { orderId: id },
+        // Порядок доопределён идентификатором: одинаковые миллисекунды реальны
+        // при пакетной обработке, и без этого «последняя» версия прыгала бы.
+        orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
+        take: 50,
+        select: { receivedAt: true, externalUpdated: true, reason: true, changedFields: true },
+      }),
+      // Ручные исправления живут в аудите, а не в ревизиях: ревизия — это версия
+      // источника, а интервал задаём мы сами.
+      deps.db.auditLog.findMany({
+        where: { entityType: 'DeliveryOrder', entityId: id, action: 'ORDER_INTERVAL_SET' },
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        take: 50,
+        select: { occurredAt: true, actorUserId: true, newValue: true },
+      }),
+    ]);
 
     return {
       order: toListItem(order),
@@ -186,6 +237,39 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         reason: revision.reason,
         changedFields: revision.changedFields,
       })),
+      manualIntervalChanges: manualChanges.map((entry) => {
+        const value = (entry.newValue ?? {}) as { startMinute?: number; endMinute?: number };
+        return {
+          occurredAt: entry.occurredAt.toISOString(),
+          actorUserId: entry.actorUserId,
+          startMinute: value.startMinute ?? null,
+          endMinute: value.endMinute ?? null,
+        };
+      }),
     };
+  });
+
+  /**
+   * Ручное локальное исправление интервала.
+   *
+   * PUT, а не PATCH: значение задаётся целиком и повторное исправление заменяет
+   * предыдущее. Дата, адрес, получатель и комментарий не редактируются вовсе —
+   * они принадлежат МоемуСкладу.
+   */
+  app.put('/api/orders/:id/interval', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = setIntervalBodySchema.parse(request.body);
+
+    const userAgent = request.headers['user-agent'];
+    return setManualInterval(
+      deps,
+      actor,
+      { orderId: id, ...body },
+      {
+        ip: request.ip,
+        userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 255) : null,
+      },
+    );
   });
 }

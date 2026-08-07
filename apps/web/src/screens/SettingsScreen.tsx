@@ -56,8 +56,10 @@ const REQUIRED_SETTINGS = [
 export function SettingsScreen(): React.JSX.Element {
   const { client } = useAuth();
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['status'],
-    queryFn: () => client.get<StatusResponse>('/api/status'),
+    queryKey: ['status', 'integrations'],
+    // Экран доступен только администратору, поэтому берутся технические
+    // подробности: публичный /api/status их намеренно не отдаёт.
+    queryFn: () => client.get<StatusResponse>('/api/status/integrations'),
   });
 
   return (

@@ -14,7 +14,6 @@ import { StatusBadge, type StatusTone } from '../ui/components';
 interface IntegrationStatus {
   provider: string;
   state: 'NOT_CONFIGURED' | 'CONFIGURED' | 'OK' | 'DEGRADED' | 'ERROR';
-  pendingOperations: number;
 }
 
 interface StatusResponse {

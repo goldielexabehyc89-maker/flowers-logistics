@@ -21,6 +21,7 @@ import { registerUserRoutes } from '../../modules/users/routes.js';
 import { registerRealtimeRoutes } from '../../modules/realtime/routes.js';
 import { registerOutboxRoutes } from '../../modules/outbox/routes.js';
 import { registerOrderRoutes } from '../../modules/orders/routes.js';
+import { authenticateWithRoles } from '../../modules/auth/guards.js';
 import type { Notifier } from '../../modules/realtime/notifier.js';
 import type { AppServer } from './types.js';
 
@@ -99,15 +100,39 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerOrderRoutes(app, { db, config });
 
   await app.register(async (api) => {
+    /**
+     * Публичное состояние приложения для индикатора в интерфейсе.
+     *
+     * Маршрут доступен без авторизации, поэтому отдаёт только высокоуровневое
+     * состояние интеграции: работает, настроена, ошибка. Технические счётчики
+     * рассказывают постороннему о внутреннем устройстве и объёме работы системы,
+     * поэтому живут на отдельном маршруте для администратора.
+     */
     api.get('/api/status', async () => ({
-      // Публичное состояние приложения для индикатора в интерфейсе.
-      // Реальных интеграций на этапе 1 нет, поэтому значения читаются из БД как есть.
       integrations: await db.integrationStatus.findMany({
-        select: { provider: true, state: true, pendingOperations: true, updatedAt: true },
+        select: { provider: true, state: true, updatedAt: true },
         orderBy: { provider: 'asc' },
       }),
       stage: 1,
     }));
+
+    /** Технические подробности интеграций. Только ADMIN. */
+    api.get('/api/status/integrations', async (request) => {
+      await authenticateWithRoles(request, { db, config }, ['ADMIN']);
+      return {
+        integrations: await db.integrationStatus.findMany({
+          select: {
+            provider: true,
+            state: true,
+            pendingOperations: true,
+            lastOkAt: true,
+            lastErrorAt: true,
+            updatedAt: true,
+          },
+          orderBy: { provider: 'asc' },
+        }),
+      };
+    });
   });
 
   // Статика web-клиента подключается только там, где сборка существует.
