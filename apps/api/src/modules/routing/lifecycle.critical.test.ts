@@ -791,6 +791,79 @@ describe('мягкая блокировка редактора', () => {
     expect(personal).not.toBeNull();
   });
 
+  it('перехват собственной аренды идемпотентен и ничего не меняет', async () => {
+    const editor = await session();
+    const route = await createRoute(editor.token);
+    const before = await ctx.db.routeEditLease.findUniqueOrThrow({ where: { routeId: route.id } });
+    const auditBefore = await ctx.db.auditLog.count({
+      where: { entityId: route.id, action: 'ROUTE_EDIT_LOCK_TAKEN_OVER' },
+    });
+    const eventsBefore = await ctx.db.realtimeEvent.count({
+      where: { topic: 'route.edit_lock_taken_over' },
+    });
+
+    const response = await call(
+      'POST',
+      `/api/routes/${route.id}/edit-lock/takeover`,
+      editor.token,
+      {
+        confirm: true,
+        reason: 'Случайный перехват собственной блокировки',
+        expectedLeaseVersion: before.version,
+      },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(
+      (response.json() as { editLock: { heldByCurrentSession: boolean } }).editLock
+        .heldByCurrentSession,
+    ).toBe(true);
+
+    const after = await ctx.db.routeEditLease.findUniqueOrThrow({ where: { routeId: route.id } });
+    // Перехвата не было: ни версии, ни срока, ни держателя, ни следа в журнале.
+    expect(after.version).toBe(before.version);
+    expect(after.expiresAt.getTime()).toBe(before.expiresAt.getTime());
+    expect(after.holderFamilyId).toBe(before.holderFamilyId);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { entityId: route.id, action: 'ROUTE_EDIT_LOCK_TAKEN_OVER' },
+      }),
+    ).toBe(auditBefore);
+    expect(
+      await ctx.db.realtimeEvent.count({ where: { topic: 'route.edit_lock_taken_over' } }),
+    ).toBe(eventsBefore);
+  });
+
+  it('второе устройство того же человека выполняет настоящий перехват', async () => {
+    const first = await session();
+    const second = await secondDevice(first, first.actor.phone);
+    const route = await createRoute(first.token);
+    const before = await ctx.db.routeEditLease.findUniqueOrThrow({ where: { routeId: route.id } });
+
+    const taken = await call('POST', `/api/routes/${route.id}/edit-lock/takeover`, second.token, {
+      confirm: true,
+      reason: 'Продолжаю работу с другого устройства',
+      expectedLeaseVersion: before.version,
+    });
+    expect(taken.statusCode).toBe(200);
+
+    const after = await ctx.db.routeEditLease.findUniqueOrThrow({ where: { routeId: route.id } });
+    expect(after.holderFamilyId).toBe(second.actor.familyId);
+    expect(after.version).toBe(before.version + 1);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { entityId: route.id, action: 'ROUTE_EDIT_LOCK_TAKEN_OVER' },
+      }),
+    ).toBe(1);
+
+    // Первое устройство право на изменения потеряло.
+    const orderId = await seedOrder();
+    const add = await call('POST', `/api/routes/${route.id}/orders`, first.token, {
+      orderIds: [orderId],
+      expectedVersion: route.version,
+    });
+    expect(add.statusCode).toBe(409);
+  });
+
   it('освобождение доступно только держателю', async () => {
     const owner = await session();
     const rival = await session();
@@ -863,6 +936,51 @@ describe('мягкая блокировка редактора', () => {
     const after = await ctx.db.routeEditLease.findUniqueOrThrow({ where: { routeId: route.id } });
     const holder = takeover.statusCode === 200 ? rival.userId : owner.userId;
     expect(after.holderUserId).toBe(holder);
+  });
+});
+
+describe('история маршрута', () => {
+  it('пагинация не повторяет переходы на второй странице', async () => {
+    const editor = await session();
+    const route = await routeWithOrder(editor.token);
+
+    // Два перехода подряд: подтверждение и возврат.
+    const confirmed = await call('POST', `/api/routes/${route.id}/confirm`, editor.token, {
+      expectedVersion: route.version,
+    });
+    const returned = await call('POST', `/api/routes/${route.id}/return-to-draft`, editor.token, {
+      expectedVersion: (confirmed.json() as RouteCard).version,
+      reason: 'Нужно поменять порядок доставки',
+    });
+    expect(returned.statusCode).toBe(200);
+
+    interface History {
+      transitions: { toState: string; occurredAt: string }[];
+      transitionTotal: number;
+      total: number;
+    }
+
+    const all = (
+      await call('GET', `/api/routes/${route.id}/history?limit=50`, editor.token)
+    ).json() as History;
+    expect(all.transitionTotal).toBe(2);
+    expect(all.transitions.map((item) => item.toState)).toEqual(['DRAFT', 'CONFIRMED']);
+
+    const first = (
+      await call('GET', `/api/routes/${route.id}/history?limit=1&offset=0`, editor.token)
+    ).json() as History;
+    const second = (
+      await call('GET', `/api/routes/${route.id}/history?limit=1&offset=1`, editor.token)
+    ).json() as History;
+
+    expect(first.transitions).toHaveLength(1);
+    expect(second.transitions).toHaveLength(1);
+    // Вторая страница обязана продолжать первую, а не повторять её.
+    expect(second.transitions[0]?.toState).not.toBe(first.transitions[0]?.toState);
+    expect(second.transitions[0]?.toState).toBe('CONFIRMED');
+    // Счётчики раздельные: аудита записей больше, чем переходов.
+    expect(second.transitionTotal).toBe(2);
+    expect(second.total).toBeGreaterThan(second.transitionTotal);
   });
 });
 

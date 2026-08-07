@@ -380,6 +380,16 @@ export async function takeoverLease(
       });
     }
 
+    // Перехват собственной активной аренды перехватом не является: он создал бы
+    // ложную запись в аудите, увеличил версию и отправил уведомление самому себе.
+    // Возвращаем текущую аренду как есть — операция идемпотентна.
+    //
+    // Второе устройство того же человека под это правило не подпадает: там другая
+    // семья сессий, и перехват настоящий.
+    if (heldBy(current, actor, now) && current !== null) {
+      return current;
+    }
+
     if (current?.version !== input.expectedLeaseVersion) {
       throw new AppError('CONFLICT', {
         message: 'stale lease version',

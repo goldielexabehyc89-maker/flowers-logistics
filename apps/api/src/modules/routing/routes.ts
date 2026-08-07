@@ -345,7 +345,7 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
 
     const query = historyQuerySchema.parse(request.query);
 
-    const [entries, total, transitions] = await Promise.all([
+    const [entries, total, transitions, transitionTotal] = await Promise.all([
       deps.db.auditLog.findMany({
         where: { entityType: 'DeliveryRoute', entityId: id },
         // Порядок доопределён идентификатором: у операции перемещения две записи
@@ -368,7 +368,10 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
       deps.db.routeStateTransition.findMany({
         where: { routeId: id },
         orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        // Пагинация та же, что у аудита: без пропуска вторая страница повторяла бы
+        // переходы первой, и история выглядела бы длиннее, чем она есть.
         take: query.limit,
+        skip: query.offset,
         select: {
           occurredAt: true,
           fromState: true,
@@ -377,6 +380,9 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
           reason: true,
         },
       }),
+      // Счётчики раздельные: у аудита и у переходов разное количество записей,
+      // и общий total не позволил бы клиенту понять, где заканчивается каждый список.
+      deps.db.routeStateTransition.count({ where: { routeId: id } }),
     ]);
 
     return {
@@ -396,6 +402,7 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
         reason: entry.reason,
       })),
       total,
+      transitionTotal,
       limit: query.limit,
       offset: query.offset,
     };

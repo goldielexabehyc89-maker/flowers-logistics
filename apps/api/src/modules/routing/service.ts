@@ -8,9 +8,11 @@
  *
  * ПОРЯДОК БЛОКИРОВОК (пользовательские операции):
  *   DeliveryRoute (FOR UPDATE, все затронутые, ORDER BY id)
+ *   → RouteEditLease (FOR UPDATE, по routeId в том же порядке)
  *   → DeliveryOrder (FOR UPDATE, ORDER BY id)
  *   → активные RouteOrder
  *   → RouteOrderConflict
+ *   → RouteStateTransition
  *   → AuditLog
  *   → RealtimeEvent
  *
