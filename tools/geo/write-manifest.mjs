@@ -23,10 +23,13 @@ const CONTENT_TYPES = new Map([
   ['.json', 'application/json'],
   ['.pbf', 'application/x-protobuf'],
   ['.png', 'image/png'],
+  // Лицензии распространяемых ресурсов. Они отдаются наружу вместе с набором,
+  // потому что и OFL, и MIT требуют, чтобы текст сопровождал файлы.
+  ['.txt', 'text/plain'],
 ]);
 
 function parseArgs(argv) {
-  const args = { tool: [] };
+  const args = { tool: [], input: [] };
   for (let i = 2; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     const value = argv[i + 1];
@@ -35,6 +38,8 @@ function parseArgs(argv) {
     }
     if (key === 'tool') {
       args.tool.push(value);
+    } else if (key === 'input') {
+      args.input.push(value);
     } else {
       args[key] = value;
     }
@@ -71,7 +76,18 @@ async function collect(root, current = '') {
 }
 
 const args = parseArgs(process.argv);
-const required = ['root', 'revision', 'region', 'source-date', 'source-file', 'style'];
+const required = [
+  'root',
+  'revision',
+  'region',
+  'source-date',
+  'source-file',
+  'style',
+  // Границы и происхождение ресурсов задаются явно: значение по умолчанию
+  // молча описало бы не тот регион и не ту версию спрайтов.
+  'bbox',
+  'assets-revision',
+];
 for (const key of required) {
   if (args[key] === undefined) {
     console.error(`Не задан --${key}`);
@@ -117,16 +133,30 @@ for (const entry of args.tool) {
   }
 }
 
+// Вспомогательные наборы влияют на результат так же, как исходный .osm.pbf:
+// другая версия береговой линии — другие тайлы. Их суммы фиксируются, иначе
+// сборку нельзя было бы повторить и сверить.
+const inputs = {};
+for (const entry of args.input) {
+  const index = entry.indexOf('=');
+  if (index > 0) {
+    inputs[entry.slice(0, index)] = await sha256(entry.slice(index + 1));
+  }
+}
+
 const manifest = {
   format: MANIFEST_FORMAT,
   revision: args.revision,
   region: args.region,
-  // Границы Москвы и области с запасом. Уточняются при сборке конкретного
-  // набора: манифест описывает то, что действительно лежит в архиве.
-  bbox: (args.bbox ?? '36.5,54.8,39.0,56.5').split(',').map(Number),
+  // Границы приходят от вызывающей стороны и попадают в манифест как есть:
+  // манифест описывает то, что действительно лежит в архиве.
+  bbox: args.bbox.split(',').map(Number),
   sourceDate: args['source-date'],
   sourceSha256: await sha256(args['source-file']),
   tools,
+  inputs,
+  /** Происхождение спрайтов и шрифтов: репозиторий и коммит. */
+  assetsRevision: args['assets-revision'],
   attribution: args.attribution ?? '© OpenStreetMap contributors',
   style: args.style,
   artifacts,

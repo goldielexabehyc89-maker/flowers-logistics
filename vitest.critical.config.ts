@@ -15,6 +15,9 @@ export default defineConfig({
       'apps/**/*.critical.test.ts',
       'packages/**/*.critical.test.ts',
       'deploy/**/*.critical.test.ts',
+      // Инструменты сборки картографических артефактов: они не входят
+      // в приложение, но их поведение так же обязано быть доказуемым.
+      'tools/**/*.critical.test.ts',
     ],
     exclude: ['**/node_modules/**', '**/dist/**', '**/generated/**', 'e2e/**'],
     passWithNoTests: false,

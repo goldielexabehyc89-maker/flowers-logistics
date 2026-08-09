@@ -1042,6 +1042,29 @@ describe('геостек в командах выкатки', () => {
     expect(compose).toContain('target: /custom_files');
   });
 
+  it('сборка подложки требует вспомогательные источники и не ходит в сеть', async () => {
+    const script = withoutComments(
+      await readFile(path.join(REPO_ROOT, 'tools/geo/build-basemap.sh'), 'utf8'),
+    );
+
+    // Профиль подложки не запускается без этих наборов, а сборка идёт offline:
+    // раньше она падала исключением Java через минуту после старта.
+    expect(script).toContain('--sources');
+    expect(script).toContain('lake_centerline.shp.zip');
+    expect(script).toContain('water-polygons-split-3857.zip');
+    expect(script).toContain('natural_earth_vector.sqlite.zip');
+
+    // Каталог монтируется только на чтение и именно туда, где его ищет профиль.
+    expect(script).toContain('/data/sources:ro');
+    // Сеть по-прежнему отключена, автоматическая загрузка не включается.
+    expect(script).toContain('--network none');
+    expect(script).not.toContain('--download=true');
+
+    // Суммы вспомогательных наборов попадают в манифест: другая их версия
+    // даёт другие тайлы, и без сумм сборку нельзя повторить и сверить.
+    expect(script).toContain('--input');
+  });
+
   it('ревизия графа берётся из фактического ответа сервиса, а не из часов', async () => {
     const script = withoutComments(
       await readFile(path.join(REPO_ROOT, 'tools/geo/build-valhalla-graph.sh'), 'utf8'),
