@@ -28,6 +28,7 @@ import {
 } from '../../orders/attention.js';
 import { recordOrderConflicts } from '../../routing/conflicts.js';
 import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
+import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
 const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
@@ -40,6 +41,19 @@ export interface ApplyResult {
   changedFields: string[];
 }
 
+export interface ApplyOptions {
+  /**
+   * Ставить ли адрес в очередь геокодирования.
+   *
+   * По умолчанию — нет. Очередь имеет смысл только там, где её кто-то
+   * обрабатывает: в local, CI и staging worker не существует, и заказ,
+   * навсегда застрявший в состоянии «Определяется», врал бы логисту о том,
+   * что точка вот-вот появится. Заказы, импортированные до включения
+   * геокодирования, попадают в очередь разовым наполнением (`backfillGeocoding`).
+   */
+  geocoding?: boolean;
+}
+
 interface StoredOrder {
   id: string;
   version: number;
@@ -47,8 +61,11 @@ interface StoredOrder {
   sourceMissing: boolean;
   /// Геоданные: смена адреса обесценивает прежнюю точку.
   geoState: $Enums.OrderGeoState;
+  geoSource: $Enums.OrderGeoSource | null;
   geoLatMicro: number | null;
   geoLonMicro: number | null;
+  /// Поколение адреса: постановка новой версии в очередь увеличивает его.
+  geoGeneration: number;
   /// Ручной интервал логиста: синхронизация обязана его учитывать и не затирать.
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
@@ -65,6 +82,7 @@ export async function applyOrderSnapshot(
   tx: TransactionClient,
   snapshot: OrderSnapshot,
   now: Date,
+  options: ApplyOptions = {},
 ): Promise<ApplyResult> {
   const existing = await lockByExternalId(tx, snapshot.externalId);
 
@@ -73,10 +91,10 @@ export async function applyOrderSnapshot(
       // Пункт Б задания: чужой заказ не попадает в базу ни одним полем.
       return { outcome: 'SKIPPED_OUT_OF_SCOPE', changedFields: [] };
     }
-    return createOrder(tx, snapshot, now);
+    return createOrder(tx, snapshot, now, options);
   }
 
-  return updateOrder(tx, existing, snapshot, now);
+  return updateOrder(tx, existing, snapshot, now, options);
 }
 
 /**
@@ -91,7 +109,7 @@ async function lockByExternalId(
   const rows = await tx.$queryRaw<StoredOrder[]>`
     SELECT "id", "version", "inScope", "sourceMissing",
            "manualIntervalStartMinute", "manualIntervalEndMinute",
-           "geoState", "geoLatMicro", "geoLonMicro"
+           "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
     FOR UPDATE
@@ -154,6 +172,7 @@ async function createOrder(
   tx: TransactionClient,
   snapshot: OrderSnapshot,
   now: Date,
+  options: ApplyOptions,
 ): Promise<ApplyResult> {
   const created = await tx.deliveryOrder.create({
     data: {
@@ -166,6 +185,26 @@ async function createOrder(
     },
     select: { id: true },
   });
+
+  // Адрес нового заказа сразу отправляется на разрешение — в той же транзакции.
+  // Отдельная постановка «потом» дала бы состояние «заказ есть, задания нет»,
+  // и такой заказ навсегда остался бы без точки.
+  if (options.geocoding === true) {
+    await enqueueGeocoding(
+      tx,
+      {
+        id: created.id,
+        address: snapshot.address,
+        inScope: snapshot.inScope,
+        sourceArchived: snapshot.sourceArchived,
+        sourceMissing: false,
+        geoState: 'UNRESOLVED',
+        geoSource: null,
+        geoGeneration: 0,
+      },
+      now,
+    );
+  }
 
   const changedFields = diffSnapshots(null, snapshot);
   await writeRevision(tx, created.id, snapshot, changedFields, 'INITIAL_IMPORT');
@@ -184,6 +223,7 @@ async function updateOrder(
   existing: StoredOrder,
   snapshot: OrderSnapshot,
   now: Date,
+  options: ApplyOptions,
 ): Promise<ApplyResult> {
   const previous = await previousSnapshot(tx, existing.id);
   const changedFields = diffSnapshots(previous, snapshot);
@@ -263,11 +303,32 @@ async function updateOrder(
   // Оставить её пригодной опаснее, чем потерять: координата от старого адреса
   // выглядит как нормальные данные и молча отправит курьера не туда.
   if (changedFields.includes('address')) {
-    await invalidateGeoOnAddressChange(tx, existing.id, {
+    const invalidated = await invalidateGeoOnAddressChange(tx, existing.id, {
       geoState: existing.geoState,
       latMicro: existing.geoLatMicro,
       lonMicro: existing.geoLonMicro,
     });
+
+    // Новый адрес отправляется на разрешение заново. Прежняя точка к нему
+    // не относится — в том числе поставленная человеком: он подтверждал другой
+    // адрес. Поколение растёт, поэтому ответ по старому адресу, если он ещё
+    // летит от провайдера, будет распознан как устаревший и отброшен.
+    if (options.geocoding === true) {
+      await enqueueGeocoding(
+        tx,
+        {
+          id: existing.id,
+          address: snapshot.address,
+          inScope: snapshot.inScope,
+          sourceArchived: snapshot.sourceArchived,
+          sourceMissing: false,
+          geoState: invalidated ? 'NEEDS_REVIEW' : existing.geoState,
+          geoSource: invalidated ? null : existing.geoSource,
+          geoGeneration: existing.geoGeneration,
+        },
+        now,
+      );
+    }
   }
 
   // Заказ мог уже лежать в маршруте. Из маршрута он НЕ удаляется: участие и история

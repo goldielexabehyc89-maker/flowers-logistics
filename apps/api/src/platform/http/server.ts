@@ -118,7 +118,13 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
       stage: 1,
     }));
 
-    /** Технические подробности интеграций. Только ADMIN. */
+    /**
+     * Технические подробности интеграций. Только ADMIN.
+     *
+     * `details` содержит исключительно очищенные сведения — коды отказа, числа
+     * и причины. Ключи, заголовки, тела ответов провайдеров, адреса и координаты
+     * туда не попадают: это обеспечивается на стороне записи.
+     */
     api.get('/api/status/integrations', async (request) => {
       await authenticateWithRoles(request, { db, config }, ['ADMIN']);
       return {
@@ -127,6 +133,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
             provider: true,
             state: true,
             pendingOperations: true,
+            details: true,
             lastOkAt: true,
             lastErrorAt: true,
             updatedAt: true,

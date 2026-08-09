@@ -17,7 +17,7 @@
 
 import { Client } from 'pg';
 
-/** Ключ блокировки. Один и тот же у worker и ручной команды. */
+/** Ключ блокировки прохода синхронизации. Один и тот же у worker и ручной команды. */
 export const SYNC_LOCK_KEY = 730_201n;
 
 export interface SyncLock {
@@ -26,6 +26,14 @@ export interface SyncLock {
 
 export interface LockDeps {
   connectionString: string;
+  /**
+   * Ключ блокировки. По умолчанию — проход синхронизации.
+   *
+   * Другие фоновые процессы с внешними обращениями берут собственный ключ:
+   * общий замок заставил бы геокодирование ждать синхронизацию и наоборот,
+   * хотя это разные сервисы с разными лимитами.
+   */
+  key?: bigint;
   /** Подменяется в тестах: настоящее соединение там не открывается. */
   connect?: (connectionString: string) => Promise<LockConnection>;
 }
@@ -62,11 +70,12 @@ async function connectPg(connectionString: string): Promise<LockConnection> {
  * Возвращает `null`, если проход уже выполняется другим процессом.
  */
 export async function acquireSyncLock(deps: LockDeps): Promise<SyncLock | null> {
+  const key = deps.key ?? SYNC_LOCK_KEY;
   const connection = await (deps.connect ?? connectPg)(deps.connectionString);
 
   let locked: boolean;
   try {
-    locked = await connection.tryLock(SYNC_LOCK_KEY);
+    locked = await connection.tryLock(key);
   } catch (error) {
     await connection.close();
     throw error;
@@ -80,7 +89,7 @@ export async function acquireSyncLock(deps: LockDeps): Promise<SyncLock | null> 
   return {
     async release() {
       try {
-        await connection.unlock(SYNC_LOCK_KEY);
+        await connection.unlock(key);
       } finally {
         // Соединение закрывается в любом случае: иначе блокировка держалась бы
         // до конца жизни процесса.

@@ -63,6 +63,19 @@ const configSchema = z.object({
   /** Перекрытие окна delta-синхронизации. Стартовое значение — пять минут. */
   MOYSKLAD_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
 
+  // --- DaData: геокодирование адресов ---
+  // Ключи существуют ТОЛЬКО в production. Ключ даёт доступ к платному балансу
+  // организации, а каждый запрос содержит адрес клиента: обращение из staging,
+  // CI или локальной разработки означало бы и трату чужих денег, и отправку
+  // персональных данных наружу из окружения, где их быть не должно.
+  DADATA_API_KEY: z.string().min(1).optional(),
+  DADATA_SECRET_KEY: z.string().min(1).optional(),
+  /** Автоматическое фоновое геокодирование. По умолчанию выключено везде. */
+  DADATA_GEOCODING_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
   /**
    * Адрес стиля карты MapLibre. Пусто — карта честно не настроена.
    *
@@ -168,6 +181,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   assertMoyskladEnvironment(parsed.data);
+  assertDadataEnvironment(parsed.data);
 
   return Object.freeze({
     ...parsed.data,
@@ -207,6 +221,44 @@ function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
 
   if (data.MOYSKLAD_SYNC_ENABLED && data.MOYSKLAD_TOKEN === undefined) {
     throw new Error('MOYSKLAD_SYNC_ENABLED=true требует MOYSKLAD_TOKEN');
+  }
+}
+
+/**
+ * Fail closed для геокодирования.
+ *
+ * Ключ DaData — это платный баланс организации, а каждый запрос несёт адрес
+ * клиента. Приложение, молча стартовавшее с рабочим ключом в staging, однажды
+ * отправит наружу настоящие адреса и потратит чужие деньги. Поэтому запуск
+ * останавливается, а не продолжается с предупреждением.
+ */
+function assertDadataEnvironment(data: z.infer<typeof configSchema>): void {
+  const isProductionMarker =
+    data.APP_ENVIRONMENT_MARKER === 'production' && data.APP_ENV === 'production';
+
+  const hasKey = data.DADATA_API_KEY !== undefined || data.DADATA_SECRET_KEY !== undefined;
+
+  if (hasKey && !isProductionMarker) {
+    throw new Error(
+      'DADATA_API_KEY и DADATA_SECRET_KEY допустимы только при APP_ENV=production и ' +
+        'APP_ENVIRONMENT_MARKER=production: рабочие ключи не размещаются в local, CI и staging',
+    );
+  }
+
+  if (data.DADATA_GEOCODING_ENABLED && !isProductionMarker) {
+    throw new Error(
+      'DADATA_GEOCODING_ENABLED=true допустим только при APP_ENV=production и ' +
+        'APP_ENVIRONMENT_MARKER=production',
+    );
+  }
+
+  // Оба ключа обязательны вместе: запрос к DaData требует и Authorization,
+  // и X-Secret, а половина пары означает ошибку развёртывания.
+  if (
+    data.DADATA_GEOCODING_ENABLED &&
+    (data.DADATA_API_KEY === undefined || data.DADATA_SECRET_KEY === undefined)
+  ) {
+    throw new Error('DADATA_GEOCODING_ENABLED=true требует и DADATA_API_KEY, и DADATA_SECRET_KEY');
   }
 }
 

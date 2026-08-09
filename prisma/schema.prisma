@@ -524,6 +524,13 @@ model DeliveryOrder {
   /// Почему точка требует проверки. Заполняется только для NEEDS_REVIEW и FAILED.
   geoReviewReason OrderGeoReviewReason?
 
+  /// Поколение адреса для геокодирования.
+  ///
+  /// Растёт только при постановке новой версии адреса в очередь. Пара
+  /// (orderId, geoGeneration) идентифицирует задание, а ответ провайдера,
+  /// вернувшийся после смены адреса, распознаётся как устаревший и отбрасывается.
+  geoGeneration   Int                   @default(0)
+
   /// Оптимистическая блокировка для будущих конкурентных изменений.
   version   Int      @default(0)
   createdAt DateTime @default(now())
@@ -532,6 +539,7 @@ model DeliveryOrder {
   revisions      DeliveryOrderRevision[]
   routeOrders    RouteOrder[]
   geoHistory  OrderGeoHistory[]
+  geocodeJobs OrderGeocodeJob[]
 
   @@index([inScope, deliveryDate])
   @@index([needsAttention])
@@ -853,6 +861,67 @@ enum OrderGeoChangeKind {
   MANUAL_SET
   /// Точка обесценена сменой адреса.
   INVALIDATED_ADDRESS_CHANGED
+  /// Адрес поставлен в очередь геокодирования.
+  GEOCODE_REQUESTED
+  /// Провайдер вернул точный дом.
+  GEOCODE_RESOLVED
+  /// Провайдер ответил, но точность недостаточна: нужна проверка человеком.
+  GEOCODE_LOW_PRECISION
+  /// Повторы исчерпаны: провайдер не смог ответить.
+  GEOCODE_FAILED
+}
+
+/// Состояние задания геокодирования.
+enum GeocodeJobStatus {
+  PENDING
+  PROCESSING
+  /// Задание завершено: результат применён либо признан устаревшим.
+  DONE
+  /// Повторы исчерпаны. Заказ переведён в FAILED и ждёт человека.
+  FAILED
+}
+
+/// Очередь геокодирования адресов.
+///
+/// Отдельная таблица, а не тема существующего outbox: обработчик outbox
+/// выполняется ВНУТРИ транзакции, а держать транзакцию открытой во время
+/// обращения к внешнему сервису нельзя — соединение с базой занималось бы
+/// на всё время сетевой задержки, а строка заказа оставалась бы заблокированной.
+///
+/// Адреса здесь нет намеренно. Задание ссылается на заказ и поколение адреса,
+/// а сам адрес читается из заказа непосредственно перед запросом. Так очередь
+/// не превращается во вторую копию персональных данных, а ответ, вернувшийся
+/// после смены адреса, невозможно применить к новому адресу по ошибке.
+model OrderGeocodeJob {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Поколение адреса на момент постановки. Вместе с orderId — тождество задания.
+  geoGeneration Int
+
+  status        GeocodeJobStatus @default(PENDING)
+  attempts      Int              @default(0)
+  maxAttempts   Int              @default(5)
+  nextAttemptAt DateTime         @default(now())
+
+  /// Аренда: кто и когда взял задание в работу.
+  lockedAt DateTime?
+  lockedBy String?
+
+  /// Только безопасный код отказа. Ни текста провайдера, ни адреса, ни координат.
+  lastErrorCode String?
+  /// Сколько раз результат оказался устаревшим. Полезно при разборе, PII не содержит.
+  staleResults  Int     @default(0)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  finishedAt DateTime?
+
+  /// Одно задание на одно поколение адреса: повтор того же снимка не создаёт дубликат.
+  @@unique([orderId, geoGeneration])
+  @@index([status, nextAttemptAt])
 }
 
 /// Неизменяемая история геоданных заказа.
