@@ -354,15 +354,21 @@ require_routing_ready() {
     return 0
   fi
 
+  # Граф загружается не мгновенно, поэтому проверка повторяется. Значения
+  # переопределяются только проверками: ждать две с половиной минуты в тесте
+  # незачем, а на сервере это разумный срок загрузки набора тайлов.
+  local attempts="${ROUTING_CHECK_ATTEMPTS:-30}"
+  local delay="${ROUTING_CHECK_DELAY:-5}"
+
   local attempt
-  for attempt in $(seq 1 30); do
+  for attempt in $(seq 1 "${attempts}"); do
     if remote "$(compose_command) run --rm --no-deps -T \
         -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
         app node /verify-geo.mjs routing 'http://valhalla:8002' '${VALHALLA_GRAPH_REVISION}'"; then
       log "маршрутизатор отвечает на графе ревизии ${VALHALLA_GRAPH_REVISION}"
       return 0
     fi
-    sleep 5
+    sleep "${delay}"
   done
 
   fail "маршрутизатор не подтвердил граф ревизии ${VALHALLA_GRAPH_REVISION}"

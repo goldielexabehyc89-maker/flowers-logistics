@@ -75,8 +75,14 @@ export interface LatLon {
 const elementSchema = z.object({
   from_index: z.number().int().min(0),
   to_index: z.number().int().min(0),
-  time: z.number().nullable().optional(),
-  distance: z.number().nullable().optional(),
+  // Поля ОБЯЗАТЕЛЬНЫ и при этом допускают null.
+  //
+  // Необязательность означала бы, что `{}` и `{ time: null }` проходят как
+  // корректная недостижимая пара. Но отсутствие поля — это не «недостижимо»,
+  // а «сервис ответил не тем»: молчаливое превращение одного в другое
+  // вычеркнуло бы существующий маршрут из расчёта.
+  time: z.number().nullable(),
+  distance: z.number().nullable(),
 });
 
 /**
@@ -259,10 +265,7 @@ export class ValhallaClient {
  * другим; принять его — значит записать пару как достижимую по расстоянию
  * и недостижимую по времени одновременно.
  */
-function toElement(
-  time: number | null | undefined,
-  distance: number | null | undefined,
-): MatrixElement {
+function toElement(time: number | null, distance: number | null): MatrixElement {
   const timeSeconds = toSeconds(time);
   const distanceMeters = toMeters(distance);
 
@@ -279,8 +282,8 @@ function toElement(
  * Отрицательное, бесконечное и нечисловое значение — не время в пути.
  * Такой ответ разбирать нельзя: он означает, что сервис вернул что-то другое.
  */
-function toSeconds(value: number | null | undefined): number | null {
-  if (value === null || value === undefined) {
+function toSeconds(value: number | null): number | null {
+  if (value === null) {
     return null;
   }
   if (!Number.isFinite(value) || value < 0) {
@@ -290,8 +293,8 @@ function toSeconds(value: number | null | undefined): number | null {
 }
 
 /** Километры ответа в целые метры. Дробные метры для доставки бессмысленны. */
-function toMeters(value: number | null | undefined): number | null {
-  if (value === null || value === undefined) {
+function toMeters(value: number | null): number | null {
+  if (value === null) {
     return null;
   }
   if (!Number.isFinite(value) || value < 0) {

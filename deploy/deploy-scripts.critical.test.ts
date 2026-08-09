@@ -98,6 +98,18 @@ for arg in "$@"; do
 done
 
 cmd="\${*: -1}"
+
+# Проверка маршрутизатора может быть настроена на отказ: так проверяется,
+# что провалившаяся проверка останавливает выкатку до запуска приложения.
+case "$cmd" in
+  *'verify-geo.mjs routing'*)
+    if [ "\${ROUTING_FAILS:-0}" = "1" ]; then
+      printf 'ОТКАЗ: маршрутизатор не подтвердил граф\\n' >&2
+      exit 1
+    fi
+    ;;
+esac
+
 case "$cmd" in
   *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
   *"$PRODUCTION_DIR/ENVIRONMENT"*) printf '%s\\n' "\${PRODUCTION_MARKER_REPLY:-production}" ;;
@@ -185,6 +197,8 @@ interface SandboxOptions {
   stagingHasVersion?: boolean;
   stagingMarkerReply?: string;
   productionMarkerReply?: string;
+  /** Заставляет проверку маршрутизатора отвечать отказом. */
+  routingFails?: boolean;
   /** Строки, выполняемые после загрузки конфигураций. */
   body: string;
 }
@@ -256,6 +270,11 @@ async function runInSandbox(
     STAGING_DIR: staging.REMOTE_DIR,
     PRODUCTION_DIR: production.REMOTE_DIR,
     STAGING_HAS_VERSION: options.stagingHasVersion === false ? '0' : '1',
+    ROUTING_FAILS: options.routingFails === true ? '1' : '0',
+    // Проверке незачем ждать загрузку графа: она проверяет поведение при
+    // отказе, а не терпение команды выкатки.
+    ROUTING_CHECK_ATTEMPTS: '2',
+    ROUTING_CHECK_DELAY: '0',
     ...(options.stagingMarkerReply === undefined
       ? {}
       : { STAGING_MARKER_REPLY: options.stagingMarkerReply }),
@@ -605,19 +624,74 @@ describe('геостек в командах выкатки', () => {
     expect(compose).toContain("- '127.0.0.1:${APP_HOST_PORT}:3000'");
   });
 
-  it('обе команды поднимают маршрутизатор вместе с приложением и проверяют его', async () => {
+  it('обе команды соблюдают порядок: valhalla → её проверка → app → готовность', async () => {
     for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
       const content = withoutComments(await readFile(script, 'utf8'));
 
-      // `up … app` не поднимает Valhalla: зависимости от неё нет намеренно,
-      // потому что её отказ не должен мешать приложению стартовать.
-      expect(content, script).toContain('up -d --no-build valhalla app');
+      // Одновременный запуск выглядит быстрее, но приложение опрашивает /status
+      // сразу при старте и успевает записать DEGRADED, пока граф загружается.
+      // Это состояние осталось бы в базе даже после успешной проверки.
+      expect(content, script).not.toContain('up -d --no-build valhalla app');
+
+      const valhallaUp = content.indexOf('up -d --no-build valhalla"');
+      const routingCheck = content.indexOf('require_routing_ready');
+      const appUp = content.indexOf('up -d --no-build app"');
+      const readyCheck = content.indexOf('require_ready');
+
+      expect(valhallaUp, script).toBeGreaterThan(-1);
+      expect(routingCheck, script).toBeGreaterThan(valhallaUp);
+      expect(appUp, script).toBeGreaterThan(routingCheck);
+      expect(readyCheck, script).toBeGreaterThan(appUp);
+
       expect(content, script).toContain('require_geo_artifacts');
-      // Valhalla не входит в /ready, поэтому её проверяют отдельно —
-      // иначе выкатка объявила бы успех при неработающем расчёте.
-      expect(content, script).toContain('require_routing_ready');
-      expect(content, script).toContain('require_ready');
     }
+  });
+
+  it('порядок команд на сервере: маршрутизатор поднят и проверен раньше приложения', async () => {
+    const result = await runInSandbox({
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+        'require_routing_ready',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    const valhallaUp = lines.findIndex((line) => line.includes('up -d --no-build valhalla'));
+    const routingCheck = lines.findIndex((line) => line.includes('verify-geo.mjs routing'));
+    const appUp = lines.findIndex((line) => line.includes('up -d --no-build app'));
+
+    expect(valhallaUp).toBeGreaterThan(-1);
+    expect(routingCheck).toBeGreaterThan(valhallaUp);
+    expect(appUp).toBeGreaterThan(routingCheck);
+  });
+
+  it('провал проверки маршрутизатора не даёт запустить новое приложение', async () => {
+    const result = await runInSandbox({
+      routingFails: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+        'require_routing_ready',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('маршрутизатор не подтвердил граф');
+
+    // Маршрутизатор подняли, но приложение не трогали: прежняя версия
+    // продолжает работать, а не сменяется на новую с неработающим расчётом.
+    expect(result.ssh).toContain('up -d --no-build valhalla');
+    expect(result.ssh).not.toContain('up -d --no-build app');
+    expect(result.stdout).not.toContain('проверки пройдены');
   });
 
   it('проверка артефактов не зависит от Node на сервере', async () => {

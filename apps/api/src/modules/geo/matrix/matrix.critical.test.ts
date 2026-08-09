@@ -685,6 +685,55 @@ describe('строгая проверка ответа матрицы', () => {
     }
   });
 
+  it('отсутствие полей времени и расстояния не считается недостижимостью', async () => {
+    // Отсутствие поля — это не «недостижимо», а «сервис ответил не тем».
+    // Молчаливое превращение одного в другое вычеркнуло бы существующий
+    // маршрут из расчёта, и планировщик построил бы объезд без него.
+    const variants: { title: string; element: Record<string, unknown> }[] = [
+      { title: 'нет обоих полей', element: {} },
+      { title: 'нет расстояния', element: { time: 60 } },
+      { title: 'нет времени', element: { distance: 1.5 } },
+      { title: 'нет времени при null расстоянии', element: { distance: null } },
+      { title: 'нет расстояния при null времени', element: { time: null } },
+    ];
+
+    for (const variant of variants) {
+      const body = {
+        sources_to_targets: [
+          { from_index: 0, to_index: 0, time: 0, distance: 0 },
+          { from_index: 0, to_index: 1, ...variant.element },
+          { from_index: 1, to_index: 0, time: 60, distance: 1.5 },
+          { from_index: 1, to_index: 1, time: 0, distance: 0 },
+        ],
+      };
+      const instance = client(async () => jsonResponse(body));
+
+      await expect(
+        instance.matrix(POINTS.slice(0, 2), COSTING.CAR),
+        variant.title,
+      ).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
+    }
+  });
+
+  it('пустой элемент не проходит даже вместе с полными соседями', async () => {
+    const instance = client(async () =>
+      jsonResponse({
+        sources_to_targets: [
+          [
+            { from_index: 0, to_index: 0 },
+            { from_index: 0, to_index: 1, time: 60, distance: 1 },
+            { from_index: 1, to_index: 0, time: 60, distance: 1 },
+            { from_index: 1, to_index: 1, time: 0, distance: 0 },
+          ],
+        ],
+      }),
+    );
+
+    await expect(instance.matrix(POINTS.slice(0, 2), COSTING.CAR)).rejects.toMatchObject({
+      code: 'BAD_RESPONSE',
+    });
+  });
+
   it('согласованная недостижимость принимается', async () => {
     const body = {
       sources_to_targets: [
