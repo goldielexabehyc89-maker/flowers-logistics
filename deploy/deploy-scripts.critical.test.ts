@@ -111,6 +111,9 @@ case "$cmd" in
 esac
 
 case "$cmd" in
+  *'sha256sum'*docker-compose.deploy.yml*)
+    printf '%s  %s\\n' "\${COMPOSE_SHA_REPLY:-совпадение-подставит-тест}" "compose"
+    ;;
   *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
   *"$PRODUCTION_DIR/ENVIRONMENT"*) printf '%s\\n' "\${PRODUCTION_MARKER_REPLY:-production}" ;;
   *'docker image inspect'*) printf '%s\\n' "$VERSION_UNDER_TEST" ;;
@@ -199,6 +202,8 @@ interface SandboxOptions {
   productionMarkerReply?: string;
   /** Заставляет проверку маршрутизатора отвечать отказом. */
   routingFails?: boolean;
+  /** Что сервер отвечает на sha256sum Compose-файла. */
+  composeShaReply?: string;
   /** Строки, выполняемые после загрузки конфигураций. */
   body: string;
 }
@@ -229,6 +234,15 @@ async function runInSandbox(
 
   const knownHostsLog = path.join(dir, 'known-hosts-args.log');
   await writeFile(knownHostsLog, '', 'utf8');
+
+  // Настоящий Compose-файл кладётся в песочницу: команда выкатки берёт его
+  // из корня репозитория, и без него проверка доставки была бы фикцией.
+  await mkdir(path.join(dir, 'deploy'), { recursive: true });
+  await writeFile(
+    path.join(dir, 'deploy/docker-compose.deploy.yml'),
+    await readFile(COMPOSE_FILE, 'utf8'),
+    'utf8',
+  );
 
   if (options.configs !== 'none') {
     await mkdir(path.join(dir, 'deploy/private'), { recursive: true });
@@ -275,6 +289,9 @@ async function runInSandbox(
     // отказе, а не терпение команды выкатки.
     ROUTING_CHECK_ATTEMPTS: '2',
     ROUTING_CHECK_DELAY: '0',
+    ...(options.composeShaReply === undefined
+      ? {}
+      : { COMPOSE_SHA_REPLY: options.composeShaReply }),
     ...(options.stagingMarkerReply === undefined
       ? {}
       : { STAGING_MARKER_REPLY: options.stagingMarkerReply }),
@@ -645,6 +662,82 @@ describe('геостек в командах выкатки', () => {
 
       expect(content, script).toContain('require_geo_artifacts');
     }
+  });
+
+  it('Compose-файл доставляется на сервер и сверяется по контрольной сумме', async () => {
+    const { createHash } = await import('node:crypto');
+    const expected = createHash('sha256')
+      .update(await readFile(COMPOSE_FILE))
+      .digest('hex');
+
+    const result = await runInSandbox({
+      composeShaReply: expected,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'sync_compose_file',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    const upload = lines.findIndex((line) => line.includes('base64 -d'));
+    const verify = lines.findIndex((line) => line.includes('sha256sum'));
+    const compose = lines.findIndex((line) => line.includes('docker compose'));
+
+    // Файл доставлен и сверен ДО первой команды Compose: иначе выкатка
+    // запустила бы окружение файлом произвольного возраста.
+    expect(upload).toBeGreaterThan(-1);
+    expect(verify).toBeGreaterThan(upload);
+    expect(compose).toBeGreaterThan(verify);
+
+    // Передача атомарна: обрыв не оставляет обрезанный файл вместо рабочего.
+    expect(result.ssh).toContain('docker-compose.deploy.yml.new');
+    expect(result.ssh).toContain('mv ');
+  });
+
+  it('несовпадение Compose-файла на сервере останавливает выкатку', async () => {
+    const result = await runInSandbox({
+      composeShaReply: 'f'.repeat(64),
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'sync_compose_file',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('не совпал с версией из репозитория');
+    // Ни одной команды Compose: состав окружения не подтверждён.
+    expect(result.ssh).not.toContain('docker compose');
+  });
+
+  it('обе команды доставляют Compose-файл до первого обращения к Compose', async () => {
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = withoutComments(await readFile(script, 'utf8'));
+
+      const sync = content.indexOf('sync_compose_file');
+      const firstCompose = content.indexOf('compose_command');
+
+      expect(sync, script).toBeGreaterThan(-1);
+      expect(firstCompose, script).toBeGreaterThan(sync);
+    }
+  });
+
+  it('сухой прогон Compose-файл не доставляет', async () => {
+    const result = await runInSandbox({
+      body: [LOAD_BOTH, 'activate_environment STAGING', 'DRY_RUN=1', 'sync_compose_file'].join(
+        '\n',
+      ),
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.ssh.trim()).toBe('');
   });
 
   it('порядок команд на сервере: маршрутизатор поднят и проверен раньше приложения', async () => {
