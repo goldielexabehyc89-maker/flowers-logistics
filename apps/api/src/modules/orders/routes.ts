@@ -15,21 +15,28 @@ import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
 import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles } from '../auth/guards.js';
-import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import {
+  fromDateColumn,
+  isCalendarDate,
+  toDateColumn,
+} from '../integrations/moysklad/delivery-date.js';
 import { toDecimalString } from '../integrations/moysklad/money.js';
 import { MAX_MINUTE, MIN_MINUTE, setManualInterval } from './service.js';
+import { fromMicro, setManualPoint } from './geo.js';
 
 const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const MAX_LIMIT = 100;
+
+const dateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Ожидается дата в формате ГГГГ-ММ-ДД')
+  .refine(isCalendarDate, 'Ожидается существующая дата');
 
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(50),
   offset: z.coerce.number().int().min(0).default(0),
   /** Календарная дата `YYYY-MM-DD`. По умолчанию — текущий день Москвы. */
-  deliveryDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Ожидается дата в формате ГГГГ-ММ-ДД')
-    .optional(),
+  deliveryDate: dateSchema.optional(),
   needsAttention: z.enum(['true', 'false']).optional(),
   inScope: z.enum(['true', 'false']).optional(),
   /** Поиск по номеру, адресу и получателю. Пустая строка ищет всё. */
@@ -42,6 +49,20 @@ const listQuerySchema = z.object({
    * расхождение с сервером в момент чужой правки.
    */
   unassigned: z.enum(['true', 'false']).optional(),
+  /** Состояние георазрешения: логисту нужно видеть, чему ещё не поставлена точка. */
+  geoState: z.enum(['UNRESOLVED', 'PENDING', 'RESOLVED', 'NEEDS_REVIEW', 'FAILED']).optional(),
+});
+
+const mapQuerySchema = z.object({
+  deliveryDate: dateSchema,
+});
+
+const geoPointSchema = z.object({
+  /** Десятичная строка или число: карта отдаёт число, скрипты — строку. */
+  lat: z.union([z.string(), z.number()]),
+  lon: z.union([z.string(), z.number()]),
+  reason: z.string().trim().min(3).max(500),
+  expectedVersion: z.number().int().min(0),
 });
 
 const setIntervalBodySchema = z.object({
@@ -93,6 +114,12 @@ function toListItem(order: {
   sourceMissing: boolean;
   needsAttention: boolean;
   attentionReasons: string[];
+  geoState: string;
+  geoSource: string | null;
+  geoPrecision: string | null;
+  geoLatMicro: number | null;
+  geoLonMicro: number | null;
+  geoReviewReason: string | null;
   version: number;
   updatedAt: Date;
 }) {
@@ -133,6 +160,16 @@ function toListItem(order: {
     },
     needsAttention: order.needsAttention,
     attentionReasons: order.attentionReasons,
+    // Координаты уходят десятичными строками: целые микроградусы наружу
+    // не показываются, а число с плавающей точкой в контракте не появляется.
+    geo: {
+      state: order.geoState,
+      source: order.geoSource,
+      precision: order.geoPrecision,
+      reviewReason: order.geoReviewReason,
+      lat: order.geoLatMicro === null ? null : fromMicro(order.geoLatMicro),
+      lon: order.geoLonMicro === null ? null : fromMicro(order.geoLonMicro),
+    },
     // Версия нужна интерфейсу: без неё ручное исправление не смогло бы
     // сослаться на конкретное состояние заказа.
     version: order.version,
@@ -205,6 +242,10 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           ? { deliveryDate: toDateColumn(day) }
           : { OR: [{ deliveryDate: toDateColumn(day) }, { deliveryDate: null }] },
       );
+    }
+
+    if (query.geoState !== undefined) {
+      where['geoState'] = query.geoState;
     }
 
     if (unassignedOnly) {
@@ -287,6 +328,133 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           endMinute: value.endMinute ?? null,
         };
       }),
+    };
+  });
+
+  /**
+   * Точки заказов выбранного дня для карты.
+   *
+   * Отдаются только заказы с пригодной точкой: рисовать маркер там, где координата
+   * не подтверждена, значит показывать выдуманное место. Заказы без точки остаются
+   * в обычном списке с понятной причиной — из работы они не исчезают.
+   */
+  app.get('/api/orders/map', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const query = mapQuerySchema.parse(request.query);
+
+    const rows = await deps.db.deliveryOrder.findMany({
+      where: {
+        inScope: true,
+        deliveryDate: toDateColumn(query.deliveryDate),
+        geoState: 'RESOLVED',
+      },
+      orderBy: [{ externalName: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        externalName: true,
+        geoLatMicro: true,
+        geoLonMicro: true,
+        geoPrecision: true,
+        needsAttention: true,
+        routeOrders: {
+          where: { removedAt: null },
+          select: { position: true, route: { select: { id: true, number: true, state: true } } },
+        },
+      },
+    });
+
+    return {
+      deliveryDate: query.deliveryDate,
+      points: rows.map((order) => {
+        const participation = order.routeOrders[0];
+        return {
+          orderId: order.id,
+          number: order.externalName,
+          lat: order.geoLatMicro === null ? null : fromMicro(order.geoLatMicro),
+          lon: order.geoLonMicro === null ? null : fromMicro(order.geoLonMicro),
+          precision: order.geoPrecision,
+          needsAttention: order.needsAttention,
+          // Разные визуальные состояния берутся из факта участия, а не угадываются.
+          assigned: participation !== undefined,
+          routeId: participation?.route.id ?? null,
+          routeNumber: participation?.route.number ?? null,
+          position: participation?.position ?? null,
+        };
+      }),
+    };
+  });
+
+  /** Ручная установка точки логистом. */
+  app.put('/api/orders/:id/geo-point', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = geoPointSchema.parse(request.body);
+
+    const userAgent = request.headers['user-agent'];
+    return setManualPoint(deps, actor, id, body, {
+      ip: request.ip,
+      userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 255) : null,
+    });
+  });
+
+  /** История геоданных заказа. Адреса и сырых ответов провайдеров здесь нет. */
+  app.get('/api/orders/:id/geo-history', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    const entries = await deps.db.orderGeoHistory.findMany({
+      where: { orderId: id },
+      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+      take: 50,
+      select: {
+        occurredAt: true,
+        kind: true,
+        state: true,
+        source: true,
+        precision: true,
+        latMicro: true,
+        lonMicro: true,
+        previousLatMicro: true,
+        previousLonMicro: true,
+        reviewReason: true,
+        reason: true,
+        actorUserId: true,
+      },
+    });
+
+    return {
+      items: entries.map((entry) => ({
+        occurredAt: entry.occurredAt.toISOString(),
+        kind: entry.kind,
+        state: entry.state,
+        source: entry.source,
+        precision: entry.precision,
+        lat: entry.latMicro === null ? null : fromMicro(entry.latMicro),
+        lon: entry.lonMicro === null ? null : fromMicro(entry.lonMicro),
+        previousLat: entry.previousLatMicro === null ? null : fromMicro(entry.previousLatMicro),
+        previousLon: entry.previousLonMicro === null ? null : fromMicro(entry.previousLonMicro),
+        reviewReason: entry.reviewReason,
+        reason: entry.reason,
+        actorUserId: entry.actorUserId,
+      })),
+    };
+  });
+
+  /**
+   * Конфигурация карты.
+   *
+   * Секретов здесь нет и быть не может: значение целиком уходит в браузер.
+   * Пустой адрес стиля — это честное «карта не настроена», а не повод молча
+   * пойти на чужой публичный сервер.
+   */
+  app.get('/api/map/config', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const styleUrl = deps.config.MAP_STYLE_URL;
+
+    return {
+      configured: styleUrl !== undefined && styleUrl !== '',
+      styleUrl: styleUrl ?? null,
+      attribution: deps.config.MAP_ATTRIBUTION ?? null,
     };
   });
 

@@ -1,0 +1,654 @@
+/**
+ * Критические проверки геоданных заказа.
+ *
+ * Внешних обращений нет: снимки строятся mapper'ом, точку ставит человек через
+ * API, карта настраивается пустой строкой конфигурации. Ни DaData, ни OSM,
+ * ни МойСклад здесь не вызываются.
+ */
+
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  closeTestContext,
+  createTestContext,
+  seedUser,
+  type TestContext,
+} from '../auth/testing/harness.js';
+import { TEST_SECRETS } from '../../platform/testing/secrets.js';
+import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
+import { mapOrder, type OrderSnapshot } from '../integrations/moysklad/mapper.js';
+import { fromMicro, toMicro, MAX_LAT_MICRO } from './geo.js';
+
+let ctx: TestContext;
+const IDS = MOYSKLAD_IDS;
+const href = (kind: string, id: string): string => `${MOYSKLAD_BASE_URL}/entity/${kind}/${id}`;
+const NOW = new Date('2026-08-10T09:00:00.000Z');
+
+/** Синтетические координаты Москвы: настоящих адресов клиентов в тестах нет. */
+const POINT = { lat: '55.751244', lon: '37.618423' };
+const OTHER_POINT = { lat: '55.760000', lon: '37.600000' };
+
+beforeAll(async () => {
+  ctx = await createTestContext();
+});
+
+afterAll(async () => {
+  await closeTestContext(ctx);
+});
+
+function source(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: randomUUID(),
+    name: `G-${process.hrtime.bigint() % 1_000_000n}`,
+    updated: '2026-08-10 10:00:00.000',
+    shipmentAddress: 'Москва, синтетический адрес, 1',
+    deliveryPlannedMoment: '2026-08-10 12:00:00.000',
+    sum: 499000,
+    payedSum: 0,
+    store: { meta: { href: href('store', IDS.store) } },
+    state: {
+      meta: { href: href('state', '22222222-2222-4222-8222-222222222222') },
+      id: '22222222-2222-4222-8222-222222222222',
+      name: 'Новый',
+      stateType: 'Regular',
+    },
+    attributes: [
+      {
+        id: IDS.deliveryMethodAttribute,
+        value: {
+          name: 'Доставка',
+          meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+        },
+      },
+      { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
+      { id: IDS.recipientAttribute, value: 'Получатель Синтетический' },
+    ],
+    ...overrides,
+  };
+}
+
+function snapshotOf(overrides: Record<string, unknown> = {}): OrderSnapshot {
+  return mapOrder(source(overrides) as never, IDS).snapshot;
+}
+
+async function apply(snapshot: OrderSnapshot, at = NOW) {
+  return ctx.db.$transaction((tx) => applyOrderSnapshot(tx, snapshot, at));
+}
+
+async function seedOrder(overrides: Record<string, unknown> = {}) {
+  const snapshot = snapshotOf(overrides);
+  await apply(snapshot);
+  return {
+    snapshot,
+    order: await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    }),
+  };
+}
+
+async function tokenFor(roles: Parameters<typeof seedUser>[1]['roles']): Promise<string> {
+  const { hashSecretCode } = await import('../auth/crypto.js');
+  const { login } = await import('../auth/service.js');
+  const pin = '1234';
+  const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+  const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+  const session = await login(
+    ctx,
+    { phone: user.phone, pin },
+    { ip: null, userAgent: 'vitest', deviceLabel: null },
+  );
+  return session.accessToken;
+}
+
+/** JSON.stringify не умеет bigint, а в записях аудита встречаются суммы. */
+function asText(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    typeof item === 'bigint' ? item.toString() : item,
+  );
+}
+
+function setPoint(
+  token: string,
+  orderId: string,
+  body: Record<string, unknown>,
+): ReturnType<typeof ctx.app.inject> {
+  return ctx.app.inject({
+    method: 'PUT',
+    url: `/api/orders/${orderId}/geo-point`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: body,
+  });
+}
+
+describe('инварианты геоданных в базе', () => {
+  it('координаты невозможны вне состояния RESOLVED', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.deliveryOrder.update({
+        where: { id: order.id },
+        data: { geoLatMicro: 55_751_244, geoLonMicro: 37_618_423 },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('RESOLVED без источника, точности и времени невозможен', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.deliveryOrder.update({
+        where: { id: order.id },
+        data: {
+          geoState: 'RESOLVED',
+          geoLatMicro: 55_751_244,
+          geoLonMicro: 37_618_423,
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('половина координаты не проходит: широта без долготы отвергается', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.deliveryOrder.update({
+        where: { id: order.id },
+        data: {
+          geoState: 'RESOLVED',
+          geoSource: 'MANUAL',
+          geoPrecision: 'EXACT_HOUSE',
+          geoResolvedAt: NOW,
+          geoLatMicro: 55_751_244,
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('координата за пределами планеты отвергается', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.deliveryOrder.update({
+        where: { id: order.id },
+        data: {
+          geoState: 'RESOLVED',
+          geoSource: 'MANUAL',
+          geoPrecision: 'EXACT_HOUSE',
+          geoResolvedAt: NOW,
+          geoLatMicro: 95_000_000,
+          geoLonMicro: 37_618_423,
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('NEEDS_REVIEW без причины невозможен', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.deliveryOrder.update({
+        where: { id: order.id },
+        data: { geoState: 'NEEDS_REVIEW' },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('история геоданных не редактируется и не удаляется', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    const response = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Клиент уточнил подъезд',
+      expectedVersion: order.version,
+    });
+    expect(response.statusCode).toBe(200);
+
+    const entry = await ctx.db.orderGeoHistory.findFirstOrThrow({ where: { orderId: order.id } });
+
+    await expect(
+      ctx.db.orderGeoHistory.update({ where: { id: entry.id }, data: { reason: 'подмена' } }),
+    ).rejects.toThrow();
+    await expect(ctx.db.orderGeoHistory.delete({ where: { id: entry.id } })).rejects.toThrow();
+  });
+
+  it('ручная запись истории без причины и автора невозможна', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.orderGeoHistory.create({
+        data: {
+          orderId: order.id,
+          kind: 'MANUAL_SET',
+          state: 'RESOLVED',
+          source: 'MANUAL',
+          precision: 'EXACT_HOUSE',
+          latMicro: 55_751_244,
+          lonMicro: 37_618_423,
+        },
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('ручная установка точки', () => {
+  it('ставит точку, пишет историю, аудит и событие без адреса и координат', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    const response = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Дом уточнён по звонку',
+      expectedVersion: order.version,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      version: number;
+      geoState: string;
+      lat: string;
+      lon: string;
+      unchanged: boolean;
+    };
+    expect(body.geoState).toBe('RESOLVED');
+    expect(body.unchanged).toBe(false);
+    expect(body.version).toBe(order.version + 1);
+    // Наружу уходит десятичная строка, а не число с плавающей точкой.
+    expect(body.lat).toBe('55.751244');
+    expect(body.lon).toBe('37.618423');
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoState).toBe('RESOLVED');
+    expect(stored.geoSource).toBe('MANUAL');
+    expect(stored.geoPrecision).toBe('EXACT_HOUSE');
+    expect(stored.geoLatMicro).toBe(55_751_244);
+    expect(stored.geoReviewReason).toBeNull();
+
+    const history = await ctx.db.orderGeoHistory.findMany({ where: { orderId: order.id } });
+    expect(history).toHaveLength(1);
+    expect(history[0]?.kind).toBe('MANUAL_SET');
+    expect(history[0]?.reason).toBe('Дом уточнён по звонку');
+
+    const audit = await ctx.db.auditLog.findMany({
+      where: { entityId: order.id, action: 'ORDER_GEO_POINT_SET' },
+    });
+    expect(audit).toHaveLength(1);
+    const auditText = asText(audit[0]);
+    expect(auditText).not.toContain('синтетический адрес');
+    expect(auditText).not.toContain('55.751244');
+    expect(auditText).not.toContain('55751244');
+
+    const events = await ctx.db.realtimeEvent.findMany({ where: { topic: 'order.geo_changed' } });
+    const own = events.filter((event) => asText(event.payload).includes(order.id));
+    expect(own.length).toBeGreaterThan(0);
+    const eventText = asText(own);
+    expect(eventText).not.toContain('синтетический адрес');
+    expect(eventText).not.toContain('55.751244');
+    expect(eventText).not.toContain('55751244');
+  });
+
+  it('повторная та же точка идемпотентна: ни истории, ни версии, ни события', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    const first = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Первая установка',
+      expectedVersion: order.version,
+    });
+    expect(first.statusCode).toBe(200);
+    const version = (first.json() as { version: number }).version;
+
+    const auditBefore = await ctx.db.auditLog.count({ where: { entityId: order.id } });
+
+    const second = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Повтор того же клика',
+      expectedVersion: version,
+    });
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { unchanged: boolean }).unchanged).toBe(true);
+    expect((second.json() as { version: number }).version).toBe(version);
+
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(1);
+    expect(await ctx.db.auditLog.count({ where: { entityId: order.id } })).toBe(auditBefore);
+  });
+
+  it('устаревшая версия возвращает 409 STALE_VERSION и ничего не меняет', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    const first = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Первая установка',
+      expectedVersion: order.version,
+    });
+    expect(first.statusCode).toBe(200);
+
+    const stale = await setPoint(token, order.id, {
+      ...OTHER_POINT,
+      reason: 'Попытка с устаревшей версией',
+      expectedVersion: order.version,
+    });
+
+    expect(stale.statusCode).toBe(409);
+    expect((stale.json() as { error: { conflict?: { kind: string } } }).error.conflict?.kind).toBe(
+      'STALE_VERSION',
+    );
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoLatMicro).toBe(55_751_244);
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(1);
+  });
+
+  it('недопустимая координата отклоняется и не оставляет следов', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    const response = await setPoint(token, order.id, {
+      lat: '95.000000',
+      lon: '37.618423',
+      reason: 'Координата за пределами планеты',
+      expectedVersion: order.version,
+    });
+
+    expect(response.statusCode).toBe(400);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoState).toBe('UNRESOLVED');
+    expect(stored.version).toBe(order.version);
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(0);
+    expect(
+      await ctx.db.auditLog.count({ where: { entityId: order.id, action: 'ORDER_GEO_POINT_SET' } }),
+    ).toBe(0);
+  });
+
+  it('две одновременные установки: одна побеждает, вторая получает 409 без частичной записи', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    // Оба запроса идут с одной и той же версией: блокировка строки обязана
+    // выстроить их в очередь, а не позволить обоим записать свою точку.
+    const [first, second] = await Promise.all([
+      setPoint(token, order.id, {
+        ...POINT,
+        reason: 'Одновременная установка A',
+        expectedVersion: order.version,
+      }),
+      setPoint(token, order.id, {
+        ...OTHER_POINT,
+        reason: 'Одновременная установка B',
+        expectedVersion: order.version,
+      }),
+    ]);
+
+    const codes = [first.statusCode, second.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.version).toBe(order.version + 1);
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(1);
+    expect(
+      await ctx.db.auditLog.count({ where: { entityId: order.id, action: 'ORDER_GEO_POINT_SET' } }),
+    ).toBe(1);
+  });
+
+  it('заказ вне нашей доставки точку не получает', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { snapshot, order } = await seedOrder();
+
+    await apply({
+      ...snapshot,
+      storeId: '33333333-3333-4333-8333-333333333333',
+      inScope: false,
+      scopeExitReason: 'STORE_CHANGED',
+      externalUpdated: '2026-08-10 13:00:00.000',
+    });
+    const moved = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(moved.inScope).toBe(false);
+
+    const response = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Попытка для заказа чужого склада',
+      expectedVersion: moved.version,
+    });
+    expect(response.statusCode).toBe(400);
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('права: ADMIN и LOGISTICIAN допущены, COURIER, WAREHOUSE и аноним — нет', async () => {
+    const { order } = await seedOrder();
+
+    for (const roles of [['ADMIN'], ['LOGISTICIAN']] as const) {
+      const fresh = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+      const response = await setPoint(await tokenFor([...roles]), order.id, {
+        ...POINT,
+        reason: `Установка ролью ${roles.join()}`,
+        expectedVersion: fresh.version,
+      });
+      expect(response.statusCode, roles.join()).toBe(200);
+    }
+
+    for (const roles of [['COURIER'], ['WAREHOUSE']] as const) {
+      const fresh = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+      const response = await setPoint(await tokenFor([...roles]), order.id, {
+        ...OTHER_POINT,
+        reason: `Попытка ролью ${roles.join()}`,
+        expectedVersion: fresh.version,
+      });
+      expect(response.statusCode, roles.join()).toBe(403);
+    }
+
+    const anonymous = await ctx.app.inject({
+      method: 'PUT',
+      url: `/api/orders/${order.id}/geo-point`,
+      payload: { ...OTHER_POINT, reason: 'Аноним', expectedVersion: 1 },
+    });
+    expect(anonymous.statusCode).toBe(401);
+  });
+});
+
+describe('смена адреса обесценивает точку', () => {
+  it('после другого адреса точка исчезает, а прежняя остаётся в истории', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { snapshot, order } = await seedOrder();
+
+    const set = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Точка до смены адреса',
+      expectedVersion: order.version,
+    });
+    expect(set.statusCode).toBe(200);
+
+    await apply(
+      {
+        ...snapshot,
+        address: 'Москва, другой синтетический адрес, 2',
+        externalUpdated: '2026-08-10 14:00:00.000',
+      },
+      new Date('2026-08-10T11:00:00.000Z'),
+    );
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoState).toBe('NEEDS_REVIEW');
+    expect(stored.geoReviewReason).toBe('ADDRESS_CHANGED');
+    expect(stored.geoLatMicro).toBeNull();
+    expect(stored.geoLonMicro).toBeNull();
+    expect(stored.geoSource).toBeNull();
+
+    const history = await ctx.db.orderGeoHistory.findMany({
+      where: { orderId: order.id },
+      orderBy: { occurredAt: 'asc' },
+    });
+    expect(history).toHaveLength(2);
+    expect(history[1]?.kind).toBe('INVALIDATED_ADDRESS_CHANGED');
+    // Прежняя точка остаётся доказательством: где заказ был до правки адреса.
+    expect(history[1]?.previousLatMicro).toBe(55_751_244);
+    expect(history[1]?.latMicro).toBeNull();
+
+    expect(
+      await ctx.db.auditLog.count({
+        where: { entityId: order.id, action: 'ORDER_GEO_INVALIDATED' },
+      }),
+    ).toBe(1);
+  });
+
+  it('заказ без точки смена адреса не трогает', async () => {
+    const { snapshot, order } = await seedOrder();
+
+    await apply(
+      {
+        ...snapshot,
+        address: 'Москва, ещё один синтетический адрес, 3',
+        externalUpdated: '2026-08-10 14:00:00.000',
+      },
+      new Date('2026-08-10T11:00:00.000Z'),
+    );
+
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(0);
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoState).toBe('UNRESOLVED');
+  });
+});
+
+describe('выборка для карты и список', () => {
+  it('карта отдаёт только заказы выбранного дня с подтверждённой точкой', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-20';
+
+    const withPoint = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
+    const withoutPoint = await seedOrder({ deliveryPlannedMoment: `${day} 13:00:00.000` });
+    const otherDay = await seedOrder({ deliveryPlannedMoment: '2026-11-21 12:00:00.000' });
+
+    for (const seeded of [withPoint, otherDay]) {
+      const response = await setPoint(token, seeded.order.id, {
+        ...POINT,
+        reason: 'Точка для проверки карты',
+        expectedVersion: seeded.order.version,
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    const map = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders/map?deliveryDate=${day}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(map.statusCode).toBe(200);
+
+    const ids = (map.json() as { points: { orderId: string }[] }).points.map(
+      (point) => point.orderId,
+    );
+    expect(ids).toContain(withPoint.order.id);
+    // Заказ без точки на карте не появляется…
+    expect(ids).not.toContain(withoutPoint.order.id);
+    expect(ids).not.toContain(otherDay.order.id);
+
+    const list = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders?deliveryDate=${day}&limit=100`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const items = (list.json() as { items: { id: string; geo: { state: string } }[] }).items;
+    // …но из списка не исчезает: логист обязан видеть его и работать с ним.
+    const listed = items.find((item) => item.id === withoutPoint.order.id);
+    expect(listed).toBeDefined();
+    expect(listed?.geo.state).toBe('UNRESOLVED');
+  });
+
+  it('несуществующая дата в запросе карты отклоняется', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/orders/map?deliveryDate=2026-02-30',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('фильтр по состоянию георазрешения работает', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-22';
+    const resolved = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
+    const unresolved = await seedOrder({ deliveryPlannedMoment: `${day} 13:00:00.000` });
+
+    await setPoint(token, resolved.order.id, {
+      ...POINT,
+      reason: 'Точка для фильтра',
+      expectedVersion: resolved.order.version,
+    });
+
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders?deliveryDate=${day}&geoState=UNRESOLVED&limit=100`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const ids = (response.json() as { items: { id: string }[] }).items.map((item) => item.id);
+    expect(ids).toContain(unresolved.order.id);
+    expect(ids).not.toContain(resolved.order.id);
+  });
+});
+
+describe('конфигурация карты', () => {
+  it('без MAP_STYLE_URL честно сообщает, что карта не настроена', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/map/config',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { configured: boolean; styleUrl: string | null };
+    // Тестовое окружение адрес стиля не задаёт: значит, обращения наружу нет.
+    expect(body.configured).toBe(false);
+    expect(body.styleUrl).toBeNull();
+  });
+
+  it('в конфигурации карты нет секретов и ключей', async () => {
+    const token = await tokenFor(['ADMIN']);
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/map/config',
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    const keys = Object.keys(response.json() as Record<string, unknown>).sort();
+    expect(keys).toEqual(['attribution', 'configured', 'styleUrl']);
+  });
+
+  it('исходный код карты не содержит публичных тайлов и демонстрационных стилей', async () => {
+    const { readFile, readdir } = await import('node:fs/promises');
+    const directory = new URL('../../../../web/src/screens/routing/', import.meta.url);
+    const files = (await readdir(directory)).filter(
+      (name) => name.endsWith('.tsx') || name.endsWith('.ts'),
+    );
+
+    for (const file of files) {
+      const code = await readFile(new URL(file, directory), 'utf8');
+      const lines = code
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('*') && !line.trimStart().startsWith('//'))
+        .join('\n');
+
+      expect(lines, file).not.toContain('tile.openstreetmap.org');
+      expect(lines, file).not.toContain('demotiles.maplibre.org');
+      expect(lines, file).not.toContain('api.maptiler.com');
+    }
+  });
+});
+
+describe('перевод координат', () => {
+  it('строка и число дают одно и то же целое значение', () => {
+    expect(toMicro('55.751244', MAX_LAT_MICRO, 'lat')).toBe(55_751_244);
+    expect(toMicro(55.751244, MAX_LAT_MICRO, 'lat')).toBe(55_751_244);
+  });
+
+  it('обратный перевод сохраняет шесть знаков, включая нули и знак', () => {
+    expect(fromMicro(55_751_244)).toBe('55.751244');
+    expect(fromMicro(37_600_000)).toBe('37.600000');
+    expect(fromMicro(-1_000_001)).toBe('-1.000001');
+    expect(fromMicro(0)).toBe('0.000000');
+  });
+});

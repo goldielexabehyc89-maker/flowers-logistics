@@ -52,3 +52,9 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Картографические архивы: сотни мегабайт, раздаются отдельно от репозитория.
+*.pmtiles
+*.mbtiles
+*.osm.pbf
+*.pbf

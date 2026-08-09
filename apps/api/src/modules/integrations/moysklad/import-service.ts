@@ -27,6 +27,7 @@ import {
   type ManualInterval,
 } from '../../orders/attention.js';
 import { recordOrderConflicts } from '../../routing/conflicts.js';
+import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
 const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
@@ -44,6 +45,10 @@ interface StoredOrder {
   version: number;
   inScope: boolean;
   sourceMissing: boolean;
+  /// Геоданные: смена адреса обесценивает прежнюю точку.
+  geoState: $Enums.OrderGeoState;
+  geoLatMicro: number | null;
+  geoLonMicro: number | null;
   /// Ручной интервал логиста: синхронизация обязана его учитывать и не затирать.
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
@@ -85,7 +90,8 @@ async function lockByExternalId(
 ): Promise<StoredOrder | null> {
   const rows = await tx.$queryRaw<StoredOrder[]>`
     SELECT "id", "version", "inScope", "sourceMissing",
-           "manualIntervalStartMinute", "manualIntervalEndMinute"
+           "manualIntervalStartMinute", "manualIntervalEndMinute",
+           "geoState", "geoLatMicro", "geoLonMicro"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
     FOR UPDATE
@@ -252,6 +258,17 @@ async function updateOrder(
     snapshot,
     reasons,
   );
+
+  // Адрес изменился — прежняя точка больше не относится к этому заказу.
+  // Оставить её пригодной опаснее, чем потерять: координата от старого адреса
+  // выглядит как нормальные данные и молча отправит курьера не туда.
+  if (changedFields.includes('address')) {
+    await invalidateGeoOnAddressChange(tx, existing.id, {
+      geoState: existing.geoState,
+      latMicro: existing.geoLatMicro,
+      lonMicro: existing.geoLonMicro,
+    });
+  }
 
   // Заказ мог уже лежать в маршруте. Из маршрута он НЕ удаляется: участие и история
   // сохраняются, а расхождение становится видимым конфликтом. Блокировка маршрута

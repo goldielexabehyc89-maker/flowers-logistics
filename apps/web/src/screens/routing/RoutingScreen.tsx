@@ -26,6 +26,8 @@ import {
   TextInput,
 } from '../../ui/components';
 import { RouteCard } from './RouteCard';
+import { MapPanel, requestMapPick } from './MapPanel';
+import { geoHint, isMappable, type OrderGeo } from './geo';
 import {
   conflictMessage,
   formatDate,
@@ -55,6 +57,8 @@ interface UnassignedOrder {
   address: string | null;
   recipient: string | null;
   needsAttention: boolean;
+  geo: OrderGeo;
+  version: number;
 }
 
 interface UnassignedResponse {
@@ -74,6 +78,7 @@ export function RoutingScreen(): React.JSX.Element {
   const [selected, setSelected] = useState<string[]>([]);
   const [vehicleType, setVehicleType] = useState<VehicleType>('CAR');
   const [openRouteId, setOpenRouteId] = useState<string | null>(null);
+  const [selectedOnMap, setSelectedOnMap] = useState<string | null>(null);
   const [targetRouteId, setTargetRouteId] = useState<string>('');
 
   useEffect(() => {
@@ -159,8 +164,8 @@ export function RoutingScreen(): React.JSX.Element {
         <div>
           <h2>Маршрутизация</h2>
           <p className="muted text-sm">
-            Заказы выбранного дня и черновики маршрутов. Карты и расчёт времени появятся на
-            следующем этапе.
+            Заказы выбранного дня, черновики маршрутов и карта. Расчёт времени в пути и
+            автоматическое построение появятся позже.
           </p>
         </div>
       </header>
@@ -237,7 +242,10 @@ export function RoutingScreen(): React.JSX.Element {
             <>
               <ul className="routes__orders">
                 {items.map((order) => (
-                  <li key={order.id} className="routes__order">
+                  <li
+                    key={order.id}
+                    className={`routes__order${selectedOnMap === order.id ? ' routes__order--selected' : ''}`}
+                  >
                     <label className="routes__order-select">
                       <input
                         type="checkbox"
@@ -254,7 +262,19 @@ export function RoutingScreen(): React.JSX.Element {
                     </label>
                     <div className="routes__order-body">
                       <div className="routes__order-head">
-                        <span className="routes__number">{order.number}</span>
+                        {/*
+                         * Номер — кнопка, а не просто текст: выбор строки
+                         * подсвечивает маркер, и делать это должно быть
+                         * возможно с клавиатуры, а не только мышью.
+                         */}
+                        <button
+                          type="button"
+                          className="routes__number routes__number-button"
+                          aria-pressed={selectedOnMap === order.id}
+                          onClick={() => setSelectedOnMap(order.id)}
+                        >
+                          {order.number}
+                        </button>
                         <span>{stopInterval(order.interval)}</span>
                         {order.needsAttention && (
                           <StatusBadge tone="warning">Требует внимания</StatusBadge>
@@ -262,6 +282,23 @@ export function RoutingScreen(): React.JSX.Element {
                       </div>
                       <span>{order.address ?? '—'}</span>
                       <span className="muted text-sm">{order.recipient ?? '—'}</span>
+                      <span className="routes__order-geo text-sm">
+                        {isMappable(order.geo) ? (
+                          <span className="muted">Точка на карте есть</span>
+                        ) : (
+                          // Заказ без точки не исчезает из работы: он остаётся
+                          // в списке с объяснением, что именно не так.
+                          <span className="routes__geo-hint">{geoHint(order.geo)}</span>
+                        )}
+                        <Button
+                          onClick={() => {
+                            setSelectedOnMap(order.id);
+                            requestMapPick({ orderId: order.id, version: order.version });
+                          }}
+                        >
+                          Указать точку
+                        </Button>
+                      </span>
                     </div>
                   </li>
                 ))}
@@ -354,6 +391,12 @@ export function RoutingScreen(): React.JSX.Element {
           )}
         </section>
       </div>
+
+      <MapPanel
+        deliveryDate={date}
+        selectedOrderId={selectedOnMap}
+        onSelect={(orderId) => setSelectedOnMap(orderId)}
+      />
 
       {openRouteId !== null && (
         <RouteCard routeId={openRouteId} onClose={() => setOpenRouteId(null)} />

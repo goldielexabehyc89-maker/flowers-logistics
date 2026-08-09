@@ -63,6 +63,17 @@ const configSchema = z.object({
   /** Перекрытие окна delta-синхронизации. Стартовое значение — пять минут. */
   MOYSKLAD_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
 
+  /**
+   * Адрес стиля карты MapLibre. Пусто — карта честно не настроена.
+   *
+   * Ключей здесь быть не может: значение целиком уходит в браузер. Публичные
+   * тайлы OSM и демонстрационные тайлы MapLibre в production запрещены —
+   * их условия не допускают продуктовую нагрузку.
+   */
+  MAP_STYLE_URL: z.string().trim().max(500).optional(),
+  /** Подпись правообладателя подложки. Показывается на карте. */
+  MAP_ATTRIBUTION: z.string().trim().max(200).optional(),
+
   /** Ключ AES-256-GCM в base64: ровно 32 байта после декодирования. */
   AUTH_REFRESH_REPLAY_KEY: z
     .string()

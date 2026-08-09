@@ -111,6 +111,110 @@
   font-weight: 600;
 }
 
+/* Номер заказа кликабелен: он связывает строку списка с маркером на карте. */
+.routes__number-button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.routes__number-button[aria-pressed='true'] {
+  text-decoration: underline;
+}
+
+.routes__order--selected {
+  background: var(--color-accent-soft);
+}
+
+.routes__order-geo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* Причина отсутствия точки заметна, но не кричит: заказ остаётся в работе. */
+.routes__geo-hint {
+  color: var(--color-warning);
+}
+
+/*
+ * Карта.
+ *
+ * Высота задаётся здесь: MapLibre измеряет контейнер, и без явного размера
+ * карта схлопнулась бы в нулевую полоску.
+ */
+.map {
+  position: relative;
+  width: 100%;
+  height: clamp(320px, 50vh, 620px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+/*
+ * Сам контейнер MapLibre. Размер задаётся здесь: библиотека измеряет элемент,
+ * и без явной высоты карта схлопнулась бы в нулевую полоску.
+ */
+.map__canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* В режиме установки точки курсор прямо говорит, что ждут клика по карте. */
+.map--picking {
+  cursor: crosshair;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+}
+
+.map-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.75rem;
+  height: 1.75rem;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+/*
+ * Три состояния маркера различаются не только цветом: часть логистов работает
+ * при ярком свете на планшете, а различать оттенки в таких условиях трудно.
+ */
+.map-marker--unassigned {
+  border-style: dashed;
+}
+
+.map-marker--assigned {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.map-marker--attention {
+  background: var(--color-warning-soft);
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+  font-weight: 700;
+}
+
+.map-marker--selected {
+  box-shadow: var(--focus-ring);
+  z-index: 1;
+}
+
 .routes__position,
 .sheet__position {
   display: inline-flex;

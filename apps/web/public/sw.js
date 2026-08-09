@@ -15,6 +15,14 @@ const CACHE_VERSION = 'fl-shell-v1';
 const SHELL_URLS = ['/', '/index.html', '/manifest.webmanifest'];
 const NEVER_CACHED_PREFIXES = ['/api', '/health', '/ready'];
 
+/*
+ * Картографические архивы не кэшируются никогда: PMTiles и MBTiles — единые файлы
+ * на сотни мегабайт, из которых карта читает небольшие куски диапазонными запросами.
+ * Положить такой файл в кэш означало бы забить хранилище устройства ради одного экрана,
+ * а сохранить кусок под адресом целого файла — однажды отдать карте обрывок.
+ */
+const NEVER_CACHED_EXTENSIONS = ['.pmtiles', '.mbtiles', '.osm.pbf', '.pbf'];
+
 function isNeverCached(pathname) {
   return NEVER_CACHED_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(prefix + '/'),
@@ -34,11 +42,24 @@ function isCacheableRequest(request) {
     return false;
   }
 
+  if (NEVER_CACHED_EXTENSIONS.some((extension) => url.pathname.toLowerCase().endsWith(extension))) {
+    return false;
+  }
+
+  // Диапазонный запрос — это кусок файла, а не ресурс.
+  if (request.headers.has('Range')) {
+    return false;
+  }
+
   return !request.headers.has('Authorization');
 }
 
 function isCacheableResponse(response) {
   if (!response || response.status !== 200 || response.type === 'opaque') {
+    return false;
+  }
+  // 206 отсечён проверкой статуса; Content-Range страхует нестандартные ответы.
+  if (response.headers.has('Content-Range')) {
     return false;
   }
   const cacheControl = response.headers.get('Cache-Control') || '';
