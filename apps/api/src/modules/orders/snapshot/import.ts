@@ -160,9 +160,22 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
     select: { id: true },
   });
 
+  // Геоданные задаются ЯВНО в обоих случаях.
+  //
+  // Пустой объект оставил бы прежнюю точку на месте: заказ, у которого пропал
+  // псевдоним адреса, остался бы в состоянии RESOLVED с координатами от старого
+  // снимка — и отчёт импорта при этом честно сообщал бы «без точки».
   const geo =
     point === null
-      ? {}
+      ? {
+          geoState: 'UNRESOLVED' as const,
+          geoSource: null,
+          geoPrecision: null,
+          geoLatMicro: null,
+          geoLonMicro: null,
+          geoResolvedAt: null,
+          geoReviewReason: null,
+        }
       : {
           geoState: 'RESOLVED' as const,
           // Источник строго SYNTHETIC: по нему на любом экране видно, что точка
@@ -172,6 +185,7 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
           geoLatMicro: point.latMicro,
           geoLonMicro: point.lonMicro,
           geoResolvedAt: new Date(),
+          geoReviewReason: null,
         };
 
   const data = {

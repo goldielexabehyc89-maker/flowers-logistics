@@ -376,6 +376,126 @@ describe('конфигурация карты для браузера', () => {
     expect(body.routingAvailable).toBe(false);
   });
 
+  it('внешний стиль допустим только в локальной разработке', async () => {
+    // Каталог без манифеста: собственная подложка неисправна.
+    const broken = await mkdtemp(path.join(tmpdir(), 'fl-basemap-broken-'));
+
+    try {
+      for (const env of ['staging', 'production'] as const) {
+        const config = loadConfig({
+          DATABASE_URL: resolveTestDatabaseUrl(),
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: env,
+          NODE_ENV: 'test',
+          LOG_LEVEL: 'silent',
+          MAP_ARTIFACTS_PATH: broken,
+          MAP_STYLE_URL: 'https://tiles.example.invalid/style.json',
+          MAP_ATTRIBUTION: '© Кто-то посторонний',
+          ...TEST_SECRETS,
+        });
+
+        const server = await buildServer({
+          config,
+          logger,
+          db,
+          notifier: {
+            subscribe: () => () => undefined,
+            start: () => undefined,
+            stop: async () => undefined,
+          },
+        });
+
+        try {
+          const response = await server.inject({
+            method: 'GET',
+            url: '/api/map/config',
+            headers: { authorization: `Bearer ${await tokenFor()}` },
+          });
+
+          const body = response.json() as { configured: boolean; styleUrl: string | null };
+
+          // Подмена неисправной подложки чужим сервером — это тот самый
+          // молчаливый внешний запрос, который запрещён.
+          expect(body.configured, env).toBe(false);
+          expect(body.styleUrl, env).toBeNull();
+          expect(response.body, env).not.toContain('tiles.example.invalid');
+        } finally {
+          await server.close();
+        }
+      }
+
+      // В локальной разработке заранее заданный адрес по-прежнему разрешён.
+      const localConfig = loadConfig({
+        DATABASE_URL: resolveTestDatabaseUrl(),
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        NODE_ENV: 'test',
+        LOG_LEVEL: 'silent',
+        MAP_ARTIFACTS_PATH: broken,
+        MAP_STYLE_URL: 'http://127.0.0.1:8080/style.json',
+        ...TEST_SECRETS,
+      });
+
+      const localServer = await buildServer({
+        config: localConfig,
+        logger,
+        db,
+        notifier: {
+          subscribe: () => () => undefined,
+          start: () => undefined,
+          stop: async () => undefined,
+        },
+      });
+
+      try {
+        const response = await localServer.inject({
+          method: 'GET',
+          url: '/api/map/config',
+          headers: { authorization: `Bearer ${await tokenFor()}` },
+        });
+        const body = response.json() as { configured: boolean; source: string };
+        expect(body.configured).toBe(true);
+        expect(body.source).toBe('EXTERNAL_STYLE');
+      } finally {
+        await localServer.close();
+      }
+    } finally {
+      await rm(broken, { recursive: true, force: true });
+    }
+  });
+
+  it('расчёт обещается только после подтверждения маршрутизатора', async () => {
+    const token = await tokenFor();
+
+    // Маршрутизатор не подтверждён: состояние интеграции не OK.
+    await db.integrationStatus.upsert({
+      where: { provider: 'valhalla' },
+      create: { provider: 'valhalla', state: 'ERROR' },
+      update: { state: 'ERROR' },
+    });
+
+    const denied = await app.inject({
+      method: 'GET',
+      url: '/api/map/config',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect((denied.json() as { routingAvailable: boolean }).routingAvailable).toBe(false);
+
+    // И даже при OK — только если адрес сервиса задан.
+    await db.integrationStatus.update({
+      where: { provider: 'valhalla' },
+      data: { state: 'OK' },
+    });
+
+    const stillDenied = await app.inject({
+      method: 'GET',
+      url: '/api/map/config',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // В этой сборке VALHALLA_URL не задан, поэтому обещать нечего.
+    expect((stillDenied.json() as { routingAvailable: boolean }).routingAvailable).toBe(false);
+  });
+
   it('адрес маршрутизатора в браузер не попадает', async () => {
     const token = await tokenFor();
     const response = await app.inject({

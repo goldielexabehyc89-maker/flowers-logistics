@@ -56,6 +56,14 @@ export interface MatrixDeps {
   /** Клиент маршрутизатора. Вызывается строго вне транзакции. */
   valhalla: {
     matrix: (points: readonly LatLon[], costing: string) => Promise<(MatrixElement | null)[][]>;
+    /**
+     * Подтверждает, что сервис отвечает по ТОМ ЖЕ графе, что указан в настройке.
+     *
+     * Обязательная зависимость, а не проверка «где-то сбоку»: расчёт по другому
+     * графу — другой ответ, и он лёг бы в кэш под нашим ключом, пережив смену
+     * дорожных данных. Бросает исключение, если подтвердить нечем.
+     */
+    verifyGraph: () => Promise<void>;
   };
   /**
    * Ревизия дорожного графа. Обязательна: расчёт по другому графу — другой
@@ -66,7 +74,14 @@ export interface MatrixDeps {
   ttlSeconds?: number;
   now?: () => Date;
   leaseTimeoutMs?: number;
-  workerId?: string;
+  /**
+   * Владелец аренды расчёта. Обязателен и уникален на процесс.
+   *
+   * Общее значение по умолчанию сделало бы владельцев неразличимыми: два
+   * экземпляра приложения считали бы аренду друг друга своей и переписывали бы
+   * чужой результат. Создаётся `newMatrixWorkerId()` один раз при запуске.
+   */
+  workerId: string;
   /** Сколько раз ждать чужой расчёт, прежде чем признать его незавершённым. */
   waitAttempts?: number;
   waitDelayMs?: number;
@@ -188,6 +203,11 @@ export async function computeMatrix(
     }
   }
 
+  // Физический запрет расчёта при неподтверждённом графе. Проверка выполняется
+  // ДО обращения к кэшу: результат по чужому графу нельзя ни считать, ни отдать
+  // из кэша, потому что ключ у него был бы наш.
+  await deps.valhalla.verifyGraph();
+
   const graphRevision = deps.graphRevision;
   const trafficMode = CURRENT_TRAFFIC_MODE;
   const keyHash = matrixCacheKey({
@@ -250,8 +270,8 @@ export async function computeMatrix(
   const computedAt = clockOf(deps);
   const ttlSeconds = deps.ttlSeconds ?? DEFAULT_TTL_SECONDS;
 
-  await deps.db.routeMatrixCache.updateMany({
-    where: { keyHash, status: 'PENDING', lockedBy: deps.workerId ?? 'matrix' },
+  const saved = await deps.db.routeMatrixCache.updateMany({
+    where: { keyHash, status: 'PENDING', lockedBy: deps.workerId },
     data: {
       status: 'READY',
       durationsSec,
@@ -263,6 +283,27 @@ export async function computeMatrix(
       lastErrorCode: null,
     },
   });
+
+  // Аренду перехватили, пока шёл расчёт: наш результат не записан, и выдавать
+  // его за сохранённый нельзя — вызывающая сторона считала бы, что он лежит
+  // в кэше, а следующий запрос считал бы всё заново.
+  if (saved.count !== 1) {
+    deps.logger.warn(
+      { matrix: { keyHash } },
+      'аренда расчёта матрицы потеряна, результат не записан',
+    );
+
+    const fromOther = await readFresh(deps, keyHash, clockOf(deps));
+    if (fromOther !== null) {
+      return { ...fromOther, graphRevision, profile: request.profile, trafficMode, cached: true };
+    }
+
+    throw new AppError('CONFLICT', {
+      message: 'matrix lease lost during computation',
+      publicMessage: 'Расчёт выполнялся другим процессом. Повторите попытку.',
+      conflict: { kind: 'MATRIX_IN_PROGRESS' },
+    });
+  }
 
   return {
     durationsSec,
@@ -326,7 +367,7 @@ async function claim(
     now: Date;
   },
 ): Promise<boolean> {
-  const workerId = deps.workerId ?? 'matrix';
+  const workerId = deps.workerId;
   const staleBefore = new Date(input.now.getTime() - (deps.leaseTimeoutMs ?? LEASE_TIMEOUT_MS));
 
   const inserted = await deps.db.$executeRaw`
@@ -401,7 +442,7 @@ async function markFailed(
   now: Date,
 ): Promise<void> {
   await deps.db.routeMatrixCache.updateMany({
-    where: { keyHash, status: 'PENDING', lockedBy: deps.workerId ?? 'matrix' },
+    where: { keyHash, status: 'PENDING', lockedBy: deps.workerId },
     data: {
       status: 'FAILED',
       durationsSec: Prisma.DbNull,

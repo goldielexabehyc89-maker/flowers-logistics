@@ -291,6 +291,47 @@ describe('импорт на staging', () => {
     expect(after).toEqual(before);
   });
 
+  it('исчезнувший псевдоним очищает прежнюю синтетическую точку', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const key = `c-${marker}`;
+
+    // Первый снимок: заказ получает синтетическую точку.
+    await importOrdersSnapshot(
+      ctx.db,
+      envConfig('staging'),
+      snapshotOf([{ key, addressAlias: `addr-${marker}c` }]),
+    );
+
+    const withPoint = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: pseudoUuid(key) },
+    });
+    expect(withPoint.geoState).toBe('RESOLVED');
+    expect(withPoint.geoLatMicro).not.toBeNull();
+
+    // Второй снимок того же заказа пришёл без псевдонима адреса.
+    const result = await importOrdersSnapshot(
+      ctx.db,
+      envConfig('staging'),
+      snapshotOf([{ key, addressAlias: null }]),
+    );
+    expect(result.withoutPoint).toBe(1);
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: pseudoUuid(key) },
+    });
+
+    // Прежняя точка снята полностью: заказ без адреса не может остаться
+    // подтверждённым, иначе отчёт «без точки» противоречил бы базе,
+    // а на карте появился бы маркер неизвестно откуда.
+    expect(after.geoState).toBe('UNRESOLVED');
+    expect(after.geoSource).toBeNull();
+    expect(after.geoPrecision).toBeNull();
+    expect(after.geoLatMicro).toBeNull();
+    expect(after.geoLonMicro).toBeNull();
+    expect(after.geoResolvedAt).toBeNull();
+    expect(after.address).toBeNull();
+  });
+
   it('импорт не переносит пользователей, аудит, outbox и realtime', async () => {
     const marker = String(process.hrtime.bigint() % 1_000_000n);
     const users = await ctx.db.user.count();

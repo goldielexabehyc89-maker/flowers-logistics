@@ -127,7 +127,14 @@ require_geo_artifacts
 
 step "Миграции и запуск"
 remote "$(compose_command) run --rm app npx prisma migrate deploy"
-remote "$(compose_command) up -d --no-build app"
+# Маршрутизатор поднимается вместе с приложением: без него расчёт времени
+# не работает, а `up … app` его не запускает — Compose поднимает только
+# перечисленные сервисы и их зависимости, а зависимости здесь нет намеренно
+# (отказ маршрутизатора не должен мешать приложению стартовать).
+remote "$(compose_command) up -d --no-build valhalla app"
+
+step "Проверка маршрутизатора"
+require_routing_ready
 
 step "Проверка готовности"
 require_ready

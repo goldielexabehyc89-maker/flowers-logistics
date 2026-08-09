@@ -44,15 +44,21 @@ export default tseslint.config(
   },
   {
     /*
-     * Инструменты сборки картографических артефактов.
+     * Инструменты сборки артефактов и проверки при выкатке.
      *
-     * Это отдельные скрипты Node, запускаемые человеком вручную: они не входят
-     * в сборку приложения, пишут в stderr осознанно и пользуются глобальными
-     * объектами среды выполнения напрямую.
+     * Это отдельные скрипты Node, запускаемые вручную либо внутри закреплённого
+     * образа: они не входят в сборку приложения, пишут в stderr осознанно
+     * и пользуются глобальными объектами среды выполнения напрямую.
      */
-    files: ['tools/**/*.mjs'],
+    files: ['tools/**/*.mjs', 'deploy/scripts/**/*.mjs'],
     languageOptions: {
-      globals: { Buffer: 'readonly', process: 'readonly', console: 'readonly' },
+      globals: {
+        Buffer: 'readonly',
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        AbortSignal: 'readonly',
+      },
     },
     rules: { 'no-console': 'off' },
   },

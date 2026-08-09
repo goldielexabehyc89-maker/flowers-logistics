@@ -195,10 +195,16 @@ export class ValhallaClient {
         throw new ValhallaError('BAD_RESPONSE');
       }
 
-      row[element.to_index] = {
-        timeSeconds: toSeconds(element.time),
-        distanceMeters: toMeters(element.distance),
-      };
+      // Каждая пара индексов обязана прийти РОВНО ОДИН РАЗ.
+      //
+      // Считать только количество элементов недостаточно: ответ, где одна пара
+      // пришла дважды, а другая не пришла вовсе, даёт то же количество —
+      // и матрица молча осталась бы с дырой на месте пропущенной пары.
+      if (row[element.to_index] !== null) {
+        throw new ValhallaError('BAD_RESPONSE');
+      }
+
+      row[element.to_index] = toElement(element.time, element.distance);
       filled += 1;
     }
 
@@ -243,6 +249,28 @@ export class ValhallaClient {
       throw new ValhallaError('BAD_RESPONSE', response.status);
     }
   }
+}
+
+/**
+ * Элемент матрицы из пары «время, расстояние».
+ *
+ * Значения обязаны быть согласованы: либо оба присутствуют, либо оба отсутствуют.
+ * Сочетание «времени нет, расстояние есть» означает, что сервис ответил чем-то
+ * другим; принять его — значит записать пару как достижимую по расстоянию
+ * и недостижимую по времени одновременно.
+ */
+function toElement(
+  time: number | null | undefined,
+  distance: number | null | undefined,
+): MatrixElement {
+  const timeSeconds = toSeconds(time);
+  const distanceMeters = toMeters(distance);
+
+  if ((timeSeconds === null) !== (distanceMeters === null)) {
+    throw new ValhallaError('BAD_RESPONSE');
+  }
+
+  return { timeSeconds, distanceMeters };
 }
 
 /**

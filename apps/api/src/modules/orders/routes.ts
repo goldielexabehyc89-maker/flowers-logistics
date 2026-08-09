@@ -26,6 +26,7 @@ import { fromMicro, setManualPoint } from './geo.js';
 import { BASEMAP_PREFIX } from '../geo/basemap/routes.js';
 import type { BasemapState } from '../geo/basemap/manifest.js';
 import { CURRENT_TRAFFIC_MODE } from '../geo/matrix/service.js';
+import { isRoutingVerified } from '../geo/routing-status.js';
 
 const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const MAX_LIMIT = 100;
@@ -466,6 +467,12 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
 
     const basemap = deps.basemap?.() ?? { ok: false as const, problem: 'NOT_CONFIGURED' as const };
 
+    // Расчёт доступен только после подтверждения графа, а не при одном лишь
+    // наличии адреса сервиса: обещать автоматический расчёт, который откажет
+    // на первом же обращении, — это дезинформация, а не оптимизм.
+    const routingAvailable =
+      deps.config.VALHALLA_URL !== undefined && (await isRoutingVerified(deps.db));
+
     if (basemap.ok) {
       return {
         configured: true,
@@ -477,25 +484,29 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         // Живых данных о дорожной обстановке в собственном стеке нет.
         // Интерфейс обязан сказать это прямо, а не намекать точностью цифр.
         trafficMode: CURRENT_TRAFFIC_MODE,
-        routingAvailable: deps.config.VALHALLA_URL !== undefined,
+        routingAvailable,
       };
     }
 
-    // Запасной вариант для локальной разработки: заранее заданный адрес стиля.
-    // В production он не используется — там подложка своя.
-    const styleUrl = deps.config.MAP_STYLE_URL;
+    // Заранее заданный внешний адрес стиля допустим ТОЛЬКО в локальной разработке.
+    //
+    // На staging и production подложка своя, и подмена её чужим сервером при
+    // неисправном наборе — это ровно тот молчаливый внешний запрос, который
+    // запрещён: адреса доставок ушли бы к постороннему, а карта работала бы,
+    // пока работает он.
+    const styleUrl = deps.config.isLocal ? deps.config.MAP_STYLE_URL : undefined;
     const configured = styleUrl !== undefined && styleUrl !== '';
 
     return {
       configured,
       source: configured ? 'EXTERNAL_STYLE' : 'NONE',
       styleUrl: styleUrl ?? null,
-      attribution: deps.config.MAP_ATTRIBUTION ?? null,
+      attribution: configured ? (deps.config.MAP_ATTRIBUTION ?? null) : null,
       revision: null,
       // Причина отказа технической подробности не раскрывает: только вид.
       problem: configured ? null : basemap.problem,
       trafficMode: CURRENT_TRAFFIC_MODE,
-      routingAvailable: deps.config.VALHALLA_URL !== undefined,
+      routingAvailable,
     };
   });
 

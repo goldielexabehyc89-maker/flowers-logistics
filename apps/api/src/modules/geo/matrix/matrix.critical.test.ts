@@ -19,11 +19,12 @@ import {
 } from '../../auth/testing/harness.js';
 import { COSTING, ValhallaClient, ValhallaError } from '../../integrations/valhalla/client.js';
 import type { LatLon, MatrixElement } from '../../integrations/valhalla/client.js';
-import { probeRouting, VALHALLA_PROVIDER } from '../routing-status.js';
+import { createGraphGate, probeRouting, VALHALLA_PROVIDER } from '../routing-status.js';
 import {
   computeMatrix,
   CURRENT_TRAFFIC_MODE,
   matrixCacheKey,
+  newMatrixWorkerId,
   normalize,
   type MatrixDeps,
 } from './service.js';
@@ -80,6 +81,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 interface FakeRouter {
   calls: number;
   matrix: (points: readonly LatLon[], costing: string) => Promise<(MatrixElement | null)[][]>;
+  verifyGraph: () => Promise<void>;
 }
 
 function fakeRouter(
@@ -89,6 +91,10 @@ function fakeRouter(
   return {
     get calls() {
       return state.calls;
+    },
+    // Граф подтверждён: отдельные проверки отказа живут ниже, в своём блоке.
+    async verifyGraph() {
+      return undefined;
     },
     async matrix(points, costing) {
       state.calls += 1;
@@ -307,6 +313,7 @@ describe('состояние маршрутизатора', () => {
 
     const result = await probeRouting(ctx.db, instance, '1700000000');
     expect(result.state).toBe('OK');
+    expect(result.revisionMatches).toBe(true);
 
     const status = await ctx.db.integrationStatus.findUniqueOrThrow({
       where: { provider: VALHALLA_PROVIDER },
@@ -441,6 +448,7 @@ describe('кэш матриц', () => {
     const points = uniquePoints();
     const failing: FakeRouter = {
       calls: 0,
+      verifyGraph: async () => undefined,
       matrix: async () => {
         throw new ValhallaError('SERVER_ERROR', 500);
       },
@@ -476,6 +484,7 @@ describe('кэш матриц', () => {
 
     const slow = (): FakeRouter => ({
       calls: 0,
+      verifyGraph: async () => undefined,
       matrix: async (input) => {
         calls += 1;
         concurrent += 1;
@@ -514,6 +523,7 @@ describe('кэш матриц', () => {
 
     const router: FakeRouter = {
       calls: 0,
+      verifyGraph: async () => undefined,
       matrix: async (input) => {
         // Короткий lock_timeout: если бы расчёт шёл внутри транзакции,
         // этот запрос не дождался бы и упал.
@@ -630,6 +640,181 @@ describe('кэш матриц', () => {
     for (const row of rowsInCache) {
       expect(row.keyHash).toMatch(/^[0-9a-f]{64}$/);
     }
+  });
+});
+
+describe('строгая проверка ответа матрицы', () => {
+  it('повтор одной пары и пропуск другой не проходят по количеству', async () => {
+    // Количество элементов совпадает с N², но пара (1,0) пришла дважды,
+    // а (0,1) не пришла вовсе. Счётчик такого не замечает — замечает
+    // проверка занятости ячейки.
+    const broken = [
+      { from_index: 0, to_index: 0, time: 0, distance: 0 },
+      { from_index: 1, to_index: 0, time: 90, distance: 2 },
+      { from_index: 1, to_index: 0, time: 95, distance: 2.1 },
+      { from_index: 1, to_index: 1, time: 0, distance: 0 },
+    ];
+    const instance = client(async () => jsonResponse({ sources_to_targets: broken }));
+
+    await expect(instance.matrix(POINTS.slice(0, 2), COSTING.CAR)).rejects.toMatchObject({
+      code: 'BAD_RESPONSE',
+    });
+  });
+
+  it('время без расстояния и расстояние без времени отвергаются', async () => {
+    const cases = [
+      { time: null, distance: 1.5 },
+      { time: 60, distance: null },
+    ];
+
+    for (const value of cases) {
+      const body = {
+        sources_to_targets: [
+          { from_index: 0, to_index: 0, time: 0, distance: 0 },
+          { from_index: 0, to_index: 1, ...value },
+          { from_index: 1, to_index: 0, time: 60, distance: 1.5 },
+          { from_index: 1, to_index: 1, time: 0, distance: 0 },
+        ],
+      };
+      const instance = client(async () => jsonResponse(body));
+
+      await expect(
+        instance.matrix(POINTS.slice(0, 2), COSTING.CAR),
+        JSON.stringify(value),
+      ).rejects.toMatchObject({ code: 'BAD_RESPONSE' });
+    }
+  });
+
+  it('согласованная недостижимость принимается', async () => {
+    const body = {
+      sources_to_targets: [
+        { from_index: 0, to_index: 0, time: 0, distance: 0 },
+        { from_index: 0, to_index: 1, time: null, distance: null },
+        { from_index: 1, to_index: 0, time: 60, distance: 1.5 },
+        { from_index: 1, to_index: 1, time: 0, distance: 0 },
+      ],
+    };
+    const instance = client(async () => jsonResponse(body));
+
+    const matrix = await instance.matrix(POINTS.slice(0, 2), COSTING.CAR);
+    expect(matrix[0]?.[1]).toEqual({ timeSeconds: null, distanceMeters: null });
+  });
+});
+
+describe('расчёт запрещён без подтверждённого графа', () => {
+  it('неподтверждённый граф не даёт дойти до маршрутизатора', async () => {
+    const router = fakeRouter();
+    router.verifyGraph = async () => {
+      throw new Error('граф не подтверждён');
+    };
+
+    await expect(
+      computeMatrix(matrixDeps(router), { points: uniquePoints(), profile: 'CAR' }),
+    ).rejects.toThrow('граф не подтверждён');
+
+    // Ни одного обращения: запрет физический, а не индикаторный.
+    expect(router.calls).toBe(0);
+  });
+
+  it('ворота графа отказывают при отсутствующей ревизии в ответе сервиса', async () => {
+    const instance = client(async () => jsonResponse({ version: '3.8.3' }));
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: GRAPH });
+
+    await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+
+    const status = await ctx.db.integrationStatus.findUniqueOrThrow({
+      where: { provider: VALHALLA_PROVIDER },
+    });
+    expect(status.state).toBe('ERROR');
+    expect(JSON.stringify(status.details)).toContain('graph-revision-unknown');
+  });
+
+  it('ворота графа отказывают при несовпадении ревизии', async () => {
+    const instance = client(async () =>
+      jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 }),
+    );
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: 'другая' });
+
+    await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+  });
+
+  it('подтверждение выполняется один раз на процесс', async () => {
+    let calls = 0;
+    const instance = client(async () => {
+      calls += 1;
+      return jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 });
+    });
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: '1700000000' });
+
+    await gate.verifyGraph();
+    await gate.verifyGraph();
+    await gate.verifyGraph();
+
+    // Подтверждать граф на каждую матрицу — значит добавлять сетевой запрос
+    // к каждому расчёту.
+    expect(calls).toBe(1);
+  });
+
+  it('неудача не запоминается: следующая попытка проверяет снова', async () => {
+    let calls = 0;
+    const instance = client(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('сервис ещё не поднялся');
+      }
+      return jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 });
+    });
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: '1700000000' });
+
+    await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+    await expect(gate.verifyGraph()).resolves.toBeUndefined();
+    expect(calls).toBe(2);
+  });
+});
+
+describe('владелец аренды расчёта', () => {
+  it('потерявший аренду не выдаёт свой результат за сохранённый', async () => {
+    const points = uniquePoints();
+    const keyHash = matrixCacheKey({
+      graphRevision: GRAPH,
+      profile: 'CAR',
+      trafficMode: CURRENT_TRAFFIC_MODE,
+      points,
+    });
+
+    const router: FakeRouter = {
+      calls: 0,
+      verifyGraph: async () => undefined,
+      matrix: async (input) => {
+        // Пока идёт расчёт, аренду перехватил другой экземпляр.
+        await ctx.db.routeMatrixCache.updateMany({
+          where: { keyHash },
+          data: { lockedBy: 'другой-экземпляр' },
+        });
+        return input.map((_, from) =>
+          input.map((__, to) =>
+            from === to
+              ? { timeSeconds: 0, distanceMeters: 0 }
+              : { timeSeconds: 60, distanceMeters: 1000 },
+          ),
+        );
+      },
+    };
+
+    // Результат не записан, поэтому и возвращать его как успешный нельзя:
+    // вызывающая сторона считала бы, что он лежит в кэше.
+    await expect(
+      computeMatrix(matrixDeps(router), { points, profile: 'CAR' }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    const row = await ctx.db.routeMatrixCache.findUniqueOrThrow({ where: { keyHash } });
+    expect(row.status).toBe('PENDING');
+    expect(row.durationsSec).toBeNull();
+  });
+
+  it('владелец аренды уникален у каждого процесса', () => {
+    const ids = new Set(Array.from({ length: 50 }, () => newMatrixWorkerId()));
+    expect(ids.size).toBe(50);
   });
 });
 
