@@ -23,6 +23,9 @@ const CONTENT_TYPES = new Map([
   ['.json', 'application/json'],
   ['.pbf', 'application/x-protobuf'],
   ['.png', 'image/png'],
+  // Лицензии распространяемых ресурсов. Они отдаются наружу вместе с набором,
+  // потому что и OFL, и MIT требуют, чтобы текст сопровождал файлы.
+  ['.txt', 'text/plain'],
 ]);
 
 function parseArgs(argv) {
@@ -73,7 +76,18 @@ async function collect(root, current = '') {
 }
 
 const args = parseArgs(process.argv);
-const required = ['root', 'revision', 'region', 'source-date', 'source-file', 'style'];
+const required = [
+  'root',
+  'revision',
+  'region',
+  'source-date',
+  'source-file',
+  'style',
+  // Границы и происхождение ресурсов задаются явно: значение по умолчанию
+  // молча описало бы не тот регион и не ту версию спрайтов.
+  'bbox',
+  'assets-revision',
+];
 for (const key of required) {
   if (args[key] === undefined) {
     console.error(`Не задан --${key}`);
@@ -134,13 +148,15 @@ const manifest = {
   format: MANIFEST_FORMAT,
   revision: args.revision,
   region: args.region,
-  // Границы Москвы и области с запасом. Уточняются при сборке конкретного
-  // набора: манифест описывает то, что действительно лежит в архиве.
-  bbox: (args.bbox ?? '36.5,54.8,39.0,56.5').split(',').map(Number),
+  // Границы приходят от вызывающей стороны и попадают в манифест как есть:
+  // манифест описывает то, что действительно лежит в архиве.
+  bbox: args.bbox.split(',').map(Number),
   sourceDate: args['source-date'],
   sourceSha256: await sha256(args['source-file']),
   tools,
   inputs,
+  /** Происхождение спрайтов и шрифтов: репозиторий и коммит. */
+  assetsRevision: args['assets-revision'],
   attribution: args.attribution ?? '© OpenStreetMap contributors',
   style: args.style,
   artifacts,

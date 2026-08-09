@@ -52,6 +52,9 @@ const artifactSchema = z.object({
     'application/octet-stream',
     'application/x-protobuf',
     'image/png',
+    // Лицензии шрифтов и спрайтов отдаются наружу вместе с набором: обе
+    // требуют, чтобы текст сопровождал распространяемые файлы.
+    'text/plain',
   ]),
 });
 
@@ -76,6 +79,14 @@ export const basemapManifestSchema = z.object({
    * чтобы наборы, собранные до его появления, оставались пригодными.
    */
   inputs: z.record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/)).optional(),
+  /**
+   * Происхождение спрайтов и шрифтов: репозиторий и коммит.
+   *
+   * Без него нельзя ответить на вопрос «откуда эти иконки и глифы» — а ответ
+   * нужен и для лицензий, и для повторяемости сборки. Поле необязательно,
+   * чтобы наборы, собранные до его появления, оставались пригодными.
+   */
+  assetsRevision: z.string().min(1).max(200).optional(),
   attribution: z.string().min(1).max(200),
   /** Файл стиля MapLibre внутри каталога. */
   style: relativePath,
