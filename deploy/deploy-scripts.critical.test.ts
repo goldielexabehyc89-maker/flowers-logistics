@@ -77,6 +77,16 @@ async function run(script: string, args: string[], env?: NodeJS.ProcessEnv): Pro
 const FAKE_SSH = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$SSH_LOG"
 
+# Крошечная имитация файловой системы сервера.
+#
+# Безопасные файловые команды выкатки выполняются по-настоящему, но с путями,
+# перенесёнными в отдельный каталог. Без этого проверка сверки и замены
+# ничего бы не проверяла: файлов, о которых идёт речь, просто не было бы.
+sandbox_run() {
+  local rewritten="\${1//\\/srv\\//$SSH_FS_DIR\\/srv\\/}"
+  eval "$rewritten"
+}
+
 for arg in "$@"; do
   case "$arg" in
     UserKnownHostsFile=*)
@@ -111,8 +121,14 @@ case "$cmd" in
 esac
 
 case "$cmd" in
-  *'sha256sum'*docker-compose.deploy.yml*)
-    printf '%s  %s\\n' "\${COMPOSE_SHA_REPLY:-совпадение-подставит-тест}" "compose"
+  printf*'base64 -d >'*|sha256sum*|"mv "*|"rm -f "*)
+    if [ -n "\${DELIVERY_SHA_REPLY:-}" ] && [ "\${cmd#sha256sum}" != "$cmd" ]; then
+      # Подменённый ответ моделирует повреждение передачи.
+      printf '%s  подменённая-сумма\\n' "\${DELIVERY_SHA_REPLY}"
+    else
+      sandbox_run "$cmd"
+    fi
+    exit 0
     ;;
   *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
   *"$PRODUCTION_DIR/ENVIRONMENT"*) printf '%s\\n' "\${PRODUCTION_MARKER_REPLY:-production}" ;;
@@ -202,8 +218,15 @@ interface SandboxOptions {
   productionMarkerReply?: string;
   /** Заставляет проверку маршрутизатора отвечать отказом. */
   routingFails?: boolean;
-  /** Что сервер отвечает на sha256sum Compose-файла. */
-  composeShaReply?: string;
+  /** Подменённый ответ сервера на sha256sum: моделирует повреждение передачи. */
+  deliveryShaReply?: string;
+  /** Версия, которую «выкатывают». По умолчанию — фиксированный SHA. */
+  version?: string;
+  /**
+   * Создать в песочнице настоящий репозиторий с двумя версиями файлов.
+   * Возвращает SHA первой версии — им и подменяется VERSION.
+   */
+  withGitHistory?: boolean;
   /** Строки, выполняемые после загрузки конфигураций. */
   body: string;
 }
@@ -215,9 +238,15 @@ interface SandboxOptions {
  * Каталог песочницы намеренно содержит пробел: рабочая папка проекта тоже
  * содержит пробелы, и путь без пробелов скрыл бы ошибки цитирования.
  */
-async function runInSandbox(
-  options: SandboxOptions,
-): Promise<RunResult & { ssh: string; knownHostsArgs: string[] }> {
+async function runInSandbox(options: SandboxOptions): Promise<
+  RunResult & {
+    ssh: string;
+    knownHostsArgs: string[];
+    oldVersionSha: string;
+    dir: string;
+    remoteFile: (remotePath: string) => Promise<string | null>;
+  }
+> {
   const staging = { ...STAGING_DEFAULTS, ...options.staging };
   const production = { ...PRODUCTION_DEFAULTS, ...options.production };
 
@@ -235,14 +264,70 @@ async function runInSandbox(
   const knownHostsLog = path.join(dir, 'known-hosts-args.log');
   await writeFile(knownHostsLog, '', 'utf8');
 
+  // Имитация файлов сервера. В неё заранее кладётся действующий Compose-файл:
+  // проверка обязана доказать, что испорченная передача его не тронула.
+  const fsDir = path.join(dir, 'server-fs');
+  await mkdir(path.join(fsDir, staging.REMOTE_DIR.replace(/^\//, '')), { recursive: true });
+  await mkdir(path.join(fsDir, production.REMOTE_DIR.replace(/^\//, '')), { recursive: true });
+  await writeFile(
+    path.join(fsDir, `${staging.REMOTE_DIR}/docker-compose.deploy.yml`),
+    EXISTING_REMOTE_COMPOSE,
+    'utf8',
+  );
+
   // Настоящий Compose-файл кладётся в песочницу: команда выкатки берёт его
-  // из корня репозитория, и без него проверка доставки была бы фикцией.
-  await mkdir(path.join(dir, 'deploy'), { recursive: true });
+  // из дерева версии, и без репозитория проверка доставки была бы фикцией.
+  await mkdir(path.join(dir, 'deploy/scripts'), { recursive: true });
   await writeFile(
     path.join(dir, 'deploy/docker-compose.deploy.yml'),
     await readFile(COMPOSE_FILE, 'utf8'),
     'utf8',
   );
+  await writeFile(
+    path.join(dir, 'deploy/scripts/verify-geo.mjs'),
+    await readFile(path.join(REPO_ROOT, 'deploy/scripts/verify-geo.mjs'), 'utf8'),
+    'utf8',
+  );
+
+  // История из двух версий: доставляться обязано содержимое VERSION,
+  // а не то, что лежит в рабочем дереве прямо сейчас.
+  let oldVersionSha = '';
+  if (options.withGitHistory === true) {
+    const git = async (...args: string[]): Promise<string> =>
+      (await execFileAsync('git', ['-C', dir, ...args])).stdout.trim();
+
+    await git('init', '-q');
+    await git('config', 'user.email', 'test@example.invalid');
+    await git('config', 'user.name', 'Проверка');
+
+    await writeFile(
+      path.join(dir, 'deploy/docker-compose.deploy.yml'),
+      'СТАРАЯ ВЕРСИЯ COMPOSE\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'deploy/scripts/verify-geo.mjs'),
+      '// СТАРАЯ ВЕРСИЯ ПРОВЕРЯЮЩЕГО СКРИПТА\n',
+      'utf8',
+    );
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'старая версия');
+    oldVersionSha = await git('rev-parse', 'HEAD');
+
+    // Рабочее дерево уходит вперёд: именно его брала прежняя реализация.
+    await writeFile(
+      path.join(dir, 'deploy/docker-compose.deploy.yml'),
+      'НОВАЯ ВЕРСИЯ COMPOSE\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(dir, 'deploy/scripts/verify-geo.mjs'),
+      '// НОВАЯ ВЕРСИЯ ПРОВЕРЯЮЩЕГО СКРИПТА\n',
+      'utf8',
+    );
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'новая версия');
+  }
 
   if (options.configs !== 'none') {
     await mkdir(path.join(dir, 'deploy/private'), { recursive: true });
@@ -266,7 +351,7 @@ async function runInSandbox(
       'set -euo pipefail',
       `source "${COMMON_LIB}"`,
       `REPO_ROOT="${dir}"`,
-      `VERSION="${VALID_SHA}"`,
+      `VERSION="${options.version ?? (oldVersionSha === '' ? VALID_SHA : oldVersionSha)}"`,
       options.body,
       "printf 'проверки пройдены\\n'",
       '',
@@ -280,6 +365,7 @@ async function runInSandbox(
     PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
     SSH_LOG: sshLog,
     KNOWN_HOSTS_ARG_LOG: knownHostsLog,
+    SSH_FS_DIR: fsDir,
     VERSION_UNDER_TEST: VALID_SHA,
     STAGING_DIR: staging.REMOTE_DIR,
     PRODUCTION_DIR: production.REMOTE_DIR,
@@ -289,9 +375,9 @@ async function runInSandbox(
     // отказе, а не терпение команды выкатки.
     ROUTING_CHECK_ATTEMPTS: '2',
     ROUTING_CHECK_DELAY: '0',
-    ...(options.composeShaReply === undefined
+    ...(options.deliveryShaReply === undefined
       ? {}
-      : { COMPOSE_SHA_REPLY: options.composeShaReply }),
+      : { DELIVERY_SHA_REPLY: options.deliveryShaReply }),
     ...(options.stagingMarkerReply === undefined
       ? {}
       : { STAGING_MARKER_REPLY: options.stagingMarkerReply }),
@@ -304,7 +390,34 @@ async function runInSandbox(
     ...result,
     ssh: await readFile(sshLog, 'utf8'),
     knownHostsArgs: (await readFile(knownHostsLog, 'utf8')).split('\n').filter((v) => v !== ''),
+    oldVersionSha,
+    dir,
+    /** Содержимое файла в имитации серверной файловой системы. */
+    remoteFile: async (remotePath: string): Promise<string | null> => {
+      try {
+        return await readFile(path.join(fsDir, remotePath), 'utf8');
+      } catch {
+        return null;
+      }
+    },
   };
+}
+
+/** Что лежит на сервере до выкатки: старый Compose-файл. */
+const EXISTING_REMOTE_COMPOSE = 'ДЕЙСТВУЮЩИЙ COMPOSE НА СЕРВЕРЕ\n';
+
+/** Достаёт полезную нагрузку доставки из журнала ssh и раскодирует её. */
+function deliveredContent(sshLog: string, remoteSuffix: string): string | null {
+  for (const line of sshLog.split('\n')) {
+    if (!line.includes('base64 -d') || !line.includes(remoteSuffix)) {
+      continue;
+    }
+    const match = /printf '%s' '([A-Za-z0-9+/=]*)'/.exec(line);
+    if (match?.[1] !== undefined) {
+      return Buffer.from(match[1], 'base64').toString('utf8');
+    }
+  }
+  return null;
 }
 
 /** Загрузка обеих конфигураций и проверка изоляции — общее начало сценариев. */
@@ -664,14 +777,9 @@ describe('геостек в командах выкатки', () => {
     }
   });
 
-  it('Compose-файл доставляется на сервер и сверяется по контрольной сумме', async () => {
-    const { createHash } = await import('node:crypto');
-    const expected = createHash('sha256')
-      .update(await readFile(COMPOSE_FILE))
-      .digest('hex');
-
+  it('сверка выполняется до замены: сначала .new, потом mv', async () => {
     const result = await runInSandbox({
-      composeShaReply: expected,
+      withGitHistory: true,
       body: [
         LOAD_BOTH,
         'activate_environment STAGING',
@@ -686,22 +794,32 @@ describe('геостек в командах выкатки', () => {
     const lines = result.ssh.split('\n').filter((line) => line !== '');
     const upload = lines.findIndex((line) => line.includes('base64 -d'));
     const verify = lines.findIndex((line) => line.includes('sha256sum'));
+    const move = lines.findIndex((line) => line.startsWith('mv ') || line.includes(' mv '));
     const compose = lines.findIndex((line) => line.includes('docker compose'));
 
-    // Файл доставлен и сверен ДО первой команды Compose: иначе выкатка
-    // запустила бы окружение файлом произвольного возраста.
     expect(upload).toBeGreaterThan(-1);
+    // Порядок обязателен: сверяется временная копия, и только потом
+    // выполняется замена. Обратный порядок лишал бы сервер рабочего файла
+    // ещё до того, как выяснится, что передача испорчена.
     expect(verify).toBeGreaterThan(upload);
-    expect(compose).toBeGreaterThan(verify);
+    expect(move).toBeGreaterThan(verify);
+    expect(compose).toBeGreaterThan(move);
 
-    // Передача атомарна: обрыв не оставляет обрезанный файл вместо рабочего.
-    expect(result.ssh).toContain('docker-compose.deploy.yml.new');
-    expect(result.ssh).toContain('mv ');
+    // Сверяется именно временная копия, а не уже заменённый файл.
+    expect(lines[verify]).toContain('.new');
+
+    // И замена действительно произошла: на сервере лежит версия из Git.
+    const staging = STAGING_DEFAULTS.REMOTE_DIR;
+    expect(await result.remoteFile(`${staging}/docker-compose.deploy.yml`)).toBe(
+      'СТАРАЯ ВЕРСИЯ COMPOSE\n',
+    );
+    expect(await result.remoteFile(`${staging}/docker-compose.deploy.yml.new`)).toBeNull();
   });
 
-  it('несовпадение Compose-файла на сервере останавливает выкатку', async () => {
+  it('несовпадение суммы не выполняет замену и не трогает действующий файл', async () => {
     const result = await runInSandbox({
-      composeShaReply: 'f'.repeat(64),
+      withGitHistory: true,
+      deliveryShaReply: 'f'.repeat(64),
       body: [
         LOAD_BOTH,
         'activate_environment STAGING',
@@ -712,9 +830,105 @@ describe('геостек в командах выкатки', () => {
     });
 
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain('не совпал с версией из репозитория');
+    expect(result.stderr).toContain('не совпал с версией');
+
+    // Действующий Compose на сервере остался прежним — это главное.
+    const staging = STAGING_DEFAULTS.REMOTE_DIR;
+    expect(await result.remoteFile(`${staging}/docker-compose.deploy.yml`)).toBe(
+      'ДЕЙСТВУЮЩИЙ COMPOSE НА СЕРВЕРЕ\n',
+    );
+    // Временная копия убрана.
+    expect(await result.remoteFile(`${staging}/docker-compose.deploy.yml.new`)).toBeNull();
+    expect(result.ssh).not.toMatch(/(^|\s)mv /m);
+    // Убрана только временная копия.
+    expect(result.ssh).toMatch(/rm -f '[^']*\.new'/);
     // Ни одной команды Compose: состав окружения не подтверждён.
     expect(result.ssh).not.toContain('docker compose');
+  });
+
+  it('доставляется содержимое VERSION, а не рабочего дерева', async () => {
+    const result = await runInSandbox({
+      withGitHistory: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'sync_compose_file',
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+    // Рабочее дерево ушло вперёд, но выкатывается более старая версия:
+    // именно её файл обязан оказаться на сервере.
+    const delivered = deliveredContent(result.ssh, 'docker-compose.deploy.yml.new');
+    expect(delivered).toBe('СТАРАЯ ВЕРСИЯ COMPOSE\n');
+    expect(delivered).not.toContain('НОВАЯ ВЕРСИЯ');
+  });
+
+  it('проверяющий скрипт тоже берётся из дерева VERSION', async () => {
+    const result = await runInSandbox({
+      withGitHistory: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'upload_verifier',
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+    const delivered = deliveredContent(result.ssh, 'verify-geo.mjs.new');
+    expect(delivered).toBe('// СТАРАЯ ВЕРСИЯ ПРОВЕРЯЮЩЕГО СКРИПТА\n');
+  });
+
+  it('более старый проверенный SHA выкатывать по-прежнему можно', async () => {
+    const result = await runInSandbox({
+      withGitHistory: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'sync_compose_file',
+      ].join('\n'),
+    });
+
+    // Никакого запрета на старую версию: она проверена и лежит в origin/main.
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain('нет файла');
+  });
+
+  it('отсутствие файла в дереве версии останавливает выкатку', async () => {
+    const result = await runInSandbox({
+      withGitHistory: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'deliver_versioned_file "deploy/не-существует.yml" "/srv/цель.yml"',
+      ].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('нет файла');
+    // До сервера дело не дошло вовсе.
+    expect(result.ssh).not.toContain('base64 -d');
+  });
+
+  it('сухой прогон не доставляет файлы и не создаёт временных копий', async () => {
+    const result = await runInSandbox({
+      withGitHistory: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'DRY_RUN=1',
+        'sync_compose_file',
+        'upload_verifier',
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.ssh.trim()).toBe('');
+    expect(result.ssh).not.toContain('.new');
   });
 
   it('обе команды доставляют Compose-файл до первого обращения к Compose', async () => {
@@ -727,17 +941,6 @@ describe('геостек в командах выкатки', () => {
       expect(sync, script).toBeGreaterThan(-1);
       expect(firstCompose, script).toBeGreaterThan(sync);
     }
-  });
-
-  it('сухой прогон Compose-файл не доставляет', async () => {
-    const result = await runInSandbox({
-      body: [LOAD_BOTH, 'activate_environment STAGING', 'DRY_RUN=1', 'sync_compose_file'].join(
-        '\n',
-      ),
-    });
-
-    expect(result.code).toBe(0);
-    expect(result.ssh.trim()).toBe('');
   });
 
   it('порядок команд на сервере: маршрутизатор поднят и проверен раньше приложения', async () => {
