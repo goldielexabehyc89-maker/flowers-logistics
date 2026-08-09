@@ -37,6 +37,12 @@ import {
   type Geocoder,
 } from './worker.js';
 import { DADATA_PROVIDER } from './status.js';
+import {
+  MIN_REQUEST_INTERVAL_MS,
+  PROVIDER_STATE_ID,
+  readProviderState,
+  reserveRequestSlot,
+} from './provider-state.js';
 
 let ctx: TestContext;
 const IDS = MOYSKLAD_IDS;
@@ -178,8 +184,29 @@ function workerDeps(
     client,
     lock: { connectionString: ctx.config.DATABASE_URL, key: GEOCODE_LOCK_KEY },
     workerId: `test-${randomUUID()}`,
+    // Ожидание общего слота подменяется: проверяется расчёт интервала,
+    // а не способность теста простоять секунду на каждом запросе.
+    slot: { sleep: async () => undefined },
     ...overrides,
   };
+}
+
+/**
+ * Возвращает общее состояние провайдера в исходное.
+ *
+ * Остановка и пауза живут в базе и переживают отдельный тест намеренно —
+ * именно этого от них и ждут в production. Поэтому проверки, которым нужен
+ * работающий провайдер, начинают с явного сброса.
+ */
+async function resetProviderState(): Promise<void> {
+  await ctx.db.geocodingProviderState.update({
+    where: { id: PROVIDER_STATE_ID },
+    data: {
+      haltedReason: null,
+      haltedAt: null,
+      nextRequestAllowedAt: new Date(Date.now() - 60_000),
+    },
+  });
 }
 
 async function jobOf(orderId: string) {
@@ -425,6 +452,7 @@ describe('обработка задания', () => {
   it('точный дом становится точкой заказа, историей, аудитом и событием', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(() => EXACT);
     const result = await processGeocodingOnce(workerDeps(client));
@@ -461,6 +489,7 @@ describe('обработка задания', () => {
   it('неточный результат не сохраняет координат и зовёт человека', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(() => ({ geo_lat: '55.7', geo_lon: '37.6', qc_geo: '1' }));
     const result = await processGeocodingOnce(workerDeps(client));
@@ -503,6 +532,7 @@ describe('обработка задания', () => {
   it('сетевой отказ повторяется с ограниченным backoff', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
@@ -535,6 +565,7 @@ describe('обработка задания', () => {
   it('429 с Retry-After откладывает ровно на указанный срок', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
@@ -551,6 +582,7 @@ describe('обработка задания', () => {
   it('429 без Retry-After откладывает на безопасную задержку из таблицы', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
@@ -566,6 +598,7 @@ describe('обработка задания', () => {
   it('исчерпание повторов переводит заказ в FAILED с причиной провайдера', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     // Последняя попытка: дальше повторять нечего.
     await ctx.db.orderGeocodeJob.updateMany({
@@ -601,19 +634,25 @@ describe('обработка задания', () => {
   it('отказ авторизации не тратит попытки: виновата конфигурация, а не адрес', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(() => {
       throw new DadataError('UNAUTHORIZED', 401);
     });
     await processGeocodingOnce(workerDeps(client));
 
+    // Задание возвращается нетронутым: причина отказа относится к ключу,
+    // а не к адресу, и живёт в общем состоянии провайдера.
     const job = await jobOf(order.id);
     expect(job.status).toBe('PENDING');
     expect(job.attempts).toBe(0);
-    expect(job.lastErrorCode).toBe('UNAUTHORIZED');
+    expect(job.lockedBy).toBeNull();
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
     expect(stored.geoState).toBe('PENDING');
+
+    const state = await readProviderState(ctx.db);
+    expect(state.haltedReason).toBe('UNAUTHORIZED');
 
     const status = await ctx.db.integrationStatus.findUniqueOrThrow({
       where: { provider: DADATA_PROVIDER },
@@ -627,6 +666,7 @@ describe('обработка задания', () => {
     const third = await seedOrder();
     const ids = [first.order.id, second.order.id, third.order.id];
     await isolateJobs(ids);
+    await resetProviderState();
 
     const client = fakeGeocoder(async () => {
       // Уступаем управление: при параллельной обработке счётчик это заметит.
@@ -676,6 +716,7 @@ describe('устаревший результат и гонки', () => {
   it('медленный DaData и смена адреса: результат не применяется к новому адресу', async () => {
     const { snapshot, order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(async () => {
       // Пока запрос «летит», приходит новая версия заказа с другим адресом.
@@ -708,6 +749,7 @@ describe('устаревший результат и гонки', () => {
   it('медленный DaData и ручная точка: решение человека не перезаписывается', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const token = await tokenFor(['LOGISTICIAN']);
 
@@ -743,6 +785,7 @@ describe('устаревший результат и гонки', () => {
   it('медленный DaData и выход заказа из области: результат отброшен', async () => {
     const { snapshot, order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(async () => {
       await apply({
@@ -769,6 +812,7 @@ describe('устаревший результат и гонки', () => {
   it('во время запроса заказ не заблокирован и не держится транзакция', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     let updatedDuringRequest = false;
 
@@ -788,6 +832,7 @@ describe('устаревший результат и гонки', () => {
   });
 
   it('ручная точка побеждает даже при повторном проходе', async () => {
+    await resetProviderState();
     const { order } = await seedOrder();
     const token = await tokenFor(['LOGISTICIAN']);
 
@@ -806,6 +851,8 @@ describe('устаревший результат и гонки', () => {
     expect(manual.statusCode).toBe(200);
 
     await isolateJobs([order.id]);
+
+    await resetProviderState();
     const client = fakeGeocoder(() => EXACT);
     await processGeocodingOnce(workerDeps(client));
 
@@ -819,6 +866,7 @@ describe('аренда, конкуренция и восстановление',
   it('второй экземпляр не обращается к DaData параллельно', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     let started = 0;
     const slow = fakeGeocoder(async () => {
@@ -846,6 +894,7 @@ describe('аренда, конкуренция и восстановление',
     const first = await seedOrder();
     const second = await seedOrder();
     await isolateJobs([first.order.id, second.order.id]);
+    await resetProviderState();
 
     // Разные ключи замка: проверяется именно захват заданий через SKIP LOCKED.
     const clientA = fakeGeocoder(() => EXACT);
@@ -876,6 +925,7 @@ describe('аренда, конкуренция и восстановление',
   it('задание умершего процесса возвращается в очередь', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     // Процесс взял задание и умер: аренда осталась в прошлом.
     await ctx.db.orderGeocodeJob.updateMany({
@@ -899,6 +949,7 @@ describe('аренда, конкуренция и восстановление',
   it('чужую аренду обработчик не перезаписывает', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(async () => {
       // Пока идёт запрос, аренду перехватил другой экземпляр.
@@ -929,6 +980,193 @@ describe('аренда, конкуренция и восстановление',
     await worker.stop();
     // Повторная остановка безопасна.
     await worker.stop();
+  });
+});
+
+describe('отказ провайдера останавливает пачку целиком', () => {
+  const PERMANENT: { code: 'UNAUTHORIZED' | 'FORBIDDEN'; status: number }[] = [
+    { code: 'UNAUTHORIZED', status: 401 },
+    { code: 'FORBIDDEN', status: 403 },
+  ];
+
+  for (const testCase of PERMANENT) {
+    it(`${testCase.status}: ровно один запрос на всю пачку и остановка до перезапуска`, async () => {
+      const orders = [await seedOrder(), await seedOrder(), await seedOrder()];
+      const ids = orders.map((seeded) => seeded.order.id);
+      await isolateJobs(ids);
+      await resetProviderState();
+
+      const client = fakeGeocoder(() => {
+        throw new DadataError(testCase.code, testCase.status);
+      });
+
+      const result = await processGeocodingOnce(workerDeps(client, { batchSize: 3 }));
+
+      // Ключ неверен для всех заданий одинаково: девять лишних обращений
+      // ничего не выяснили бы, а стоили бы денег и времени.
+      expect(client.calls).toHaveLength(1);
+      expect(result.requests).toBe(1);
+      expect(result.claimed).toBe(3);
+      expect(result.released).toBe(2);
+      expect(result.haltedReason).toBe(testCase.code);
+
+      // Ни одно задание не потратило попытку: они ни в чём не виноваты.
+      const jobs = await ctx.db.orderGeocodeJob.findMany({ where: { orderId: { in: ids } } });
+      expect(jobs).toHaveLength(3);
+      for (const job of jobs) {
+        expect(job.status).toBe('PENDING');
+        expect(job.attempts).toBe(0);
+        expect(job.lockedBy).toBeNull();
+      }
+
+      // Заказы не тронуты.
+      for (const id of ids) {
+        const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id } });
+        expect(stored.geoState).toBe('PENDING');
+      }
+
+      const state = await readProviderState(ctx.db);
+      expect(state.haltedReason).toBe(testCase.code);
+
+      // Следующий проход не делает ни одного обращения и заданий не берёт.
+      const second = fakeGeocoder(() => EXACT);
+      const again = await processGeocodingOnce(workerDeps(second, { batchSize: 3 }));
+      expect(second.calls).toHaveLength(0);
+      expect(again.claimed).toBe(0);
+      expect(again.haltedReason).toBe(testCase.code);
+    });
+  }
+
+  it('429: один запрос, общая пауза и возврат остальных заданий без попыток', async () => {
+    const orders = [await seedOrder(), await seedOrder(), await seedOrder()];
+    const ids = orders.map((seeded) => seeded.order.id);
+    await isolateJobs(ids);
+    await resetProviderState();
+
+    const now = new Date(Date.now() + 1000);
+    const client = fakeGeocoder(() => {
+      throw new DadataError('RATE_LIMITED', 429, 42_000);
+    });
+
+    const result = await processGeocodingOnce(workerDeps(client, { batchSize: 3, now: () => now }));
+
+    expect(client.calls).toHaveLength(1);
+    expect(result.requests).toBe(1);
+    expect(result.released).toBe(2);
+    expect(result.skippedCooldown).toBe(true);
+
+    const jobs = await ctx.db.orderGeocodeJob.findMany({
+      where: { orderId: { in: ids } },
+      orderBy: { createdAt: 'asc' },
+    });
+    // Попытку тратит только тот заказ, который получил отказ.
+    expect(jobs.filter((job) => job.attempts === 1)).toHaveLength(1);
+    expect(jobs.filter((job) => job.attempts === 0)).toHaveLength(2);
+    for (const job of jobs) {
+      expect(job.status).toBe('PENDING');
+    }
+
+    // Пауза общая: она относится к ключу, а не к одному заказу.
+    const state = await readProviderState(ctx.db);
+    expect(state.haltedReason).toBeNull();
+    expect(state.nextRequestAllowedAt.getTime()).toBeGreaterThanOrEqual(now.getTime() + 42_000);
+
+    // До истечения паузы обращений нет.
+    const second = fakeGeocoder(() => EXACT);
+    const again = await processGeocodingOnce(workerDeps(second, { batchSize: 3, now: () => now }));
+    expect(second.calls).toHaveLength(0);
+    expect(again.claimed).toBe(0);
+    expect(again.skippedCooldown).toBe(true);
+  });
+
+  it('429 без Retry-After даёт безопасную паузу в тридцать секунд', async () => {
+    const { order } = await seedOrder();
+    await isolateJobs([order.id]);
+    await resetProviderState();
+
+    const now = new Date(Date.now() + 1000);
+    const client = fakeGeocoder(() => {
+      throw new DadataError('RATE_LIMITED', 429, null);
+    });
+
+    await processGeocodingOnce(workerDeps(client, { now: () => now }));
+
+    const state = await readProviderState(ctx.db);
+    expect(state.nextRequestAllowedAt.getTime()).toBeGreaterThanOrEqual(now.getTime() + 30_000);
+  });
+});
+
+describe('общий интервал между запросами', () => {
+  it('второй экземпляр начинает запрос не раньше секунды после первого', async () => {
+    await resetProviderState();
+
+    // Один и тот же момент времени у обоих экземпляров: если бы интервал жил
+    // полем внутри клиента, второй начал бы запрос немедленно.
+    const now = new Date();
+    const waits: number[] = [];
+
+    const first = await reserveRequestSlot(ctx.db, {
+      now: () => now,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    const second = await reserveRequestSlot(ctx.db, {
+      now: () => now,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    expect(first.granted).toBe(true);
+    expect(second.granted).toBe(true);
+    expect(first.waitMs).toBe(0);
+    // Второму слоту велено подождать: интервал общий на все процессы.
+    expect(second.waitMs).toBeGreaterThanOrEqual(MIN_REQUEST_INTERVAL_MS);
+    expect(waits).toEqual([MIN_REQUEST_INTERVAL_MS]);
+  });
+
+  it('интервал соблюдается при передаче замка двум разным проходам', async () => {
+    const first = await seedOrder();
+    const second = await seedOrder();
+    await isolateJobs([first.order.id, second.order.id]);
+    await resetProviderState();
+
+    const startedAt: number[] = [];
+    const base = Date.now();
+    // Часы стоят: любое расхождение стартов может прийти только из общего слота.
+    const frozen = new Date(base);
+
+    const track = (): void => {
+      startedAt.push(base);
+    };
+
+    const waits: number[] = [];
+    const slot = {
+      now: () => frozen,
+      sleep: async (ms: number): Promise<void> => {
+        waits.push(ms);
+      },
+    };
+
+    // Два разных экземпляра: каждый со своим клиентом и своим worker id.
+    const clientA = fakeGeocoder(() => {
+      track();
+      return EXACT;
+    });
+    await processGeocodingOnce(workerDeps(clientA, { batchSize: 1, slot, now: () => frozen }));
+
+    const clientB = fakeGeocoder(() => {
+      track();
+      return EXACT;
+    });
+    await processGeocodingOnce(workerDeps(clientB, { batchSize: 1, slot, now: () => frozen }));
+
+    expect(clientA.calls).toHaveLength(1);
+    expect(clientB.calls).toHaveLength(1);
+    // Второму экземпляру пришлось ждать ровно интервал, хотя его клиент
+    // никаких запросов до этого не делал.
+    expect(waits).toEqual([MIN_REQUEST_INTERVAL_MS]);
   });
 });
 
@@ -963,6 +1201,110 @@ describe('backfill существующих заказов', () => {
     const again = await backfillGeocoding(ctx.db, { batchSize: 20, maxBatches: 100 });
     expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: ready.order.id } })).toBe(1);
     expect(again.enqueued).toBe(0);
+  });
+
+  it('маленькие пачки, ведущие пустые адреса и объём выше предела: ставится всё и по разу', async () => {
+    // Заказы «до включения геокодирования»: они в UNRESOLVED и без заданий.
+    const withoutAddress = [];
+    for (let i = 0; i < 3; i += 1) {
+      withoutAddress.push(await seedOrder({ shipmentAddress: i === 0 ? null : '   ' }));
+    }
+
+    const suitable = [];
+    for (let i = 0; i < 7; i += 1) {
+      const seeded = await seedOrder();
+      await ctx.db.orderGeocodeJob.deleteMany({ where: { orderId: seeded.order.id } });
+      await ctx.db.deliveryOrder.update({
+        where: { id: seeded.order.id },
+        data: { geoState: 'UNRESOLVED', geoGeneration: 0 },
+      });
+      suitable.push(seeded.order.id);
+    }
+
+    // Пачка меньше числа заказов: наполнение обязано дойти до конца само,
+    // а не остановиться на первой пачке и молча оставить остальные без точки.
+    const result = await backfillGeocoding(ctx.db, { batchSize: 2 });
+
+    expect(result.exhaustedBatches).toBe(false);
+    expect(result.stopped).toBe(false);
+
+    for (const id of suitable) {
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id } });
+      expect(stored.geoState).toBe('PENDING');
+      expect(stored.geoGeneration).toBe(1);
+      // Ровно одно задание: повторная постановка обесценила бы уже летящий ответ.
+      expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: id } })).toBe(1);
+    }
+
+    // Пустой и пробельный адрес отсекается прямо в выборке и место в пачке
+    // не занимает: иначе он не пускал бы к следующим подходящим заказам.
+    for (const seeded of withoutAddress) {
+      expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: seeded.order.id } })).toBe(0);
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+        where: { id: seeded.order.id },
+      });
+      expect(stored.geoState).toBe('UNRESOLVED');
+    }
+
+    // Повтор ничего не добавляет.
+    const again = await backfillGeocoding(ctx.db, { batchSize: 2 });
+    expect(again.enqueued).toBe(0);
+    for (const id of suitable) {
+      expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: id } })).toBe(1);
+    }
+  });
+
+  it('достижение аварийного предела пачек видно в результате, а не молчит', async () => {
+    const seeded = await seedOrder();
+    await ctx.db.orderGeocodeJob.deleteMany({ where: { orderId: seeded.order.id } });
+    await ctx.db.deliveryOrder.update({
+      where: { id: seeded.order.id },
+      data: { geoState: 'UNRESOLVED', geoGeneration: 0 },
+    });
+
+    const result = await backfillGeocoding(ctx.db, { batchSize: 1, maxBatches: 1 });
+
+    // Одна пачка выбрана, но подходящие заказы могли остаться: об этом
+    // обязаны узнать и вызывающая сторона, и журнал.
+    expect(result.exhaustedBatches).toBe(true);
+  });
+
+  it('остановка приложения дожидается наполнения', async () => {
+    // Наполнение работает с базой, которую остановка вот-вот закроет. Проверка
+    // читает исходный код точки входа: поднимать процесс ради этого незачем,
+    // а пропущенное ожидание проявилось бы только в редком сбое при деплое.
+    const { readFile } = await import('node:fs/promises');
+    const code = await readFile(new URL('../../../index.ts', import.meta.url), 'utf8');
+
+    expect(code).toContain('backfillStopping = true;');
+    expect(code).toContain('backfill ?? Promise.resolve(),');
+    expect(code).toContain('shouldStop: () => backfillStopping');
+  });
+
+  it('остановка процесса прекращает наполнение между пачками', async () => {
+    for (let i = 0; i < 4; i += 1) {
+      const seeded = await seedOrder();
+      await ctx.db.orderGeocodeJob.deleteMany({ where: { orderId: seeded.order.id } });
+      await ctx.db.deliveryOrder.update({
+        where: { id: seeded.order.id },
+        data: { geoState: 'UNRESOLVED', geoGeneration: 0 },
+      });
+    }
+
+    let stopping = false;
+    const result = await backfillGeocoding(ctx.db, {
+      batchSize: 1,
+      shouldStop: () => stopping,
+      now: () => {
+        // Первая пачка проходит, дальше процесс объявляется останавливающимся.
+        stopping = true;
+        return new Date();
+      },
+    });
+
+    expect(result.stopped).toBe(true);
+    // Наполнение завершилось само, а не оборвалось посреди пачки.
+    expect(result.enqueued).toBeGreaterThanOrEqual(1);
   });
 
   it('заказ с ручной точкой наполнение не трогает', async () => {
@@ -1005,6 +1347,7 @@ describe('состояние интеграции и отсутствие пер
   it('администратору видны счётчик и очищенные детали, но не ключи и не адреса', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(() => {
       throw new DadataError('SERVER_ERROR', 500);
@@ -1040,6 +1383,7 @@ describe('состояние интеграции и отсутствие пер
   it('ни адрес, ни координаты не попадают в аудит и realtime автоматического разрешения', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
+    await resetProviderState();
 
     const client = fakeGeocoder(() => EXACT);
     await processGeocodingOnce(workerDeps(client));

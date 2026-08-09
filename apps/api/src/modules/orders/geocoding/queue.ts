@@ -132,6 +132,26 @@ export async function enqueueGeocoding(
 export interface BackfillResult {
   scanned: number;
   enqueued: number;
+  /** Наполнение остановлено запросом извне: процесс завершается. */
+  stopped: boolean;
+  /** Сработал аварийный предел числа пачек. Молчаливого обрыва не бывает. */
+  exhaustedBatches: boolean;
+}
+
+export interface BackfillOptions {
+  batchSize?: number;
+  /**
+   * Аварийный предел числа пачек.
+   *
+   * Это не рабочее ограничение объёма, а защита от бесконечного цикла:
+   * обычный проход заканчивается, когда подходящих заказов не осталось.
+   * Достижение предела попадает в результат и в журнал — заказы не могут
+   * молча остаться без геокодирования.
+   */
+  maxBatches?: number;
+  now?: () => Date;
+  /** Проверка запроса на остановку. Опрашивается между пачками. */
+  shouldStop?: () => boolean;
 }
 
 /**
@@ -141,58 +161,75 @@ export interface BackfillResult {
  * в `UNRESOLVED` и сами в очередь не попадут — постановка происходит только
  * при импорте и смене адреса.
  *
- * Пачки маленькие и с явным пределом: разом отправить в платный сервис всю
- * историю заказов означало бы неожиданный счёт и часы работы на предельном
- * темпе. Берутся только `UNRESOLVED` — заказ, ждущий человека (`NEEDS_REVIEW`)
- * или признанный неразрешимым (`FAILED`), автоматика не трогает.
+ * Проход идёт небольшими пачками ДО ИСЧЕРПАНИЯ, а не до фиксированного числа
+ * записей: остановиться на первых пятистах значило бы молча оставить остальные
+ * заказы без точки навсегда, потому что второй раз наполнение не запускается.
+ *
+ * Курсор по идентификатору обязателен. Без него заказ, который выбрался
+ * кандидатом, но не прошёл проверку под блокировкой, попадал бы в каждую
+ * следующую пачку и не пускал бы к остальным — проход крутился бы на месте.
  *
  * Каждая пачка — отдельная короткая транзакция: длинная транзакция на тысячи
  * заказов держала бы блокировки всё время наполнения.
  */
 export async function backfillGeocoding(
   db: Database,
-  options: { batchSize?: number; maxBatches?: number; now?: () => Date } = {},
+  options: BackfillOptions = {},
 ): Promise<BackfillResult> {
   const batchSize = Math.min(Math.max(1, options.batchSize ?? 50), 200);
-  const maxBatches = Math.max(1, options.maxBatches ?? 10);
+  const maxBatches = Math.max(1, options.maxBatches ?? 100_000);
   const clock = options.now ?? ((): Date => new Date());
+  const shouldStop = options.shouldStop ?? ((): boolean => false);
 
-  const result: BackfillResult = { scanned: 0, enqueued: 0 };
+  const result: BackfillResult = {
+    scanned: 0,
+    enqueued: 0,
+    stopped: false,
+    exhaustedBatches: false,
+  };
+
+  // Курсор по идентификатору: он двигается всегда, независимо от того,
+  // удалось ли поставить конкретный заказ в очередь.
+  let cursor = '00000000-0000-0000-0000-000000000000';
 
   for (let batch = 0; batch < maxBatches; batch += 1) {
-    const candidates = await db.deliveryOrder.findMany({
-      where: {
-        geoState: 'UNRESOLVED',
-        inScope: true,
-        sourceArchived: false,
-        sourceMissing: false,
-        address: { not: null },
-        // Заказ с уже существующим незавершённым заданием пропускается:
-        // повторная постановка увеличила бы поколение и обесценила бы
-        // результат, который прямо сейчас летит от провайдера.
-        geocodeJobs: { none: { status: { in: ['PENDING', 'PROCESSING'] } } },
-      },
-      orderBy: [{ deliveryDate: 'asc' }, { id: 'asc' }],
-      take: batchSize,
-      select: {
-        id: true,
-        address: true,
-        inScope: true,
-        sourceArchived: true,
-        sourceMissing: true,
-        geoState: true,
-        geoSource: true,
-        geoGeneration: true,
-      },
-    });
+    if (shouldStop()) {
+      result.stopped = true;
+      return result;
+    }
+
+    // Выборка сырым запросом: пустой и состоящий из пробелов адрес отсекается
+    // прямо здесь. Такой заказ не годится для отправки, и оставлять его
+    // кандидатом значило бы каждый раз тратить на него место в пачке.
+    const candidates = await db.$queryRaw<{ id: string }[]>`
+      SELECT o."id"::text AS "id"
+      FROM "DeliveryOrder" AS o
+      WHERE o."geoState" = 'UNRESOLVED'
+        AND o."inScope" = TRUE
+        AND o."sourceArchived" = FALSE
+        AND o."sourceMissing" = FALSE
+        AND o."address" IS NOT NULL
+        AND btrim(o."address") <> ''
+        AND o."id" > ${cursor}::uuid
+        AND NOT EXISTS (
+          SELECT 1
+          FROM "OrderGeocodeJob" AS j
+          WHERE j."orderId" = o."id"
+            AND j."status" IN ('PENDING', 'PROCESSING')
+        )
+      ORDER BY o."id" ASC
+      LIMIT ${batchSize}
+    `;
 
     if (candidates.length === 0) {
-      break;
+      return result;
     }
 
     result.scanned += candidates.length;
 
     for (const candidate of candidates) {
+      cursor = candidate.id;
+
       const enqueued = await db.$transaction(async (tx) => {
         // Строка перечитывается под блокировкой: между выборкой и постановкой
         // заказ мог сменить адрес, выйти из области или получить ручную точку.
@@ -210,6 +247,8 @@ export async function backfillGeocoding(
     }
   }
 
+  // Предел достигнут: об этом обязаны узнать и вызывающая сторона, и журнал.
+  result.exhaustedBatches = true;
   return result;
 }
 

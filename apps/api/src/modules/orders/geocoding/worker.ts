@@ -40,6 +40,15 @@ import { parseQcGeo, QC_GEO_EXACT, type DadataAddress } from '../../integrations
 import { MAX_LAT_MICRO, MAX_LON_MICRO, toMicro } from '../geo.js';
 import { retryDelayMs } from './queue.js';
 import { setDadataStatus } from './status.js';
+import {
+  DEFAULT_COOLDOWN_MS,
+  haltProvider,
+  MAX_INLINE_WAIT_MS,
+  readProviderState,
+  reserveRequestSlot,
+  startCooldown,
+  type SlotDeps,
+} from './provider-state.js';
 import type { Role } from '@fl/shared';
 
 const ORDER_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
@@ -52,9 +61,6 @@ const ORDER_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
  * Ключ отличается от ключа синхронизации: это разные сервисы.
  */
 export const GEOCODE_LOCK_KEY = 730_205n;
-
-/** Индекс, дающий максимальную паузу из таблицы backoff. */
-const MAX_ATTEMPT_PAUSE_INDEX = 5;
 
 /** Сколько задание может находиться в PROCESSING, прежде чем считаться зависшим. */
 export const LEASE_TIMEOUT_MS = 120_000;
@@ -72,8 +78,16 @@ export interface GeocodePassResult {
   failed: number;
   retried: number;
   stale: number;
+  /** Задания, возвращённые в очередь без попытки и без запроса. */
+  released: number;
+  /** Сколько раз обращались к провайдеру за проход. */
+  requests: number;
   /** Проход не состоялся: обращения к DaData уже выполняет другой процесс. */
   skippedBusy: boolean;
+  /** Проход не состоялся: обращения остановлены до исправления конфигурации. */
+  haltedReason: string | null;
+  /** Проход не состоялся: действует общая пауза после 429. */
+  skippedCooldown: boolean;
 }
 
 export interface Geocoder {
@@ -91,6 +105,8 @@ export interface GeocodeWorkerDeps {
   leaseRenewIntervalMs?: number;
   /** Сколько заданий берётся за один проход. Обрабатываются последовательно. */
   batchSize?: number;
+  /** Часы и ожидание общего слота. Подменяются в тестах: реальных пауз там нет. */
+  slot?: SlotDeps;
 }
 
 interface ClaimedJob {
@@ -282,8 +298,12 @@ interface JobOutcome {
   failed: boolean;
   retried: boolean;
   stale: boolean;
+  /** Запрос к провайдеру действительно выполнялся. */
+  requested: boolean;
   /** Код последней ошибки провайдера. Нужен для состояния интеграции. */
   errorCode: DadataErrorCode | null;
+  /** Проход обязан прекратиться: отказ относится ко всему провайдеру. */
+  stop: PassStop | null;
 }
 
 const EMPTY_OUTCOME: JobOutcome = {
@@ -292,8 +312,19 @@ const EMPTY_OUTCOME: JobOutcome = {
   failed: false,
   retried: false,
   stale: false,
+  requested: false,
   errorCode: null,
+  stop: null,
 };
+
+/**
+ * Почему проход прекращён досрочно.
+ *
+ * Отказ ключа и лимит относятся ко всему провайдеру, а не к одному заданию:
+ * продолжать пачку после них значит гарантированно получить тот же ответ
+ * ещё девять раз, потратив обращения и время.
+ */
+type PassStop = { kind: 'HALT'; reason: DadataErrorCode } | { kind: 'COOLDOWN'; until: Date };
 
 /**
  * Один проход очереди.
@@ -301,6 +332,10 @@ const EMPTY_OUTCOME: JobOutcome = {
  * Обращения к DaData защищены session advisory-lock: если проход уже идёт
  * в другом экземпляре приложения, этот честно ничего не делает, а не удваивает
  * темп и счёт.
+ *
+ * Проход прекращается досрочно при отказе ключа и при 429. В обоих случаях
+ * оставшиеся захваченные задания возвращаются в очередь БЕЗ расходования
+ * попыток: они ни в чём не виноваты и ни одного запроса не получили.
  */
 export async function processGeocodingOnce(deps: GeocodeWorkerDeps): Promise<GeocodePassResult> {
   const result: GeocodePassResult = {
@@ -310,8 +345,24 @@ export async function processGeocodingOnce(deps: GeocodeWorkerDeps): Promise<Geo
     failed: 0,
     retried: 0,
     stale: 0,
+    released: 0,
+    requests: 0,
     skippedBusy: false,
+    haltedReason: null,
+    skippedCooldown: false,
   };
+
+  // Состояние провайдера проверяется ДО захвата замка и заданий: остановленный
+  // ключ не должен приводить даже к обращению к очереди.
+  const state = await readProviderState(deps.db);
+  if (state.haltedReason !== null) {
+    result.haltedReason = state.haltedReason;
+    return result;
+  }
+  if (state.nextRequestAllowedAt.getTime() - clockOf(deps).getTime() > MAX_INLINE_WAIT_MS) {
+    result.skippedCooldown = true;
+    return result;
+  }
 
   const lock = await acquireSyncLock({ ...deps.lock, key: deps.lock.key ?? GEOCODE_LOCK_KEY });
   if (lock === null) {
@@ -336,6 +387,7 @@ export async function processGeocodingOnce(deps: GeocodeWorkerDeps): Promise<Geo
 
     let lastError: DadataErrorCode | null = null;
     let anySuccess = false;
+    let stop: PassStop | null = null;
 
     try {
       // Строго последовательно: параллельная обработка нарушила бы и общий
@@ -347,12 +399,41 @@ export async function processGeocodingOnce(deps: GeocodeWorkerDeps): Promise<Geo
         result.failed += outcome.failed ? 1 : 0;
         result.retried += outcome.retried ? 1 : 0;
         result.stale += outcome.stale ? 1 : 0;
+        result.requests += outcome.requested ? 1 : 0;
         anySuccess ||= outcome.resolved || outcome.lowPrecision;
         lastError = outcome.errorCode ?? lastError;
         pending.delete(job.id);
+
+        if (outcome.stop !== null) {
+          stop = outcome.stop;
+          break;
+        }
       }
     } finally {
       clearInterval(keeper);
+    }
+
+    if (stop !== null) {
+      const now = clockOf(deps);
+      if (stop.kind === 'HALT') {
+        await haltProvider(deps.db, stop.reason, now);
+        result.haltedReason = stop.reason;
+        deps.logger.error(
+          { geocode: { reason: stop.reason, released: pending.size } },
+          'обращения к геокодеру остановлены до исправления конфигурации',
+        );
+      } else {
+        await startCooldown(deps.db, stop.until, now);
+        result.skippedCooldown = true;
+        deps.logger.warn(
+          { geocode: { cooldownUntil: stop.until.toISOString(), released: pending.size } },
+          'проход геокодирования прекращён: действует общая пауза провайдера',
+        );
+      }
+
+      // Оставшиеся задания не сделали ни одного запроса: попытки им
+      // не засчитываются, иначе чужой отказ съел бы их право на повтор.
+      result.released = await releaseJobs(deps, [...pending]);
     }
 
     await reportPassStatus(deps, { anySuccess, lastError });
@@ -361,6 +442,19 @@ export async function processGeocodingOnce(deps: GeocodeWorkerDeps): Promise<Geo
   } finally {
     await lock.release();
   }
+}
+
+/** Возвращает захваченные задания в очередь, не трогая счётчик попыток. */
+async function releaseJobs(deps: GeocodeWorkerDeps, ids: string[]): Promise<number> {
+  if (ids.length === 0) {
+    return 0;
+  }
+
+  const updated = await deps.db.orderGeocodeJob.updateMany({
+    where: { id: { in: ids }, status: 'PROCESSING', lockedBy: workerIdOf(deps) },
+    data: { status: 'PENDING', lockedAt: null, lockedBy: null },
+  });
+  return updated.count;
 }
 
 async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<JobOutcome> {
@@ -376,6 +470,34 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
     return { ...EMPTY_OUTCOME, stale: true };
   }
 
+  // Общий на все экземпляры слот: минимальный интервал между началами
+  // запросов не может держаться полем внутри одного объекта клиента.
+  const slot = await reserveRequestSlot(deps.db, deps.slot);
+  if (!slot.granted) {
+    // Слот не выдан — значит, пока мы работали, соседний экземпляр объявил
+    // паузу или остановил обращения. Ни одного запроса не сделано, задание
+    // возвращается нетронутым.
+    await releaseJobs(deps, [job.id]);
+
+    if (!Number.isFinite(slot.waitMs)) {
+      // Бесконечное ожидание означает остановку, а не паузу: причину знает
+      // общее состояние, выдумывать её здесь нельзя.
+      const state = await readProviderState(deps.db);
+      return {
+        ...EMPTY_OUTCOME,
+        stop: {
+          kind: 'HALT',
+          reason: (state.haltedReason ?? 'NOT_CONFIGURED') as DadataErrorCode,
+        },
+      };
+    }
+
+    return {
+      ...EMPTY_OUTCOME,
+      stop: { kind: 'COOLDOWN', until: new Date(clockOf(deps).getTime() + slot.waitMs) },
+    };
+  }
+
   let answer: DadataAddress;
   try {
     // Никакой транзакции здесь нет и быть не может: запрос длится сотни
@@ -387,7 +509,8 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
 
   const decision = decideResult(answer);
   try {
-    return await applyResult(deps, job, address, decision);
+    const outcome = await applyResult(deps, job, address, decision);
+    return { ...outcome, requested: true };
   } catch (error) {
     if (error instanceof LeaseLostError) {
       // Задание уже довёл до конца другой владелец: наша транзакция откачена,
@@ -396,7 +519,7 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
         { geocode: { jobId: job.id, orderId: job.orderId } },
         'аренда задания геокодирования потеряна, результат не записан',
       );
-      return { ...EMPTY_OUTCOME, stale: true };
+      return { ...EMPTY_OUTCOME, stale: true, requested: true };
     }
     throw error;
   }
@@ -605,25 +728,36 @@ async function handleFailure(
   const now = clockOf(deps);
   const code: DadataErrorCode = error instanceof DadataError ? error.code : 'TRANSPORT_ERROR';
 
+  // Неверный ключ, отозванные права, отсутствие ключей.
+  //
+  // Отказ относится ко всему провайдеру, а не к адресу: попытка не тратится,
+  // задание возвращается нетронутым, а проход прекращается. Продолжать пачку
+  // здесь означало бы получить тот же ответ ещё девять раз — и повторять это
+  // каждые несколько минут до вмешательства человека.
   if (isPermanentDadataFailure(code)) {
-    await finishJob(deps.db, deps, job.id, {
-      status: 'PENDING',
-      attempts: job.attempts,
-      finishedAt: null,
-      lockedAt: null,
-      lockedBy: null,
-      lastErrorCode: code,
-      nextAttemptAt: new Date(now.getTime() + retryDelayMs(MAX_ATTEMPT_PAUSE_INDEX)),
-    });
-    return { ...EMPTY_OUTCOME, retried: true, errorCode: code };
+    await releaseJobs(deps, [job.id]);
+    return {
+      ...EMPTY_OUTCOME,
+      requested: true,
+      errorCode: code,
+      stop: { kind: 'HALT', reason: code },
+    };
   }
 
-  const attempts = job.attempts + 1;
-  const exhausted = attempts >= job.maxAttempts;
+  const retryAfter = error instanceof DadataError ? error.retryAfterMs : null;
 
-  if (!exhausted) {
-    const retryAfter = error instanceof DadataError ? error.retryAfterMs : null;
-    const delay = retryAfter ?? retryDelayMs(attempts);
+  // Превышение лимита. Попытку тратит только тот заказ, который получил 429;
+  // пауза при этом общая, потому что лимит относится к ключу целиком.
+  if (code === 'RATE_LIMITED') {
+    const cooldownMs = retryAfter ?? DEFAULT_COOLDOWN_MS;
+    const attempts = job.attempts + 1;
+    const exhausted = attempts >= job.maxAttempts;
+    const until = new Date(now.getTime() + cooldownMs);
+
+    if (exhausted) {
+      const outcome = await failOrder(deps, job, code, attempts, now);
+      return { ...outcome, requested: true, stop: { kind: 'COOLDOWN', until } };
+    }
 
     await finishJob(deps.db, deps, job.id, {
       status: 'PENDING',
@@ -632,12 +766,36 @@ async function handleFailure(
       lockedAt: null,
       lockedBy: null,
       lastErrorCode: code,
-      nextAttemptAt: new Date(now.getTime() + delay),
+      nextAttemptAt: until,
     });
-    return { ...EMPTY_OUTCOME, retried: true, errorCode: code };
+
+    return {
+      ...EMPTY_OUTCOME,
+      retried: true,
+      requested: true,
+      errorCode: code,
+      stop: { kind: 'COOLDOWN', until },
+    };
   }
 
-  return failOrder(deps, job, code, attempts, now);
+  const attempts = job.attempts + 1;
+  const exhausted = attempts >= job.maxAttempts;
+
+  if (!exhausted) {
+    await finishJob(deps.db, deps, job.id, {
+      status: 'PENDING',
+      attempts,
+      finishedAt: null,
+      lockedAt: null,
+      lockedBy: null,
+      lastErrorCode: code,
+      nextAttemptAt: new Date(now.getTime() + retryDelayMs(attempts)),
+    });
+    return { ...EMPTY_OUTCOME, retried: true, requested: true, errorCode: code };
+  }
+
+  const outcome = await failOrder(deps, job, code, attempts, now);
+  return { ...outcome, requested: true };
 }
 
 /**

@@ -26,6 +26,7 @@ import { DadataClient } from './modules/integrations/dadata/client.js';
 import { createGeocodeWorker, GEOCODE_LOCK_KEY } from './modules/orders/geocoding/worker.js';
 import { reportGeocodingStartupStatus } from './modules/orders/geocoding/status.js';
 import { backfillGeocoding } from './modules/orders/geocoding/queue.js';
+import { clearHalt } from './modules/orders/geocoding/provider-state.js';
 import { shouldGeocodeAutomatically } from './modules/orders/geocoding/enabled.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -101,25 +102,42 @@ async function main(): Promise<void> {
         lock: { connectionString: config.DATABASE_URL, key: GEOCODE_LOCK_KEY },
       })
     : null;
-  geocodeWorker?.start();
-
   // Разовое наполнение очереди уже импортированными заказами.
   //
   // Постановка происходит только при импорте и смене адреса, поэтому заказы,
   // пришедшие до включения геокодирования, сами в очередь не попадут. Проход
-  // идёт в фоне: он длинный, а старт приложения задерживать нельзя.
+  // идёт в фоне: он длинный, а старт приложения задерживать нельзя, — но при
+  // остановке процесса его обязательно дожидаются, иначе последняя пачка
+  // работала бы с базой, которую уже закрывают.
+  let backfillStopping = false;
+  let backfill: Promise<void> | null = null;
+
   if (geocodeWorker !== null) {
-    void backfillGeocoding(db)
-      .then((result) =>
+    // Остановка обращений снимается только здесь: приложение стартовало,
+    // значит, конфигурацию проверял человек. Та же неверная настройка снова
+    // остановит обращения после первого же отказа, и это стоит одного запроса.
+    await clearHalt(db);
+
+    backfill = backfillGeocoding(db, { shouldStop: () => backfillStopping })
+      .then((result) => {
+        if (result.exhaustedBatches) {
+          logger.error(
+            { geocoding: result },
+            'наполнение очереди геокодирования прервано аварийным пределом: часть заказов осталась без задания',
+          );
+          return;
+        }
         logger.info(
           { geocoding: result },
           'очередь геокодирования наполнена существующими заказами',
-        ),
-      )
+        );
+      })
       .catch((error: unknown) =>
         logger.error({ err: error }, 'наполнение очереди геокодирования не удалось'),
       );
   }
+
+  geocodeWorker?.start();
 
   let shuttingDown = false;
 
@@ -140,11 +158,14 @@ async function main(): Promise<void> {
       // Сначала фоновые задачи: они дожидаются начатого прохода, поэтому
       // к моменту закрытия соединения с базой ни один обработчик уже не работает.
       // Общий лимит остановки при этом не меняется — он висит выше по коду.
+      backfillStopping = true;
       await Promise.all([
         outbox.stop(),
         maintenance.stop(),
         syncWorker?.stop() ?? Promise.resolve(),
         geocodeWorker?.stop() ?? Promise.resolve(),
+        // Наполнение опрашивает флаг между пачками, поэтому ожидание короткое.
+        backfill ?? Promise.resolve(),
       ]);
       await app.close();
       await notifier.stop();
