@@ -55,6 +55,11 @@ export interface SyncDeps {
   overlapSeconds?: number;
   /** Соединение для глобальной блокировки прохода. */
   lock: LockDeps;
+  /**
+   * Ставить ли адреса импортированных заказов в очередь геокодирования.
+   * Включается только там, где очередь кто-то обрабатывает, — в production.
+   */
+  geocodingEnabled?: boolean;
 }
 
 export interface PassResult {
@@ -243,7 +248,7 @@ async function applyRows(deps: SyncDeps, rows: unknown[], result: PassResult): P
     const { snapshot } = mapOrder(row as never, deps.ids);
 
     const applied = await deps.db.$transaction((tx: TransactionClient) =>
-      applyOrderSnapshot(tx, snapshot, now),
+      applyOrderSnapshot(tx, snapshot, now, { geocoding: deps.geocodingEnabled === true }),
     );
 
     result.processed += 1;

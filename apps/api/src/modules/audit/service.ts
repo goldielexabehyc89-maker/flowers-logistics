@@ -62,6 +62,11 @@ export const AUDIT_ACTIONS = [
   // там только состояние и версия.
   'ORDER_GEO_POINT_SET',
   'ORDER_GEO_INVALIDATED',
+  // Автоматическое геокодирование. Автор — не человек, координат и адресов
+  // в записи нет: только состояние, источник, версия и технический код отказа.
+  'ORDER_GEO_RESOLVED',
+  'ORDER_GEO_LOW_PRECISION',
+  'ORDER_GEO_FAILED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

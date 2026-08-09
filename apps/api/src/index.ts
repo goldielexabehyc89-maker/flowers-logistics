@@ -22,6 +22,12 @@ import {
   reportStartupStatus,
   shouldRunAutomatically,
 } from './modules/integrations/moysklad/worker.js';
+import { DadataClient } from './modules/integrations/dadata/client.js';
+import { createGeocodeWorker, GEOCODE_LOCK_KEY } from './modules/orders/geocoding/worker.js';
+import { reportGeocodingStartupStatus } from './modules/orders/geocoding/status.js';
+import { backfillGeocoding } from './modules/orders/geocoding/queue.js';
+import { clearHalt } from './modules/orders/geocoding/provider-state.js';
+import { shouldGeocodeAutomatically } from './modules/orders/geocoding/enabled.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -47,6 +53,9 @@ async function main(): Promise<void> {
   });
   outbox.start();
 
+  // Геокодирование включается ровно там, где есть кому обрабатывать очередь.
+  const geocodingEnabled = shouldGeocodeAutomatically(config);
+
   // Синхронизация МоегоСклада. Токен существует только в production, поэтому
   // в остальных окружениях worker не создаётся и ни одного сетевого обращения
   // не выполняется — интеграция честно остаётся ненастроенной.
@@ -63,6 +72,7 @@ async function main(): Promise<void> {
     ids: MOYSKLAD_IDS,
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,
     lock: { connectionString: config.DATABASE_URL },
+    geocodingEnabled,
   };
   await reportStartupStatus(moysklad, config);
 
@@ -70,6 +80,64 @@ async function main(): Promise<void> {
     ? createSyncWorker(moysklad, config.MOYSKLAD_SYNC_INTERVAL_SECONDS * 1000)
     : null;
   syncWorker?.start();
+
+  // Геокодирование адресов. Ключи существуют только в production, поэтому
+  // в остальных окружениях клиент и worker не создаются вовсе: ни одного
+  // обращения к DaData оттуда произойти не может, даже если заказы есть.
+  await reportGeocodingStartupStatus(db, {
+    configured: config.DADATA_API_KEY !== undefined && config.DADATA_SECRET_KEY !== undefined,
+    enabled: geocodingEnabled,
+  });
+
+  const geocodeWorker = geocodingEnabled
+    ? createGeocodeWorker({
+        db,
+        logger,
+        client: new DadataClient({
+          credentials: {
+            apiKey: config.DADATA_API_KEY ?? null,
+            secretKey: config.DADATA_SECRET_KEY ?? null,
+          },
+        }),
+        lock: { connectionString: config.DATABASE_URL, key: GEOCODE_LOCK_KEY },
+      })
+    : null;
+  // Разовое наполнение очереди уже импортированными заказами.
+  //
+  // Постановка происходит только при импорте и смене адреса, поэтому заказы,
+  // пришедшие до включения геокодирования, сами в очередь не попадут. Проход
+  // идёт в фоне: он длинный, а старт приложения задерживать нельзя, — но при
+  // остановке процесса его обязательно дожидаются, иначе последняя пачка
+  // работала бы с базой, которую уже закрывают.
+  let backfillStopping = false;
+  let backfill: Promise<void> | null = null;
+
+  if (geocodeWorker !== null) {
+    // Остановка обращений снимается только здесь: приложение стартовало,
+    // значит, конфигурацию проверял человек. Та же неверная настройка снова
+    // остановит обращения после первого же отказа, и это стоит одного запроса.
+    await clearHalt(db);
+
+    backfill = backfillGeocoding(db, { shouldStop: () => backfillStopping })
+      .then((result) => {
+        if (result.exhaustedBatches) {
+          logger.error(
+            { geocoding: result },
+            'наполнение очереди геокодирования прервано аварийным пределом: часть заказов осталась без задания',
+          );
+          return;
+        }
+        logger.info(
+          { geocoding: result },
+          'очередь геокодирования наполнена существующими заказами',
+        );
+      })
+      .catch((error: unknown) =>
+        logger.error({ err: error }, 'наполнение очереди геокодирования не удалось'),
+      );
+  }
+
+  geocodeWorker?.start();
 
   let shuttingDown = false;
 
@@ -90,10 +158,14 @@ async function main(): Promise<void> {
       // Сначала фоновые задачи: они дожидаются начатого прохода, поэтому
       // к моменту закрытия соединения с базой ни один обработчик уже не работает.
       // Общий лимит остановки при этом не меняется — он висит выше по коду.
+      backfillStopping = true;
       await Promise.all([
         outbox.stop(),
         maintenance.stop(),
         syncWorker?.stop() ?? Promise.resolve(),
+        geocodeWorker?.stop() ?? Promise.resolve(),
+        // Наполнение опрашивает флаг между пачками, поэтому ожидание короткое.
+        backfill ?? Promise.resolve(),
       ]);
       await app.close();
       await notifier.stop();
