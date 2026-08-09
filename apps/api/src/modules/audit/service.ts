@@ -58,6 +58,10 @@ export const AUDIT_ACTIONS = [
   'ROUTE_EDIT_LOCK_ACQUIRED',
   'ROUTE_EDIT_LOCK_RELEASED',
   'ROUTE_EDIT_LOCK_TAKEN_OVER',
+  // Геоданные заказа. Ни адрес, ни координаты в аудит не попадают:
+  // там только состояние и версия.
+  'ORDER_GEO_POINT_SET',
+  'ORDER_GEO_INVALIDATED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -207,6 +207,103 @@ test('экран «Сделки»: список, поиск и ручной ин
   await expect(page.locator('.deals__row', { hasText: orderNumber })).toBeVisible();
 });
 
+/**
+ * Минимальный валидный стиль MapLibre.
+ *
+ * Подложки нет намеренно: проверяется поведение приложения, а не качество карты.
+ * Настоящие тайлы сюда не скачиваются, к публичным серверам OSM обращений нет.
+ */
+const EMPTY_STYLE = JSON.stringify({ version: 8, sources: {}, layers: [] });
+
+test('карта не настроена: интерфейс говорит честно, а список продолжает работать', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Конфигурация подменяется на «не настроена» независимо от окружения стенда.
+  await page.route('**/api/map/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: false, styleUrl: null, attribution: null }),
+    }),
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  await expect(page.getByText('Карта не настроена', { exact: true })).toBeVisible();
+  // Карта не появилась, но работа не остановилась.
+  await expect(page.locator('[data-testid="orders-map"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Создать черновик' })).toBeEnabled();
+  await page.waitForSelector('.routes__order, .state', { state: 'visible' });
+});
+
+test('карта: ручная точка ставится без перезагрузки, строка и маркер связаны', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
+  test.skip(first === '', 'нужен проверочный заказ');
+
+  const styleUrl = 'https://maps.local.test/style.json';
+  await page.route('**/api/map/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true, styleUrl, attribution: '© Проверка' }),
+    }),
+  );
+  await page.route(styleUrl, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: EMPTY_STYLE }),
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+
+  const map = page.locator('[data-testid="orders-map"]');
+  await expect(map).toBeVisible();
+
+  const row = page.locator('.routes__order', { hasText: first });
+  await expect(row).toBeVisible();
+
+  // Точки ещё нет: строка объясняет причину и остаётся в работе.
+  await expect(row.locator('.routes__geo-hint')).toBeVisible();
+
+  await row.getByRole('button', { name: 'Указать точку' }).click();
+  await expect(page.locator('.routes__hint')).toContainText('Укажите точку на карте');
+
+  await map.click({ position: { x: 240, y: 160 } });
+  await expect(page.getByRole('heading', { name: 'Подтвердите точку заказа' })).toBeVisible();
+  await page.getByLabel('Причина').fill('Проверочная синтетическая точка');
+  await page.getByRole('button', { name: 'Сохранить точку' }).click();
+
+  // Маркер появляется без перезагрузки страницы.
+  const marker = page.locator(`.map-marker[aria-label="Заказ ${first} на карте"]`);
+  await expect(marker).toBeVisible();
+  await expect(row.locator('.routes__geo-hint')).toHaveCount(0);
+
+  // Выбор маркера подсвечивает строку…
+  await marker.click();
+  await expect(row.locator('.routes__number-button')).toHaveAttribute('aria-pressed', 'true');
+  await expect(marker).toHaveClass(/map-marker--selected/);
+
+  // …а выбор другой строки снимает подсветку и переносит её.
+  const secondNumber = process.env['E2E_ORDER_NUMBER_2'] ?? '';
+  test.skip(secondNumber === '', 'нужен второй проверочный заказ');
+  const secondRow = page.locator('.routes__order', { hasText: secondNumber });
+  await secondRow.locator('.routes__number-button').click();
+  await expect(marker).not.toHaveClass(/map-marker--selected/);
+
+  await row.locator('.routes__number-button').click();
+  await expect(marker).toHaveClass(/map-marker--selected/);
+});
+
 test('маршрут: черновик → состав → порядок → подтверждение → маршрутный лист', async ({
   page,
 }: {

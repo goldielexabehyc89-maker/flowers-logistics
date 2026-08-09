@@ -16,10 +16,22 @@
 /** Префиксы, которые не кэшируются ни при каких условиях. */
 export const NEVER_CACHED_PREFIXES = ['/api', '/health', '/ready'] as const;
 
+/**
+ * Картографические архивы не кэшируются никогда.
+ *
+ * PMTiles и MBTiles — это единые файлы на сотни мегабайт и гигабайты, из которых
+ * карта читает небольшие куски диапазонными запросами. Положить такой файл в кэш браузера
+ * означало бы забить хранилище устройства целиком ради одного экрана.
+ */
+export const NEVER_CACHED_EXTENSIONS = ['.pmtiles', '.mbtiles', '.osm.pbf', '.pbf'] as const;
+
 export interface CacheDecisionInput {
   method: string;
   url: string;
-  /** Заголовки запроса: наличие Authorization запрещает кэширование. */
+  /**
+   * Заголовки запроса: наличие Authorization запрещает кэширование,
+   * а наличие Range означает кусок файла и кэшированию не подлежит.
+   */
   requestHeaders?: Record<string, string> | undefined;
 }
 
@@ -45,17 +57,36 @@ export function shouldCacheRequest(input: CacheDecisionInput): boolean {
     return false;
   }
 
-  const headers = input.requestHeaders ?? {};
-  const hasAuthorization = Object.keys(headers).some(
-    (name) => name.toLowerCase() === 'authorization',
-  );
+  // Картографические архивы: целиком в кэш они не помещаются, а частично
+  // кэшированный файл хуже отсутствующего — карта прочитала бы обрывок.
+  if (NEVER_CACHED_EXTENSIONS.some((extension) => pathname.toLowerCase().endsWith(extension))) {
+    return false;
+  }
 
-  return !hasAuthorization;
+  const headers = input.requestHeaders ?? {};
+  const names = Object.keys(headers).map((name) => name.toLowerCase());
+
+  if (names.includes('authorization')) {
+    return false;
+  }
+
+  // Диапазонный запрос — это кусок файла, а не ресурс: класть его в кэш
+  // под адресом целого файла значит однажды отдать обрывок вместо ответа.
+  return !names.includes('range');
 }
 
 /** Можно ли положить в кэш конкретный ответ. */
 export function shouldCacheResponse(status: number, headers: Record<string, string>): boolean {
+  // 206 Partial Content — ответ на диапазонный запрос: он не является
+  // полноценным представлением ресурса и в кэш не попадает.
   if (status !== 200) {
+    return false;
+  }
+
+  const hasContentRange = Object.keys(headers).some(
+    (name) => name.toLowerCase() === 'content-range',
+  );
+  if (hasContentRange) {
     return false;
   }
 

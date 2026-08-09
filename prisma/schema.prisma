@@ -109,6 +109,7 @@ model User {
   removedRouteOrders RouteOrder[]  @relation("RouteOrderRemovedBy")
   routeTransitions RouteStateTransition[]
   routeEditLeases  RouteEditLease[]
+  geoChanges         OrderGeoHistory[]
 
   @@index([status])
   @@index([createdAt])
@@ -507,6 +508,22 @@ model DeliveryOrder {
   needsAttention   Boolean                @default(false)
   attentionReasons OrderAttentionReason[]
 
+  /// Георазрешение адреса. Координаты хранятся целыми микроградусами:
+  /// от них зависят порядок объезда и расстояние, а двоичная дробь округляется
+  /// незаметно. Микроградус — около 11 сантиметров, чего заведомо достаточно.
+  ///
+  /// База гарантирует, что координаты существуют ТОЛЬКО в состоянии RESOLVED
+  /// и всегда вместе с источником, точностью и временем разрешения. Поэтому
+  /// непригодная точка физически не может выглядеть пригодной.
+  geoState        OrderGeoState          @default(UNRESOLVED)
+  geoSource       OrderGeoSource?
+  geoPrecision    OrderGeoPrecision?
+  geoLatMicro     Int?
+  geoLonMicro     Int?
+  geoResolvedAt   DateTime?
+  /// Почему точка требует проверки. Заполняется только для NEEDS_REVIEW и FAILED.
+  geoReviewReason OrderGeoReviewReason?
+
   /// Оптимистическая блокировка для будущих конкурентных изменений.
   version   Int      @default(0)
   createdAt DateTime @default(now())
@@ -514,6 +531,7 @@ model DeliveryOrder {
 
   revisions      DeliveryOrderRevision[]
   routeOrders    RouteOrder[]
+  geoHistory  OrderGeoHistory[]
 
   @@index([inScope, deliveryDate])
   @@index([needsAttention])
@@ -779,4 +797,96 @@ model RouteEditLease {
 
   @@index([holderUserId])
   @@index([expiresAt])
+}
+
+
+// --- Этап 5.1. Геоданные заказа ---------------------------------------------
+
+/// Состояние георазрешения адреса заказа.
+enum OrderGeoState {
+  /// Точка ещё не запрашивалась.
+  UNRESOLVED
+  /// Запрос к геокодеру поставлен в очередь (ветка 5.2).
+  PENDING
+  /// Точка пригодна для планирования.
+  RESOLVED
+  /// Точка есть в истории, но пользоваться ею нельзя: нужна проверка человеком.
+  NEEDS_REVIEW
+  /// Геокодер отказал окончательно.
+  FAILED
+}
+
+/// Откуда взялась точка.
+enum OrderGeoSource {
+  /// Production-геокодер (ветка 5.2).
+  DADATA
+  /// Логист поставил точку руками.
+  MANUAL
+  /// Синтетический набор staging. Production-процесс такие точки не создаёт.
+  SYNTHETIC
+}
+
+/// Насколько точно найден адрес.
+enum OrderGeoPrecision {
+  EXACT_HOUSE
+  NEARBY_HOUSE
+  STREET
+  LOCALITY
+  UNKNOWN
+}
+
+/// Почему точка требует проверки.
+enum OrderGeoReviewReason {
+  /// Адрес в МоемСкладе изменился: прежняя точка больше не относится к заказу.
+  ADDRESS_CHANGED
+  /// Геокодер нашёл только улицу или населённый пункт.
+  LOW_PRECISION
+  /// Провайдер вернул отказ или не ответил.
+  PROVIDER_FAILED
+  /// Проверку запросил человек.
+  MANUAL_CHECK
+}
+
+/// Что произошло с геоданными заказа.
+enum OrderGeoChangeKind {
+  /// Логист поставил точку руками.
+  MANUAL_SET
+  /// Точка обесценена сменой адреса.
+  INVALIDATED_ADDRESS_CHANGED
+}
+
+/// Неизменяемая история геоданных заказа.
+///
+/// Адрес здесь не хранится намеренно: история отвечает на вопрос «какая точка
+/// была и почему она сменилась», а сам адрес живёт в заказе и его ревизиях.
+/// Сырые ответы будущих провайдеров тоже не сохраняются.
+model OrderGeoHistory {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  kind       OrderGeoChangeKind
+  occurredAt DateTime           @default(now())
+
+  /// Состояние и точка ПОСЛЕ изменения. У инвалидации координат нет.
+  state     OrderGeoState
+  source    OrderGeoSource?
+  precision OrderGeoPrecision?
+  latMicro  Int?
+  lonMicro  Int?
+
+  /// Прежняя точка: она перестаёт быть текущей, но остаётся доказательством.
+  previousLatMicro Int?
+  previousLonMicro Int?
+
+  reviewReason OrderGeoReviewReason?
+  /// Пояснение человека. Обязательно для ручной установки, 3–500 символов.
+  reason       String?
+
+  /// Автор. Пусто у системной инвалидации: её выполняет синхронизация.
+  actorUserId String? @db.Uuid
+  actor       User?   @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([orderId, occurredAt])
 }
