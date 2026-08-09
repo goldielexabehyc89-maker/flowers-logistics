@@ -44,30 +44,57 @@ export interface GeoPoint {
 }
 
 /**
+ * Обычная десятичная запись: знак, целая часть, необязательная дробная.
+ *
+ * Ни шестнадцатеричной, ни экспоненциальной записи, ни пустой строки, ни пробелов.
+ * `Number()` принял бы всё это молча: пустая строка стала бы нулём, `0x10` —
+ * шестнадцатью, `1e2` — сотней. Координата, полученная так, выглядит как
+ * нормальные данные и отправляет курьера в другое место.
+ */
+const DECIMAL_DEGREES = /^-?\d+(?:\.\d+)?$/;
+
+/**
  * Разбирает координату из десятичной строки или числа.
  *
  * Строка предпочтительна: она проходит через JSON без потери знаков. Число тоже
  * принимается — браузерная карта отдаёт именно его, — но сразу переводится
  * в целые микроградусы и дальше живёт только так.
+ *
+ * Диапазон проверяется до округления. Иначе `90.0000004` округлилось бы
+ * до ровно 90° и прошло бы как допустимое значение, хотя исходное — за пределами
+ * планеты и означает ошибку на стороне отправителя.
  */
-export function toMicro(value: unknown, limit: number, field: string): number {
-  const asNumber = typeof value === 'string' ? Number(value) : value;
+export function toMicro(value: unknown, limitMicro: number, field: string): number {
+  const invalid = new AppError('VALIDATION_FAILED', {
+    message: `invalid ${field}`,
+    publicMessage: 'Координата указана неверно.',
+  });
 
-  if (typeof asNumber !== 'number' || !Number.isFinite(asNumber)) {
-    throw new AppError('VALIDATION_FAILED', {
-      message: `invalid ${field}`,
-      publicMessage: 'Координата указана неверно.',
-    });
+  let degrees: number;
+  if (typeof value === 'string') {
+    if (!DECIMAL_DEGREES.test(value)) {
+      throw invalid;
+    }
+    degrees = Number(value);
+  } else if (typeof value === 'number') {
+    degrees = value;
+  } else {
+    throw invalid;
   }
 
-  const micro = Math.round(asNumber * MICRO);
-  if (Math.abs(micro) > limit) {
+  if (!Number.isFinite(degrees)) {
+    throw invalid;
+  }
+
+  // Ровно ±90 и ±180 допустимы: это полюса и линия перемены даты, а не ошибка.
+  if (Math.abs(degrees) > limitMicro / MICRO) {
     throw new AppError('VALIDATION_FAILED', {
       message: `${field} is out of range`,
       publicMessage: 'Координата выходит за пределы допустимых значений.',
     });
   }
-  return micro;
+
+  return Math.round(degrees * MICRO);
 }
 
 /** `55751244` → `55.751244`. Наружу координаты уходят десятичными строками. */
@@ -110,9 +137,12 @@ export interface SetPointResult {
 /**
  * Ручная установка точки логистом.
  *
- * Повторная установка той же точки идемпотентна: она не создаёт ложную запись
- * в неизменяемой истории, не увеличивает версию и не будит остальных логистов
- * событием. Иначе двойной клик выглядел бы как два разных решения.
+ * Повторная установка той же **ручной** точки идемпотентна: она не создаёт ложную
+ * запись в неизменяемой истории, не увеличивает версию и не будит остальных
+ * логистов событием. Иначе двойной клик выглядел бы как два разных решения.
+ *
+ * Подтверждение точки, найденной геокодером, идемпотентным не считается даже
+ * при совпадении координат: меняется источник, а вместе с ним и ответственность.
  */
 export async function setManualPoint(
   deps: { db: Database },
@@ -144,8 +174,15 @@ export async function setManualPoint(
       });
     }
 
+    // Идемпотентен только повтор уже ручной точки.
+    //
+    // Совпадение координат с точкой геокодера — не то же самое: человек берёт
+    // на себя ответственность за место доставки и снимает её с провайдера,
+    // а следующая переоценка адреса не должна молча вернуть автоматический
+    // источник. Поэтому подтверждение точки DADATA — это изменение.
     if (
       order.geoState === 'RESOLVED' &&
+      order.geoSource === 'MANUAL' &&
       order.geoLatMicro === latMicro &&
       order.geoLonMicro === lonMicro
     ) {
@@ -200,7 +237,7 @@ export async function setManualPoint(
       actorRoles: actor.roles,
       source: 'api',
       // Ни адреса, ни координат: точка живёт в защищённой истории заказа.
-      oldValue: { geoState: order.geoState },
+      oldValue: { geoState: order.geoState, geoSource: order.geoSource },
       newValue: { geoState: 'RESOLVED', geoSource: 'MANUAL', version: order.version + 1 },
       ip: context.ip,
       userAgent: context.userAgent,
@@ -230,6 +267,7 @@ interface LockedOrder {
   sourceArchived: boolean;
   sourceMissing: boolean;
   geoState: $Enums.OrderGeoState;
+  geoSource: $Enums.OrderGeoSource | null;
   geoLatMicro: number | null;
   geoLonMicro: number | null;
 }
@@ -237,7 +275,7 @@ interface LockedOrder {
 async function lockOrder(tx: TransactionClient, orderId: string): Promise<LockedOrder> {
   const rows = await tx.$queryRaw<LockedOrder[]>`
     SELECT "id", "version", "inScope", "sourceArchived", "sourceMissing",
-           "geoState", "geoLatMicro", "geoLonMicro"
+           "geoState", "geoSource", "geoLatMicro", "geoLonMicro"
     FROM "DeliveryOrder"
     WHERE "id" = ${orderId}::uuid
     FOR UPDATE

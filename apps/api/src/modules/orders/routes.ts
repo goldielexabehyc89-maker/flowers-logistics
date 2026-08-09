@@ -345,6 +345,11 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     const rows = await deps.db.deliveryOrder.findMany({
       where: {
         inScope: true,
+        // Исчезнувший или архивированный в источнике заказ мы не везём, и точка
+        // на карте выглядела бы как обычная работа. Правило то же, что и в выборке
+        // для распределения: карта и список маршрутизации обязаны совпадать.
+        sourceArchived: false,
+        sourceMissing: false,
         deliveryDate: toDateColumn(query.deliveryDate),
         geoState: 'RESOLVED',
       },

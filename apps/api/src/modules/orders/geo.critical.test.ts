@@ -232,6 +232,316 @@ describe('инварианты геоданных в базе', () => {
   });
 });
 
+describe('форма записи в неизменяемой истории', () => {
+  /**
+   * История геоданных не редактируется и не удаляется, поэтому неверная запись
+   * останется в ней навсегда как ложное доказательство. Единственная защита —
+   * запрет на её появление, и держит его база, а не код приложения.
+   */
+  async function seedActor(): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const pinHash = await hashSecretCode('1234', TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, {
+      roles: ['LOGISTICIAN'],
+      status: 'ACTIVE',
+      pinHash,
+    });
+    return user.id;
+  }
+
+  it('допустимая ручная запись создаётся', async () => {
+    const { order } = await seedOrder();
+    const actorUserId = await seedActor();
+
+    const entry = await ctx.db.orderGeoHistory.create({
+      data: {
+        orderId: order.id,
+        kind: 'MANUAL_SET',
+        state: 'RESOLVED',
+        source: 'MANUAL',
+        precision: 'EXACT_HOUSE',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        previousLatMicro: null,
+        previousLonMicro: null,
+        reason: 'Логист показал дом на карте',
+        actorUserId,
+      },
+    });
+    expect(entry.kind).toBe('MANUAL_SET');
+  });
+
+  it('допустимая запись об обесценивании создаётся', async () => {
+    const { order } = await seedOrder();
+
+    const entry = await ctx.db.orderGeoHistory.create({
+      data: {
+        orderId: order.id,
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+        previousLatMicro: 55_751_244,
+        previousLonMicro: 37_618_423,
+      },
+    });
+    expect(entry.kind).toBe('INVALIDATED_ADDRESS_CHANGED');
+  });
+
+  const IMPOSSIBLE: { title: string; data: Record<string, unknown> }[] = [
+    {
+      title: 'ручная запись с точностью улицы',
+      data: {
+        kind: 'MANUAL_SET',
+        state: 'RESOLVED',
+        source: 'MANUAL',
+        precision: 'STREET',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        reason: 'Точность не соответствует ручной установке',
+      },
+    },
+    {
+      title: 'ручная запись с источником геокодера',
+      data: {
+        kind: 'MANUAL_SET',
+        state: 'RESOLVED',
+        source: 'DADATA',
+        precision: 'EXACT_HOUSE',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        reason: 'Источник не соответствует ручной установке',
+      },
+    },
+    {
+      title: 'ручная запись в состоянии проверки',
+      data: {
+        kind: 'MANUAL_SET',
+        state: 'NEEDS_REVIEW',
+        source: 'MANUAL',
+        precision: 'EXACT_HOUSE',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        reason: 'Состояние не соответствует ручной установке',
+      },
+    },
+    {
+      title: 'ручная запись с причиной проверки',
+      data: {
+        kind: 'MANUAL_SET',
+        state: 'RESOLVED',
+        source: 'MANUAL',
+        precision: 'EXACT_HOUSE',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        reviewReason: 'MANUAL_CHECK',
+        reason: 'Проверку только что выполнил человек',
+      },
+    },
+    {
+      title: 'ручная запись без координат',
+      data: {
+        kind: 'MANUAL_SET',
+        state: 'RESOLVED',
+        source: 'MANUAL',
+        precision: 'EXACT_HOUSE',
+        reason: 'Ручная установка без точки бессмысленна',
+      },
+    },
+    {
+      title: 'ручная запись со слишком короткой причиной',
+      data: {
+        kind: 'MANUAL_SET',
+        state: 'RESOLVED',
+        source: 'MANUAL',
+        precision: 'EXACT_HOUSE',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        reason: 'ок',
+      },
+    },
+    {
+      title: 'обесценивание с новой точкой',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+        latMicro: 55_751_244,
+        lonMicro: 37_618_423,
+        previousLatMicro: 55_760_000,
+        previousLonMicro: 37_600_000,
+      },
+    },
+    {
+      title: 'обесценивание с источником',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+        source: 'DADATA',
+        previousLatMicro: 55_751_244,
+        previousLonMicro: 37_618_423,
+      },
+    },
+    {
+      title: 'обесценивание с точностью',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+        precision: 'STREET',
+        previousLatMicro: 55_751_244,
+        previousLonMicro: 37_618_423,
+      },
+    },
+    {
+      title: 'обесценивание без прежней точки',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+      },
+    },
+    {
+      title: 'обесценивание с половиной прежней точки',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+        previousLatMicro: 55_751_244,
+      },
+    },
+    {
+      title: 'обесценивание в состоянии RESOLVED',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'RESOLVED',
+        reviewReason: 'ADDRESS_CHANGED',
+        previousLatMicro: 55_751_244,
+        previousLonMicro: 37_618_423,
+      },
+    },
+    {
+      title: 'обесценивание с чужой причиной проверки',
+      data: {
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'LOW_PRECISION',
+        previousLatMicro: 55_751_244,
+        previousLonMicro: 37_618_423,
+      },
+    },
+  ];
+
+  for (const testCase of IMPOSSIBLE) {
+    it(`невозможно: ${testCase.title}`, async () => {
+      const { order } = await seedOrder();
+      const actorUserId = await seedActor();
+      const base = testCase.data['kind'] === 'MANUAL_SET' ? { actorUserId } : {};
+
+      await expect(
+        ctx.db.orderGeoHistory.create({
+          data: { orderId: order.id, ...base, ...testCase.data } as never,
+        }),
+      ).rejects.toThrow();
+    });
+  }
+
+  it('ручная запись без автора невозможна', async () => {
+    const { order } = await seedOrder();
+
+    await expect(
+      ctx.db.orderGeoHistory.create({
+        data: {
+          orderId: order.id,
+          kind: 'MANUAL_SET',
+          state: 'RESOLVED',
+          source: 'MANUAL',
+          precision: 'EXACT_HOUSE',
+          latMicro: 55_751_244,
+          lonMicro: 37_618_423,
+          reason: 'Запись без автора не доказывает ничьего решения',
+        },
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('строгий разбор координаты', () => {
+  /**
+   * Значения, которые `Number()` принял бы молча.
+   *
+   * Пустая строка стала бы нулём — это точка в Гвинейском заливе; `0x10` —
+   * шестнадцатью; `1e2` — сотней. Такая координата не выглядит как ошибка
+   * и потому опаснее отказа.
+   */
+  const REJECTED: { title: string; lat: unknown; lon: unknown }[] = [
+    { title: 'пустая строка', lat: '', lon: '37.618423' },
+    { title: 'пробелы', lat: '   ', lon: '37.618423' },
+    { title: 'шестнадцатеричная запись', lat: '0x10', lon: '37.618423' },
+    { title: 'экспонента', lat: '1e2', lon: '37.618423' },
+    { title: 'экспонента в допустимом диапазоне', lat: '5.5e1', lon: '37.618423' },
+    { title: 'запятая вместо точки', lat: '55,751244', lon: '37.618423' },
+    { title: 'пробел внутри числа', lat: '55.75 1244', lon: '37.618423' },
+    { title: 'единицы измерения', lat: '55.751244°', lon: '37.618423' },
+    { title: 'Infinity', lat: 'Infinity', lon: '37.618423' },
+    { title: 'широта чуть за пределом', lat: '90.0000004', lon: '37.618423' },
+    { title: 'южная широта чуть за пределом', lat: '-90.0000004', lon: '37.618423' },
+    { title: 'долгота чуть за пределом', lat: '55.751244', lon: '180.0000004' },
+    { title: 'широта числом за пределом', lat: 90.0000004, lon: 37.618423 },
+    { title: 'нечисловой тип', lat: true, lon: '37.618423' },
+  ];
+
+  for (const testCase of REJECTED) {
+    it(`отклоняет: ${testCase.title}`, async () => {
+      const token = await tokenFor(['LOGISTICIAN']);
+      const { order } = await seedOrder();
+
+      const response = await setPoint(token, order.id, {
+        lat: testCase.lat,
+        lon: testCase.lon,
+        reason: `Проверка: ${testCase.title}`,
+        expectedVersion: order.version,
+      });
+
+      expect(response.statusCode).toBe(400);
+
+      // Отказ происходит до любой записи: ни точки, ни истории, ни версии.
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+      expect(stored.geoState).toBe('UNRESOLVED');
+      expect(stored.geoLatMicro).toBeNull();
+      expect(stored.version).toBe(order.version);
+      expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(0);
+    });
+  }
+
+  it('точные границы планеты принимаются', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    const response = await setPoint(token, order.id, {
+      lat: '-90.000000',
+      lon: '180.000000',
+      reason: 'Полюс и линия перемены даты — не ошибка',
+      expectedVersion: order.version,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoLatMicro).toBe(-90_000_000);
+    expect(stored.geoLonMicro).toBe(180_000_000);
+  });
+
+  it('чистая функция отклоняет то же самое и принимает границы', () => {
+    for (const value of ['', '   ', '0x10', '1e2', '90.0000004', '.5', '5.', '+55.5']) {
+      expect(() => toMicro(value, MAX_LAT_MICRO, 'lat'), value).toThrow();
+    }
+
+    expect(toMicro('90', MAX_LAT_MICRO, 'lat')).toBe(90_000_000);
+    expect(toMicro('-90.000000', MAX_LAT_MICRO, 'lat')).toBe(-90_000_000);
+    expect(toMicro(90, MAX_LAT_MICRO, 'lat')).toBe(90_000_000);
+  });
+});
+
 describe('ручная установка точки', () => {
   it('ставит точку, пишет историю, аудит и событие без адреса и координат', async () => {
     const token = await tokenFor(['LOGISTICIAN']);
@@ -313,6 +623,59 @@ describe('ручная установка точки', () => {
 
     expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(1);
     expect(await ctx.db.auditLog.count({ where: { entityId: order.id } })).toBe(auditBefore);
+  });
+
+  it('подтверждение точки геокодера меняет источник и не считается повтором', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const { order } = await seedOrder();
+
+    // Точка, как если бы её нашёл геокодер: ветка 5.2 запишет её так же.
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        geoState: 'RESOLVED',
+        geoSource: 'DADATA',
+        geoPrecision: 'NEARBY_HOUSE',
+        geoLatMicro: 55_751_244,
+        geoLonMicro: 37_618_423,
+        geoResolvedAt: NOW,
+      },
+    });
+    const found = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+
+    const response = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Логист подтвердил точку геокодера',
+      expectedVersion: found.version,
+    });
+
+    expect(response.statusCode).toBe(200);
+    // Координаты те же, но ответственность перешла к человеку: это изменение.
+    expect((response.json() as { unchanged: boolean }).unchanged).toBe(false);
+    expect((response.json() as { version: number }).version).toBe(found.version + 1);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoSource).toBe('MANUAL');
+    expect(stored.geoPrecision).toBe('EXACT_HOUSE');
+
+    const history = await ctx.db.orderGeoHistory.findMany({ where: { orderId: order.id } });
+    expect(history).toHaveLength(1);
+    expect(history[0]?.kind).toBe('MANUAL_SET');
+    expect(history[0]?.reason).toBe('Логист подтвердил точку геокодера');
+
+    expect(
+      await ctx.db.auditLog.count({ where: { entityId: order.id, action: 'ORDER_GEO_POINT_SET' } }),
+    ).toBe(1);
+
+    // А вот повтор уже ручной точки идемпотентен.
+    const repeat = await setPoint(token, order.id, {
+      ...POINT,
+      reason: 'Повтор уже ручной точки',
+      expectedVersion: found.version + 1,
+    });
+    expect(repeat.statusCode).toBe(200);
+    expect((repeat.json() as { unchanged: boolean }).unchanged).toBe(true);
+    expect(await ctx.db.orderGeoHistory.count({ where: { orderId: order.id } })).toBe(1);
   });
 
   it('устаревшая версия возвращает 409 STALE_VERSION и ничего не меняет', async () => {
@@ -555,6 +918,49 @@ describe('выборка для карты и список', () => {
     const listed = items.find((item) => item.id === withoutPoint.order.id);
     expect(listed).toBeDefined();
     expect(listed?.geo.state).toBe('UNRESOLVED');
+  });
+
+  it('архивированный и пропавший в источнике заказ на карту не попадают', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-25';
+
+    const normal = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
+    const archived = await seedOrder({ deliveryPlannedMoment: `${day} 13:00:00.000` });
+    const missing = await seedOrder({ deliveryPlannedMoment: `${day} 14:00:00.000` });
+
+    for (const seeded of [normal, archived, missing]) {
+      const response = await setPoint(token, seeded.order.id, {
+        ...POINT,
+        reason: 'Точка до исчезновения заказа',
+        expectedVersion: seeded.order.version,
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    // Состояние готовится прямо в базе: важно, что фильтрует выборка карты,
+    // а не то, каким путём заказ дошёл до этого состояния.
+    await ctx.db.deliveryOrder.update({
+      where: { id: archived.order.id },
+      data: { sourceArchived: true },
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: missing.order.id },
+      data: { sourceMissing: true },
+    });
+
+    const map = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders/map?deliveryDate=${day}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(map.statusCode).toBe(200);
+
+    const ids = (map.json() as { points: { orderId: string }[] }).points.map(
+      (point) => point.orderId,
+    );
+    expect(ids).toContain(normal.order.id);
+    expect(ids).not.toContain(archived.order.id);
+    expect(ids).not.toContain(missing.order.id);
   });
 
   it('несуществующая дата в запросе карты отклоняется', async () => {
