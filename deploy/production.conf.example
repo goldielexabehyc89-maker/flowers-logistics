@@ -39,3 +39,22 @@ COMPOSE_FILE="docker-compose.deploy.yml"
 
 ENV_FILE="production.env"
 DB_VOLUME="fl-production-db"
+
+# --- Картографические артефакты ---
+#
+# Каталоги лежат ВНЕ Git и вне образа приложения. Наборы неизменяемы: новая
+# сборка кладётся в каталог с новым именем, а этот путь переключается на неё.
+# Перезапись набора на месте запрещена — приложение читает файлы прямо сейчас.
+#
+# Допустимо, чтобы staging и production указывали на ОДИН И ТОТ ЖЕ набор
+# одной ревизии: он неизменяем и одинаков. Контейнеры, тома, файлы окружения
+# и кэши при этом остаются раздельными.
+MAP_ARTIFACTS_DIR="/srv/geo/basemap/CHANGE_ME_revision"
+VALHALLA_GRAPH_DIR="/srv/geo/valhalla/CHANGE_ME_revision"
+
+# Ревизия дорожного графа. Обязана совпасть с тем, что сервис отдаёт в /status.
+# Несовпадение — отказ до расчёта: результат лёг бы в кэш под чужим ключом.
+VALHALLA_GRAPH_REVISION="CHANGE_ME_graph_revision"
+
+# Образ маршрутизатора: тег и digest вместе. `latest` запрещён.
+VALHALLA_IMAGE="ghcr.io/valhalla/valhalla:3.8.3@sha256:70b45295d81035e3562e1bbf996a28d5fc55e1ccc5d7e3fff9f297d3b1a1359f"

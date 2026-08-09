@@ -22,6 +22,8 @@ import { registerRealtimeRoutes } from '../../modules/realtime/routes.js';
 import { registerOutboxRoutes } from '../../modules/outbox/routes.js';
 import { registerOrderRoutes } from '../../modules/orders/routes.js';
 import { registerRoutingRoutes } from '../../modules/routing/routes.js';
+import { registerBasemapRoutes } from '../../modules/geo/basemap/routes.js';
+import { loadBasemap, type BasemapState } from '../../modules/geo/basemap/manifest.js';
 import { authenticateWithRoles } from '../../modules/auth/guards.js';
 import type { Notifier } from '../../modules/realtime/notifier.js';
 import type { AppServer } from './types.js';
@@ -32,6 +34,13 @@ export interface ServerDeps {
   db: Database;
   /** Слушатель сигналов PostgreSQL для realtime-канала. */
   notifier: Notifier;
+  /**
+   * Уже проверенная подложка.
+   *
+   * Проверка читает и хеширует сотни мегабайт, поэтому выполняется один раз
+   * при старте. Тесты передают готовое состояние и не платят за пересчёт.
+   */
+  basemap?: BasemapState;
 }
 
 function resolveWebDist(config: AppConfig): string {
@@ -45,6 +54,18 @@ function resolveWebDist(config: AppConfig): string {
 
 export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   const { config, logger, db, notifier } = deps;
+
+  // Подложка проверяется один раз при сборке сервера. Несовпадение контрольной
+  // суммы означает «карта не настроена»: приложение продолжает работать
+  // и никуда наружу за тайлами не идёт.
+  const basemap: BasemapState = deps.basemap ?? (await loadBasemap(config.MAP_ARTIFACTS_PATH));
+
+  if (!basemap.ok && config.MAP_ARTIFACTS_PATH !== undefined) {
+    logger.warn(
+      { basemap: { problem: basemap.problem, artifact: basemap.artifact ?? null } },
+      'подложка карты не прошла проверку: карта объявлена ненастроенной',
+    );
+  }
 
   const app: AppServer = Fastify({
     loggerInstance: logger,
@@ -98,7 +119,8 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerUserRoutes(app, { db, config });
   await registerRealtimeRoutes(app, { db, config, notifier });
   await registerOutboxRoutes(app, { db, config });
-  await registerOrderRoutes(app, { db, config });
+  await registerOrderRoutes(app, { db, config, basemap: () => basemap });
+  await registerBasemapRoutes(app, { state: () => basemap });
   await registerRoutingRoutes(app, { db, config });
 
   await app.register(async (api) => {

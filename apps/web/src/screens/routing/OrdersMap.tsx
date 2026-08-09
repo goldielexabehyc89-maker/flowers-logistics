@@ -52,6 +52,14 @@ export interface OrdersMapProps {
   /** Режим установки точки: клик по карте возвращает координаты. */
   picking: boolean;
   onPick: (coordinates: { lat: number; lon: number }) => void;
+  /**
+   * Подложка не загрузилась.
+   *
+   * Стиль или архив тайлов могли оказаться недоступны уже после того, как
+   * конфигурация сказала «настроено». Молчаливо показать серый прямоугольник
+   * нельзя: логист должен понимать, что видит не карту.
+   */
+  onLoadError: () => void;
 }
 
 export function OrdersMap({
@@ -62,6 +70,7 @@ export function OrdersMap({
   onSelect,
   picking,
   onPick,
+  onLoadError,
 }: OrdersMapProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -75,6 +84,8 @@ export function OrdersMap({
   pickRef.current = onPick;
   const pickingRef = useRef(picking);
   pickingRef.current = picking;
+  const loadErrorRef = useRef(onLoadError);
+  loadErrorRef.current = onLoadError;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -93,6 +104,12 @@ export function OrdersMap({
       attributionControl: attribution === null ? false : { customAttribution: attribution },
     });
     map.addControl(new NavigationControl({ showCompass: false }), 'top-right');
+
+    // Ошибка загрузки стиля или тайлов. Внешнего запасного источника нет
+    // и быть не может: публичные серверы OSM в работе не используются.
+    map.on('error', () => {
+      loadErrorRef.current();
+    });
 
     map.on('click', (event: MapMouseEvent) => {
       if (pickingRef.current) {

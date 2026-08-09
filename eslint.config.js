@@ -42,5 +42,19 @@ export default tseslint.config(
     files: ['**/*.config.{js,ts}', 'scripts/**/*.{js,ts}', 'apps/api/src/scripts/**/*.ts'],
     rules: { 'no-console': 'off' },
   },
+  {
+    /*
+     * Инструменты сборки картографических артефактов.
+     *
+     * Это отдельные скрипты Node, запускаемые человеком вручную: они не входят
+     * в сборку приложения, пишут в stderr осознанно и пользуются глобальными
+     * объектами среды выполнения напрямую.
+     */
+    files: ['tools/**/*.mjs'],
+    languageOptions: {
+      globals: { Buffer: 'readonly', process: 'readonly', console: 'readonly' },
+    },
+    rules: { 'no-console': 'off' },
+  },
   prettier,
 );

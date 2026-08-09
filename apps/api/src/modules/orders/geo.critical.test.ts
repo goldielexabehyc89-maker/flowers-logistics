@@ -1021,7 +1021,20 @@ describe('конфигурация карты', () => {
     });
 
     const keys = Object.keys(response.json() as Record<string, unknown>).sort();
-    expect(keys).toEqual(['attribution', 'configured', 'styleUrl']);
+    expect(keys).toEqual([
+      'attribution',
+      'configured',
+      'problem',
+      'revision',
+      'routingAvailable',
+      'source',
+      'styleUrl',
+      'trafficMode',
+    ]);
+
+    // Адрес маршрутизатора известен только серверу и в браузер не уходит.
+    expect(response.body).not.toContain('valhalla');
+    expect(response.body).not.toContain('8002');
   });
 
   it('исходный код карты не содержит публичных тайлов и демонстрационных стилей', async () => {

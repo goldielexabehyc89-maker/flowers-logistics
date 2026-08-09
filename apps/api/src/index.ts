@@ -27,6 +27,8 @@ import { createGeocodeWorker, GEOCODE_LOCK_KEY } from './modules/orders/geocodin
 import { reportGeocodingStartupStatus } from './modules/orders/geocoding/status.js';
 import { backfillGeocoding } from './modules/orders/geocoding/queue.js';
 import { clearHalt } from './modules/orders/geocoding/provider-state.js';
+import { ValhallaClient } from './modules/integrations/valhalla/client.js';
+import { probeRouting } from './modules/geo/routing-status.js';
 import { shouldGeocodeAutomatically } from './modules/orders/geocoding/enabled.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -138,6 +140,17 @@ async function main(): Promise<void> {
   }
 
   geocodeWorker?.start();
+
+  // Собственный маршрутизатор. Живёт внутри сети Compose и наружу не выходит.
+  // Его недоступность не влияет на готовность приложения: ручные маршруты —
+  // основной способ работы, а расчёт времени только ускоряет его.
+  const valhalla = new ValhallaClient({ baseUrl: config.VALHALLA_URL ?? null });
+  await probeRouting(db, valhalla, config.VALHALLA_GRAPH_REVISION ?? null).catch(
+    (error: unknown) => {
+      logger.error({ err: error }, 'не удалось определить состояние маршрутизатора');
+      return null;
+    },
+  );
 
   let shuttingDown = false;
 

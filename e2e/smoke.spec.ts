@@ -304,6 +304,121 @@ test('карта: ручная точка ставится без перезаг
   await expect(marker).toHaveClass(/map-marker--selected/);
 });
 
+/** Ответ конфигурации карты. Адреса маршрутизатора здесь нет и быть не может. */
+interface MapConfigResponse {
+  configured: boolean;
+  source: string;
+  styleUrl: string | null;
+  attribution: string | null;
+  trafficMode: string;
+  routingAvailable: boolean;
+}
+
+/** Публичные картографические серверы. Ни одного обращения к ним быть не должно. */
+const FORBIDDEN_MAP_HOSTS = [
+  'tile.openstreetmap.org',
+  'tiles.openstreetmap.org',
+  'demotiles.maplibre.org',
+  'api.maptiler.com',
+  'basemaps.protomaps.com',
+  'tiles.protomaps.com',
+  'api.mapbox.com',
+  'openmaptiles.com',
+];
+
+test('собственная подложка: всё с нашего origin и ни одного внешнего запроса', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const external: string[] = [];
+  const mapRequests: string[] = [];
+  // Контейнер, а не отдельная переменная: значение приходит из обработчика
+  // события, и вывод типов не должен считать его навсегда пустым.
+  const captured: { config: MapConfigResponse | null } = { config: null };
+
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (FORBIDDEN_MAP_HOSTS.some((host) => url.hostname.endsWith(host))) {
+      external.push(request.url());
+    }
+    if (url.pathname.startsWith('/maps/')) {
+      mapRequests.push(url.pathname);
+    }
+  });
+
+  // Конфигурацию читаем из ответа, который получило само приложение: свой
+  // запрос из страницы пошёл бы без токена доступа и увидел бы только 401.
+  page.on('response', (response) => {
+    if (new URL(response.url()).pathname === '/api/map/config' && response.status() === 200) {
+      void response
+        .json()
+        .then((body: MapConfigResponse) => {
+          captured.config = body;
+        })
+        .catch(() => undefined);
+    }
+  });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  await expect.poll(() => captured.config !== null, { timeout: 15_000 }).toBe(true);
+
+  const config = captured.config;
+  if (config === null) {
+    throw new Error('приложение не получило конфигурацию карты');
+  }
+
+  expect(config.configured).toBe(true);
+  // Подложка своя: адрес указывает на наш origin, а не на чужой сервер.
+  expect(config.source).toBe('SELF_HOSTED');
+  expect(config.styleUrl?.startsWith('/maps/')).toBe(true);
+  expect(config.attribution).toContain('OpenStreetMap');
+  // Живых пробок в собственном стеке нет, и интерфейс обязан это знать.
+  expect(config.trafficMode).toBe('STATIC');
+
+  // Стиль и артефакты доступны без авторизации: это статика нашего origin.
+  const style = await page.evaluate(async (url: string) => {
+    const response = await fetch(url);
+    return { status: response.status, body: await response.text() };
+  }, config.styleUrl ?? '');
+
+  expect(style.status).toBe(200);
+  // Ни одного абсолютного адреса: стиль не может увести браузер наружу.
+  expect(style.body).not.toMatch(/https?:\/\//);
+  expect(style.body).toContain('OpenStreetMap');
+
+  // Диапазонный запрос к архиву работает: без него PMTiles бесполезен.
+  const range = await page.evaluate(async () => {
+    const response = await fetch('/maps/tiles-test0001.pmtiles', {
+      headers: { Range: 'bytes=0-126' },
+    });
+    return {
+      status: response.status,
+      contentRange: response.headers.get('content-range'),
+      acceptRanges: response.headers.get('accept-ranges'),
+    };
+  });
+
+  expect(range.status).toBe(206);
+  expect(range.contentRange).toMatch(/^bytes 0-126\/\d+$/);
+  expect(range.acceptRanges).toBe('bytes');
+
+  // Расчёт времени в этой проверке не настроен, поэтому обещать его нечем:
+  // пометка о пробках появляется только вместе с доступным маршрутизатором.
+  expect(config.routingAvailable).toBe(false);
+  await expect(page.getByTestId('traffic-note')).toHaveCount(0);
+
+  // Главное: ни одного обращения к публичным картографическим серверам.
+  expect(external).toEqual([]);
+  // И при этом наш origin действительно использовался.
+  expect(mapRequests.length).toBeGreaterThan(0);
+});
+
 test('маршрут: черновик → состав → порядок → подтверждение → маршрутный лист', async ({
   page,
 }: {
@@ -432,7 +547,12 @@ test('перехват блокировки переводит прежнего 
   const secondCard = secondPage.locator('.routes__card');
   await expect(secondCard.getByRole('button', { name: 'Перехватить' })).toBeVisible();
   await secondCard.getByRole('button', { name: 'Перехватить' }).click();
-  await secondPage.getByLabel('Причина').fill('Продолжаю работу с другого устройства');
+  // На экране теперь есть и карта со своим окном подтверждения точки, поэтому
+  // поле причины берётся из открытого сейчас окна, а не по всей странице.
+  await secondPage
+    .locator('dialog[open]')
+    .getByLabel('Причина')
+    .fill('Продолжаю работу с другого устройства');
   await secondPage.getByRole('button', { name: 'Продолжить' }).click();
 
   // Первый сеанс узнаёт об этом сам, без перезагрузки страницы.

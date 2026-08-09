@@ -93,6 +93,11 @@ remote "docker pull '$(image_reference)'"
 require_image_revision
 log "метка образа соответствует ${VERSION}"
 
+step "Картографические артефакты"
+# Fail closed: приложение стартует с подложкой и графом, смонтированными
+# на чтение, и обязано получить именно те файлы, которые собирали.
+require_geo_artifacts
+
 step "Миграции и запуск"
 # Секреты лежат в файле окружения на сервере и не передаются аргументами команды.
 remote "$(compose_command) run --rm app npx prisma migrate deploy"

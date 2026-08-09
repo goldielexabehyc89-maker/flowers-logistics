@@ -62,6 +62,7 @@ CONFIG_KEYS=(
   SSH_HOST SSH_USER SSH_PORT HOST_FINGERPRINT
   REMOTE_DIR APP_DOMAIN APP_HOST_PORT
   IMAGE_REPOSITORY COMPOSE_PROJECT COMPOSE_FILE ENV_FILE DB_VOLUME
+  MAP_ARTIFACTS_DIR VALHALLA_GRAPH_DIR VALHALLA_GRAPH_REVISION VALHALLA_IMAGE
 )
 
 # Читает конфигурацию окружения в переменные с префиксом.
@@ -288,6 +289,59 @@ image_reference() {
 
 # Развёрнутый образ проверяется по OCI-label: тег можно перевесить,
 # а метка внутри образа соответствует конкретному коммиту.
+# Проверяет картографические артефакты на сервере.
+#
+# Fail closed. Отсутствующий манифест, несовпавшая контрольная сумма или другая
+# ревизия графа означают, что на сервере лежит НЕ то, что собирали. Выкатка
+# в таком состоянии дала бы либо пустую карту, либо расчёт по чужим дорожным
+# данным, попавший в кэш под нашим ключом.
+#
+# При DRY_RUN проверка не выполняется: она требует обращения к серверу,
+# а сухой прогон обязан обходиться без сети и без секретов.
+require_geo_artifacts() {
+  if is_dry_run; then
+    log "сухой прогон: проверка картографических артефактов пропущена (нужен доступ к серверу)"
+    return 0
+  fi
+
+  local basemap="${MAP_ARTIFACTS_DIR}" graph="${VALHALLA_GRAPH_DIR}"
+
+  remote "test -f '${basemap}/manifest.json'" \
+    || fail "на сервере нет манифеста подложки: ${basemap}/manifest.json"
+  remote "test -f '${graph}/GRAPH_REVISION'" \
+    || fail "на сервере нет ревизии дорожного графа: ${graph}/GRAPH_REVISION"
+
+  # Каталоги обязаны быть доступны только на чтение для пользователя приложения:
+  # набор неизменяем, и право записи в него противоречит самому его смыслу.
+  local actual_revision
+  actual_revision="$(remote "cat '${graph}/GRAPH_REVISION'" | tr -d '[:space:]')"
+  if [ "${actual_revision}" != "${VALHALLA_GRAPH_REVISION}" ]; then
+    fail "ревизия дорожного графа на сервере «${actual_revision}» не совпадает с конфигурацией «${VALHALLA_GRAPH_REVISION}»"
+  fi
+
+  # Полная сверка контрольных сумм подложки выполняется на сервере: гонять
+  # сотни мегабайт через SSH ради хеша незачем.
+  remote "cd '${basemap}' && node -e '
+    const { createHash } = require(\"node:crypto\");
+    const { createReadStream, readFileSync, statSync } = require(\"node:fs\");
+    const path = require(\"node:path\");
+    const manifest = JSON.parse(readFileSync(\"manifest.json\", \"utf8\"));
+    if (manifest.format !== \"flowers-logistics/basemap-manifest@1\") { process.exit(3); }
+    const sha = (f) => new Promise((res, rej) => {
+      const h = createHash(\"sha256\");
+      createReadStream(f).on(\"data\", (c) => h.update(c)).on(\"end\", () => res(h.digest(\"hex\"))).on(\"error\", rej);
+    });
+    (async () => {
+      for (const a of manifest.artifacts) {
+        if (statSync(a.path).size !== a.bytes) process.exit(4);
+        if ((await sha(a.path)) !== a.sha256) process.exit(5);
+      }
+    })();
+  '" || fail "картографические артефакты на сервере не совпадают с манифестом: ${basemap}"
+
+  log "картографические артефакты проверены: подложка и граф ревизии ${VALHALLA_GRAPH_REVISION}"
+}
+
 require_image_revision() {
   local actual
   actual="$(remote "docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' '$(image_reference)'")"
