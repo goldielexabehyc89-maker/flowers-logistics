@@ -62,6 +62,7 @@ CONFIG_KEYS=(
   SSH_HOST SSH_USER SSH_PORT HOST_FINGERPRINT
   REMOTE_DIR APP_DOMAIN APP_HOST_PORT
   IMAGE_REPOSITORY COMPOSE_PROJECT COMPOSE_FILE ENV_FILE DB_VOLUME
+  MAP_ARTIFACTS_DIR VALHALLA_GRAPH_DIR VALHALLA_GRAPH_REVISION VALHALLA_IMAGE
 )
 
 # Читает конфигурацию окружения в переменные с префиксом.
@@ -288,6 +289,91 @@ image_reference() {
 
 # Развёрнутый образ проверяется по OCI-label: тег можно перевесить,
 # а метка внутри образа соответствует конкретному коммиту.
+# Доставляет проверочный скрипт на сервер.
+#
+# Скрипт лежит в репозитории — это единственный источник правды. На сервер он
+# попадает вместе с командой выкатки, а не устанавливается заранее: иначе
+# на разных серверах оказались бы разные его версии.
+#
+# Передача через base64 избавляет от экранирования кавычек внутри SSH-команды:
+# JavaScript и shell делят слишком много спецсимволов, чтобы полагаться
+# на ручное цитирование.
+upload_verifier() {
+  local encoded
+  encoded="$(base64 < "${REPO_ROOT}/deploy/scripts/verify-geo.mjs" | tr -d '\n')"
+  remote "printf '%s' '${encoded}' | base64 -d > '${REMOTE_DIR}/verify-geo.mjs'"
+}
+
+# Запускает проверку внутри закреплённого образа приложения.
+#
+# Именно внутри образа, а не на сервере: полагаться на установленный там Node
+# нельзя — его может не быть вовсе, а версия может отличаться от проверенной.
+run_verifier_with_mount() {
+  local mount="$1" mode="$2" argument="$3" revision="$4"
+  remote "docker run --rm --network none \
+    -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
+    -v '${mount}:${mount}:ro' \
+    '$(image_reference)' node /verify-geo.mjs '${mode}' '${argument}' '${revision}'"
+}
+
+# Проверяет картографические артефакты на сервере.
+#
+# Fail closed. Отсутствующий манифест, несовпавшая контрольная сумма или другая
+# ревизия графа означают, что на сервере лежит НЕ то, что собирали. Выкатка
+# в таком состоянии дала бы либо пустую карту, либо расчёт по чужим дорожным
+# данным, попавший в кэш под нашим ключом.
+#
+# При DRY_RUN проверка не выполняется: она требует обращения к серверу,
+# а сухой прогон обязан обходиться без сети и без секретов.
+require_geo_artifacts() {
+  if is_dry_run; then
+    log "сухой прогон: проверка картографических артефактов пропущена (нужен доступ к серверу)"
+    return 0
+  fi
+
+  upload_verifier
+
+  run_verifier_with_mount "${MAP_ARTIFACTS_DIR}" basemap "${MAP_ARTIFACTS_DIR}" "" \
+    || fail "подложка на сервере не совпадает с манифестом: ${MAP_ARTIFACTS_DIR}"
+
+  run_verifier_with_mount "${VALHALLA_GRAPH_DIR}" graph "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_REVISION}" \
+    || fail "дорожный граф на сервере не совпадает с манифестом или ревизией ${VALHALLA_GRAPH_REVISION}"
+
+  log "картографические артефакты проверены: подложка и граф ревизии ${VALHALLA_GRAPH_REVISION}"
+}
+
+# Спрашивает сам маршрутизатор, на каком графе он работает.
+#
+# Манифест говорит, что мы собрали; /status — что сервис действительно загрузил.
+# Без этой проверки выкатка объявила бы успех при работающем приложении
+# и неработающем расчёте: маршрутизатор намеренно не входит в /ready, потому
+# что его отказ не должен снимать приложение с балансировки.
+require_routing_ready() {
+  if is_dry_run; then
+    log "сухой прогон: проверка маршрутизатора пропущена (нужен доступ к серверу)"
+    return 0
+  fi
+
+  # Граф загружается не мгновенно, поэтому проверка повторяется. Значения
+  # переопределяются только проверками: ждать две с половиной минуты в тесте
+  # незачем, а на сервере это разумный срок загрузки набора тайлов.
+  local attempts="${ROUTING_CHECK_ATTEMPTS:-30}"
+  local delay="${ROUTING_CHECK_DELAY:-5}"
+
+  local attempt
+  for attempt in $(seq 1 "${attempts}"); do
+    if remote "$(compose_command) run --rm --no-deps -T \
+        -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
+        app node /verify-geo.mjs routing 'http://valhalla:8002' '${VALHALLA_GRAPH_REVISION}'"; then
+      log "маршрутизатор отвечает на графе ревизии ${VALHALLA_GRAPH_REVISION}"
+      return 0
+    fi
+    sleep "${delay}"
+  done
+
+  fail "маршрутизатор не подтвердил граф ревизии ${VALHALLA_GRAPH_REVISION}"
+}
+
 require_image_revision() {
   local actual
   actual="$(remote "docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' '$(image_reference)'")"
@@ -316,10 +402,18 @@ require_ready() {
 # IMAGE_REPOSITORY передаётся вместе с остальными: Compose обязан поднять ровно
 # тот образ, который скрипт загрузил и у которого сверил OCI-метку. Зашитый
 # в Compose адрес позволил бы проверить один образ, а запустить другой.
+# Команда Compose со ВСЕМИ переменными, которые встречаются в YAML.
+#
+# Передавать только «нужные для этой команды» нельзя: Compose разбирает файл
+# целиком даже для `run app`. Пропущенная переменная превращается в пустую
+# строку — и получается сервис без образа и bind mount из пустого пути,
+# то есть отказ на ровном месте или, хуже, монтирование не того каталога.
 compose_command() {
-  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' docker compose -f '%s' -p '%s'" \
+  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_REVISION='%s' VALHALLA_IMAGE='%s' docker compose -f '%s' -p '%s'" \
     "${REMOTE_DIR}" "${IMAGE_REPOSITORY}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
-    "${ENV_FILE}" "${DB_VOLUME}" "${COMPOSE_PROJECT}" "${COMPOSE_FILE}" "${COMPOSE_PROJECT}"
+    "${ENV_FILE}" "${DB_VOLUME}" "${COMPOSE_PROJECT}" \
+    "${MAP_ARTIFACTS_DIR}" "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_REVISION}" "${VALHALLA_IMAGE}" \
+    "${COMPOSE_FILE}" "${COMPOSE_PROJECT}"
 }
 
 # --- Отчёт ---------------------------------------------------------------

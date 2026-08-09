@@ -23,6 +23,10 @@ import {
 import { toDecimalString } from '../integrations/moysklad/money.js';
 import { MAX_MINUTE, MIN_MINUTE, setManualInterval } from './service.js';
 import { fromMicro, setManualPoint } from './geo.js';
+import { BASEMAP_PREFIX } from '../geo/basemap/routes.js';
+import type { BasemapState } from '../geo/basemap/manifest.js';
+import { CURRENT_TRAFFIC_MODE } from '../geo/matrix/service.js';
+import { isRoutingVerified } from '../geo/routing-status.js';
 
 const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const MAX_LIMIT = 100;
@@ -80,6 +84,8 @@ const idParamSchema = z.object({
 interface OrdersDeps {
   db: Database;
   config: AppConfig;
+  /** Проверенное состояние собственной подложки. Пусто — её просто нет. */
+  basemap?: () => BasemapState;
 }
 
 /** Текущий календарный день Москвы. */
@@ -449,17 +455,58 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
    * Конфигурация карты.
    *
    * Секретов здесь нет и быть не может: значение целиком уходит в браузер.
-   * Пустой адрес стиля — это честное «карта не настроена», а не повод молча
-   * пойти на чужой публичный сервер.
+   * Адрес маршрутизатора сюда не попадает никогда — он известен только серверу.
+   *
+   * Собственная подложка предпочтительнее внешнего адреса: если каталог
+   * артефактов проверен, стиль отдаётся с нашего origin. Непроверенная
+   * подложка — это честное «карта не настроена», а не повод молча пойти
+   * на чужой публичный сервер.
    */
   app.get('/api/map/config', async (request) => {
     await authenticateWithRoles(request, deps, ORDER_ROLES);
-    const styleUrl = deps.config.MAP_STYLE_URL;
+
+    const basemap = deps.basemap?.() ?? { ok: false as const, problem: 'NOT_CONFIGURED' as const };
+
+    // Расчёт доступен только после подтверждения графа, а не при одном лишь
+    // наличии адреса сервиса: обещать автоматический расчёт, который откажет
+    // на первом же обращении, — это дезинформация, а не оптимизм.
+    const routingAvailable =
+      deps.config.VALHALLA_URL !== undefined && (await isRoutingVerified(deps.db));
+
+    if (basemap.ok) {
+      return {
+        configured: true,
+        source: 'SELF_HOSTED',
+        styleUrl: `${BASEMAP_PREFIX}/${basemap.manifest.style}`,
+        attribution: basemap.manifest.attribution,
+        revision: basemap.manifest.revision,
+        problem: null,
+        // Живых данных о дорожной обстановке в собственном стеке нет.
+        // Интерфейс обязан сказать это прямо, а не намекать точностью цифр.
+        trafficMode: CURRENT_TRAFFIC_MODE,
+        routingAvailable,
+      };
+    }
+
+    // Заранее заданный внешний адрес стиля допустим ТОЛЬКО в локальной разработке.
+    //
+    // На staging и production подложка своя, и подмена её чужим сервером при
+    // неисправном наборе — это ровно тот молчаливый внешний запрос, который
+    // запрещён: адреса доставок ушли бы к постороннему, а карта работала бы,
+    // пока работает он.
+    const styleUrl = deps.config.isLocal ? deps.config.MAP_STYLE_URL : undefined;
+    const configured = styleUrl !== undefined && styleUrl !== '';
 
     return {
-      configured: styleUrl !== undefined && styleUrl !== '',
+      configured,
+      source: configured ? 'EXTERNAL_STYLE' : 'NONE',
       styleUrl: styleUrl ?? null,
-      attribution: deps.config.MAP_ATTRIBUTION ?? null,
+      attribution: configured ? (deps.config.MAP_ATTRIBUTION ?? null) : null,
+      revision: null,
+      // Причина отказа технической подробности не раскрывает: только вид.
+      problem: configured ? null : basemap.problem,
+      trafficMode: CURRENT_TRAFFIC_MODE,
+      routingAvailable,
     };
   });
 

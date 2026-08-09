@@ -23,7 +23,13 @@ import {
   TextInput,
 } from '../../ui/components';
 import { conflictMessage } from './routing';
-import { describeMap, roundCoordinate, type MapConfig, type MapPointsResponse } from './geo';
+import {
+  describeMap,
+  roundCoordinate,
+  trafficNote,
+  type MapConfig,
+  type MapPointsResponse,
+} from './geo';
 
 /**
  * Карта грузится отдельным куском.
@@ -55,6 +61,8 @@ export function MapPanel({
   const [picked, setPicked] = useState<{ lat: number; lon: number } | null>(null);
   const [reason, setReason] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
+  /** Подложка не загрузилась уже после успешной проверки конфигурации. */
+  const [basemapFailed, setBasemapFailed] = useState(false);
 
   const config = useQuery({
     queryKey: ['map-config'],
@@ -142,6 +150,9 @@ export function MapPanel({
   }
 
   const items = points.data?.points ?? [];
+  // Пометка о пробках показывается всегда, когда расчёт вообще возможен:
+  // молчание читалось бы как «пробки учтены».
+  const traffic = trafficNote(config.data);
 
   return (
     <section className="routes__panel">
@@ -150,7 +161,16 @@ export function MapPanel({
         <span className="muted text-sm">точек: {items.length}</span>
       </header>
 
-      {points.isPending ? (
+      {basemapFailed ? (
+        <ErrorState
+          title="Подложка карты не загрузилась"
+          description="Маршруты и список заказов работают как обычно. Внешние карты не используются намеренно."
+          onRetry={() => {
+            setBasemapFailed(false);
+            void config.refetch();
+          }}
+        />
+      ) : points.isPending ? (
         <LoadingState title="Загружаем точки…" />
       ) : points.isError ? (
         <ErrorState title="Не удалось загрузить точки" onRetry={() => void points.refetch()} />
@@ -164,8 +184,15 @@ export function MapPanel({
             onSelect={onSelect}
             picking={picking !== null}
             onPick={(coordinates) => setPicked(coordinates)}
+            onLoadError={() => setBasemapFailed(true)}
           />
         </Suspense>
+      )}
+
+      {traffic !== null && (
+        <p className="muted text-sm" data-testid="traffic-note">
+          {traffic}
+        </p>
       )}
 
       {picking !== null && (

@@ -42,5 +42,25 @@ export default tseslint.config(
     files: ['**/*.config.{js,ts}', 'scripts/**/*.{js,ts}', 'apps/api/src/scripts/**/*.ts'],
     rules: { 'no-console': 'off' },
   },
+  {
+    /*
+     * Инструменты сборки артефактов и проверки при выкатке.
+     *
+     * Это отдельные скрипты Node, запускаемые вручную либо внутри закреплённого
+     * образа: они не входят в сборку приложения, пишут в stderr осознанно
+     * и пользуются глобальными объектами среды выполнения напрямую.
+     */
+    files: ['tools/**/*.mjs', 'deploy/scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        Buffer: 'readonly',
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        AbortSignal: 'readonly',
+      },
+    },
+    rules: { 'no-console': 'off' },
+  },
   prettier,
 );

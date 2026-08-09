@@ -41,13 +41,59 @@ services:
       APP_ENVIRONMENT_MARKER: ${APP_ENV_NAME}
       NODE_ENV: production
       TZ: Europe/Moscow
+      # Внутренние пути и адреса задаются здесь, а не в файле окружения:
+      # они определяются формой этого Compose-файла, а не настройками сервера.
+      # Приложение обязано получить их само — иначе подложка окажется
+      # «не настроена», а расчёт времени не заработает вовсе.
+      MAP_ARTIFACTS_PATH: /srv/basemap
+      # Маршрутизатор доступен только внутри сети Compose по имени сервиса.
+      VALHALLA_URL: http://valhalla:8002
+      VALHALLA_GRAPH_REVISION: ${VALHALLA_GRAPH_REVISION}
     ports:
       # Только петлевой интерфейс: наружу приложение выводится обратным прокси
       # при настройке сервера. Внешний порт свой у каждого окружения.
       - '127.0.0.1:${APP_HOST_PORT}:3000'
+    volumes:
+      # Картографические артефакты монтируются ТОЛЬКО НА ЧТЕНИЕ и лежат вне
+      # образа: PMTiles на регион — сотни мегабайт, которые остались бы
+      # в каждом слое. Набор неизменяем: приложение сверяет его с манифестом
+      # при старте, а подмена файла под работающим процессом дала бы обрывок
+      # вместо тайла.
+      - type: bind
+        source: ${MAP_ARTIFACTS_DIR}
+        target: /srv/basemap
+        read_only: true
     depends_on:
       db:
         condition: service_healthy
+
+  # Собственный маршрутизатор.
+  #
+  # Наружу НЕ публикуется: ни одного проброса портов. Доступен только другим
+  # сервисам внутри сети Compose. Маршрутизатор, открытый в интернет, — это
+  # чужой бесплатный вычислитель и заодно способ узнать, куда мы возим.
+  valhalla:
+    image: ${VALHALLA_IMAGE}
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Moscow
+      # Сервис только читает готовый граф и ничего не собирает на месте:
+      # сборка занимает десятки минут и не должна происходить при перезапуске.
+      use_tiles_ignore_pbf: 'True'
+      build_tar: 'False'
+      force_rebuild: 'False'
+      serve_tiles: 'True'
+    volumes:
+      - type: bind
+        source: ${VALHALLA_GRAPH_DIR}
+        target: /custom_files
+        read_only: true
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8002/status > /dev/null || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
 volumes:
   db:

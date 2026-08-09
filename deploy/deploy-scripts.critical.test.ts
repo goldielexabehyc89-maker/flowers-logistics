@@ -98,6 +98,18 @@ for arg in "$@"; do
 done
 
 cmd="\${*: -1}"
+
+# Проверка маршрутизатора может быть настроена на отказ: так проверяется,
+# что провалившаяся проверка останавливает выкатку до запуска приложения.
+case "$cmd" in
+  *'verify-geo.mjs routing'*)
+    if [ "\${ROUTING_FAILS:-0}" = "1" ]; then
+      printf 'ОТКАЗ: маршрутизатор не подтвердил граф\\n' >&2
+      exit 1
+    fi
+    ;;
+esac
+
 case "$cmd" in
   *"$STAGING_DIR/ENVIRONMENT"*)   printf '%s\\n' "\${STAGING_MARKER_REPLY:-staging}" ;;
   *"$PRODUCTION_DIR/ENVIRONMENT"*) printf '%s\\n' "\${PRODUCTION_MARKER_REPLY:-production}" ;;
@@ -118,6 +130,10 @@ interface EnvironmentValues {
   ENV_FILE: string;
   DB_VOLUME: string;
   IMAGE_REPOSITORY: string;
+  MAP_ARTIFACTS_DIR: string;
+  VALHALLA_GRAPH_DIR: string;
+  VALHALLA_GRAPH_REVISION: string;
+  VALHALLA_IMAGE: string;
 }
 
 const STAGING_DEFAULTS: EnvironmentValues = {
@@ -129,6 +145,10 @@ const STAGING_DEFAULTS: EnvironmentValues = {
   ENV_FILE: 'staging.env',
   DB_VOLUME: 'fl-staging-db',
   IMAGE_REPOSITORY: 'ghcr.io/example/app',
+  MAP_ARTIFACTS_DIR: '/srv/geo/basemap/20260801',
+  VALHALLA_GRAPH_DIR: '/srv/geo/valhalla/20260801',
+  VALHALLA_GRAPH_REVISION: '1786000000',
+  VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
 };
 
 const PRODUCTION_DEFAULTS: EnvironmentValues = {
@@ -140,6 +160,10 @@ const PRODUCTION_DEFAULTS: EnvironmentValues = {
   ENV_FILE: 'production.env',
   DB_VOLUME: 'fl-production-db',
   IMAGE_REPOSITORY: 'ghcr.io/example/app',
+  MAP_ARTIFACTS_DIR: '/srv/geo/basemap/20260801',
+  VALHALLA_GRAPH_DIR: '/srv/geo/valhalla/20260801',
+  VALHALLA_GRAPH_REVISION: '1786000000',
+  VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
 };
 
 function configContent(values: EnvironmentValues, name: string): string {
@@ -157,6 +181,10 @@ function configContent(values: EnvironmentValues, name: string): string {
     'COMPOSE_FILE="docker-compose.deploy.yml"',
     `ENV_FILE="${values.ENV_FILE}"`,
     `DB_VOLUME="${values.DB_VOLUME}"`,
+    `MAP_ARTIFACTS_DIR="${values.MAP_ARTIFACTS_DIR}"`,
+    `VALHALLA_GRAPH_DIR="${values.VALHALLA_GRAPH_DIR}"`,
+    `VALHALLA_GRAPH_REVISION="${values.VALHALLA_GRAPH_REVISION}"`,
+    `VALHALLA_IMAGE="${values.VALHALLA_IMAGE}"`,
     '',
   ].join('\n');
 }
@@ -169,6 +197,8 @@ interface SandboxOptions {
   stagingHasVersion?: boolean;
   stagingMarkerReply?: string;
   productionMarkerReply?: string;
+  /** Заставляет проверку маршрутизатора отвечать отказом. */
+  routingFails?: boolean;
   /** Строки, выполняемые после загрузки конфигураций. */
   body: string;
 }
@@ -240,6 +270,11 @@ async function runInSandbox(
     STAGING_DIR: staging.REMOTE_DIR,
     PRODUCTION_DIR: production.REMOTE_DIR,
     STAGING_HAS_VERSION: options.stagingHasVersion === false ? '0' : '1',
+    ROUTING_FAILS: options.routingFails === true ? '1' : '0',
+    // Проверке незачем ждать загрузку графа: она проверяет поведение при
+    // отказе, а не терпение команды выкатки.
+    ROUTING_CHECK_ATTEMPTS: '2',
+    ROUTING_CHECK_DELAY: '0',
     ...(options.stagingMarkerReply === undefined
       ? {}
       : { STAGING_MARKER_REPLY: options.stagingMarkerReply }),
@@ -528,6 +563,228 @@ describe('адрес образа', () => {
       const content = withoutComments(await readFile(file, 'utf8'));
       expect(content).not.toMatch(/[\w.-]+\.[a-z]{2,}\/[\w./-]+:\$\{IMAGE_TAG\}/);
       expect(content).not.toContain('ghcr.io/');
+    }
+  });
+});
+
+describe('геостек в командах выкатки', () => {
+  it('compose_command передаёт все переменные из YAML при пустом окружении сервера', async () => {
+    // Compose разбирает файл ЦЕЛИКОМ даже для `run app`. Пропущенная переменная
+    // становится пустой строкой: получается сервис без образа и bind mount
+    // из пустого пути. Поэтому команда обязана быть самодостаточной.
+    const result = await runInSandbox({
+      body: [LOAD_BOTH, 'activate_environment STAGING', 'compose_command', "printf '\n'"].join(
+        '\n',
+      ),
+    });
+
+    expect(result.code).toBe(0);
+
+    for (const variable of [
+      "MAP_ARTIFACTS_DIR='/srv/geo/basemap/20260801'",
+      "VALHALLA_GRAPH_DIR='/srv/geo/valhalla/20260801'",
+      "VALHALLA_GRAPH_REVISION='1786000000'",
+      'VALHALLA_IMAGE=',
+      "IMAGE_REPOSITORY='ghcr.io/example/app'",
+      "ENV_FILE='staging.env'",
+      "DB_VOLUME='fl-staging-db'",
+      "APP_HOST_PORT='3001'",
+    ]) {
+      expect(result.stdout, variable).toContain(variable);
+    }
+
+    // Ни одна переменная YAML не осталась незаданной.
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const referenced = [...compose.matchAll(/\$\{([A-Z_]+)\}/g)].map((match) => match[1] ?? '');
+    for (const name of new Set(referenced)) {
+      expect(result.stdout, `переменная ${name} не передана Compose`).toContain(`${name}=`);
+    }
+  });
+
+  it('Compose внедряет приложению внутренние пути, адрес маршрутизатора и ревизию', async () => {
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+
+    // Приложение обязано получить их само: иначе подложка окажется
+    // «не настроена», а расчёт времени не заработает вовсе.
+    expect(compose).toContain('MAP_ARTIFACTS_PATH: /srv/basemap');
+    expect(compose).toContain('VALHALLA_URL: http://valhalla:8002');
+    expect(compose).toContain('VALHALLA_GRAPH_REVISION: ${VALHALLA_GRAPH_REVISION}');
+
+    // Каталоги монтируются только на чтение.
+    expect(compose).toMatch(/source: \$\{MAP_ARTIFACTS_DIR\}[\s\S]*?read_only: true/);
+    expect(compose).toMatch(/source: \$\{VALHALLA_GRAPH_DIR\}[\s\S]*?read_only: true/);
+  });
+
+  it('маршрутизатор наружу не публикуется ни одним портом', async () => {
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+
+    const valhallaBlock = compose.slice(compose.indexOf('  valhalla:'));
+    expect(valhallaBlock).not.toContain('ports:');
+    // У приложения порт есть, но только на петлевом интерфейсе.
+    expect(compose).toContain("- '127.0.0.1:${APP_HOST_PORT}:3000'");
+  });
+
+  it('обе команды соблюдают порядок: valhalla → её проверка → app → готовность', async () => {
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = withoutComments(await readFile(script, 'utf8'));
+
+      // Одновременный запуск выглядит быстрее, но приложение опрашивает /status
+      // сразу при старте и успевает записать DEGRADED, пока граф загружается.
+      // Это состояние осталось бы в базе даже после успешной проверки.
+      expect(content, script).not.toContain('up -d --no-build valhalla app');
+
+      const valhallaUp = content.indexOf('up -d --no-build valhalla"');
+      const routingCheck = content.indexOf('require_routing_ready');
+      const appUp = content.indexOf('up -d --no-build app"');
+      const readyCheck = content.indexOf('require_ready');
+
+      expect(valhallaUp, script).toBeGreaterThan(-1);
+      expect(routingCheck, script).toBeGreaterThan(valhallaUp);
+      expect(appUp, script).toBeGreaterThan(routingCheck);
+      expect(readyCheck, script).toBeGreaterThan(appUp);
+
+      expect(content, script).toContain('require_geo_artifacts');
+    }
+  });
+
+  it('порядок команд на сервере: маршрутизатор поднят и проверен раньше приложения', async () => {
+    const result = await runInSandbox({
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+        'require_routing_ready',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    const valhallaUp = lines.findIndex((line) => line.includes('up -d --no-build valhalla'));
+    const routingCheck = lines.findIndex((line) => line.includes('verify-geo.mjs routing'));
+    const appUp = lines.findIndex((line) => line.includes('up -d --no-build app'));
+
+    expect(valhallaUp).toBeGreaterThan(-1);
+    expect(routingCheck).toBeGreaterThan(valhallaUp);
+    expect(appUp).toBeGreaterThan(routingCheck);
+  });
+
+  it('провал проверки маршрутизатора не даёт запустить новое приложение', async () => {
+    const result = await runInSandbox({
+      routingFails: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+        'require_routing_ready',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('маршрутизатор не подтвердил граф');
+
+    // Маршрутизатор подняли, но приложение не трогали: прежняя версия
+    // продолжает работать, а не сменяется на новую с неработающим расчётом.
+    expect(result.ssh).toContain('up -d --no-build valhalla');
+    expect(result.ssh).not.toContain('up -d --no-build app');
+    expect(result.stdout).not.toContain('проверки пройдены');
+  });
+
+  it('проверка артефактов не зависит от Node на сервере', async () => {
+    const common = withoutComments(await readFile(COMMON_LIB, 'utf8'));
+
+    // Скрипт доставляется с машины выкатки и выполняется внутри закреплённого
+    // образа приложения: полагаться на установленный на сервере Node нельзя.
+    expect(common).toContain('verify-geo.mjs');
+    expect(common).toContain('docker run --rm --network none');
+    expect(common).toContain('node /verify-geo.mjs');
+
+    // Прямого вызова node по ssh не осталось.
+    const remoteNodeCalls = common
+      .split('\n')
+      .filter((line) => line.includes('remote "') && /\bnode -e\b/.test(line));
+    expect(remoteNodeCalls).toEqual([]);
+  });
+
+  it('сухой прогон не проверяет артефакты и не идёт в сеть', async () => {
+    const result = await runInSandbox({
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'DRY_RUN=1',
+        'require_geo_artifacts',
+        'require_routing_ready',
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+    // Ни одного обращения к серверу: сухой прогон обязан обходиться
+    // без сети и без секретов.
+    expect(result.ssh.trim()).toBe('');
+  });
+
+  it('конфигурация графа собирается под рабочий путь /custom_files', async () => {
+    const script = withoutComments(
+      await readFile(path.join(REPO_ROOT, 'tools/geo/build-valhalla-graph.sh'), 'utf8'),
+    );
+
+    // Пути в valhalla.json обязаны совпадать с тем, куда каталог монтируется
+    // в рабочем контейнере. Записанный /output означал бы конфигурацию,
+    // работающую только на машине сборки: сервис искал бы тайлы по
+    // несуществующему пути и молча поднялся бы без графа.
+    expect(script).toContain('--mjolnir-tile-dir /custom_files/tiles');
+    expect(script).toContain('--mjolnir-tile-extract /custom_files/tiles.tar');
+    expect(script).toContain('/custom_files/valhalla.json');
+    expect(script).not.toContain('/output/valhalla.json');
+    expect(script).not.toContain('--mjolnir-tile-dir /output');
+
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+    expect(compose).toContain('target: /custom_files');
+  });
+
+  it('ревизия графа берётся из фактического ответа сервиса, а не из часов', async () => {
+    const script = withoutComments(
+      await readFile(path.join(REPO_ROOT, 'tools/geo/build-valhalla-graph.sh'), 'utf8'),
+    );
+
+    // Ревизия обязана совпасть с тем, что сервис ответит на сервере: взятая
+    // из текущего времени, она заставила бы выкатку вечно отвергать
+    // собственный же граф.
+    expect(script).not.toMatch(/revision="\$\(date/);
+    expect(script).toContain('/status');
+    expect(script).toContain('tileset_last_modified');
+    // Пробный запуск идёт без внешней сети и доказывает, что граф работает.
+    expect(script).toContain('--network none');
+    expect(script).toContain('valhalla_service');
+    expect(script).toContain('GRAPH_REVISION');
+  });
+
+  it('проверка при выкатке сверяет манифест графа и сумму набора тайлов', async () => {
+    const verifier = await readFile(path.join(REPO_ROOT, 'deploy/scripts/verify-geo.mjs'), 'utf8');
+
+    expect(verifier).toContain('flowers-logistics/valhalla-manifest@1');
+    expect(verifier).toContain('tiles.tar');
+    expect(verifier).toContain('sha256');
+    // И отдельно — фактический ответ самого маршрутизатора.
+    expect(verifier).toContain('/status');
+    expect(verifier).toContain('tileset_last_modified');
+  });
+
+  it('шаблоны конфигураций описывают каталоги артефактов и ревизию графа', async () => {
+    for (const template of ['deploy/staging.conf.example', 'deploy/production.conf.example']) {
+      const content = await readFile(path.join(REPO_ROOT, template), 'utf8');
+
+      expect(content, template).toContain('MAP_ARTIFACTS_DIR=');
+      expect(content, template).toContain('VALHALLA_GRAPH_DIR=');
+      expect(content, template).toContain('VALHALLA_GRAPH_REVISION=');
+      // Образ закреплён digest, а не тегом latest.
+      expect(content, template).toContain('VALHALLA_IMAGE=');
+      expect(content, template).toContain('@sha256:');
+      expect(content, template).not.toContain(':latest');
     }
   });
 });

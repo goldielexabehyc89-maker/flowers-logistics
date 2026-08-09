@@ -71,6 +71,8 @@ export const CONFLICT_KINDS = [
   'EDIT_LOCK_HELD_BY_OTHER',
   /** Переданная версия блокировки устарела: её успели перехватить. */
   'EDIT_LOCK_STALE',
+  /** Такой же расчёт матрицы уже выполняется другим экземпляром приложения. */
+  'MATRIX_IN_PROGRESS',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

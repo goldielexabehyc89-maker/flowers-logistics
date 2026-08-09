@@ -14,3 +14,9 @@ test-results/
 backups/
 docs/
 .claude/
+
+# Картографические артефакты в образ не попадают: они монтируются на чтение.
+*.pmtiles
+*.mbtiles
+*.osm.pbf
+geo-artifacts/

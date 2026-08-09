@@ -15,6 +15,13 @@ import type { AppLogger } from './logging/logger.js';
 
 export const SUCCESSOR_CLEANUP_INTERVAL_MS = 60_000;
 export const REALTIME_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
+/**
+ * Очистка просроченных матриц.
+ *
+ * Реже остальных: матрицы живут сутками, и убирать их чаще незачем — лишний
+ * проход по таблице ничего не освобождает, а нагрузку создаёт.
+ */
+export const MATRIX_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 export interface MaintenanceDeps {
   db: Database;
@@ -42,6 +49,22 @@ export async function cleanupExpiredSuccessorTokens(deps: MaintenanceDeps): Prom
   return result.count;
 }
 
+/**
+ * Удаляет просроченные записи кэша матриц.
+ *
+ * Без неё таблица растёт вечно: просроченная матрица всё равно не используется,
+ * а строка с двумя матрицами на шестьдесят точек весит заметно.
+ */
+export async function cleanupExpiredMatrixCache(deps: MaintenanceDeps): Promise<number> {
+  const now = (deps.now ?? (() => new Date()))();
+
+  const result = await deps.db.routeMatrixCache.deleteMany({
+    where: { expiresAt: { lt: now } },
+  });
+
+  return result.count;
+}
+
 /** Удаляет realtime-события за пределами срока хранения. */
 export async function cleanupExpiredRealtimeEvents(deps: MaintenanceDeps): Promise<number> {
   const now = (deps.now ?? (() => new Date()))();
@@ -57,13 +80,18 @@ export interface MaintenanceRunner {
   start: () => void;
   /** Запрещает новые проходы и дожидается выполняющихся. */
   stop: () => Promise<void>;
-  /** Один проход обеих задач; используется при старте и в тестах. */
-  runOnce: () => Promise<{ successorTokens: number; realtimeEvents: number }>;
+  /** Один проход всех задач; используется при старте и в тестах. */
+  runOnce: () => Promise<{
+    successorTokens: number;
+    realtimeEvents: number;
+    matrixEntries: number;
+  }>;
 }
 
 interface Intervals {
   successorCleanup: number;
   realtimeCleanup: number;
+  matrixCleanup: number;
 }
 
 export function createMaintenanceRunner(
@@ -71,12 +99,14 @@ export function createMaintenanceRunner(
   intervals: Intervals = {
     successorCleanup: SUCCESSOR_CLEANUP_INTERVAL_MS,
     realtimeCleanup: REALTIME_CLEANUP_INTERVAL_MS,
+    matrixCleanup: MATRIX_CLEANUP_INTERVAL_MS,
   },
 ): MaintenanceRunner {
   const timers: NodeJS.Timeout[] = [];
   let stopped = false;
   let successorInFlight: Promise<number> | null = null;
   let realtimeInFlight: Promise<number> | null = null;
+  let matrixInFlight: Promise<number> | null = null;
 
   const runSuccessorCleanup = async (): Promise<number> => {
     if (successorInFlight !== null || stopped) {
@@ -127,6 +157,31 @@ export function createMaintenanceRunner(
     }
   };
 
+  const runMatrixCleanup = async (): Promise<number> => {
+    if (matrixInFlight !== null || stopped) {
+      return 0;
+    }
+    const pass = (async (): Promise<number> => {
+      try {
+        const removed = await cleanupExpiredMatrixCache(deps);
+        if (removed > 0) {
+          // Только количество: координаты в лог не попадают.
+          deps.logger.info({ removed }, 'удалены просроченные матрицы');
+        }
+        return removed;
+      } catch (error) {
+        deps.logger.error({ err: error }, 'очистка кэша матриц завершилась ошибкой');
+        return 0;
+      }
+    })();
+    matrixInFlight = pass;
+    try {
+      return await pass;
+    } finally {
+      matrixInFlight = null;
+    }
+  };
+
   return {
     start() {
       if (timers.length > 0) {
@@ -138,9 +193,11 @@ export function createMaintenanceRunner(
         intervals.successorCleanup,
       );
       const realtimeTimer = setInterval(() => void runRealtimeCleanup(), intervals.realtimeCleanup);
+      const matrixTimer = setInterval(() => void runMatrixCleanup(), intervals.matrixCleanup);
       successorTimer.unref();
       realtimeTimer.unref();
-      timers.push(successorTimer, realtimeTimer);
+      matrixTimer.unref();
+      timers.push(successorTimer, realtimeTimer, matrixTimer);
     },
     /**
      * Снимает таймеры и дожидается уже начатых проходов.
@@ -154,12 +211,13 @@ export function createMaintenanceRunner(
         clearInterval(timer);
       }
       timers.length = 0;
-      await Promise.allSettled([successorInFlight, realtimeInFlight]);
+      await Promise.allSettled([successorInFlight, realtimeInFlight, matrixInFlight]);
     },
     async runOnce() {
       return {
         successorTokens: await runSuccessorCleanup(),
         realtimeEvents: await runRealtimeCleanup(),
+        matrixEntries: await runMatrixCleanup(),
       };
     },
   };

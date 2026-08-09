@@ -291,6 +291,16 @@ jobs:
           echo "::add-mask::$code"
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
+      - name: Подготовить минимальный набор картографических артефактов
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Настоящий набор PMTiles весит гигабайты и в CI не скачивается.
+          # Генератор создаёт крошечный, но валидный набор без единого
+          # сетевого обращения — этого достаточно для контрактных проверок.
+          rm -rf "${RUNNER_TEMP}/basemap"
+          node tools/geo/make-test-pmtiles.mjs "${RUNNER_TEMP}/basemap"
+
       - name: Запустить приложение
         shell: bash
         env:
@@ -299,7 +309,7 @@ jobs:
           NODE_ENV: production
         run: |
           set -euo pipefail
-          node apps/api/dist/index.js &
+          MAP_ARTIFACTS_PATH="${RUNNER_TEMP}/basemap" node apps/api/dist/index.js &
           for _ in $(seq 1 60); do
             if curl -fsS --max-time 2 http://127.0.0.1:3000/ready > /dev/null; then exit 0; fi
             sleep 1

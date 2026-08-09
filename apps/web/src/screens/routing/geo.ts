@@ -38,8 +38,23 @@ export interface MapPointsResponse {
 
 export interface MapConfig {
   configured: boolean;
+  /** Откуда взята подложка: собственный набор или заранее заданный адрес. */
+  source?: 'SELF_HOSTED' | 'EXTERNAL_STYLE' | 'NONE';
   styleUrl: string | null;
   attribution: string | null;
+  revision?: string | null;
+  /** Почему подложка недоступна. Технических подробностей не раскрывает. */
+  problem?: string | null;
+  /**
+   * Есть ли данные о текущей дорожной обстановке.
+   *
+   * `STATIC` означает постоянные скорости дорожного графа. Это НЕ пробки,
+   * и интерфейс обязан сказать это прямо: цифра, выданная за знание о текущей
+   * ситуации, заставила бы логиста верить в точность, которой нет.
+   */
+  trafficMode?: 'NONE' | 'STATIC';
+  /** Настроен ли расчёт времени в пути. */
+  routingAvailable?: boolean;
 }
 
 export const GEO_STATE_LABELS: Record<GeoState, string> = {
@@ -122,6 +137,31 @@ export interface MapStatus {
   message: string | null;
 }
 
+/** Понятные объяснения отказов подложки. Внутренних подробностей нет. */
+export const BASEMAP_PROBLEMS: Record<string, string> = {
+  NOT_CONFIGURED: 'Карта не настроена: подложка не установлена.',
+  MANIFEST_MISSING: 'Карта не настроена: набор подложки не найден на сервере.',
+  MANIFEST_INVALID: 'Карта не настроена: набор подложки не распознан.',
+  ARTIFACT_MISSING: 'Карта не настроена: часть файлов подложки отсутствует.',
+  SIZE_MISMATCH: 'Карта не настроена: файлы подложки не совпадают с описанием набора.',
+  CHECKSUM_MISMATCH: 'Карта не настроена: файлы подложки не совпадают с описанием набора.',
+  STYLE_NOT_LISTED: 'Карта не настроена: стиль отсутствует в наборе.',
+};
+
+/**
+ * Пометка о дорожной обстановке.
+ *
+ * Показывается всегда, когда расчёт времени вообще возможен. Молчание здесь
+ * читалось бы как «пробки учтены»: собственный стек считает по постоянным
+ * скоростям графа и о текущей ситуации не знает ничего.
+ */
+export function trafficNote(config: MapConfig | undefined): string | null {
+  if (config?.routingAvailable !== true) {
+    return null;
+  }
+  return 'Время в пути — без данных о текущих пробках.';
+}
+
 /**
  * Настроена ли карта.
  *
@@ -134,9 +174,14 @@ export function describeMap(config: MapConfig | undefined): MapStatus {
     return { ready: false, message: 'Проверяем настройки карты…' };
   }
   if (!config.configured || config.styleUrl === null || config.styleUrl === '') {
+    const explained =
+      config.problem === null || config.problem === undefined
+        ? null
+        : (BASEMAP_PROBLEMS[config.problem] ?? null);
+
     return {
       ready: false,
-      message: 'Карта не настроена. Список заказов и маршруты работают как обычно.',
+      message: `${explained ?? 'Карта не настроена.'} Список заказов и маршруты работают как обычно.`,
     };
   }
   return { ready: true, message: null };
