@@ -167,6 +167,57 @@ describe('манифест и проверка целостности', () => {
     }
   });
 
+  it('манифест с суммами вспомогательных источников принимается', async () => {
+    const copy = await mkdtemp(path.join(tmpdir(), 'fl-basemap-inputs-'));
+    try {
+      await run(process.execPath, [generator, copy]);
+      const manifest = JSON.parse(
+        await readFile(path.join(copy, 'manifest.json'), 'utf8'),
+      ) as BasemapManifest & { inputs?: Record<string, string> };
+
+      // Вспомогательные наборы влияют на результат так же, как исходный
+      // .osm.pbf: другая версия береговой линии — другие тайлы.
+      manifest.inputs = {
+        'lake_centerline.shp.zip': 'a'.repeat(64),
+        'water-polygons-split-3857.zip': 'b'.repeat(64),
+        'natural_earth_vector.sqlite.zip': 'c'.repeat(64),
+      };
+      await writeFile(path.join(copy, 'manifest.json'), JSON.stringify(manifest));
+
+      const state = await loadBasemap(copy);
+      expect(state.ok).toBe(true);
+    } finally {
+      await rm(copy, { recursive: true, force: true });
+    }
+  });
+
+  it('набор без поля вспомогательных источников остаётся пригодным', async () => {
+    // Наборы, собранные до появления поля, не должны внезапно стать
+    // «ненастроенной картой»: подложка от этого не портится.
+    const state = await loadBasemap(root);
+    expect(state.ok).toBe(true);
+    if (state.ok) {
+      expect(state.manifest.inputs).toBeUndefined();
+    }
+  });
+
+  it('мусор вместо контрольной суммы источника отвергается', async () => {
+    const copy = await mkdtemp(path.join(tmpdir(), 'fl-basemap-badinput-'));
+    try {
+      await run(process.execPath, [generator, copy]);
+      const manifest = JSON.parse(
+        await readFile(path.join(copy, 'manifest.json'), 'utf8'),
+      ) as BasemapManifest & { inputs?: Record<string, string> };
+
+      manifest.inputs = { 'water-polygons-split-3857.zip': 'не-сумма' };
+      await writeFile(path.join(copy, 'manifest.json'), JSON.stringify(manifest));
+
+      expect(await loadBasemap(copy)).toMatchObject({ problem: 'MANIFEST_INVALID' });
+    } finally {
+      await rm(copy, { recursive: true, force: true });
+    }
+  });
+
   it('путь с выходом за каталог отвергается схемой', async () => {
     const copy = await mkdtemp(path.join(tmpdir(), 'fl-basemap-escape-'));
     try {

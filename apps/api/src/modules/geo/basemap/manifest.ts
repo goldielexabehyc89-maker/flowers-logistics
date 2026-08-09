@@ -68,6 +68,14 @@ export const basemapManifestSchema = z.object({
   sourceSha256: z.string().regex(/^[0-9a-f]{64}$/),
   /** Версии инструментов сборки. Пустых значений быть не может. */
   tools: z.record(z.string().min(1), z.string().min(1)),
+  /**
+   * Контрольные суммы вспомогательных входных наборов.
+   *
+   * Береговые линии, водные полигоны и Natural Earth влияют на результат так же,
+   * как исходный `.osm.pbf`: другая их версия — другие тайлы. Поле необязательно,
+   * чтобы наборы, собранные до его появления, оставались пригодными.
+   */
+  inputs: z.record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/)).optional(),
   attribution: z.string().min(1).max(200),
   /** Файл стиля MapLibre внутри каталога. */
   style: relativePath,

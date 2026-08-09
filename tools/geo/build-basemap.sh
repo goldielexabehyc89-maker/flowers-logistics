@@ -22,6 +22,7 @@ input=""
 region=""
 source_date=""
 assets=""
+sources=""
 output=""
 attribution="© OpenStreetMap contributors"
 
@@ -29,12 +30,27 @@ usage() {
   cat >&2 <<'USAGE'
 Использование:
   build-basemap.sh --input <файл.osm.pbf> --region <название> --source-date <ГГГГ-ММ-ДД>
-                   --assets <каталог со спрайтами и шрифтами> --output <каталог результата>
+                   --assets <каталог со спрайтами и шрифтами>
+                   --sources <каталог вспомогательных источников>
+                   --output <каталог результата>
                    [--attribution "© OpenStreetMap contributors"]
 
 Каталог --assets готовится один раз и содержит:
   sprite/sprite.json, sprite/sprite.png (и @2x при наличии)
   fonts/<Семейство>/<диапазон>.pbf
+
+Каталог --sources содержит вспомогательные наборы, без которых профиль
+не запускается. Они не входят в .osm.pbf и скачиваются один раз отдельно:
+  lake_centerline.shp.zip
+  water-polygons-split-3857.zip
+  natural_earth_vector.sqlite.zip
+
+Подготовить их можно самим planetiler — единственный шаг, которому нужна сеть:
+  docker run --rm -v "<каталог>:/data/sources" \
+    ghcr.io/onthegomap/planetiler:0.10.2 --only-download --download
+
+Дальше сборка идёт offline: набор фиксируется контрольными суммами
+и попадает в манифест, потому что влияет на результат.
 USAGE
   exit 2
 }
@@ -45,6 +61,7 @@ while [ $# -gt 0 ]; do
     --region) region="${2:-}"; shift 2 ;;
     --source-date) source_date="${2:-}"; shift 2 ;;
     --assets) assets="${2:-}"; shift 2 ;;
+    --sources) sources="${2:-}"; shift 2 ;;
     --output) output="${2:-}"; shift 2 ;;
     --attribution) attribution="${2:-}"; shift 2 ;;
     *) usage ;;
@@ -52,10 +69,22 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$input" ] && [ -n "$region" ] && [ -n "$source_date" ] || usage
-[ -n "$assets" ] && [ -n "$output" ] || usage
+[ -n "$assets" ] && [ -n "$sources" ] && [ -n "$output" ] || usage
 
 [ -f "$input" ] || { echo "Файл ${input} не найден" >&2; exit 1; }
 [ -d "$assets" ] || { echo "Каталог ресурсов ${assets} не найден" >&2; exit 1; }
+[ -d "$sources" ] || { echo "Каталог вспомогательных источников ${sources} не найден" >&2; exit 1; }
+
+# Профиль отказывается работать без этих наборов, а сборка идёт без сети.
+# Понятный отказ здесь лучше, чем исключение Java через минуту после старта.
+for required in lake_centerline.shp.zip water-polygons-split-3857.zip natural_earth_vector.sqlite.zip; do
+  [ -f "${sources}/${required}" ] || {
+    echo "В каталоге ${sources} нет вспомогательного источника ${required}." >&2
+    echo "Подготовьте набор один раз: docker run --rm -v '${sources}:/data/sources' \\" >&2
+    echo "  ${PLANETILER_IMAGE} --only-download --download" >&2
+    exit 1
+  }
+done
 printf '%s' "$source_date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
   || { echo "Дата источника должна быть в формате ГГГГ-ММ-ДД" >&2; exit 1; }
 
@@ -72,6 +101,7 @@ echo "Сборка тайлов planetiler ${PLANETILER_IMAGE}" >&2
 docker run --rm \
   --network none \
   -v "$(cd "$(dirname "$input")" && pwd):/input:ro" \
+  -v "$(cd "$sources" && pwd):/data/sources:ro" \
   -v "${output}:/output" \
   "${PLANETILER_IMAGE}@${PLANETILER_DIGEST}" \
   --osm-path="/input/$(basename "$input")" \
@@ -128,8 +158,14 @@ cat > "${output}/style-${revision}.json" <<STYLE
 }
 STYLE
 
+aux_args=()
+for required in lake_centerline.shp.zip water-polygons-split-3857.zip natural_earth_vector.sqlite.zip; do
+  aux_args+=(--input "${required}=${sources}/${required}")
+done
+
 node "${here}/write-manifest.mjs" \
   --root "$output" \
+  "${aux_args[@]}" \
   --revision "$revision" \
   --region "$region" \
   --source-date "$source_date" \

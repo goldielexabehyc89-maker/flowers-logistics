@@ -26,7 +26,7 @@ const CONTENT_TYPES = new Map([
 ]);
 
 function parseArgs(argv) {
-  const args = { tool: [] };
+  const args = { tool: [], input: [] };
   for (let i = 2; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     const value = argv[i + 1];
@@ -35,6 +35,8 @@ function parseArgs(argv) {
     }
     if (key === 'tool') {
       args.tool.push(value);
+    } else if (key === 'input') {
+      args.input.push(value);
     } else {
       args[key] = value;
     }
@@ -117,6 +119,17 @@ for (const entry of args.tool) {
   }
 }
 
+// Вспомогательные наборы влияют на результат так же, как исходный .osm.pbf:
+// другая версия береговой линии — другие тайлы. Их суммы фиксируются, иначе
+// сборку нельзя было бы повторить и сверить.
+const inputs = {};
+for (const entry of args.input) {
+  const index = entry.indexOf('=');
+  if (index > 0) {
+    inputs[entry.slice(0, index)] = await sha256(entry.slice(index + 1));
+  }
+}
+
 const manifest = {
   format: MANIFEST_FORMAT,
   revision: args.revision,
@@ -127,6 +140,7 @@ const manifest = {
   sourceDate: args['source-date'],
   sourceSha256: await sha256(args['source-file']),
   tools,
+  inputs,
   attribution: args.attribution ?? '© OpenStreetMap contributors',
   style: args.style,
   artifacts,
