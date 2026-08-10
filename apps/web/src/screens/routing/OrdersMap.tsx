@@ -17,13 +17,36 @@ import {
   Map as MapLibreMap,
   Marker,
   NavigationControl,
+  setWorkerUrl,
   type MapMouseEvent,
   type StyleSpecification,
 } from 'maplibre-gl';
 import { Protocol } from 'pmtiles';
 import 'maplibre-gl/dist/maplibre-gl.css';
+// Воркер собирается отдельным файлом, и его адрес известен сборщику.
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { markerKind, toLngLat, type MapPoint } from './geo';
 import { resolveStyleUrls, type StyleDocument } from './style-urls';
+
+/**
+ * Адрес воркера MapLibre.
+ *
+ * Разбор векторных тайлов идёт в веб-воркере. Свой адрес MapLibre вычисляет
+ * от `import.meta.url` собственного модуля: в собранном приложении это
+ * `/assets/<чанк>.js`, и получается `/assets/maplibre-gl-worker.mjs` — файла
+ * с таким именем сборка не создаёт. Одностраничное приложение отвечает на этот
+ * адрес своей оболочкой, воркер получает HTML вместо кода и молча не отвечает.
+ *
+ * Видимых следов у поломки нет: стиль применяется, заголовок архива тайлов
+ * скачивается, ошибок в консоли не появляется — но тайлы не разбираются
+ * никогда, и карта навсегда остаётся в состоянии загрузки.
+ *
+ * Поэтому адрес задаётся явно и берётся у сборщика: он собирает воркер
+ * отдельным файлом со всеми его зависимостями и подставляет настоящий путь.
+ * Вызов на уровне модуля не случаен — он обязан произойти до создания первой
+ * карты, иначе пул воркеров успеет подняться с неверным адресом.
+ */
+setWorkerUrl(maplibreWorkerUrl);
 
 /** Москва: карта открывается там, где работает служба. */
 const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
