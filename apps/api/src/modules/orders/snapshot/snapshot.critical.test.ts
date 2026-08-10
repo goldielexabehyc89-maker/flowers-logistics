@@ -274,21 +274,23 @@ describe('импорт на staging', () => {
     expect(second.created).toBe(0);
     expect(second.updated).toBe(2);
 
+    // Порядок строк задаётся явно: без ORDER BY база вправе вернуть их
+    // как угодно, и сравнение списков превратилось бы в проверку удачи.
+    const points = async (): Promise<string[]> =>
+      (
+        await ctx.db.deliveryOrder.findMany({
+          where: { externalId: { in: [pseudoUuid(`r-${marker}-1`), pseudoUuid(`r-${marker}-2`)] } },
+          orderBy: { externalId: 'asc' },
+        })
+      ).map((order) => `${order.geoLatMicro}:${order.geoLonMicro}`);
+
     // Заказ один, а не два: ключ снимка устойчиво отображается в идентификатор.
-    const orders = await ctx.db.deliveryOrder.findMany({
-      where: { externalId: { in: [pseudoUuid(`r-${marker}-1`), pseudoUuid(`r-${marker}-2`)] } },
-    });
-    expect(orders).toHaveLength(2);
+    const before = await points();
+    expect(before).toHaveLength(2);
 
     // Точка та же: псевдоним стабильно отображается в одну и ту же точку.
-    const before = orders.map((order) => `${order.geoLatMicro}:${order.geoLonMicro}`);
     await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
-    const after = (
-      await ctx.db.deliveryOrder.findMany({
-        where: { externalId: { in: [pseudoUuid(`r-${marker}-1`), pseudoUuid(`r-${marker}-2`)] } },
-      })
-    ).map((order) => `${order.geoLatMicro}:${order.geoLonMicro}`);
-    expect(after).toEqual(before);
+    expect(await points()).toEqual(before);
   });
 
   it('исчезнувший псевдоним очищает прежнюю синтетическую точку', async () => {
