@@ -140,6 +140,14 @@ esac
 exit 0
 `;
 
+/**
+ * Идентичность графа в песочнице: SHA-256 из 64 шестнадцатеричных символов.
+ *
+ * Числовое время сюда подставить нельзя — проверка формата отвергнет его
+ * ещё до обращения к серверу, и это отдельно проверяется ниже.
+ */
+const GRAPH_SHA = '0f'.repeat(32);
+
 interface EnvironmentValues {
   ENVIRONMENT_MARKER: string;
   SSH_HOST: string;
@@ -151,7 +159,7 @@ interface EnvironmentValues {
   IMAGE_REPOSITORY: string;
   MAP_ARTIFACTS_DIR: string;
   VALHALLA_GRAPH_DIR: string;
-  VALHALLA_GRAPH_REVISION: string;
+  VALHALLA_GRAPH_SHA256: string;
   VALHALLA_IMAGE: string;
 }
 
@@ -166,7 +174,7 @@ const STAGING_DEFAULTS: EnvironmentValues = {
   IMAGE_REPOSITORY: 'ghcr.io/example/app',
   MAP_ARTIFACTS_DIR: '/srv/geo/basemap/20260801',
   VALHALLA_GRAPH_DIR: '/srv/geo/valhalla/20260801',
-  VALHALLA_GRAPH_REVISION: '1786000000',
+  VALHALLA_GRAPH_SHA256: GRAPH_SHA,
   VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
 };
 
@@ -181,7 +189,7 @@ const PRODUCTION_DEFAULTS: EnvironmentValues = {
   IMAGE_REPOSITORY: 'ghcr.io/example/app',
   MAP_ARTIFACTS_DIR: '/srv/geo/basemap/20260801',
   VALHALLA_GRAPH_DIR: '/srv/geo/valhalla/20260801',
-  VALHALLA_GRAPH_REVISION: '1786000000',
+  VALHALLA_GRAPH_SHA256: GRAPH_SHA,
   VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
 };
 
@@ -202,7 +210,7 @@ function configContent(values: EnvironmentValues, name: string): string {
     `DB_VOLUME="${values.DB_VOLUME}"`,
     `MAP_ARTIFACTS_DIR="${values.MAP_ARTIFACTS_DIR}"`,
     `VALHALLA_GRAPH_DIR="${values.VALHALLA_GRAPH_DIR}"`,
-    `VALHALLA_GRAPH_REVISION="${values.VALHALLA_GRAPH_REVISION}"`,
+    `VALHALLA_GRAPH_SHA256="${values.VALHALLA_GRAPH_SHA256}"`,
     `VALHALLA_IMAGE="${values.VALHALLA_IMAGE}"`,
     '',
   ].join('\n');
@@ -713,7 +721,7 @@ describe('геостек в командах выкатки', () => {
     for (const variable of [
       "MAP_ARTIFACTS_DIR='/srv/geo/basemap/20260801'",
       "VALHALLA_GRAPH_DIR='/srv/geo/valhalla/20260801'",
-      "VALHALLA_GRAPH_REVISION='1786000000'",
+      `VALHALLA_GRAPH_SHA256='${GRAPH_SHA}'`,
       'VALHALLA_IMAGE=',
       "IMAGE_REPOSITORY='ghcr.io/example/app'",
       "ENV_FILE='staging.env'",
@@ -738,7 +746,7 @@ describe('геостек в командах выкатки', () => {
     // «не настроена», а расчёт времени не заработает вовсе.
     expect(compose).toContain('MAP_ARTIFACTS_PATH: /srv/basemap');
     expect(compose).toContain('VALHALLA_URL: http://valhalla:8002');
-    expect(compose).toContain('VALHALLA_GRAPH_REVISION: ${VALHALLA_GRAPH_REVISION}');
+    expect(compose).toContain('VALHALLA_GRAPH_SHA256: ${VALHALLA_GRAPH_SHA256}');
 
     // Каталоги монтируются только на чтение.
     expect(compose).toMatch(/source: \$\{MAP_ARTIFACTS_DIR\}[\s\S]*?read_only: true/);
@@ -1002,13 +1010,80 @@ describe('геостек в командах выкатки', () => {
     });
 
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain('маршрутизатор не подтвердил граф');
+    expect(result.stderr).toContain('маршрутизатор не подтвердил готовность');
 
     // Маршрутизатор подняли, но приложение не трогали: прежняя версия
     // продолжает работать, а не сменяется на новую с неработающим расчётом.
     expect(result.ssh).toContain('up -d --no-build valhalla');
     expect(result.ssh).not.toContain('up -d --no-build app');
     expect(result.stdout).not.toContain('проверки пройдены');
+  });
+
+  it('маршрутизатор не запускается раньше проверки содержимого графа', async () => {
+    const result = await runInSandbox({
+      // Проверяющий скрипт доставляется из дерева VERSION, поэтому песочнице
+      // нужна история репозитория.
+      withGitHistory: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'require_geo_artifacts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    // Режим передаётся закавыченным аргументом: `verify-geo.mjs 'graph' …`.
+    const graphCheck = lines.findIndex((line) => /verify-geo\.mjs '?graph/.test(line));
+    const valhallaUp = lines.findIndex((line) => line.includes('up -d --no-build valhalla'));
+
+    // Сервис не должен подниматься на непроверенном наборе: иначе он
+    // отрапортует о готовности по тому, что нашёл, каким бы оно ни было.
+    expect(graphCheck).toBeGreaterThan(-1);
+    expect(valhallaUp).toBeGreaterThan(graphCheck);
+
+    // Проверка идёт по содержимому: SHA-256 передаётся аргументом.
+    expect(lines[graphCheck]).toContain(GRAPH_SHA);
+  });
+
+  it('приложение не запускается раньше пробной матрицы', async () => {
+    const result = await runInSandbox({
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'require_routing_ready',
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).toBe(0);
+
+    const lines = result.ssh.split('\n').filter((line) => line !== '');
+    const routing = lines.findIndex((line) => line.includes('verify-geo.mjs routing'));
+    const matrix = lines.findIndex((line) => line.includes('verify-geo.mjs matrix'));
+    const appUp = lines.findIndex((line) => line.includes('up -d --no-build app'));
+
+    // Загруженный набор ещё не означает работающий расчёт: пробная матрица
+    // отвечает на вопрос, ради которого весь стек и существует.
+    expect(routing).toBeGreaterThan(-1);
+    expect(matrix).toBeGreaterThan(routing);
+    expect(appUp).toBeGreaterThan(matrix);
+  });
+
+  it('числовое время в роли идентичности отвергается до обращения к серверу', async () => {
+    const result = await runInSandbox({
+      staging: { VALHALLA_GRAPH_SHA256: '1786349243' },
+      body: [LOAD_BOTH, 'activate_environment STAGING', 'require_geo_artifacts'].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('VALHALLA_GRAPH_SHA256 задан неверно');
+    // Ни одного обращения к серверу: значение отвергнуто по форме.
+    expect(result.ssh.trim()).toBe('');
   });
 
   it('проверка артефактов не зависит от Node на сервере', async () => {
@@ -1103,15 +1178,34 @@ describe('геостек в командах выкатки', () => {
     expect(script).toContain('GRAPH_REVISION');
   });
 
-  it('проверка при выкатке сверяет манифест графа и сумму набора тайлов', async () => {
+  it('проверка при выкатке считает содержимое, а не читает объявление', async () => {
     const verifier = await readFile(path.join(REPO_ROOT, 'deploy/scripts/verify-geo.mjs'), 'utf8');
 
     expect(verifier).toContain('flowers-logistics/valhalla-manifest@1');
     expect(verifier).toContain('tiles.tar');
-    expect(verifier).toContain('sha256');
+    // Сумма пересчитывается по лежащему на сервере файлу: манифест только
+    // объявляет, а доказывает пересчёт.
+    expect(verifier).toContain('const actual = await sha256(file)');
     // И отдельно — фактический ответ самого маршрутизатора.
     expect(verifier).toContain('/status');
-    expect(verifier).toContain('tileset_last_modified');
+  });
+
+  it('в проверке нет сравнения метки времени с идентичностью графа', async () => {
+    const verifier = await readFile(path.join(REPO_ROOT, 'deploy/scripts/verify-geo.mjs'), 'utf8');
+    const common = withoutComments(await readFile(COMMON_LIB, 'utf8'));
+
+    // Режим готовности вызывается без ревизии: сравнивать её там нечем и незачем.
+    expect(common).toContain("verify-geo.mjs routing 'http://valhalla:8002'");
+    expect(common).not.toMatch(/verify-geo\.mjs routing[^"]*VALHALLA_GRAPH/);
+
+    // Метка времени остаётся диагностикой: она попадает в вывод, но ни с чем
+    // не сравнивается. Сравнение с ней однажды остановило исправную выкатку
+    // после обычного копирования набора — и не остановило бы подменённый файл.
+    const body = verifier.slice(verifier.indexOf('async function verifyRouting'));
+    const routingBody = body.slice(0, body.indexOf('async function verifyMatrix'));
+    expect(routingBody).toContain('tileset_last_modified');
+    expect(routingBody).not.toContain('expectedRevision');
+    expect(routingBody).not.toContain('expectedSha');
   });
 
   it('шаблоны конфигураций описывают каталоги артефактов и ревизию графа', async () => {
@@ -1120,7 +1214,7 @@ describe('геостек в командах выкатки', () => {
 
       expect(content, template).toContain('MAP_ARTIFACTS_DIR=');
       expect(content, template).toContain('VALHALLA_GRAPH_DIR=');
-      expect(content, template).toContain('VALHALLA_GRAPH_REVISION=');
+      expect(content, template).toContain('VALHALLA_GRAPH_SHA256=');
       // Образ закреплён digest, а не тегом latest.
       expect(content, template).toContain('VALHALLA_IMAGE=');
       expect(content, template).toContain('@sha256:');

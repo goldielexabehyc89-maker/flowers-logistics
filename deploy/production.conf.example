@@ -52,9 +52,15 @@ DB_VOLUME="fl-production-db"
 MAP_ARTIFACTS_DIR="/srv/geo/basemap/CHANGE_ME_revision"
 VALHALLA_GRAPH_DIR="/srv/geo/valhalla/CHANGE_ME_revision"
 
-# Ревизия дорожного графа. Обязана совпасть с тем, что сервис отдаёт в /status.
-# Несовпадение — отказ до расчёта: результат лёг бы в кэш под чужим ключом.
-VALHALLA_GRAPH_REVISION="CHANGE_ME_graph_revision"
+# Идентичность дорожного графа: SHA-256 файла tiles.tar из его манифеста,
+# ровно 64 шестнадцатеричных символа.
+#
+# Именно содержимое, а не время файла. Выкатка пересчитывает сумму лежащего
+# на сервере файла и сводит её с манифестом и с этим значением; расхождение —
+# отказ до запуска маршрутизатора. Время изменения файла и tileset_last_modified
+# из /status идентичностью не являются: они меняются при копировании набора
+# и не меняются при подмене его содержимого.
+VALHALLA_GRAPH_SHA256="CHANGE_ME_tiles_tar_sha256"
 
 # Образ маршрутизатора: тег и digest вместе. `latest` запрещён.
 VALHALLA_IMAGE="ghcr.io/valhalla/valhalla:3.8.3@sha256:70b45295d81035e3562e1bbf996a28d5fc55e1ccc5d7e3fff9f297d3b1a1359f"

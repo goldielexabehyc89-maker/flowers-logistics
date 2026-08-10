@@ -62,8 +62,17 @@ CONFIG_KEYS=(
   SSH_HOST SSH_USER SSH_PORT HOST_FINGERPRINT
   REMOTE_DIR APP_DOMAIN APP_HOST_PORT
   IMAGE_REPOSITORY COMPOSE_PROJECT COMPOSE_FILE ENV_FILE DB_VOLUME
-  MAP_ARTIFACTS_DIR VALHALLA_GRAPH_DIR VALHALLA_GRAPH_REVISION VALHALLA_IMAGE
+  MAP_ARTIFACTS_DIR VALHALLA_GRAPH_DIR VALHALLA_GRAPH_SHA256 VALHALLA_IMAGE
 )
+
+# Идентичность дорожного графа — это SHA-256 файла tiles.tar и ничто другое.
+#
+# Прежняя переменная VALHALLA_GRAPH_REVISION хранила Unix-время изменения файла.
+# Оно менялось при обычном копировании набора на сервер и не менялось при
+# подмене содержимого с сохранением времени, то есть не доказывало ничего.
+# Имя изменено намеренно: молчаливое чтение старого ключа вернуло бы время
+# в роль источника правды.
+GRAPH_SHA256_PATTERN='^[0-9a-f]{64}$'
 
 # Читает конфигурацию окружения в переменные с префиксом.
 #
@@ -401,23 +410,41 @@ require_geo_artifacts() {
     return 0
   fi
 
+  # Формат проверяется до обращения к серверу: пустое или произвольное значение
+  # сравнилось бы с чем угодно, а числовое время означало бы возврат к прежнему,
+  # неработающему определению идентичности.
+  if ! printf '%s' "${VALHALLA_GRAPH_SHA256}" | grep -Eq "${GRAPH_SHA256_PATTERN}"; then
+    fail "VALHALLA_GRAPH_SHA256 задан неверно: нужен SHA-256 набора тайлов из 64 шестнадцатеричных символов"
+  fi
+
   upload_verifier
 
   run_verifier_with_mount "${MAP_ARTIFACTS_DIR}" basemap "${MAP_ARTIFACTS_DIR}" "" \
     || fail "подложка на сервере не совпадает с манифестом: ${MAP_ARTIFACTS_DIR}"
 
-  run_verifier_with_mount "${VALHALLA_GRAPH_DIR}" graph "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_REVISION}" \
-    || fail "дорожный граф на сервере не совпадает с манифестом или ревизией ${VALHALLA_GRAPH_REVISION}"
+  # Считает фактический SHA-256 лежащего на сервере tiles.tar и сводит его
+  # с манифестом и конфигурацией. Время изменения файла в проверке не участвует.
+  run_verifier_with_mount "${VALHALLA_GRAPH_DIR}" graph "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_SHA256}" \
+    || fail "содержимое дорожного графа на сервере не совпало с ${VALHALLA_GRAPH_SHA256}"
 
-  log "картографические артефакты проверены: подложка и граф ревизии ${VALHALLA_GRAPH_REVISION}"
+  log "картографические артефакты проверены: подложка и граф с содержимым ${VALHALLA_GRAPH_SHA256}"
 }
 
-# Спрашивает сам маршрутизатор, на каком графе он работает.
+# Спрашивает сам маршрутизатор, готов ли он работать.
 #
-# Манифест говорит, что мы собрали; /status — что сервис действительно загрузил.
-# Без этой проверки выкатка объявила бы успех при работающем приложении
-# и неработающем расчёте: маршрутизатор намеренно не входит в /ready, потому
-# что его отказ не должен снимать приложение с балансировки.
+# Что именно установлено, уже доказано: содержимое tiles.tar пересчитано
+# и сведено с манифестом и конфигурацией ДО запуска сервиса. Здесь выясняется
+# то, чего файл на диске не говорит, — сервис поднялся, набор прочитан
+# и расчёт действительно выполняется.
+#
+# `tileset_last_modified` с ревизией НЕ сравнивается. Это время файла: оно
+# меняется от копирования набора и не меняется от подмены его содержимого.
+# Сравнение с ним однажды уже остановило исправную выкатку и при этом
+# не остановило бы неисправную.
+#
+# Маршрутизатор намеренно не входит в /ready: его отказ не должен снимать
+# приложение с балансировки. Но выкатка без него не продолжается — иначе она
+# объявила бы успех при работающем приложении и неработающем расчёте.
 require_routing_ready() {
   if is_dry_run; then
     log "сухой прогон: проверка маршрутизатора пропущена (нужен доступ к серверу)"
@@ -430,18 +457,29 @@ require_routing_ready() {
   local attempts="${ROUTING_CHECK_ATTEMPTS:-30}"
   local delay="${ROUTING_CHECK_DELAY:-5}"
 
-  local attempt
+  local ready=0 attempt
   for attempt in $(seq 1 "${attempts}"); do
     if remote "$(compose_command) run --rm --no-deps -T \
         -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
-        app node /verify-geo.mjs routing 'http://valhalla:8002' '${VALHALLA_GRAPH_REVISION}'"; then
-      log "маршрутизатор отвечает на графе ревизии ${VALHALLA_GRAPH_REVISION}"
-      return 0
+        app node /verify-geo.mjs routing 'http://valhalla:8002'"; then
+      ready=1
+      break
     fi
     sleep "${delay}"
   done
 
-  fail "маршрутизатор не подтвердил граф ревизии ${VALHALLA_GRAPH_REVISION}"
+  [ "${ready}" -eq 1 ] || fail "маршрутизатор не подтвердил готовность набора тайлов"
+  log "маршрутизатор готов: набор тайлов загружен"
+
+  # Загруженный набор ещё не означает работающий расчёт. Пробная матрица
+  # на синтетических точках проверяет оба профиля до того, как приложение
+  # получит право запуститься.
+  remote "$(compose_command) run --rm --no-deps -T \
+      -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
+      app node /verify-geo.mjs matrix 'http://valhalla:8002'" \
+    || fail "маршрутизатор не выполнил пробный расчёт матрицы"
+
+  log "пробная матрица посчитана обоими профилями"
 }
 
 require_image_revision() {
@@ -479,10 +517,10 @@ require_ready() {
 # строку — и получается сервис без образа и bind mount из пустого пути,
 # то есть отказ на ровном месте или, хуже, монтирование не того каталога.
 compose_command() {
-  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_REVISION='%s' VALHALLA_IMAGE='%s' docker compose -f '%s' -p '%s'" \
+  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_SHA256='%s' VALHALLA_IMAGE='%s' docker compose -f '%s' -p '%s'" \
     "${REMOTE_DIR}" "${IMAGE_REPOSITORY}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
     "${ENV_FILE}" "${DB_VOLUME}" "${COMPOSE_PROJECT}" \
-    "${MAP_ARTIFACTS_DIR}" "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_REVISION}" "${VALHALLA_IMAGE}" \
+    "${MAP_ARTIFACTS_DIR}" "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_SHA256}" "${VALHALLA_IMAGE}" \
     "${COMPOSE_FILE}" "${COMPOSE_PROJECT}"
 }
 

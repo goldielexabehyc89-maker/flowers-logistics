@@ -5,8 +5,12 @@
  * Проверяется то, нарушение чего опасно: в маршрутизатор уходят только
  * координаты; направленная матрица не выдаётся за симметричную; недостижимая
  * пара не превращается в ноль; ключ кэша меняется вместе с профилем, порядком
- * точек и ревизией графа; два экземпляра не считают одно и то же; сетевой
+ * точек и содержимым графа; два экземпляра не считают одно и то же; сетевой
  * вызов не выполняется внутри транзакции.
+ *
+ * Идентичность графа — SHA-256 файла `tiles.tar`. Метка времени из `/status`
+ * с ней не сравнивается ни здесь, ни в коде: она меняется от копирования
+ * набора и не меняется от подмены его содержимого.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -39,7 +43,9 @@ const POINTS: LatLon[] = [
   { lat: 55.77, lon: 37.64 },
 ];
 
-const GRAPH = 'graph-2026-08-01';
+/** Идентичность графа: ровно 64 шестнадцатеричных символа, как SHA-256. */
+const GRAPH = '0f'.repeat(32);
+const GRAPH_OTHER = '7c'.repeat(32);
 
 beforeAll(async () => {
   ctx = await createTestContext();
@@ -117,7 +123,7 @@ function matrixDeps(router: FakeRouter, overrides: Partial<MatrixDeps> = {}): Ma
     db: ctx.db,
     logger,
     valhalla: router,
-    graphRevision: GRAPH,
+    graphSha256: GRAPH,
     workerId: `test-${randomUUID()}`,
     waitAttempts: 2,
     waitDelayMs: 10,
@@ -289,36 +295,77 @@ describe('состояние маршрутизатора', () => {
     expect(status?.state).toBe('NOT_CONFIGURED');
   });
 
-  it('несовпадение ревизии графа — это отказ, а не мелочь', async () => {
-    const instance = client(async () =>
-      jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 }),
-    );
+  it('произвольная метка времени не сравнивается с идентичностью графа', async () => {
+    // Метка меняется при каждом копировании набора на сервер. Ни одно её
+    // значение не должно ни подтверждать, ни опровергать идентичность:
+    // именно такое сравнение однажды остановило исправную выкатку.
+    for (const marker of [1, 1_700_000_000, 1_786_349_243, 1_786_365_674]) {
+      const instance = client(async () =>
+        jsonResponse({ version: '3.8.3', tileset_last_modified: marker }),
+      );
 
-    const result = await probeRouting(ctx.db, instance, 'другая-ревизия');
+      const result = await probeRouting(ctx.db, instance, GRAPH);
 
-    expect(result.state).toBe('ERROR');
-    expect(result.revisionMatches).toBe(false);
+      expect(result.state, `метка ${marker} должна приниматься`).toBe('OK');
+      expect(result.graphSha256).toBe(GRAPH);
+      // Метка сохраняется как диагностика — и только.
+      expect(result.tilesetLastModified).toBe(marker);
+    }
 
     const status = await ctx.db.integrationStatus.findUniqueOrThrow({
       where: { provider: VALHALLA_PROVIDER },
     });
-    expect(status.state).toBe('ERROR');
-    expect(JSON.stringify(status.details)).toContain('graph-revision-mismatch');
+    expect(status.state).toBe('OK');
+    expect(JSON.stringify(status.details)).not.toContain('valhalla.internal');
   });
 
-  it('совпадение ревизии переводит интеграцию в OK', async () => {
-    const instance = client(async () =>
-      jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 }),
-    );
+  it('незагруженный набор тайлов остаётся отказом готовности', async () => {
+    const instance = client(async () => jsonResponse({ version: '3.8.3' }));
 
-    const result = await probeRouting(ctx.db, instance, '1700000000');
-    expect(result.state).toBe('OK');
-    expect(result.revisionMatches).toBe(true);
+    const result = await probeRouting(ctx.db, instance, GRAPH);
+
+    expect(result.state).toBe('ERROR');
+    expect(result.tilesetLastModified).toBeNull();
 
     const status = await ctx.db.integrationStatus.findUniqueOrThrow({
       where: { provider: VALHALLA_PROVIDER },
     });
-    expect(JSON.stringify(status.details)).not.toContain('valhalla.internal');
+    expect(JSON.stringify(status.details)).toContain('tileset-not-loaded');
+  });
+
+  it('явное has_tiles = false — отказ', async () => {
+    const instance = client(async () =>
+      jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000, has_tiles: false }),
+    );
+
+    const result = await probeRouting(ctx.db, instance, GRAPH);
+
+    expect(result.state).toBe('ERROR');
+    const status = await ctx.db.integrationStatus.findUniqueOrThrow({
+      where: { provider: VALHALLA_PROVIDER },
+    });
+    expect(JSON.stringify(status.details)).toContain('tiles-unavailable');
+  });
+
+  it('идентичность неверного формата отклоняется до сетевого запроса', async () => {
+    // Так выглядело прежнее значение: Unix-время изменения файла.
+    for (const wrong of ['1786349243', '', 'не-sha', `${GRAPH}0`, GRAPH.toUpperCase()]) {
+      let calls = 0;
+      const instance = client(async () => {
+        calls += 1;
+        return jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 });
+      });
+
+      const result = await probeRouting(ctx.db, instance, wrong);
+
+      expect(result.state, `значение «${wrong}» должно быть отклонено`).toBe('ERROR');
+      expect(calls, 'обращения к сервису быть не должно').toBe(0);
+    }
+
+    const status = await ctx.db.integrationStatus.findUniqueOrThrow({
+      where: { provider: VALHALLA_PROVIDER },
+    });
+    expect(JSON.stringify(status.details)).toContain('graph-sha-invalid');
   });
 });
 
@@ -377,7 +424,7 @@ describe('матрица', () => {
   it('без ревизии графа расчёт не начинается', async () => {
     const router = fakeRouter();
     await expect(
-      computeMatrix(matrixDeps(router, { graphRevision: null }), {
+      computeMatrix(matrixDeps(router, { graphSha256: null }), {
         points: POINTS,
         profile: 'CAR',
       }),
@@ -402,14 +449,14 @@ describe('кэш матриц', () => {
   });
 
   it('порядок точек, профиль и ревизия графа дают разные ключи', () => {
-    const base = { graphRevision: GRAPH, profile: 'CAR' as const, trafficMode: 'STATIC' as const };
+    const base = { graphSha256: GRAPH, profile: 'CAR' as const, trafficMode: 'STATIC' as const };
 
     const key = matrixCacheKey({ ...base, points: POINTS });
     const reordered = matrixCacheKey({ ...base, points: [...POINTS].reverse() });
     const otherProfile = matrixCacheKey({ ...base, profile: 'FOOT', points: POINTS });
     const otherGraph = matrixCacheKey({
       ...base,
-      graphRevision: 'graph-2026-09-01',
+      graphSha256: GRAPH_OTHER,
       points: POINTS,
     });
     const otherTraffic = matrixCacheKey({ ...base, trafficMode: 'NONE', points: POINTS });
@@ -417,6 +464,12 @@ describe('кэш матриц', () => {
     expect(new Set([key, reordered, otherProfile, otherGraph, otherTraffic]).size).toBe(5);
     // Тот же набор в том же порядке — тот же ключ.
     expect(matrixCacheKey({ ...base, points: [...POINTS] })).toBe(key);
+
+    // Ключ определяется содержимым графа. Набор, скопированный на сервер,
+    // остаётся тем же графом: время файла в ключ не входит и входить не может,
+    // иначе копирование обесценивало бы весь кэш.
+    expect(matrixCacheKey({ ...base, graphSha256: GRAPH, points: POINTS })).toBe(key);
+    expect(otherGraph).not.toBe(key);
   });
 
   it('смена ревизии графа не переиспользует старый результат', async () => {
@@ -426,7 +479,7 @@ describe('кэш матриц', () => {
     await computeMatrix(matrixDeps(router), { points, profile: 'CAR' });
     expect(router.calls).toBe(1);
 
-    await computeMatrix(matrixDeps(router, { graphRevision: 'graph-2026-12-31' }), {
+    await computeMatrix(matrixDeps(router, { graphSha256: GRAPH_OTHER }), {
       points,
       profile: 'CAR',
     });
@@ -459,7 +512,7 @@ describe('кэш матриц', () => {
     ).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
 
     const keyHash = matrixCacheKey({
-      graphRevision: GRAPH,
+      graphSha256: GRAPH,
       profile: 'CAR',
       trafficMode: CURRENT_TRAFFIC_MODE,
       points,
@@ -549,7 +602,7 @@ describe('кэш матриц', () => {
   it('брошенный расчёт перехватывается по истечении аренды', async () => {
     const points = uniquePoints();
     const keyHash = matrixCacheKey({
-      graphRevision: GRAPH,
+      graphSha256: GRAPH,
       profile: 'CAR',
       trafficMode: CURRENT_TRAFFIC_MODE,
       points,
@@ -559,7 +612,7 @@ describe('кэш матриц', () => {
     await ctx.db.routeMatrixCache.create({
       data: {
         keyHash,
-        graphRevision: GRAPH,
+        graphSha256: GRAPH,
         profile: 'CAR',
         trafficMode: CURRENT_TRAFFIC_MODE,
         pointCount: points.length,
@@ -586,7 +639,7 @@ describe('кэш матриц', () => {
     await computeMatrix(matrixDeps(router, { ttlSeconds: 60 }), { points, profile: 'CAR' });
 
     const keyHash = matrixCacheKey({
-      graphRevision: GRAPH,
+      graphSha256: GRAPH,
       profile: 'CAR',
       trafficMode: CURRENT_TRAFFIC_MODE,
       points,
@@ -610,7 +663,7 @@ describe('кэш матриц', () => {
     await computeMatrix(deps, { points, profile: 'CAR' });
 
     const keyHash = matrixCacheKey({
-      graphRevision: GRAPH,
+      graphSha256: GRAPH,
       profile: 'CAR',
       trafficMode: CURRENT_TRAFFIC_MODE,
       points,
@@ -765,9 +818,9 @@ describe('расчёт запрещён без подтверждённого г
     expect(router.calls).toBe(0);
   });
 
-  it('ворота графа отказывают при отсутствующей ревизии в ответе сервиса', async () => {
+  it('ворота графа отказывают при незагруженном наборе тайлов', async () => {
     const instance = client(async () => jsonResponse({ version: '3.8.3' }));
-    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: GRAPH });
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedGraphSha256: GRAPH });
 
     await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
 
@@ -775,14 +828,28 @@ describe('расчёт запрещён без подтверждённого г
       where: { provider: VALHALLA_PROVIDER },
     });
     expect(status.state).toBe('ERROR');
-    expect(JSON.stringify(status.details)).toContain('graph-revision-unknown');
+    expect(JSON.stringify(status.details)).toContain('tileset-not-loaded');
   });
 
-  it('ворота графа отказывают при несовпадении ревизии', async () => {
+  it('ворота графа пропускают набор с другой меткой времени', async () => {
+    // Тот же граф после копирования на сервер: содержимое прежнее, метка новая.
+    const instance = client(async () =>
+      jsonResponse({ version: '3.8.3', tileset_last_modified: 1_786_365_674 }),
+    );
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedGraphSha256: GRAPH });
+
+    await expect(gate.verifyGraph()).resolves.toBeUndefined();
+  });
+
+  it('ворота графа отказывают при идентичности неверного формата', async () => {
     const instance = client(async () =>
       jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 }),
     );
-    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: 'другая' });
+    const gate = createGraphGate({
+      db: ctx.db,
+      client: instance,
+      expectedGraphSha256: '1786349243',
+    });
 
     await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
   });
@@ -793,7 +860,7 @@ describe('расчёт запрещён без подтверждённого г
       calls += 1;
       return jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 });
     });
-    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: '1700000000' });
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedGraphSha256: GRAPH });
 
     await gate.verifyGraph();
     await gate.verifyGraph();
@@ -813,7 +880,7 @@ describe('расчёт запрещён без подтверждённого г
       }
       return jsonResponse({ version: '3.8.3', tileset_last_modified: 1_700_000_000 });
     });
-    const gate = createGraphGate({ db: ctx.db, client: instance, expectedRevision: '1700000000' });
+    const gate = createGraphGate({ db: ctx.db, client: instance, expectedGraphSha256: GRAPH });
 
     await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
     await expect(gate.verifyGraph()).resolves.toBeUndefined();
@@ -825,7 +892,7 @@ describe('владелец аренды расчёта', () => {
   it('потерявший аренду не выдаёт свой результат за сохранённый', async () => {
     const points = uniquePoints();
     const keyHash = matrixCacheKey({
-      graphRevision: GRAPH,
+      graphSha256: GRAPH,
       profile: 'CAR',
       trafficMode: CURRENT_TRAFFIC_MODE,
       points,

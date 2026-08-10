@@ -54,26 +54,53 @@ export async function setRoutingStatus(
   });
 }
 
+/**
+ * Идентичность дорожного графа — SHA-256 файла `tiles.tar`.
+ *
+ * Ровно 64 шестнадцатеричных символа. Проверка формата здесь не украшение:
+ * прежде идентичностью считалось Unix-время изменения файла, и без явного
+ * ограничения такое значение снова оказалось бы в ключе кэша, различая
+ * одинаковые графы и не различая разные.
+ */
+export const GRAPH_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+export function isGraphSha256(value: string | null): value is string {
+  return value !== null && GRAPH_SHA256_PATTERN.test(value.trim());
+}
+
 export interface RoutingProbeResult {
   state: RoutingState;
-  /** Ревизия набора тайлов, о которой сообщил сервис. */
+  /**
+   * Метка времени набора тайлов из `/status`.
+   *
+   * ДИАГНОСТИКА. Признак того, что сервис прочитал набор, и ничего больше.
+   * С идентичностью графа не сравнивается и в ключ кэша не входит: это время
+   * файла, которое меняется от копирования и не меняется от подмены
+   * содержимого.
+   */
   tilesetLastModified: number | null;
   version: string | null;
-  /** Заявленная в конфигурации ревизия совпала с фактической. */
-  revisionMatches: boolean | null;
+  /** Идентичность графа, под которой работает приложение. */
+  graphSha256: string | null;
 }
 
 /**
- * Проверяет маршрутизатор и сверяет ревизию графа.
+ * Проверяет готовность маршрутизатора.
  *
- * Несовпадение ревизии — это отказ, а не мелочь: конфигурация утверждает одно,
- * сервис отвечает по другим дорожным данным, и любой расчёт лёг бы в кэш
- * под чужим ключом. Считать в таком состоянии нельзя.
+ * Что именно установлено, доказывается не здесь: содержимое `tiles.tar`
+ * пересчитывается и сводится с манифестом и конфигурацией при выкатке, до того
+ * как сервис вообще запускается. Приложению остаётся выяснить то, чего файл
+ * на диске не говорит, — сервис отвечает и набор загружен.
+ *
+ * Сравнения `tileset_last_modified` с идентичностью графа здесь нет и быть
+ * не может. Такое сравнение останавливало исправную выкатку после обычного
+ * копирования набора и при этом пропустило бы подменённый файл с сохранённым
+ * временем.
  */
 export async function probeRouting(
   db: Database,
   client: Pick<ValhallaClient, 'configured' | 'status'>,
-  expectedRevision: string | null,
+  expectedGraphSha256: string | null,
   now: Date = new Date(),
 ): Promise<RoutingProbeResult> {
   if (!client.configured) {
@@ -82,68 +109,78 @@ export async function probeRouting(
       state: 'NOT_CONFIGURED',
       tilesetLastModified: null,
       version: null,
-      revisionMatches: null,
+      graphSha256: null,
     };
   }
 
-  if (expectedRevision === null || expectedRevision.trim() === '') {
-    await setRoutingStatus(db, 'ERROR', { reason: 'no-graph-revision' }, now);
-    return { state: 'ERROR', tilesetLastModified: null, version: null, revisionMatches: null };
+  // Некорректная идентичность — отказ до любого сетевого запроса: результат
+  // расчёта было бы некуда отнести, а ключ кэша получился бы бессмысленным.
+  if (!isGraphSha256(expectedGraphSha256)) {
+    await setRoutingStatus(db, 'ERROR', { reason: 'graph-sha-invalid' }, now);
+    return { state: 'ERROR', tilesetLastModified: null, version: null, graphSha256: null };
   }
+
+  const graphSha256 = expectedGraphSha256.trim();
 
   try {
     const status = await client.status();
-    const actual = status.tilesetLastModified === null ? null : String(status.tilesetLastModified);
 
-    // Сервис не сообщил ревизию набора тайлов — подтвердить граф нечем.
-    //
-    // Это не «неизвестно, но, наверное, тот же»: без подтверждения любой расчёт
-    // лёг бы в кэш под ключом с заявленной ревизией, пережив смену дорожных
-    // данных. Отсутствие подтверждения — такой же отказ, как несовпадение.
-    if (actual === null) {
+    // Набор не загружен: сервис поднялся, но тайлов у него нет. Считать в таком
+    // состоянии нельзя — это отказ готовности, а не отсутствие диагностики.
+    if (status.tilesetLastModified === null) {
       await setRoutingStatus(
         db,
         'ERROR',
-        { reason: 'graph-revision-unknown', version: status.version },
+        { reason: 'tileset-not-loaded', version: status.version, graphSha256 },
         now,
       );
       return {
         state: 'ERROR',
         tilesetLastModified: null,
         version: status.version,
-        revisionMatches: null,
+        graphSha256,
       };
     }
 
-    // Ревизия из конфигурации задаётся человеком при установке графа. Сервис
-    // подтверждает её своим `tileset_last_modified`; расхождение означает,
-    // что установлен другой граф.
-    if (actual !== expectedRevision) {
+    // Поле есть не во всех сборках сервиса. Если оно есть, явное «тайлов нет»
+    // — прямой отказ, а не повод довериться остальным полям.
+    if (status.hasTiles === false) {
       await setRoutingStatus(
         db,
         'ERROR',
-        { reason: 'graph-revision-mismatch', version: status.version },
+        { reason: 'tiles-unavailable', version: status.version, graphSha256 },
         now,
       );
       return {
         state: 'ERROR',
         tilesetLastModified: status.tilesetLastModified,
         version: status.version,
-        revisionMatches: false,
+        graphSha256,
       };
     }
 
-    await setRoutingStatus(db, 'OK', { version: status.version }, now);
+    await setRoutingStatus(
+      db,
+      'OK',
+      {
+        version: status.version,
+        graphSha256,
+        // Только для дежурного: по этому числу видно, когда набор появился
+        // на диске. Решений оно не принимает.
+        tilesetLastModified: status.tilesetLastModified,
+      },
+      now,
+    );
     return {
       state: 'OK',
       tilesetLastModified: status.tilesetLastModified,
       version: status.version,
-      revisionMatches: true,
+      graphSha256,
     };
   } catch (error) {
     const code = error instanceof ValhallaError ? error.code : 'TRANSPORT_ERROR';
     await setRoutingStatus(db, 'DEGRADED', { code }, now);
-    return { state: 'DEGRADED', tilesetLastModified: null, version: null, revisionMatches: null };
+    return { state: 'DEGRADED', tilesetLastModified: null, version: null, graphSha256 };
   }
 }
 
@@ -160,7 +197,7 @@ export async function probeRouting(
 export function createGraphGate(deps: {
   db: Database;
   client: Pick<ValhallaClient, 'configured' | 'status'>;
-  expectedRevision: string | null;
+  expectedGraphSha256: string | null;
   now?: () => Date;
 }): { verifyGraph: () => Promise<void>; reset: () => void } {
   let verified = false;
@@ -175,7 +212,7 @@ export function createGraphGate(deps: {
       }
 
       const clock = deps.now ?? ((): Date => new Date());
-      const result = await probeRouting(deps.db, deps.client, deps.expectedRevision, clock());
+      const result = await probeRouting(deps.db, deps.client, deps.expectedGraphSha256, clock());
 
       if (result.state !== 'OK') {
         throw new AppError('SERVICE_UNAVAILABLE', {
