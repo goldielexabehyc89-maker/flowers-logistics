@@ -33,6 +33,13 @@ export const APP_SECTIONS: readonly AppSection[] = [
     roles: ['ADMIN', 'LOGISTICIAN'],
   },
   {
+    key: 'planning',
+    path: '/planning',
+    title: 'Планирование',
+    shortTitle: 'План',
+    roles: ['ADMIN', 'LOGISTICIAN'],
+  },
+  {
     key: 'route-sheets',
     path: '/route-sheets',
     title: 'Маршрутные листы',

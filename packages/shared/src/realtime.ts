@@ -37,6 +37,11 @@ export const REALTIME_TOPICS = [
   // ни причины перехвата, ни номера маршрута там нет.
   'route.edit_lock_changed',
   'route.edit_lock_taken_over',
+  // Планирование маршрутов и склады (этап 5.4). Тоже только ADMIN и LOGISTICIAN.
+  // В payload — идентификатор запуска и его состояние: ни маршрутов, ни заказов,
+  // ни координат там нет, клиент перезапрашивает карточку сам.
+  'route_plan.updated',
+  'depot.changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

@@ -103,13 +103,18 @@ model User {
   settingUpdates  SystemSetting[]
   realtimeEvents  RealtimeEvent[]
 
-  createdRoutes    DeliveryRoute[] @relation("RouteCreatedBy")
-  assignedRoutes   DeliveryRoute[] @relation("RouteCourier")
-  addedRouteOrders RouteOrder[]    @relation("RouteOrderAddedBy")
-  removedRouteOrders RouteOrder[]  @relation("RouteOrderRemovedBy")
-  routeTransitions RouteStateTransition[]
-  routeEditLeases  RouteEditLease[]
+  createdRoutes      DeliveryRoute[]        @relation("RouteCreatedBy")
+  assignedRoutes     DeliveryRoute[]        @relation("RouteCourier")
+  addedRouteOrders   RouteOrder[]           @relation("RouteOrderAddedBy")
+  removedRouteOrders RouteOrder[]           @relation("RouteOrderRemovedBy")
+  routeTransitions   RouteStateTransition[]
+  routeEditLeases    RouteEditLease[]
   geoChanges         OrderGeoHistory[]
+
+  createdDepots     Depot[]                @relation("DepotCreatedBy")
+  requestedPlanRuns RoutePlanRun[]         @relation("PlanRunRequestedBy")
+  appliedPlanRuns   RoutePlanRun[]         @relation("PlanRunAppliedBy")
+  planVehicleSlots  RoutePlanVehicleSlot[] @relation("PlanSlotCourier")
 
   @@index([status])
   @@index([createdAt])
@@ -291,18 +296,18 @@ model SystemSetting {
 /// поэтому «изменение есть, а события нет» невозможно.
 /// LISTEN/NOTIFY только ускоряет доставку; при переподключении пропущенное читается отсюда.
 model RealtimeEvent {
-  id         BigInt   @id @default(autoincrement())
-  topic      String
+  id             BigInt   @id @default(autoincrement())
+  topic          String
   /// Персональный адресат: если задан, событие видит только этот пользователь.
-  audienceUserId String? @db.Uuid
+  audienceUserId String?  @db.Uuid
   /// Роли-адресаты: событие видят пользователи с любой из перечисленных ролей.
   /// Пустой список вместе с пустым audienceUserId означает «никому» — это защищает
   /// от случайной широковещательной рассылки административных данных курьерам.
   audienceRoles  Role[]
-  payload    Json
-  occurredAt DateTime @default(now())
+  payload        Json
+  occurredAt     DateTime @default(now())
   /// Граница хранения (24 часа). За её пределами клиент получает resync-required.
-  expiresAt  DateTime
+  expiresAt      DateTime
 
   audienceUser User? @relation(fields: [audienceUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
@@ -321,11 +326,11 @@ model OutboxMessage {
   payload        Json
   status         OutboxStatus @default(PENDING)
 
-  attempts     Int      @default(0)
-  maxAttempts  Int      @default(10)
+  attempts      Int      @default(0)
+  maxAttempts   Int      @default(10)
   nextAttemptAt DateTime @default(now())
   /// Текст последней ошибки после очистки от секретов и PII.
-  lastError    String?
+  lastError     String?
 
   lockedAt DateTime?
   lockedBy String?
@@ -432,7 +437,7 @@ model DeliveryOrder {
 
   /// UUID `customerorder` МоегоСклада. Ключ идемпотентности импорта: уникален
   /// и после создания не меняется.
-  externalId      String   @unique @db.Uuid
+  externalId      String    @unique @db.Uuid
   /// Отображаемый номер заказа. Используется для показа и поиска, но не как ключ.
   externalName    String
   /// Значение `updated` МоегоСклада: курсор delta-синхронизации.
@@ -488,14 +493,14 @@ model DeliveryOrder {
   paymentTypeName String?
 
   /// Деньги целыми копейками.
-  sumMinor      BigInt @default(0)
-  payedSumMinor BigInt @default(0)
+  sumMinor           BigInt  @default(0)
+  payedSumMinor      BigInt  @default(0)
   /// Курьер принимает деньги только при точном типе оплаты «Наличные/карта на ТТ».
-  cashCollectable Boolean @default(false)
+  cashCollectable    Boolean @default(false)
   /// max(0, sumMinor - payedSumMinor). Ниже нуля не опускается.
-  cashToCollectMinor BigInt @default(0)
+  cashToCollectMinor BigInt  @default(0)
   /// payedSum > sum: переплата или ошибка данных, требует проверки.
-  cashAnomaly Boolean @default(false)
+  cashAnomaly        Boolean @default(false)
 
   /// Относится ли заказ к нашей области прямо сейчас.
   inScope         Boolean               @default(true)
@@ -515,7 +520,7 @@ model DeliveryOrder {
   /// База гарантирует, что координаты существуют ТОЛЬКО в состоянии RESOLVED
   /// и всегда вместе с источником, точностью и временем разрешения. Поэтому
   /// непригодная точка физически не может выглядеть пригодной.
-  geoState        OrderGeoState          @default(UNRESOLVED)
+  geoState        OrderGeoState         @default(UNRESOLVED)
   geoSource       OrderGeoSource?
   geoPrecision    OrderGeoPrecision?
   geoLatMicro     Int?
@@ -529,15 +534,15 @@ model DeliveryOrder {
   /// Растёт только при постановке новой версии адреса в очередь. Пара
   /// (orderId, geoGeneration) идентифицирует задание, а ответ провайдера,
   /// вернувшийся после смены адреса, распознаётся как устаревший и отбрасывается.
-  geoGeneration   Int                   @default(0)
+  geoGeneration Int @default(0)
 
   /// Оптимистическая блокировка для будущих конкурентных изменений.
   version   Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  revisions      DeliveryOrderRevision[]
-  routeOrders    RouteOrder[]
+  revisions   DeliveryOrderRevision[]
+  routeOrders RouteOrder[]
   geoHistory  OrderGeoHistory[]
   geocodeJobs OrderGeocodeJob[]
 
@@ -563,9 +568,9 @@ model DeliveryOrderRevision {
 
   /// Канонический снимок только подтверждённых импортируемых полей.
   /// Сырой ответ API целиком не сохраняется.
-  snapshot     Json
+  snapshot      Json
   /// SHA-256 канонического снимка: дешёвая дедупликация без сравнения JSON.
-  snapshotHash String
+  snapshotHash  String
   /// Поля, реально изменившиеся относительно предыдущей ревизии.
   changedFields String[]
   reason        OrderRevisionReason
@@ -599,7 +604,6 @@ model IntegrationCursor {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
-
 
 // --- Этап 4.1. Ручные маршруты-черновики -------------------------------------
 
@@ -668,16 +672,40 @@ model DeliveryRoute {
   /// Оптимистическая блокировка. За одну логическую операцию увеличивается ровно один раз.
   version Int @default(1)
 
+  /// Склад начала и склад конца смены (этап 5.4).
+  ///
+  /// Оба необязательны: миграция не может создать склад, а ручная маршрутизация
+  /// обязана работать до того, как администратор его настроит. Для маршрута,
+  /// созданного планированием, база требует оба (CHECK `DeliveryRoute_plan_depots`):
+  /// автоматический маршрут без точки отсчёта не воспроизводим.
+  startDepotId String? @db.Uuid
+  startDepot   Depot?  @relation("RouteStartDepot", fields: [startDepotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  endDepotId   String? @db.Uuid
+  endDepot     Depot?  @relation("RouteEndDepot", fields: [endDepotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Запуск планирования, породивший маршрут. Пусто у ручного черновика.
+  planRunId String?       @db.Uuid
+  planRun   RoutePlanRun? @relation(fields: [planRunId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Слот машины, породивший маршрут.
+  ///
+  /// Уникален: один слот не может дать два маршрута. Без этого повторное
+  /// применение одного запуска создало бы вторую копию плана, и заказы
+  /// оказались бы распределены дважды.
+  planVehicleSlotId String?               @unique @db.Uuid
+  planVehicleSlot   RoutePlanVehicleSlot? @relation(fields: [planVehicleSlotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  orders       RouteOrder[] @relation("RouteOrderRoute")
-  movedInOrders RouteOrder[] @relation("RouteOrderMovedTo")
-  transitions RouteStateTransition[]
-  editLease   RouteEditLease?
+  orders        RouteOrder[]           @relation("RouteOrderRoute")
+  movedInOrders RouteOrder[]           @relation("RouteOrderMovedTo")
+  transitions   RouteStateTransition[]
+  editLease     RouteEditLease?
 
   @@index([deliveryDate, state])
   @@index([courierUserId])
+  @@index([planRunId])
 }
 
 /// Участие заказа в маршруте с историей.
@@ -747,7 +775,6 @@ model RouteNumberCounter {
   updatedAt    DateTime @updatedAt
 }
 
-
 /// Неизменяемая история переходов состояния маршрута.
 ///
 /// `DeliveryRoute.state` — текущее состояние, эта таблица — доказательство того,
@@ -806,7 +833,6 @@ model RouteEditLease {
   @@index([holderUserId])
   @@index([expiresAt])
 }
-
 
 // --- Этап 5.1. Геоданные заказа ---------------------------------------------
 
@@ -979,9 +1005,9 @@ model RouteMatrixCache {
   /// Допускает NULL: строки предыдущей версии его не содержат, и для новой
   /// версии они тем самым невидимы.
   graphSha256 String?
-  profile       VehicleType
-  trafficMode   TrafficMode
-  pointCount    Int
+  profile     VehicleType
+  trafficMode TrafficMode
+  pointCount  Int
 
   status MatrixCacheStatus @default(PENDING)
 
@@ -1064,4 +1090,219 @@ model OrderGeoHistory {
   actor       User?   @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([orderId, occurredAt])
+}
+
+// --- Этап 5.4. Склады, планирование маршрутов и автоматические черновики -----
+
+/// Склад — предметная сущность, а не настройка.
+///
+/// Его координаты участвуют в маршрутах, матрицах и истории планирования:
+/// на склад ссылаются уже посчитанные планы, и спрятать его в `SystemSetting`
+/// значило бы отложить неизбежное.
+///
+/// Записи не удаляются никогда (триггер на DELETE): маршруты и снимки
+/// планирования ссылаются на склад, и удаление оставило бы историю без точки
+/// отсчёта. Недоступность выражается признаком `isActive`.
+model Depot {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  name    String
+  address String
+
+  /// Координаты целыми микроградусами — та же точность, что у заказа.
+  /// Пределы закреплены ограничениями базы, а не только кодом.
+  latMicro Int
+  lonMicro Int
+
+  isActive Boolean @default(true)
+
+  /// Пока склад является складом по умолчанию, поле равно 'default'; иначе NULL.
+  /// Уникальный индекс по нему даёт «не более одного склада по умолчанию»
+  /// средствами базы: NULL в PostgreSQL не конфликтуют.
+  ///
+  /// База дополнительно требует, чтобы склад по умолчанию был активен
+  /// (CHECK `Depot_default_active`): состояние «выключен, но по умолчанию»
+  /// физически невозможно, даже если проверка в коде когда-нибудь исчезнет.
+  defaultKey String? @unique
+
+  /// Оптимистическая блокировка. Любое изменение склада называет ожидаемую версию.
+  version Int @default(1)
+
+  createdById String @db.Uuid
+  createdBy   User   @relation("DepotCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  startedRoutes DeliveryRoute[]        @relation("RouteStartDepot")
+  endedRoutes   DeliveryRoute[]        @relation("RouteEndDepot")
+  startedSlots  RoutePlanVehicleSlot[] @relation("PlanSlotStartDepot")
+  endedSlots    RoutePlanVehicleSlot[] @relation("PlanSlotEndDepot")
+
+  @@index([isActive])
+}
+
+/// Состояние запуска планирования.
+///
+/// Расчёт и применение разделены намеренно: `PREVIEW` — это неизменяемое
+/// предложение, которое логист видит целиком (маршруты и неразмещённые заказы)
+/// до того, как в системе появится хоть один черновик.
+enum RoutePlanRunState {
+  /// Принят, аренда расчёта ещё не взята.
+  QUEUED
+  /// Считается. Аренда с `lockedUntil` и сердцебиением.
+  COMPUTING
+  /// Готовое неизменяемое превью. Черновиков ещё нет.
+  PREVIEW
+  /// Подтверждено человеком: черновики созданы.
+  APPLIED
+  /// Отказ с безопасным кодом. Автоматически не повторяется.
+  FAILED
+  /// Превью снято с рассмотрения: истекло явным действием либо вход устарел.
+  EXPIRED
+}
+
+/// Запуск планирования маршрутов на один день.
+model RoutePlanRun {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  deliveryDate DateTime          @db.Date
+  state        RoutePlanRunState @default(QUEUED)
+
+  /// Пока запуск не завершён (QUEUED, COMPUTING, PREVIEW), поле равно дате
+  /// доставки; у завершённых — NULL. Уникальный индекс по нему запрещает два
+  /// одновременных запуска одного дня средствами базы, а не «маловероятностью».
+  ///
+  /// Именно поэтому превью не вытесняется молча: новый расчёт того же дня
+  /// возможен только после явного истечения прежнего.
+  activeDateKey DateTime? @unique @db.Date
+
+  requestedById String @db.Uuid
+  requestedBy   User   @relation("PlanRunRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Аренда расчёта по СЕРВЕРНОМУ времени. Перехват допустим только после
+  /// истечения `lockedUntil`; сердцебиение продлевает его, пока процесс жив.
+  lockedUntil DateTime?
+  lockedBy    String?
+  heartbeatAt DateTime?
+
+  /// Сколько раз расчёт восстанавливали после падения процесса. Обычная ошибка
+  /// матрицы или решателя счётчик не увеличивает и повтора не вызывает.
+  recoveryAttempts Int @default(0)
+
+  /// Только безопасный код отказа: ни тел ответов, ни координат, ни адресов.
+  failureCode String?
+
+  appliedAt   DateTime?
+  appliedById String?   @db.Uuid
+  appliedBy   User?     @relation("PlanRunAppliedBy", fields: [appliedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  version Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  slots  RoutePlanVehicleSlot[]
+  input  RoutePlanInputSnapshot?
+  result RoutePlanResultSnapshot?
+  routes DeliveryRoute[]
+
+  @@index([deliveryDate, state])
+  @@index([state, lockedUntil])
+}
+
+/// Слот машины запуска планирования.
+///
+/// После постановки запуска строка неизменяема (триггер на UPDATE и DELETE):
+/// перехват брошенной аренды обязан продолжить расчёт с теми же условиями,
+/// с которыми он был поставлен.
+model RoutePlanVehicleSlot {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  runId String       @db.Uuid
+  run   RoutePlanRun @relation(fields: [runId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Порядковый номер слота начиная с 1. Он же — числовой идентификатор машины
+  /// в запросе решателя: имён и описаний туда не уходит.
+  slotIndex Int
+
+  /// Курьер необязателен: слот может остаться без человека, и тогда его маршрут
+  /// создаётся черновиком без назначения.
+  courierUserId String? @db.Uuid
+  courier       User?   @relation("PlanSlotCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  vehicleType VehicleType
+
+  /// Вместимость в ЗАКАЗАХ: один заказ — одна единица.
+  capacityOrders Int
+
+  /// Фактически использованная смена. Минуты от полуночи.
+  shiftStartMinute Int
+  shiftEndMinute   Int
+
+  startDepotId String @db.Uuid
+  startDepot   Depot  @relation("PlanSlotStartDepot", fields: [startDepotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  endDepotId   String @db.Uuid
+  endDepot     Depot  @relation("PlanSlotEndDepot", fields: [endDepotId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  route DeliveryRoute?
+
+  /// Один курьер не может занимать два слота одного запуска. Слоты без курьера
+  /// не конфликтуют: NULL в PostgreSQL уникальности не нарушают.
+  @@unique([runId, courierUserId])
+  @@unique([runId, slotIndex])
+}
+
+/// Неизменяемый снимок ВХОДА планирования.
+///
+/// Создаётся ДО обращения к матрице и решателю. Иначе перехват брошенной аренды
+/// не смог бы продолжить расчёт с первоначальными данными: заказы, настройки
+/// и склад к тому моменту могли измениться, и повторная попытка дала бы другой
+/// ответ на тот же запрос.
+///
+/// Адресов, получателей, номеров заказов, комментариев и денег здесь нет.
+/// Координаты есть: без них воспроизвести расчёт нечем, а точки той же природы
+/// уже хранит неизменяемая `OrderGeoHistory`.
+model RoutePlanInputSnapshot {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  runId String       @unique @db.Uuid
+  run   RoutePlanRun @relation(fields: [runId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Версии входных заказов, их точки и окна, параметры слотов, смены,
+  /// время обслуживания, координаты и версии складов, предел размера задачи.
+  payload     Json
+  /// SHA-256 канонического снимка: дешёвое сравнение без разбора JSON.
+  payloadHash String
+
+  createdAt DateTime @default(now())
+}
+
+/// Неизменяемый снимок РЕЗУЛЬТАТА планирования.
+///
+/// Создаётся при переходе в `PREVIEW`. Хранит нормализованный числовой запрос
+/// к решателю и его ответ целиком: при пределе в шестьдесят точек это небольшой
+/// объём, а воспроизводимость получается настоящая. Ни адресов, ни координат,
+/// ни номеров заказов в запросе решателя нет — только индексы и числа.
+model RoutePlanResultSnapshot {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  runId String       @unique @db.Uuid
+  run   RoutePlanRun @relation(fields: [runId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Идентичность дорожного графа, по которому посчитаны матрицы.
+  graphSha256   String
+  /// Ключи кэша использованных матриц по профилям.
+  matrixKeys    Json
+  /// Версия решателя из его же ответа.
+  solverVersion String
+
+  /// Числовой запрос к решателю как он был отправлен.
+  request  Json
+  /// Ответ решателя как он был получен.
+  response Json
+  /// Разобранный план: маршруты по слотам и неразмещённые заказы.
+  plan     Json
+
+  createdAt DateTime @default(now())
 }

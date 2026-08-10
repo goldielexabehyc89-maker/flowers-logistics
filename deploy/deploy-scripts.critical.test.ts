@@ -168,6 +168,8 @@ interface EnvironmentValues {
   VALHALLA_GRAPH_DIR: string;
   VALHALLA_GRAPH_SHA256: string;
   VALHALLA_IMAGE: string;
+  VROOM_IMAGE: string;
+  VROOM_VERSION: string;
 }
 
 const STAGING_DEFAULTS: EnvironmentValues = {
@@ -183,6 +185,8 @@ const STAGING_DEFAULTS: EnvironmentValues = {
   VALHALLA_GRAPH_DIR: '/srv/geo/valhalla/20260801',
   VALHALLA_GRAPH_SHA256: GRAPH_SHA,
   VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
+  VROOM_IMAGE: 'ghcr.io/vroom-project/vroom-docker:v1.15.0@sha256:bbbb',
+  VROOM_VERSION: '1.15.0',
 };
 
 const PRODUCTION_DEFAULTS: EnvironmentValues = {
@@ -198,6 +202,8 @@ const PRODUCTION_DEFAULTS: EnvironmentValues = {
   VALHALLA_GRAPH_DIR: '/srv/geo/valhalla/20260801',
   VALHALLA_GRAPH_SHA256: GRAPH_SHA,
   VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
+  VROOM_IMAGE: 'ghcr.io/vroom-project/vroom-docker:v1.15.0@sha256:bbbb',
+  VROOM_VERSION: '1.15.0',
 };
 
 function configContent(values: EnvironmentValues, name: string): string {
@@ -219,6 +225,8 @@ function configContent(values: EnvironmentValues, name: string): string {
     `VALHALLA_GRAPH_DIR="${values.VALHALLA_GRAPH_DIR}"`,
     `VALHALLA_GRAPH_SHA256="${values.VALHALLA_GRAPH_SHA256}"`,
     `VALHALLA_IMAGE="${values.VALHALLA_IMAGE}"`,
+    `VROOM_IMAGE="${values.VROOM_IMAGE}"`,
+    `VROOM_VERSION="${values.VROOM_VERSION}"`,
     '',
   ].join('\n');
 }
@@ -1363,7 +1371,83 @@ describe('геостек в командах выкатки', () => {
       expect(content, template).toContain('VALHALLA_IMAGE=');
       expect(content, template).toContain('@sha256:');
       expect(content, template).not.toContain(':latest');
+      // Решатель закрепляется так же: тегом И digest.
+      expect(content, template).toContain('VROOM_IMAGE=');
+      expect(content, template).toContain('VROOM_VERSION=');
     }
+  });
+});
+
+describe('решатель в командах выкатки', () => {
+  it('живёт во ВНУТРЕННЕЙ сети и не публикует ни одного порта', async () => {
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+
+    // `--network none` для решателя невозможен: приложение обязано слать ему
+    // HTTP. Поэтому изоляция строится отдельной сетью без выхода наружу.
+    const vroomBlock = compose.slice(compose.indexOf('  vroom:'));
+    expect(vroomBlock).not.toContain('ports:');
+    expect(compose).toMatch(/ {2}solver:\n {4}internal: true/);
+
+    // Приложение подключено к обеим сетям, решатель — только к внутренней.
+    const appBlock = compose.slice(compose.indexOf('  app:'), compose.indexOf('  valhalla:'));
+    expect(appBlock).toContain('- default');
+    expect(appBlock).toContain('- solver');
+    expect(vroomBlock.slice(0, vroomBlock.indexOf('networks:'))).not.toContain('default');
+  });
+
+  it('приложение получает адрес решателя и его версию от Compose', async () => {
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+
+    expect(compose).toContain('VROOM_URL: http://vroom:3000');
+    expect(compose).toContain('VROOM_VERSION: ${VROOM_VERSION}');
+  });
+
+  it('обе команды поднимают решатель и проверяют его ДО миграций', async () => {
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = withoutComments(await readFile(script, 'utf8'));
+
+      const vroomUp = content.indexOf('up -d --no-build vroom"');
+      const solverCheck = content.indexOf('require_solver_ready');
+      const migrations = content.indexOf('run --rm app npx prisma migrate deploy');
+      const appUp = content.indexOf('up -d --no-build app"');
+
+      expect(vroomUp, script).toBeGreaterThan(-1);
+      expect(solverCheck, script).toBeGreaterThan(vroomUp);
+      // Отказ решателя обязан остановить выкатку ДО изменения схемы:
+      // тогда продолжает работать уже развёрнутая версия.
+      expect(migrations, script).toBeGreaterThan(solverCheck);
+      expect(appUp, script).toBeGreaterThan(migrations);
+    }
+  });
+
+  it('версия решателя проверяется формой, а образ — наличием digest', async () => {
+    const badVersion = await runInSandbox({
+      staging: { VROOM_VERSION: '1.15' },
+      body: [LOAD_BOTH, 'activate_environment STAGING', 'require_solver_ready'].join('\n'),
+    });
+    expect(badVersion.code).not.toBe(0);
+    expect(badVersion.stderr).toContain('VROOM_VERSION задан неверно');
+
+    const looseImage = await runInSandbox({
+      staging: { VROOM_IMAGE: 'ghcr.io/vroom-project/vroom-docker:v1.15.0' },
+      body: [LOAD_BOTH, 'activate_environment STAGING', 'require_solver_ready'].join('\n'),
+    });
+    expect(looseImage.code).not.toBe(0);
+    expect(looseImage.stderr).toContain('digest');
+  });
+
+  it('проверка решателя выясняет возможность, а не читает номер версии', async () => {
+    const verifier = await readFile(path.join(REPO_ROOT, 'deploy/scripts/verify-geo.mjs'), 'utf8');
+
+    // Разное время обслуживания по типам транспорта появилось в VROOM 1.15.0.
+    // Решатель более старой версии неизвестный ключ проигнорирует и вернёт
+    // правдоподобный план с нулевым временем обслуживания.
+    expect(verifier).toContain('service_per_type');
+    expect(verifier).toContain('summary?.service');
+    // В пробной задаче нет ни координат, ни описаний — как и в рабочих запросах.
+    expect(verifier).toContain('location_index');
+    const probe = verifier.slice(verifier.indexOf('async function verifySolver'));
+    expect(probe).not.toContain('description');
   });
 });
 

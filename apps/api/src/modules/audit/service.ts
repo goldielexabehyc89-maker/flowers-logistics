@@ -67,6 +67,22 @@ export const AUDIT_ACTIONS = [
   'ORDER_GEO_RESOLVED',
   'ORDER_GEO_LOW_PRECISION',
   'ORDER_GEO_FAILED',
+  // Склады. В аудит попадают название, координаты и признаки — адресов клиентов
+  // здесь нет, а адрес склада является служебным и персональным не считается.
+  'DEPOT_CREATED',
+  'DEPOT_UPDATED',
+  'DEPOT_DEFAULT_CHANGED',
+  'DEPOT_DEACTIVATED',
+  'DEPOT_ACTIVATED',
+  // Общие настройки планирования: смена и время обслуживания.
+  'SETTING_UPDATED',
+  // Планирование маршрутов. Ни адресов, ни координат заказов: только
+  // идентификаторы, количества, состояния и безопасные коды отказа.
+  'ROUTE_PLAN_REQUESTED',
+  'ROUTE_PLAN_COMPUTED',
+  'ROUTE_PLAN_FAILED',
+  'ROUTE_PLAN_APPLIED',
+  'ROUTE_PLAN_EXPIRED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

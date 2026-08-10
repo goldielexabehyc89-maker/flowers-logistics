@@ -14,6 +14,7 @@ import { PLACEHOLDERS, PlaceholderScreen, WarehousePlaceholder } from './screens
 import { DealsScreen } from './screens/deals/DealsScreen';
 import { RoutingScreen } from './screens/routing/RoutingScreen';
 import { RouteSheetsScreen } from './screens/routing/RouteSheetsScreen';
+import { PlanningScreen } from './screens/planning/PlanningScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { UsersScreen } from './screens/users/UsersScreen';
 import { AppShell } from './shell/AppShell';
@@ -95,6 +96,14 @@ export function App(): React.JSX.Element {
           element={
             <SectionRoute>
               <RoutingScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/planning"
+          element={
+            <SectionRoute>
+              <PlanningScreen />
             </SectionRoute>
           }
         />

@@ -68,7 +68,16 @@ CONFIG_KEYS=(
   REMOTE_DIR APP_DOMAIN APP_HOST_PORT
   IMAGE_REPOSITORY COMPOSE_PROJECT COMPOSE_FILE ENV_FILE DB_VOLUME
   MAP_ARTIFACTS_DIR VALHALLA_GRAPH_DIR VALHALLA_GRAPH_SHA256 VALHALLA_IMAGE
+  VROOM_IMAGE VROOM_VERSION
 )
+
+# Версия решателя из закреплённого образа: ровно три числа через точку.
+#
+# Значение уходит в неизменяемый снимок результата планирования и объясняет,
+# каким решателем получен план. ВОЗМОЖНОСТЬЮ решателя оно не является:
+# разное время обслуживания по типам транспорта приложение проверяет пробной
+# задачей при старте, а не доверием к этой строке.
+VROOM_VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+$'
 
 # Идентичность дорожного графа — это SHA-256 файла tiles.tar и ничто другое.
 #
@@ -646,6 +655,47 @@ require_routing_ready() {
   log "пробная матрица посчитана обоими профилями"
 }
 
+# Спрашивает сам решатель, умеет ли он то, на что мы рассчитываем.
+#
+# Проверяется не версия из конфигурации, а поведение. Разное время
+# обслуживания по типам транспорта появилось в VROOM 1.15.0; решатель более
+# старой версии неизвестный ключ проигнорирует и вернёт правдоподобный план
+# с нулевым временем обслуживания. Такой план выглядит выполнимым и таковым
+# не является, поэтому доверять номеру в переменной окружения нельзя.
+require_solver_ready() {
+  if is_dry_run; then
+    log "сухой прогон: проверка решателя пропущена (нужен доступ к серверу)"
+    return 0
+  fi
+
+  if ! printf '%s' "${VROOM_VERSION}" | grep -Eq "${VROOM_VERSION_PATTERN}"; then
+    fail "VROOM_VERSION задан неверно: нужен номер вида 1.15.0"
+  fi
+
+  # Образ закрепляется тегом И digest, как маршрутизатор и planetiler.
+  case "${VROOM_IMAGE}" in
+    *@sha256:*) ;;
+    *) fail "VROOM_IMAGE обязан быть закреплён digest: тег без sha256 указывает на изменяемый образ" ;;
+  esac
+
+  local attempts="${SOLVER_CHECK_ATTEMPTS:-30}"
+  local delay="${SOLVER_CHECK_DELAY:-5}"
+
+  local ready=0 attempt
+  for attempt in $(seq 1 "${attempts}"); do
+    if remote "$(compose_command) run --rm --no-deps -T \
+        -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
+        app node /verify-geo.mjs solver 'http://vroom:3000'"; then
+      ready=1
+      break
+    fi
+    sleep "${delay}"
+  done
+
+  [ "${ready}" -eq 1 ] || fail "решатель не подтвердил возможность разного времени обслуживания по типам транспорта"
+  log "решатель готов: версия ${VROOM_VERSION}, время обслуживания по типу машины учитывается"
+}
+
 require_image_revision() {
   local actual
   actual="$(remote "docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' '$(image_reference)'")"
@@ -681,10 +731,11 @@ require_ready() {
 # строку — и получается сервис без образа и bind mount из пустого пути,
 # то есть отказ на ровном месте или, хуже, монтирование не того каталога.
 compose_command() {
-  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_SHA256='%s' VALHALLA_IMAGE='%s' docker compose -f '%s' -p '%s'" \
+  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_SHA256='%s' VALHALLA_IMAGE='%s' VROOM_IMAGE='%s' VROOM_VERSION='%s' docker compose -f '%s' -p '%s'" \
     "${REMOTE_DIR}" "${IMAGE_REPOSITORY}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
     "${ENV_FILE}" "${DB_VOLUME}" "${COMPOSE_PROJECT}" \
     "${MAP_ARTIFACTS_DIR}" "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_SHA256}" "${VALHALLA_IMAGE}" \
+    "${VROOM_IMAGE}" "${VROOM_VERSION}" \
     "${COMPOSE_FILE}" "${COMPOSE_PROJECT}"
 }
 
