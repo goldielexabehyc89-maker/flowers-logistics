@@ -32,14 +32,115 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const BASEMAP_FORMAT = 'flowers-logistics/basemap-manifest@1';
 const GRAPH_FORMAT = 'flowers-logistics/valhalla-manifest@1';
 
 /** Ревизия графа — это SHA-256 и ничто другое: ровно 64 шестнадцатеричных символа. */
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+/** Предел длины пути артефакта. Тот же, что в приложении. */
+const MAX_ARTIFACT_PATH = 200;
+
+/**
+ * Допустим ли путь артефакта.
+ *
+ * Путь приходит из манифеста, который лежит рядом с файлами, и превращается
+ * в чтение с диска и в адрес HTTP. Проверка здесь — единственное дешёвое место,
+ * где это можно остановить.
+ *
+ * Внутренние пробелы РАЗРЕШЕНЫ: настоящее имя семейства шрифтов —
+ * «Noto Sans Regular», и ломать его ради регулярного выражения неправильно.
+ * Разрешение пробела не ослабляет защиту: опасны не пробелы, а выход за корень,
+ * и он запрещён отдельно и явно.
+ *
+ * Одного регулярного выражения мало. `^[^/]+(/[^/]+)*$` пропускает сегменты
+ * «.» и «..», из которых и собирается обход каталога. Поэтому путь разбирается
+ * посегментно, а результат дополнительно сверяется с realpath корня.
+ *
+ * Возвращает причину отказа или null, если путь допустим.
+ */
+export function artifactPathProblem(value) {
+  if (typeof value !== 'string' || value === '') {
+    return 'пустой путь';
+  }
+  if (value.length > MAX_ARTIFACT_PATH) {
+    return 'слишком длинный путь';
+  }
+  // Абсолютный путь увёл бы чтение куда угодно мимо корня набора.
+  if (value.startsWith('/')) {
+    return 'абсолютный путь';
+  }
+  if (value.includes('\\')) {
+    return 'обратный слэш';
+  }
+  // NUL обрывает имя на уровне системного вызова, управляющие символы
+  // не могут быть частью имени файла, который мы сами же и собрали.
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code < 0x20 || code === 0x7f) {
+      return 'управляющий символ';
+    }
+  }
+  // Percent-encoding в ИМЕНИ файла: путь уже разобран, и «%2e%2e» здесь —
+  // это попытка провести обход мимо посегментной проверки.
+  if (value.includes('%')) {
+    return 'percent-encoding в имени';
+  }
+
+  for (const segment of value.split('/')) {
+    if (segment === '') {
+      return 'пустой сегмент';
+    }
+    if (segment === '.' || segment === '..') {
+      return `сегмент «${segment}»`;
+    }
+    if (segment !== segment.trim()) {
+      return 'пробел в начале или конце сегмента';
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Разрешает путь артефакта внутри корня набора.
+ *
+ * Посегментной проверки мало: символическая ссылка проходит её целиком,
+ * а ведёт наружу. Сравниваются именно realpath, то есть то, что система
+ * действительно откроет.
+ */
+export async function resolveArtifact(root, relative) {
+  const problem = artifactPathProblem(relative);
+  if (problem !== null) {
+    return { ok: false, problem };
+  }
+
+  let rootReal;
+  try {
+    rootReal = await realpath(root);
+  } catch {
+    return { ok: false, problem: 'каталог набора недоступен' };
+  }
+
+  const candidate = path.join(rootReal, relative);
+  let real;
+  try {
+    real = await realpath(candidate);
+  } catch {
+    // Файла нет — это отдельный случай, и путь сам по себе допустим.
+    return { ok: true, file: candidate, missing: true };
+  }
+
+  if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+    return { ok: false, problem: 'путь выходит за пределы каталога набора' };
+  }
+
+  return { ok: true, file: real, missing: false };
+}
 
 /**
  * Синтетические точки для пробного расчёта.
@@ -103,7 +204,14 @@ async function verifyBasemap(root) {
   }
 
   for (const artifact of manifest.artifacts) {
-    const file = path.join(root, artifact.path);
+    // Путь проверяется ДО обращения к диску: манифест приходит вместе
+    // с файлами, и его запись превращается в чтение и в адрес HTTP.
+    const resolved = await resolveArtifact(root, artifact.path);
+    if (!resolved.ok) {
+      fail(`недопустимый путь в манифесте подложки: ${resolved.problem}`);
+    }
+
+    const file = resolved.file;
 
     let size;
     try {
@@ -118,6 +226,14 @@ async function verifyBasemap(root) {
     if ((await sha256(file)) !== artifact.sha256) {
       fail(`контрольная сумма не совпала: ${artifact.path}`);
     }
+  }
+
+  const styleProblem = artifactPathProblem(manifest.style);
+  if (styleProblem !== null) {
+    fail(`недопустимый путь стиля в манифесте: ${styleProblem}`);
+  }
+  if (!manifest.artifacts.some((artifact) => artifact.path === manifest.style)) {
+    fail(`файл стиля ${String(manifest.style)} не перечислен в манифесте`);
   }
 
   console.error(
@@ -303,35 +419,48 @@ async function verifyMatrix(url) {
   }
 }
 
-const [mode, first, second] = process.argv.slice(2);
+/**
+ * Разбор аргументов и запуск.
+ *
+ * Вынесен в функцию и вызывается только при прямом запуске: иначе модуль
+ * нельзя импортировать, а общий корпус контрактных проверок обязан прогонять
+ * ОДИН список путей и через этот код, и через приложение.
+ */
+async function main() {
+  const [mode, first, second] = process.argv.slice(2);
 
-try {
-  switch (mode) {
-    case 'basemap':
-      await verifyBasemap(first);
-      break;
-    case 'graph':
-      await verifyGraph(first, second);
-      break;
-    case 'routing':
-      await verifyRouting(first);
-      break;
-    case 'matrix':
-      await verifyMatrix(first);
-      break;
-    default:
-      console.error(
-        'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url>',
-      );
-      process.exit(EXIT_USAGE);
+  try {
+    switch (mode) {
+      case 'basemap':
+        await verifyBasemap(first);
+        break;
+      case 'graph':
+        await verifyGraph(first, second);
+        break;
+      case 'routing':
+        await verifyRouting(first);
+        break;
+      case 'matrix':
+        await verifyMatrix(first);
+        break;
+      default:
+        console.error(
+          'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url>',
+        );
+        process.exit(EXIT_USAGE);
+    }
+  } catch (error) {
+    // Сюда попадает только то, чего проверка не предусмотрела: испорченная
+    // структура манифеста, ошибка чтения, дефект самого скрипта. Это НЕ вывод
+    // о несовпадении артефактов, и код возврата обязан отличаться — иначе
+    // выкатка объявила бы файлы повреждёнными, ничего о них не установив.
+    console.error(
+      `ВНУТРЕННЯЯ ОШИБКА ПРОВЕРКИ: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(EXIT_INTERNAL);
   }
-} catch (error) {
-  // Сюда попадает только то, чего проверка не предусмотрела: испорченная
-  // структура манифеста, ошибка чтения, дефект самого скрипта. Это НЕ вывод
-  // о несовпадении артефактов, и код возврата обязан отличаться — иначе
-  // выкатка объявила бы файлы повреждёнными, ничего о них не установив.
-  console.error(
-    `ВНУТРЕННЯЯ ОШИБКА ПРОВЕРКИ: ${error instanceof Error ? error.message : String(error)}`,
-  );
-  process.exit(EXIT_INTERNAL);
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
 }

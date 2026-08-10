@@ -408,6 +408,25 @@ test('собственная подложка: всё с нашего origin и 
   expect(range.contentRange).toMatch(/^bytes 0-126\/\d+$/);
   expect(range.acceptRanges).toBe('bytes');
 
+  // Глифы лежат в каталоге «Noto Sans Regular» — с пробелами, как в настоящем
+  // наборе. Браузер пришлёт адрес закодированным, и подложка обязана его
+  // отдать: из-за отказа принимать пробел карта на staging не работала вовсе.
+  const glyphs = await page.evaluate(async () => {
+    const response = await fetch('/maps/fonts/Noto%20Sans%20Regular/0-255.pbf');
+    return {
+      status: response.status,
+      type: response.headers.get('content-type'),
+      bytes: (await response.arrayBuffer()).byteLength,
+    };
+  });
+
+  expect(glyphs.status).toBe(200);
+  expect(glyphs.type).toBe('application/x-protobuf');
+  expect(glyphs.bytes).toBeGreaterThan(0);
+
+  // Адрес глифов в стиле — тоже относительный и с настоящим именем семейства.
+  expect(style.body).toContain('{fontstack}');
+
   // Расчёт времени в этой проверке не настроен, поэтому обещать его нечем:
   // пометка о пробках появляется только вместе с доступным маршрутизатором.
   expect(config.routingAvailable).toBe(false);

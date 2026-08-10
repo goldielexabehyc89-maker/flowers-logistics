@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -28,19 +28,80 @@ export const BASEMAP_MANIFEST_FORMAT = 'flowers-logistics/basemap-manifest@1';
 
 export const MANIFEST_FILE_NAME = 'manifest.json';
 
+/** Предел длины пути артефакта. Тот же, что в `deploy/scripts/verify-geo.mjs`. */
+const MAX_ARTIFACT_PATH = 200;
+
 /**
- * Относительный путь артефакта внутри каталога.
+ * Допустим ли путь артефакта. Возвращает причину отказа или `null`.
  *
- * Ни абсолютных путей, ни `..`, ни обратных слэшей: манифест приходит вместе
- * с файлами, и путь из него превращается в чтение с диска. Проверка здесь —
- * единственное место, где это можно остановить дёшево.
+ * Манифест приходит вместе с файлами, и его запись превращается в чтение
+ * с диска и в адрес HTTP. Проверка здесь — самое дешёвое место, где это можно
+ * остановить.
+ *
+ * Внутренние пробелы РАЗРЕШЕНЫ: настоящее имя семейства шрифтов —
+ * «Noto Sans Regular», и 256 файлов глифов законно лежат в каталоге с пробелами.
+ * Прежнее выражение `^[A-Za-z0-9._-]+…$` их отвергало, и подложка объявлялась
+ * ненастроенной при совершенно исправном наборе.
+ *
+ * Разрешение пробела ничего не ослабляет. Опасны не пробелы, а выход за корень,
+ * и он запрещён отдельно: одного регулярного выражения мало, потому что
+ * `^[^/]+(/[^/]+)*$` пропускает сегменты «.» и «..», из которых обход
+ * каталога и собирается. Поэтому путь разбирается посегментно, а фактическое
+ * расположение файла дополнительно сверяется с realpath корня.
+ *
+ * ЭТИ ПРАВИЛА ОБЯЗАНЫ СОВПАДАТЬ с `artifactPathProblem` в
+ * `deploy/scripts/verify-geo.mjs`. Совпадение закреплено общим корпусом
+ * проверок `deploy/manifest-path-contract.critical.test.ts`: расхождение
+ * означало бы, что выкатка одобряет набор, который приложение не примет, —
+ * ровно это и случилось на staging.
  */
+export function artifactPathProblem(value: unknown): string | null {
+  if (typeof value !== 'string' || value === '') {
+    return 'пустой путь';
+  }
+  if (value.length > MAX_ARTIFACT_PATH) {
+    return 'слишком длинный путь';
+  }
+  if (value.startsWith('/')) {
+    return 'абсолютный путь';
+  }
+  if (value.includes('\\')) {
+    return 'обратный слэш';
+  }
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) {
+      return 'управляющий символ';
+    }
+  }
+  // Percent-encoding в ИМЕНИ файла: путь уже разобран, и «%2e%2e» здесь —
+  // попытка провести обход мимо посегментной проверки.
+  if (value.includes('%')) {
+    return 'percent-encoding в имени';
+  }
+
+  for (const segment of value.split('/')) {
+    if (segment === '') {
+      return 'пустой сегмент';
+    }
+    if (segment === '.' || segment === '..') {
+      return `сегмент «${segment}»`;
+    }
+    if (segment !== segment.trim()) {
+      return 'пробел в начале или конце сегмента';
+    }
+  }
+
+  return null;
+}
+
 const relativePath = z
   .string()
   .min(1)
-  .max(200)
-  .regex(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/, 'Ожидается относительный путь без «..»')
-  .refine((value) => !value.split('/').includes('..'), 'Путь не может выходить за каталог');
+  .max(MAX_ARTIFACT_PATH)
+  .refine((value) => artifactPathProblem(value) === null, {
+    message: 'Недопустимый путь артефакта',
+  });
 
 const artifactSchema = z.object({
   path: relativePath,
@@ -103,7 +164,9 @@ export type BasemapProblem =
   | 'ARTIFACT_MISSING'
   | 'SIZE_MISMATCH'
   | 'CHECKSUM_MISMATCH'
-  | 'STYLE_NOT_LISTED';
+  | 'STYLE_NOT_LISTED'
+  /** Файл нашёлся, но лежит вне каталога набора: символическая ссылка наружу. */
+  | 'ARTIFACT_OUTSIDE_ROOT';
 
 export interface BasemapReady {
   ok: true;
@@ -187,8 +250,17 @@ export async function loadBasemap(
     return { ok: false, problem: 'STYLE_NOT_LISTED' };
   }
 
+  // Корень разрешается один раз: сравнивать нужно то, что система действительно
+  // откроет, а не то, что написано в манифесте.
+  let rootReal: string;
+  try {
+    rootReal = await realpath(root);
+  } catch {
+    return { ok: false, problem: 'NOT_CONFIGURED' };
+  }
+
   for (const artifact of parsed.artifacts) {
-    const filePath = path.join(root, artifact.path);
+    const filePath = path.join(rootReal, artifact.path);
 
     let size: number;
     try {
@@ -199,6 +271,18 @@ export async function loadBasemap(
       size = info.size;
     } catch {
       return { ok: false, problem: 'ARTIFACT_MISSING', artifact: artifact.path };
+    }
+
+    // Посегментной проверки мало: символическая ссылка проходит её целиком,
+    // а ведёт наружу. Сверяется фактическое расположение файла.
+    let real: string;
+    try {
+      real = await realpath(filePath);
+    } catch {
+      return { ok: false, problem: 'ARTIFACT_MISSING', artifact: artifact.path };
+    }
+    if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+      return { ok: false, problem: 'ARTIFACT_OUTSIDE_ROOT', artifact: artifact.path };
     }
 
     if (size !== artifact.bytes) {
@@ -213,7 +297,7 @@ export async function loadBasemap(
     }
   }
 
-  return { ok: true, root, manifest: parsed, artifacts };
+  return { ok: true, root: rootReal, manifest: parsed, artifacts };
 }
 
 /** Человеческое объяснение отказа. Технических подробностей наружу не уходит. */
@@ -232,5 +316,7 @@ export function describeProblem(problem: BasemapProblem): string {
       return 'Карта не настроена: файлы подложки не совпадают с манифестом.';
     case 'STYLE_NOT_LISTED':
       return 'Карта не настроена: стиль отсутствует в манифесте.';
+    case 'ARTIFACT_OUTSIDE_ROOT':
+      return 'Карта не настроена: файл подложки лежит вне её каталога.';
   }
 }
