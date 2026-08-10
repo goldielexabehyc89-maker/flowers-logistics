@@ -11,7 +11,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -354,6 +355,60 @@ describe('раздача артефактов', () => {
     expect(response.rawPayload[7]).toBe(3);
   });
 
+  it('глифы в каталоге с пробелами отдаются, в том числе по percent-encoded адресу', async () => {
+    // Настоящий набор держит 256 файлов глифов в каталоге «Noto Sans Regular».
+    // Прежняя схема пути отвергала пробел, и подложка объявлялась ненастроенной
+    // при совершенно исправных файлах — карта на staging не работала целиком.
+    const manifest = await manifestOf();
+    const glyphs = manifest.artifacts.find((artifact) => artifact.path.endsWith('.pbf'));
+
+    expect(glyphs?.path).toBe('fonts/Noto Sans Regular/0-255.pbf');
+
+    // Так путь выглядит в манифесте.
+    const direct = await app.inject({ method: 'GET', url: `/maps/${glyphs?.path ?? ''}` });
+    expect(direct.statusCode).toBe(200);
+    expect(direct.headers['content-type']).toBe('application/x-protobuf');
+
+    // А так его пришлёт браузер: MapLibre подставляет {fontstack} в адрес,
+    // и пробел приезжает закодированным.
+    const encoded = await app.inject({
+      method: 'GET',
+      url: '/maps/fonts/Noto%20Sans%20Regular/0-255.pbf',
+    });
+    expect(encoded.statusCode).toBe(200);
+    expect(encoded.rawPayload.length).toBe(glyphs?.bytes);
+    expect(encoded.rawPayload.equals(direct.rawPayload)).toBe(true);
+  });
+
+  it('percent-encoded обход каталога не отдаёт ни одного файла', async () => {
+    for (const url of [
+      '/maps/%2e%2e/%2e%2e/etc/passwd',
+      '/maps/fonts/%2e%2e/%2e%2e/manifest.json',
+      '/maps/..%2f..%2fetc%2fpasswd',
+      '/maps/fonts/Noto%20Sans%20Regular/%2e%2e/%2e%2e/manifest.json',
+    ]) {
+      const response = await app.inject({ method: 'GET', url });
+
+      // Часть таких адресов маршрутизатор сворачивает сам и до `/maps/*`
+      // они не доходят — тогда отвечает оболочка приложения, как на любой
+      // неизвестный адрес. Важно не то, каким кодом ответили, а то, что
+      // содержимого файла наружу не ушло ни в одном случае.
+      const type = String(response.headers['content-type'] ?? '');
+      expect(type, url).not.toContain('application/octet-stream');
+      expect(type, url).not.toContain('application/x-protobuf');
+      expect(type, url).not.toContain('image/png');
+      expect(response.body, url).not.toContain('flowers-logistics/basemap-manifest');
+      expect(response.body, url).not.toContain('root:');
+
+      if (response.statusCode === 200) {
+        // Это оболочка SPA, а не артефакт.
+        expect(type, url).toContain('text/html');
+      } else {
+        expect(response.statusCode, url).toBe(404);
+      }
+    }
+  });
+
   it('неудовлетворимый диапазон даёт 416 с размером файла', async () => {
     const manifest = await manifestOf();
     const tiles = manifest.artifacts.find((artifact) => artifact.path.endsWith('.pmtiles'));
@@ -395,6 +450,104 @@ describe('раздача артефактов', () => {
 
     // Прямой запрос отвергается маршрутом: файла нет в белом списке.
     expect((await app.inject({ method: 'GET', url: '/maps/manifest.json' })).statusCode).toBe(404);
+  });
+});
+
+describe('манифест и границы каталога набора', () => {
+  it('набор с пробелами в путях загружается без MANIFEST_INVALID', async () => {
+    // Тот самый случай, из-за которого карта на staging не работала:
+    // файлы целы, суммы совпадают, а манифест отвергался схемой пути.
+    const state = await loadBasemap(root);
+
+    expect(state.ok).toBe(true);
+    if (state.ok) {
+      expect(state.manifest.artifacts.some((artifact) => artifact.path.includes(' '))).toBe(true);
+    }
+  });
+
+  it('символическая ссылка за пределы каталога отклоняется', async () => {
+    const outside = await mkdtemp(path.join(tmpdir(), 'fl-basemap-outside-'));
+    const set = await mkdtemp(path.join(tmpdir(), 'fl-basemap-symlink-'));
+
+    try {
+      const secret = path.join(outside, 'secret.pbf');
+      await writeFile(secret, 'посторонний файл', 'utf8');
+
+      const linked = path.join(set, 'escape.pbf');
+      await symlink(secret, linked);
+
+      const bytes = (await stat(linked)).size;
+      const sha = createHash('sha256')
+        .update(await readFile(linked))
+        .digest('hex');
+
+      await writeFile(
+        path.join(set, 'manifest.json'),
+        JSON.stringify({
+          format: 'flowers-logistics/basemap-manifest@1',
+          revision: 'test0001',
+          region: 'Тест',
+          bbox: [0, 0, 1, 1],
+          sourceDate: '2026-08-06',
+          sourceSha256: 'a'.repeat(64),
+          tools: { planetiler: 'test' },
+          attribution: '© OpenStreetMap contributors',
+          style: 'escape.pbf',
+          artifacts: [
+            { path: 'escape.pbf', bytes, sha256: sha, contentType: 'application/x-protobuf' },
+          ],
+        }),
+        'utf8',
+      );
+
+      // Посегментной проверки мало: ссылка проходит её целиком, а ведёт наружу.
+      const state = await loadBasemap(set);
+      expect(state.ok).toBe(false);
+      if (!state.ok) {
+        expect(state.problem).toBe('ARTIFACT_OUTSIDE_ROOT');
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(set, { recursive: true, force: true });
+    }
+  });
+
+  it('недопустимый путь в манифесте объявляет карту ненастроенной', async () => {
+    const set = await mkdtemp(path.join(tmpdir(), 'fl-basemap-bad-path-'));
+
+    try {
+      await writeFile(
+        path.join(set, 'manifest.json'),
+        JSON.stringify({
+          format: 'flowers-logistics/basemap-manifest@1',
+          revision: 'test0001',
+          region: 'Тест',
+          bbox: [0, 0, 1, 1],
+          sourceDate: '2026-08-06',
+          sourceSha256: 'a'.repeat(64),
+          tools: { planetiler: 'test' },
+          attribution: '© OpenStreetMap contributors',
+          style: '../outside.json',
+          artifacts: [
+            {
+              path: '../outside.json',
+              bytes: 1,
+              sha256: 'b'.repeat(64),
+              contentType: 'application/json',
+            },
+          ],
+        }),
+        'utf8',
+      );
+
+      const state = await loadBasemap(set);
+      expect(state.ok).toBe(false);
+      if (!state.ok) {
+        expect(state.problem).toBe('MANIFEST_INVALID');
+      }
+    } finally {
+      await rm(set, { recursive: true, force: true });
+    }
   });
 });
 

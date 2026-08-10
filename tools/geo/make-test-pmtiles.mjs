@@ -46,7 +46,11 @@ const tilesName = `tiles-${revision}.pmtiles`;
 const styleName = `style-${revision}.json`;
 
 await mkdir(path.join(root, 'sprite'), { recursive: true });
-await mkdir(path.join(root, 'fonts', 'NotoSans-Regular'), { recursive: true });
+// Имя семейства шрифтов с пробелами — ровно так устроен настоящий набор
+// (ресурсы protomaps дают «Noto Sans Regular»). Фикстура обязана повторять
+// этот формат: иначе проверки не заметили бы, что подложка с пробелами
+// в путях не принимается приложением.
+await mkdir(path.join(root, 'fonts', 'Noto Sans Regular'), { recursive: true });
 
 const header = buildPmtilesHeader();
 // Немного «содержимого» после заголовка: диапазонные запросы должны иметь
@@ -92,7 +96,7 @@ const files = [
   },
   { relative: 'sprite/sprite.png', data: spritePng, contentType: 'image/png' },
   {
-    relative: 'fonts/NotoSans-Regular/0-255.pbf',
+    relative: 'fonts/Noto Sans Regular/0-255.pbf',
     data: glyphs,
     contentType: 'application/x-protobuf',
   },

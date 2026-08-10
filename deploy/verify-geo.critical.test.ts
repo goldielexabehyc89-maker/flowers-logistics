@@ -17,7 +17,7 @@
 
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, utimes, writeFile, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile, readFile, stat } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -194,6 +194,118 @@ describe('идентичность дорожного графа определ�
     const after = await stat(tilesPath);
     expect(after.mtimeMs).toBe(before.mtimeMs);
     expect(sha256(await readFile(tilesPath))).toBe(tilesSha);
+  });
+});
+
+describe('проверка выкатки судит о путях так же, как приложение', () => {
+  let root: string;
+
+  async function writeBasemapManifest(artifactPath: string): Promise<void> {
+    const data = Buffer.from('содержимое', 'utf8');
+    const file = path.join(root, artifactPath);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, data);
+
+    await writeFile(
+      path.join(root, 'manifest.json'),
+      JSON.stringify({
+        format: 'flowers-logistics/basemap-manifest@1',
+        revision: 'test0001',
+        style: artifactPath,
+        artifacts: [
+          {
+            path: artifactPath,
+            bytes: data.length,
+            sha256: sha256(data),
+            contentType: 'application/x-protobuf',
+          },
+        ],
+      }),
+    );
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'basemap-paths-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('каталог шрифтов с пробелами принимается', async () => {
+    // Формат настоящего набора: 256 файлов глифов лежат в «Noto Sans Regular».
+    await writeBasemapManifest('fonts/Noto Sans Regular/0-255.pbf');
+
+    const result = await runVerifier(['basemap', root]);
+
+    expect(result.code, result.stderr).toBe(0);
+  });
+
+  it('обход каталога в манифесте отклоняется как несовпадение', async () => {
+    await writeBasemapManifest('ok.pbf');
+    const manifestPath = path.join(root, 'manifest.json');
+
+    for (const bad of ['../outside.pbf', 'a/../../outside.pbf', '/etc/passwd', 'a//b.pbf', '.']) {
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+        style: string;
+        artifacts: { path: string }[];
+      };
+      manifest.artifacts[0]!.path = bad;
+      manifest.style = bad;
+      await writeFile(manifestPath, JSON.stringify(manifest));
+
+      const result = await runVerifier(['basemap', root]);
+
+      expect(result.code, `путь «${bad}» должен быть отклонён`).toBe(EXIT_MISMATCH);
+      expect(result.stderr).toContain('недопустимый путь');
+    }
+  });
+
+  it('символическая ссылка за пределы набора отклоняется', async () => {
+    const outside = await mkdtemp(path.join(tmpdir(), 'basemap-outside-'));
+    try {
+      const secret = path.join(outside, 'secret.pbf');
+      const data = Buffer.from('посторонний файл', 'utf8');
+      await writeFile(secret, data);
+
+      await symlink(secret, path.join(root, 'escape.pbf'));
+      await writeFile(
+        path.join(root, 'manifest.json'),
+        JSON.stringify({
+          format: 'flowers-logistics/basemap-manifest@1',
+          revision: 'test0001',
+          style: 'escape.pbf',
+          artifacts: [
+            {
+              path: 'escape.pbf',
+              bytes: data.length,
+              sha256: sha256(data),
+              contentType: 'application/x-protobuf',
+            },
+          ],
+        }),
+      );
+
+      const result = await runVerifier(['basemap', root]);
+
+      expect(result.code).toBe(EXIT_MISMATCH);
+      expect(result.stderr).toContain('выходит за пределы каталога набора');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('стиль обязан быть перечислен и иметь допустимый путь', async () => {
+    await writeBasemapManifest('ok.pbf');
+    const manifestPath = path.join(root, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { style: string };
+    manifest.style = 'нет-такого.json';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const result = await runVerifier(['basemap', root]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('не перечислен в манифесте');
   });
 });
 
