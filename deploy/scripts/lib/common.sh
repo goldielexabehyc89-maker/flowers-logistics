@@ -21,6 +21,11 @@ fail() { printf '\nОТКАЗ: %s\n' "$*" >&2; exit 1; }
 DRY_RUN="0"
 VERSION=""
 
+# Суммы доставленных файлов. Пустые, пока ничего не доставляли:
+# в сухом прогоне доставки нет вовсе.
+DELIVERED_SHA256=""
+VERIFIER_SHA256=""
+
 # --- Разбор аргументов ---------------------------------------------------
 
 parse_args() {
@@ -349,6 +354,7 @@ deliver_versioned_file() {
   # Замена — только после успешной сверки и одним движением.
   remote "mv '${remote_path}.new' '${remote_path}'"
 
+  DELIVERED_SHA256="${expected}"
   log "доставлен ${repo_path} версии ${VERSION:0:12}: ${expected:0:16}…"
 }
 
@@ -381,18 +387,176 @@ sha256_of() {
 # на разных серверах оказались бы разные его версии.
 upload_verifier() {
   deliver_versioned_file "deploy/scripts/verify-geo.mjs" "${REMOTE_DIR}/verify-geo.mjs"
+  VERIFIER_SHA256="${DELIVERED_SHA256}"
 }
 
-# Запускает проверку внутри закреплённого образа приложения.
+# Коды возврата verify-geo.mjs. Обязаны совпадать с самим скриптом.
+VERIFY_EXIT_MISMATCH=10
+VERIFY_EXIT_INTERNAL=20
+VERIFY_EXIT_USAGE=2
+
+# Сколько ждать результат и как часто спрашивать. Переопределяются проверками:
+# ждать двадцать минут в тесте незачем.
+GEO_VERIFY_ATTEMPTS="${GEO_VERIFY_ATTEMPTS:-120}"
+GEO_VERIFY_DELAY="${GEO_VERIFY_DELAY:-10}"
+
+# Итог последней проверки: OK | MISMATCH | INTERNAL | USAGE | TIMEOUT | LOST |
+# FOREIGN | MALFORMED. Читается вызывающей стороной, чтобы написать в журнал
+# правду, а не единственное заготовленное объяснение.
+GEO_VERIFY_STATUS=""
+GEO_VERIFY_DETAIL=""
+
+# Проверка артефактов, ОТВЯЗАННАЯ ОТ SSH.
 #
-# Именно внутри образа, а не на сервере: полагаться на установленный там Node
-# нельзя — его может не быть вовсе, а версия может отличаться от проверенной.
+# Подсчёт SHA-256 гигабайтного набора длится минуты. Раньше он жил ровно
+# столько, сколько держалось соединение: обрыв канала убивал проверку, и
+# выкатка объявляла артефакты не совпавшими с манифестом, ничего о них
+# не установив. Это ровно то, что произошло на нестабильном канале при
+# исправных файлах.
+#
+# Теперь сервер получает задание и выполняет его сам. Клиент только запускает
+# проверку и опрашивает результат короткими соединениями: обрыв опроса стоит
+# одной попытки и ничего не перезапускает.
+#
+# Проверка внутри закреплённого образа приложения, а не на сервере: полагаться
+# на установленный там Node нельзя — его может не быть вовсе, а версия может
+# отличаться от проверенной.
 run_verifier_with_mount() {
   local mount="$1" mode="$2" argument="$3" revision="$4"
-  remote "docker run --rm --network none \
-    -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \
-    -v '${mount}:${mount}:ro' \
-    '$(image_reference)' node /verify-geo.mjs '${mode}' '${argument}' '${revision}'"
+
+  GEO_VERIFY_STATUS=""
+  GEO_VERIFY_DETAIL=""
+
+  # Каталог задания уникален для каждой проверки каждой выкатки. Общий
+  # предсказуемый путь однажды отдал бы результат прошлого запуска как свой.
+  local job_id="${VERSION:0:12}-${mode}-$$-${RANDOM}"
+  local job_dir="${REMOTE_DIR}/state/geo-verify/${job_id}"
+
+  # Раннер пишется файлом, а не собирается в строке ssh: команда с тремя
+  # уровнями кавычек нечитаема и ломается от любого пути с пробелом.
+  local runner encoded
+  runner="$(printf '%s\n' \
+    '#!/bin/sh' \
+    '# Задание проверки артефактов. Живёт независимо от SSH-соединения.' \
+    'set -u' \
+    'dir="$1"' \
+    '# Ровно один запуск: повторный вызов ничего не делает.' \
+    'if [ -e "${dir}/started" ]; then exit 0; fi' \
+    ': > "${dir}/started"' \
+    "docker run --rm --network none \\" \
+    "  -v '${REMOTE_DIR}/verify-geo.mjs:/verify-geo.mjs:ro' \\" \
+    "  -v '${mount}:${mount}:ro' \\" \
+    "  '$(image_reference)' node /verify-geo.mjs '${mode}' '${argument}' '${revision}' \\" \
+    '  > "${dir}/stdout" 2> "${dir}/stderr"' \
+    'code=$?' \
+    '# Результат появляется целиком или не появляется вовсе: читатель никогда' \
+    '# не увидит наполовину записанную строку.' \
+    "printf '%s %s %s\\n' '${job_id}' '${VERIFIER_SHA256}' \"\${code}\" > \"\${dir}/result.tmp\"" \
+    'mv "${dir}/result.tmp" "${dir}/result"')"
+  encoded="$(printf '%s' "${runner}" | base64 | tr -d '\n')"
+
+  # Запуск. Все три потока закрыты, иначе ssh ждал бы завершения проверки.
+  if ! remote "mkdir -p '${REMOTE_DIR}/state/geo-verify' && mkdir '${job_dir}' && chmod 700 '${job_dir}' && printf '%s' '${encoded}' | base64 -d > '${job_dir}/run.sh' && chmod 600 '${job_dir}/run.sh' && nohup sh '${job_dir}/run.sh' '${job_dir}' > /dev/null 2>&1 < /dev/null & echo запущено" > /dev/null; then
+    GEO_VERIFY_STATUS="LAUNCH_FAILED"
+    GEO_VERIFY_DETAIL="не удалось запустить проверку на сервере"
+    return 1
+  fi
+
+  await_verifier_result "${job_dir}" "${job_id}"
+}
+
+# Опрашивает результат короткими соединениями.
+#
+# Обрыв опроса — это обрыв опроса, а не приговор артефактам: попытка теряется,
+# проверка на сервере продолжается, ничего не перезапускается.
+await_verifier_result() {
+  local job_dir="$1" job_id="$2"
+  local attempt line rc drops=0
+
+  for attempt in $(seq 1 "${GEO_VERIFY_ATTEMPTS}"); do
+    # Команда всегда завершается успешно и сама сообщает, что нашла: иначе
+    # «файла ещё нет» и «соединение оборвалось» дали бы один и тот же код.
+    line="$(remote "d='${job_dir}'; if [ ! -d \"\$d\" ]; then printf 'LOST\n'; elif [ -f \"\$d/result\" ]; then cat \"\$d/result\"; else printf 'PENDING\n'; fi" 2>/dev/null)"
+    rc=$?
+
+    if [ "${rc}" -ne 0 ]; then
+      drops=$((drops + 1))
+      sleep "${GEO_VERIFY_DELAY}"
+      continue
+    fi
+
+    case "${line}" in
+      PENDING) sleep "${GEO_VERIFY_DELAY}"; continue ;;
+      LOST)
+        GEO_VERIFY_STATUS="LOST"
+        GEO_VERIFY_DETAIL="каталог задания проверки исчез с сервера"
+        return 1
+        ;;
+    esac
+
+    # Разбор результата. Строка обязана быть полной и принадлежать этому
+    # запуску и этой версии проверяющего скрипта.
+    local got_id got_sha got_code extra
+    read -r got_id got_sha got_code extra <<< "${line}"
+
+    if [ -z "${got_code:-}" ] || [ -n "${extra:-}" ] || ! printf '%s' "${got_code}" | grep -Eq '^[0-9]+$'; then
+      GEO_VERIFY_STATUS="MALFORMED"
+      GEO_VERIFY_DETAIL="результат проверки записан не полностью"
+      return 1
+    fi
+
+    if [ "${got_id}" != "${job_id}" ] || [ "${got_sha}" != "${VERIFIER_SHA256}" ]; then
+      GEO_VERIFY_STATUS="FOREIGN"
+      GEO_VERIFY_DETAIL="результат принадлежит другому запуску проверки"
+      return 1
+    fi
+
+    # Результат получен — и только теперь убирается собственный каталог.
+    remote "rm -rf '${job_dir}'" > /dev/null 2>&1 || true
+
+    case "${got_code}" in
+      0)
+        GEO_VERIFY_STATUS="OK"
+        [ "${drops}" -gt 0 ] && log "опрос прерывался ${drops} раз(а), проверка при этом не перезапускалась"
+        return 0
+        ;;
+      "${VERIFY_EXIT_MISMATCH}")
+        GEO_VERIFY_STATUS="MISMATCH"
+        GEO_VERIFY_DETAIL="проверка завершилась и установила несовпадение"
+        return 1
+        ;;
+      "${VERIFY_EXIT_USAGE}")
+        GEO_VERIFY_STATUS="USAGE"
+        GEO_VERIFY_DETAIL="проверка вызвана с неверными аргументами"
+        return 1
+        ;;
+      *)
+        GEO_VERIFY_STATUS="INTERNAL"
+        GEO_VERIFY_DETAIL="проверка завершилась внутренней ошибкой (код ${got_code})"
+        return 1
+        ;;
+    esac
+  done
+
+  # Времени не хватило. Про артефакты не сказано ничего, и новую проверку
+  # никто автоматически не запускает: это решение владельца.
+  GEO_VERIFY_STATUS="TIMEOUT"
+  GEO_VERIFY_DETAIL="результат не получен за отведённое время (обрывов опроса: ${drops})"
+  return 1
+}
+
+# Единая формулировка отказа.
+#
+# «Не совпадает с манифестом» допустимо ровно в одном случае: проверка дошла
+# до конца и установила несовпадение. Во всех остальных случаях мы про файлы
+# не знаем ничего и говорить о них не вправе.
+geo_verify_failure_message() {
+  local subject="$1" where="$2"
+  case "${GEO_VERIFY_STATUS}" in
+    MISMATCH)  printf '%s на сервере не совпадает с проверенным содержимым: %s' "${subject}" "${where}" ;;
+    TIMEOUT)   printf 'проверка «%s» не завершилась за отведённое время: %s. Артефакты несовпавшими НЕ признаны' "${subject}" "${GEO_VERIFY_DETAIL}" ;;
+    *)         printf 'проверка «%s» не состоялась: %s. Артефакты несовпавшими НЕ признаны' "${subject}" "${GEO_VERIFY_DETAIL}" ;;
+  esac
 }
 
 # Проверяет картографические артефакты на сервере.
@@ -420,12 +584,12 @@ require_geo_artifacts() {
   upload_verifier
 
   run_verifier_with_mount "${MAP_ARTIFACTS_DIR}" basemap "${MAP_ARTIFACTS_DIR}" "" \
-    || fail "подложка на сервере не совпадает с манифестом: ${MAP_ARTIFACTS_DIR}"
+    || fail "$(geo_verify_failure_message 'подложка' "${MAP_ARTIFACTS_DIR}")"
 
   # Считает фактический SHA-256 лежащего на сервере tiles.tar и сводит его
   # с манифестом и конфигурацией. Время изменения файла в проверке не участвует.
   run_verifier_with_mount "${VALHALLA_GRAPH_DIR}" graph "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_SHA256}" \
-    || fail "содержимое дорожного графа на сервере не совпало с ${VALHALLA_GRAPH_SHA256}"
+    || fail "$(geo_verify_failure_message 'дорожный граф' "${VALHALLA_GRAPH_SHA256}")"
 
   log "картографические артефакты проверены: подложка и граф с содержимым ${VALHALLA_GRAPH_SHA256}"
 }

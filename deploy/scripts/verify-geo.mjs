@@ -56,9 +56,22 @@ const PROBE_POINTS = [
 /** Профили, которыми пользуется приложение. Оба обязаны считаться. */
 const PROBE_COSTINGS = ['auto', 'pedestrian'];
 
+/**
+ * Коды возврата.
+ *
+ * Различать их обязательно. Вызывающая сторона на основании кода пишет
+ * в журнал выкатки либо «артефакты не совпали», либо «проверка не состоялась».
+ * Один общий код заставлял бы обвинять артефакты в том, чего они не делали:
+ * упавший verifier и упавшая проверка неотличимы от повреждённого файла.
+ */
+export const EXIT_MISMATCH = 10;
+export const EXIT_INTERNAL = 20;
+export const EXIT_USAGE = 2;
+
+/** Проверка состоялась и установила несовпадение. */
 function fail(message) {
   console.error(`ОТКАЗ: ${message}`);
-  process.exit(1);
+  process.exit(EXIT_MISMATCH);
 }
 
 async function sha256(filePath) {
@@ -292,22 +305,33 @@ async function verifyMatrix(url) {
 
 const [mode, first, second] = process.argv.slice(2);
 
-switch (mode) {
-  case 'basemap':
-    await verifyBasemap(first);
-    break;
-  case 'graph':
-    await verifyGraph(first, second);
-    break;
-  case 'routing':
-    await verifyRouting(first);
-    break;
-  case 'matrix':
-    await verifyMatrix(first);
-    break;
-  default:
-    console.error(
-      'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url>',
-    );
-    process.exit(2);
+try {
+  switch (mode) {
+    case 'basemap':
+      await verifyBasemap(first);
+      break;
+    case 'graph':
+      await verifyGraph(first, second);
+      break;
+    case 'routing':
+      await verifyRouting(first);
+      break;
+    case 'matrix':
+      await verifyMatrix(first);
+      break;
+    default:
+      console.error(
+        'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url>',
+      );
+      process.exit(EXIT_USAGE);
+  }
+} catch (error) {
+  // Сюда попадает только то, чего проверка не предусмотрела: испорченная
+  // структура манифеста, ошибка чтения, дефект самого скрипта. Это НЕ вывод
+  // о несовпадении артефактов, и код возврата обязан отличаться — иначе
+  // выкатка объявила бы файлы повреждёнными, ничего о них не установив.
+  console.error(
+    `ВНУТРЕННЯЯ ОШИБКА ПРОВЕРКИ: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  process.exit(EXIT_INTERNAL);
 }
