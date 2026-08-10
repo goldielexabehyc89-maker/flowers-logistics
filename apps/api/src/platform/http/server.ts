@@ -24,6 +24,7 @@ import { registerOrderRoutes } from '../../modules/orders/routes.js';
 import { registerRoutingRoutes } from '../../modules/routing/routes.js';
 import { registerBasemapRoutes } from '../../modules/geo/basemap/routes.js';
 import { loadBasemap, type BasemapState } from '../../modules/geo/basemap/manifest.js';
+import { setBasemapStatus } from '../../modules/geo/basemap/status.js';
 import { authenticateWithRoles } from '../../modules/auth/guards.js';
 import type { Notifier } from '../../modules/realtime/notifier.js';
 import type { AppServer } from './types.js';
@@ -66,6 +67,14 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
       'подложка карты не прошла проверку: карта объявлена ненастроенной',
     );
   }
+
+  // Индикатор интеграций обязан говорить о карте то же самое, что и `/maps/*`.
+  // Запись `maps` появилась заглушкой на этапе 1 и с тех пор не обновлялась:
+  // интерфейс показывал «Интеграция не настроена» при работающей подложке.
+  // Отказ записи не должен мешать приложению подняться — это индикатор.
+  await setBasemapStatus(db, basemap).catch((error: unknown) => {
+    logger.warn({ err: error }, 'не удалось записать состояние подложки в индикатор');
+  });
 
   const app: AppServer = Fastify({
     loggerInstance: logger,

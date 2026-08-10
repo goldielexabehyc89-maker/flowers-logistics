@@ -451,6 +451,8 @@ test('адреса подложки: архив запрашивается из 
   /** Запросы мимо каталога карты: именно так выглядел дефект. */
   const outsideMaps: string[] = [];
   const spriteRequests: string[] = [];
+  /** Ответы на запрос воркера MapLibre: тип содержимого важнее кода. */
+  const workerResponses: { path: string; status: number; type: string }[] = [];
 
   page.on('request', (request) => {
     const url = new URL(request.url());
@@ -477,6 +479,13 @@ test('адреса подложки: архив запрашивается из 
       if (entry !== undefined) {
         entry.status = response.status();
       }
+    }
+    if (url.pathname.includes('maplibre-gl-worker')) {
+      workerResponses.push({
+        path: url.pathname,
+        status: response.status(),
+        type: response.headers()['content-type'] ?? '',
+      });
     }
   });
 
@@ -512,6 +521,23 @@ test('адреса подложки: архив запрашивается из 
     .toBeGreaterThan(0);
   for (const path of spriteRequests) {
     expect(path.startsWith('/maps/sprite/'), path).toBe(true);
+  }
+
+  // Воркер MapLibre обязан быть настоящим скриптом.
+  //
+  // Свой адрес MapLibre вычисляет от `import.meta.url` собственного модуля,
+  // и в собранном приложении это давало `/assets/maplibre-gl-worker.mjs` —
+  // файла с таким именем сборка не создаёт. Одностраничное приложение
+  // отвечало на этот адрес своей оболочкой: воркер получал HTML вместо кода
+  // и молча не отвечал, а карта навсегда оставалась в состоянии загрузки —
+  // без единой ошибки в консоли.
+  await expect
+    .poll(() => workerResponses.length, { timeout: 20_000, message: 'воркер MapLibre не запрошен' })
+    .toBeGreaterThan(0);
+  for (const response of workerResponses) {
+    expect(response.status, response.path).toBe(200);
+    expect(response.type, response.path).toContain('javascript');
+    expect(response.type, response.path).not.toContain('text/html');
   }
 
   // И ни одного обращения к публичным картографическим серверам.

@@ -28,6 +28,7 @@ import { seedUser } from '../../auth/testing/harness.js';
 import type { AppServer } from '../../../platform/http/types.js';
 import type { Database } from '../../../platform/db.js';
 import { loadBasemap, type BasemapManifest } from './manifest.js';
+import { basemapStatusOf, MAPS_PROVIDER } from './status.js';
 import { contentRange, parseRange } from './range.js';
 
 const run = promisify(execFile);
@@ -548,6 +549,49 @@ describe('манифест и границы каталога набора', () 
     } finally {
       await rm(set, { recursive: true, force: true });
     }
+  });
+});
+
+describe('индикатор интеграции «карта»', () => {
+  it('исправная подложка переводит индикатор в OK', async () => {
+    const status = await db.integrationStatus.findUnique({
+      where: { provider: MAPS_PROVIDER },
+    });
+
+    // Запись появилась заглушкой на этапе 1 и не обновлялась: интерфейс
+    // показывал «Интеграция не настроена» при полностью работающей карте.
+    expect(status?.state).toBe('OK');
+    expect(JSON.stringify(status?.details)).toContain('test0001');
+  });
+
+  it('состояние выводится из той же проверки, что решает судьбу /maps', () => {
+    expect(basemapStatusOf({ ok: false, problem: 'NOT_CONFIGURED' })).toEqual({
+      state: 'NOT_CONFIGURED',
+      details: { reason: 'no-artifacts-path' },
+    });
+
+    // «Не настроена» и «настроена, но не сошлась» — разные вещи: второе отказ.
+    expect(
+      basemapStatusOf({ ok: false, problem: 'CHECKSUM_MISMATCH', artifact: 'tiles.pmtiles' }),
+    ).toEqual({
+      state: 'ERROR',
+      details: { reason: 'CHECKSUM_MISMATCH', artifact: 'tiles.pmtiles' },
+    });
+    expect(basemapStatusOf({ ok: false, problem: 'MANIFEST_INVALID' })).toEqual({
+      state: 'ERROR',
+      details: { reason: 'MANIFEST_INVALID', artifact: null },
+    });
+  });
+
+  it('в индикатор не уходят пути, суммы и содержимое манифеста', async () => {
+    const status = await db.integrationStatus.findUniqueOrThrow({
+      where: { provider: MAPS_PROVIDER },
+    });
+    const details = JSON.stringify(status.details);
+
+    expect(details).not.toContain('/');
+    expect(details).not.toContain('sha256');
+    expect(details).not.toMatch(/[0-9a-f]{64}/);
   });
 });
 
