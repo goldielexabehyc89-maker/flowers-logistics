@@ -745,6 +745,27 @@ describe('геостек в командах выкатки', () => {
     expect(compose).toMatch(/source: \$\{VALHALLA_GRAPH_DIR\}[\s\S]*?read_only: true/);
   });
 
+  it('маршрутизатор получает явную команду запуска', async () => {
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+    const valhalla = compose.slice(compose.indexOf('  valhalla:'));
+
+    // У официального образа нет ни entrypoint, ни cmd: без команды контейнер
+    // просто не запустится, а `up` отчитается об успехе.
+    expect(valhalla).toContain('command:');
+    expect(valhalla).toContain('valhalla_service');
+    expect(valhalla).toContain('/custom_files/valhalla.json');
+  });
+
+  it('в описании маршрутизатора нет переменных чужого образа', async () => {
+    const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
+
+    // Эти переменные понимает сторонний образ docker-valhalla, а не официальный.
+    // Их присутствие создавало бы ложное впечатление настройки, которой нет.
+    for (const foreign of ['use_tiles_ignore_pbf', 'build_tar', 'force_rebuild', 'serve_tiles']) {
+      expect(compose, foreign).not.toContain(foreign);
+    }
+  });
+
   it('маршрутизатор наружу не публикуется ни одним портом', async () => {
     const compose = withoutComments(await readFile(COMPOSE_FILE, 'utf8'));
 
