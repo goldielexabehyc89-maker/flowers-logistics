@@ -13,7 +13,7 @@
  * набора и не меняется от подмены его содержимого.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -612,6 +612,9 @@ describe('кэш матриц', () => {
     await ctx.db.routeMatrixCache.create({
       data: {
         keyHash,
+        // Обе колонки, как их заполняет сам сервис: старая остаётся в схеме
+        // ради работающей предыдущей версии.
+        graphRevision: GRAPH,
         graphSha256: GRAPH,
         profile: 'CAR',
         trafficMode: CURRENT_TRAFFIC_MODE,
@@ -885,6 +888,125 @@ describe('расчёт запрещён без подтверждённого г
     await expect(gate.verifyGraph()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
     await expect(gate.verifyGraph()).resolves.toBeUndefined();
     expect(calls).toBe(2);
+  });
+});
+
+describe('схема кэша остаётся пригодной прежней версии приложения', () => {
+  // Выкатка сохраняет прежнюю версию при отказе запуска новой: тот же
+  // контейнер, та же схема. Поэтому смена идентичности графа выполнена
+  // расширением — старая колонка на месте и по-прежнему принимает то, что
+  // писала предыдущая версия.
+
+  it('после миграции существуют обе колонки', async () => {
+    const columns = await ctx.db.$queryRaw<{ column_name: string; is_nullable: string }[]>`
+      SELECT column_name, is_nullable
+      FROM information_schema.columns
+      WHERE table_name = 'RouteMatrixCache' AND column_name IN ('graphRevision', 'graphSha256')
+      ORDER BY column_name
+    `;
+
+    expect(columns.map((column) => column.column_name)).toEqual(['graphRevision', 'graphSha256']);
+    // Старая колонка обязательна — её заполняет и прежняя версия, и новая.
+    expect(columns.find((c) => c.column_name === 'graphRevision')?.is_nullable).toBe('NO');
+    // Новая допускает NULL: строки прежней версии её не содержат.
+    expect(columns.find((c) => c.column_name === 'graphSha256')?.is_nullable).toBe('YES');
+  });
+
+  it('запись в прежней форме по-прежнему принимается базой', async () => {
+    // Ключ обязан быть SHA-256: это ограничение базы с этапа 5.3.
+    const keyHash = createHash('sha256').update(`old-${randomUUID()}`).digest('hex');
+    const now = new Date();
+
+    // Ровно то, что делает предыдущая версия приложения: она не знает
+    // о graphSha256 и пишет в graphRevision Unix-время изменения файла.
+    await expect(
+      ctx.db.$executeRaw`
+        INSERT INTO "RouteMatrixCache"
+          ("id", "keyHash", "graphRevision", "profile", "trafficMode", "pointCount",
+           "status", "attempts", "lockedAt", "lockedBy", "createdAt", "updatedAt")
+        VALUES (gen_random_uuid(), ${keyHash}, '1786349243',
+                'CAR'::"VehicleType", 'STATIC'::"TrafficMode",
+                2, 'PENDING', 1, ${now}, 'прежняя-версия', ${now}, ${now})
+      `,
+    ).resolves.toBe(1);
+
+    const row = await ctx.db.routeMatrixCache.findUniqueOrThrow({ where: { keyHash } });
+    expect(row.graphRevision).toBe('1786349243');
+    expect(row.graphSha256).toBeNull();
+  });
+
+  it('ограничение формата не пропускает время в новую колонку', async () => {
+    const keyHash = createHash('sha256').update(`bad-${randomUUID()}`).digest('hex');
+    const now = new Date();
+
+    await expect(
+      ctx.db.$executeRaw`
+        INSERT INTO "RouteMatrixCache"
+          ("id", "keyHash", "graphRevision", "graphSha256", "profile", "trafficMode",
+           "pointCount", "status", "attempts", "createdAt", "updatedAt")
+        VALUES (gen_random_uuid(), ${keyHash}, '1786349243', '1786349243',
+                'CAR'::"VehicleType", 'STATIC'::"TrafficMode",
+                2, 'PENDING', 1, ${now}, ${now})
+      `,
+    ).rejects.toThrow();
+  });
+
+  it('новая запись заполняет обе колонки одной и той же суммой', async () => {
+    const points = uniquePoints();
+    const router = fakeRouter();
+
+    await computeMatrix(matrixDeps(router), { points, profile: 'CAR' });
+
+    const keyHash = matrixCacheKey({
+      graphSha256: GRAPH,
+      profile: 'CAR',
+      trafficMode: CURRENT_TRAFFIC_MODE,
+      points,
+    });
+    const row = await ctx.db.routeMatrixCache.findUniqueOrThrow({ where: { keyHash } });
+
+    expect(row.graphSha256).toBe(GRAPH);
+    // Прежняя версия обращается с этой колонкой как с непрозрачной строкой
+    // и никогда по ней не ищет, поэтому та же сумма — безопасное значение.
+    expect(row.graphRevision).toBe(GRAPH);
+  });
+
+  it('строки прежней версии для новой невидимы', async () => {
+    const points = uniquePoints();
+    const keyHash = matrixCacheKey({
+      graphSha256: GRAPH,
+      profile: 'CAR',
+      trafficMode: CURRENT_TRAFFIC_MODE,
+      points,
+    });
+    const now = new Date();
+
+    // Готовая и не просроченная строка, записанная предыдущей версией
+    // под тем же ключом. Отнести её к какому-либо графу нельзя.
+    await ctx.db.$executeRaw`
+      INSERT INTO "RouteMatrixCache"
+        ("id", "keyHash", "graphRevision", "profile", "trafficMode", "pointCount",
+         "status", "attempts", "durationsSec", "distancesM", "computedAt",
+         "expiresAt", "createdAt", "updatedAt")
+      VALUES (gen_random_uuid(), ${keyHash}, '1786349243',
+              'CAR'::"VehicleType", 'STATIC'::"TrafficMode", ${points.length},
+              'READY', 1, '[[0,111],[222,0]]'::jsonb, '[[0,333],[444,0]]'::jsonb,
+              ${now}, ${new Date(now.getTime() + 3_600_000)}, ${now}, ${now})
+    `;
+
+    const router = fakeRouter();
+    const result = await computeMatrix(matrixDeps(router), { points, profile: 'CAR' });
+
+    // Расчёт выполнен заново, чужие числа наружу не ушли.
+    expect(result.cached).toBe(false);
+    expect(router.calls).toBe(1);
+    expect(result.durationsSec[0]?.[1]).not.toBe(111);
+
+    // Строка перехвачена и теперь несёт идентичность. Не перехватывать её
+    // означало бы навсегда запретить расчёт этого ключа: годной она
+    // не станет, а место занимает.
+    const row = await ctx.db.routeMatrixCache.findUniqueOrThrow({ where: { keyHash } });
+    expect(row.graphSha256).toBe(GRAPH);
   });
 });
 

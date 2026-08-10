@@ -109,12 +109,25 @@ done
 
 cmd="\${*: -1}"
 
-# Проверка маршрутизатора может быть настроена на отказ: так проверяется,
-# что провалившаяся проверка останавливает выкатку до запуска приложения.
+# Каждая проверка может быть настроена на отказ по отдельности: так
+# проверяется, что провалившаяся проверка останавливает выкатку ДО миграций
+# и до запуска приложения — схема и работающая версия остаются прежними.
 case "$cmd" in
+  *"verify-geo.mjs 'graph'"*)
+    if [ "\${GRAPH_FAILS:-0}" = "1" ]; then
+      printf 'ОТКАЗ: содержимое набора тайлов не совпало\\n' >&2
+      exit 1
+    fi
+    ;;
   *'verify-geo.mjs routing'*)
     if [ "\${ROUTING_FAILS:-0}" = "1" ]; then
-      printf 'ОТКАЗ: маршрутизатор не подтвердил граф\\n' >&2
+      printf 'ОТКАЗ: маршрутизатор не сообщил, что набор тайлов загружен\\n' >&2
+      exit 1
+    fi
+    ;;
+  *'verify-geo.mjs matrix'*)
+    if [ -n "\${MATRIX_FAILS:-}" ]; then
+      printf 'ОТКАЗ: пробный расчёт «%s» не нашёл ни одного пути\\n' "\${MATRIX_FAILS}" >&2
       exit 1
     fi
     ;;
@@ -226,6 +239,10 @@ interface SandboxOptions {
   productionMarkerReply?: string;
   /** Заставляет проверку маршрутизатора отвечать отказом. */
   routingFails?: boolean;
+  /** Заставляет проверку содержимого графа отвечать отказом. */
+  graphFails?: boolean;
+  /** Заставляет пробный расчёт отвечать отказом. Значение — имя профиля. */
+  matrixFails?: 'auto' | 'pedestrian';
   /** Подменённый ответ сервера на sha256sum: моделирует повреждение передачи. */
   deliveryShaReply?: string;
   /** Версия, которую «выкатывают». По умолчанию — фиксированный SHA. */
@@ -379,6 +396,8 @@ async function runInSandbox(options: SandboxOptions): Promise<
     PRODUCTION_DIR: production.REMOTE_DIR,
     STAGING_HAS_VERSION: options.stagingHasVersion === false ? '0' : '1',
     ROUTING_FAILS: options.routingFails === true ? '1' : '0',
+    GRAPH_FAILS: options.graphFails === true ? '1' : '0',
+    ...(options.matrixFails === undefined ? {} : { MATRIX_FAILS: options.matrixFails }),
     // Проверке незачем ждать загрузку графа: она проверяет поведение при
     // отказе, а не терпение команды выкатки.
     ROUTING_CHECK_ATTEMPTS: '2',
@@ -1086,6 +1105,129 @@ describe('геостек в командах выкатки', () => {
     expect(result.ssh.trim()).toBe('');
   });
 
+  it('миграции идут после обеих матриц и до запуска приложения', async () => {
+    // Схема меняется последней из того, что может отказать. Выкатка сохраняет
+    // прежнюю версию при неудаче, и менять базу под работающим приложением
+    // ради версии, которая может не запуститься, нельзя.
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const whole = withoutComments(await readFile(script, 'utf8'));
+      // Текст плана сухого прогона перечисляет те же шаги словами и стоит выше
+      // исполняемой части: искать порядок нужно после него.
+      const planEnd = whole.indexOf('\nPLAN\n');
+      expect(planEnd, script).toBeGreaterThan(-1);
+      const content = whole.slice(planEnd);
+
+      const geo = content.indexOf('require_geo_artifacts');
+      const valhallaUp = content.indexOf('up -d --no-build valhalla');
+      const routing = content.indexOf('require_routing_ready');
+      const migrate = content.indexOf('prisma migrate deploy');
+      const appUp = content.indexOf('up -d --no-build app');
+      const ready = content.indexOf('require_ready');
+
+      for (const [name, index] of Object.entries({
+        geo,
+        valhallaUp,
+        routing,
+        migrate,
+        appUp,
+        ready,
+      })) {
+        expect(index, `${name} отсутствует в ${script}`).toBeGreaterThan(-1);
+      }
+
+      expect(valhallaUp, script).toBeGreaterThan(geo);
+      expect(routing, script).toBeGreaterThan(valhallaUp);
+      expect(migrate, script).toBeGreaterThan(routing);
+      expect(appUp, script).toBeGreaterThan(migrate);
+      expect(ready, script).toBeGreaterThan(appUp);
+    }
+  });
+
+  it('план сухого прогона описывает фактический порядок', async () => {
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const whole = await readFile(script, 'utf8');
+      const plan = whole.slice(whole.indexOf('cat <<PLAN'), whole.indexOf('\nPLAN\n'));
+
+      const routing = plan.indexOf('маршрутизатор');
+      const matrix = plan.indexOf('матриц');
+      const migrate = plan.indexOf('миграци');
+      const app = plan.lastIndexOf('приложение');
+
+      // План — то, что читает человек перед настоящей выкаткой. Разойдясь
+      // с кодом, он вводит в заблуждение ровно в тот момент, когда его читают.
+      expect(matrix, script).toBeGreaterThan(routing);
+      expect(migrate, script).toBeGreaterThan(matrix);
+      expect(app, script).toBeGreaterThan(migrate);
+    }
+  });
+
+  it('отказ проверки содержимого не доводит до миграций', async () => {
+    const result = await runInSandbox({
+      withGitHistory: true,
+      graphFails: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        'require_geo_artifacts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+        'require_routing_ready',
+        `remote "$(compose_command) run --rm app npx prisma migrate deploy"`,
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    // Ни схема, ни работающая версия не тронуты.
+    expect(result.ssh).not.toContain('prisma migrate deploy');
+    expect(result.ssh).not.toContain('up -d --no-build app');
+    expect(result.ssh).not.toContain('up -d --no-build valhalla');
+  });
+
+  it('отказ /status не доводит до миграций', async () => {
+    const result = await runInSandbox({
+      routingFails: true,
+      body: [
+        LOAD_BOTH,
+        'activate_environment STAGING',
+        'prepare_known_hosts',
+        `remote "$(compose_command) up -d --no-build valhalla"`,
+        'require_routing_ready',
+        `remote "$(compose_command) run --rm app npx prisma migrate deploy"`,
+        `remote "$(compose_command) up -d --no-build app"`,
+      ].join('\n'),
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.ssh).toContain('up -d --no-build valhalla');
+    expect(result.ssh).not.toContain('prisma migrate deploy');
+    expect(result.ssh).not.toContain('up -d --no-build app');
+  });
+
+  it('отказ любой из двух матриц не доводит до миграций', async () => {
+    for (const profile of ['auto', 'pedestrian'] as const) {
+      const result = await runInSandbox({
+        matrixFails: profile,
+        body: [
+          LOAD_BOTH,
+          'activate_environment STAGING',
+          'prepare_known_hosts',
+          `remote "$(compose_command) up -d --no-build valhalla"`,
+          'require_routing_ready',
+          `remote "$(compose_command) run --rm app npx prisma migrate deploy"`,
+          `remote "$(compose_command) up -d --no-build app"`,
+        ].join('\n'),
+      });
+
+      expect(result.code, profile).not.toBe(0);
+      expect(result.stderr, profile).toContain('пробный расчёт');
+      // Набор загружен, но профиль не считается — схему трогать нельзя.
+      expect(result.ssh, profile).toContain('verify-geo.mjs routing');
+      expect(result.ssh, profile).not.toContain('prisma migrate deploy');
+      expect(result.ssh, profile).not.toContain('up -d --no-build app');
+    }
+  });
+
   it('проверка артефактов не зависит от Node на сервере', async () => {
     const common = withoutComments(await readFile(COMMON_LIB, 'utf8'));
 
@@ -1206,6 +1348,52 @@ describe('геостек в командах выкатки', () => {
     expect(routingBody).toContain('tileset_last_modified');
     expect(routingBody).not.toContain('expectedRevision');
     expect(routingBody).not.toContain('expectedSha');
+  });
+
+  it('миграция смены идентичности только расширяет схему', async () => {
+    const file = path.join(
+      REPO_ROOT,
+      'prisma/migrations/20260815090000_graph_content_revision/migration.sql',
+    );
+    const sql = withoutComments(await readFile(file, 'utf8'))
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('--'))
+      .join('\n');
+
+    // Выкатка сохраняет прежнюю версию при отказе запуска новой. Переименование
+    // или удаление колонки превратило бы этот запасной путь в ловушку: старый
+    // контейнер получал бы «column does not exist» на каждом расчёте.
+    expect(sql).not.toMatch(/RENAME\s+COLUMN/i);
+    expect(sql).not.toMatch(/DROP\s+COLUMN/i);
+    expect(sql).not.toMatch(/DROP\s+TABLE/i);
+    expect(sql).not.toMatch(/DELETE\s+FROM/i);
+
+    // Добавляется новая колонка, допускающая NULL: строки предыдущей версии
+    // её не содержат.
+    expect(sql).toMatch(/ADD COLUMN "graphSha256"/);
+    expect(sql).toMatch(/"graphSha256" IS NULL OR/);
+    expect(sql).toContain('^[0-9a-f]{64}$');
+  });
+
+  it('новая версия не ищет по graphRevision', async () => {
+    const service = await readFile(
+      path.join(REPO_ROOT, 'apps/api/src/modules/geo/matrix/service.ts'),
+      'utf8',
+    );
+    const code = withoutComments(service)
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('*') && !line.trimStart().startsWith('//'))
+      .join('\n');
+
+    // Старая колонка заполняется ради работающей прежней версии, но ни искать,
+    // ни выбирать по ней новая версия не может: источник истины — graphSha256.
+    const mentions = code.split('\n').filter((line) => line.includes('graphRevision'));
+    expect(mentions).toHaveLength(2);
+    expect(mentions[0]).toContain('"graphRevision"');
+    expect(mentions[1]).toContain('graphRevision: input.graphSha256');
+
+    // Выборка идёт по идентичности содержимого.
+    expect(code).toContain('where: { keyHash, graphSha256 }');
   });
 
   it('шаблоны конфигураций описывают каталоги артефактов и ревизию графа', async () => {

@@ -233,7 +233,7 @@ export async function computeMatrix(
 
   const now = clockOf(deps);
 
-  const fresh = await readFresh(deps, keyHash, now);
+  const fresh = await readFresh(deps, keyHash, graphSha256, now);
   if (fresh !== null) {
     return { ...fresh, graphSha256, profile: request.profile, trafficMode, cached: true };
   }
@@ -250,7 +250,7 @@ export async function computeMatrix(
   if (!claimed) {
     // Считает кто-то другой. Ждать чужой результат дешевле, чем повторить
     // ту же работу: расчёт одинаков, а лимиты маршрутизатора общие.
-    const waited = await waitForOther(deps, keyHash);
+    const waited = await waitForOther(deps, keyHash, graphSha256);
     if (waited !== null) {
       return { ...waited, graphSha256, profile: request.profile, trafficMode, cached: true };
     }
@@ -307,7 +307,7 @@ export async function computeMatrix(
       'аренда расчёта матрицы потеряна, результат не записан',
     );
 
-    const fromOther = await readFresh(deps, keyHash, clockOf(deps));
+    const fromOther = await readFresh(deps, keyHash, graphSha256, clockOf(deps));
     if (fromOther !== null) {
       return { ...fromOther, graphSha256, profile: request.profile, trafficMode, cached: true };
     }
@@ -334,14 +334,22 @@ interface CachedMatrix {
   distancesM: (number | null)[][];
 }
 
-/** Готовый и не просроченный результат. Просроченный считается отсутствующим. */
+/**
+ * Готовый и не просроченный результат. Просроченный считается отсутствующим.
+ *
+ * Выбирается ТОЛЬКО по `graphSha256`. Строки предыдущей версии приложения его
+ * не содержат и потому невидимы: они посчитаны, когда идентичностью считалось
+ * время файла, и отнести их к какому-либо графу больше нельзя. Колонка
+ * `graphRevision` в поиске не участвует ни здесь, ни где-либо ещё.
+ */
 async function readFresh(
   deps: MatrixDeps,
   keyHash: string,
+  graphSha256: string,
   now: Date,
 ): Promise<CachedMatrix | null> {
-  const row = await deps.db.routeMatrixCache.findUnique({
-    where: { keyHash },
+  const row = await deps.db.routeMatrixCache.findFirst({
+    where: { keyHash, graphSha256 },
     select: { status: true, durationsSec: true, distancesM: true, expiresAt: true },
   });
 
@@ -384,11 +392,19 @@ async function claim(
   const workerId = deps.workerId;
   const staleBefore = new Date(input.now.getTime() - (deps.leaseTimeoutMs ?? LEASE_TIMEOUT_MS));
 
+  // Заполняются обе колонки.
+  //
+  // "graphRevision" объявлена NOT NULL и остаётся в схеме, пока прежняя версия
+  // приложения может продолжить работу после неудачного запуска новой.
+  // Записывать в неё нечего, кроме той же суммы: это безопасное совместимое
+  // значение — прежняя версия обращается с ней как с непрозрачной строкой
+  // и никогда по ней не ищет. Источник истины и ключ поиска — "graphSha256".
   const inserted = await deps.db.$executeRaw`
     INSERT INTO "RouteMatrixCache"
-      ("id", "keyHash", "graphSha256", "profile", "trafficMode", "pointCount",
-       "status", "attempts", "lockedAt", "lockedBy", "createdAt", "updatedAt")
-    VALUES (gen_random_uuid(), ${input.keyHash}, ${input.graphSha256},
+      ("id", "keyHash", "graphRevision", "graphSha256", "profile", "trafficMode",
+       "pointCount", "status", "attempts", "lockedAt", "lockedBy",
+       "createdAt", "updatedAt")
+    VALUES (gen_random_uuid(), ${input.keyHash}, ${input.graphSha256}, ${input.graphSha256},
             ${input.profile}::"VehicleType", ${input.trafficMode}::"TrafficMode",
             ${input.pointCount}, 'PENDING', 1, ${input.now}, ${workerId},
             ${input.now}, ${input.now})
@@ -408,10 +424,17 @@ async function claim(
         { status: 'PENDING', lockedAt: { lt: staleBefore } },
         { status: 'FAILED' },
         { status: 'READY', expiresAt: { lte: input.now } },
+        // Строка без установленной идентичности: её оставила предыдущая версия,
+        // когда идентичностью считалось время файла. Отнести её к какому-либо
+        // графу нельзя, поэтому кэшем для нас она не является. Не перехватывать
+        // её означало бы навсегда запретить расчёт этого ключа: годной она
+        // не станет, а место занимает.
+        { graphSha256: null },
       ],
     },
     data: {
       status: 'PENDING',
+      graphRevision: input.graphSha256,
       graphSha256: input.graphSha256,
       profile: input.profile,
       trafficMode: input.trafficMode,
@@ -432,14 +455,18 @@ async function claim(
 }
 
 /** Ждёт чужой расчёт. `null` — не дождались; вызывающая сторона получит 409. */
-async function waitForOther(deps: MatrixDeps, keyHash: string): Promise<CachedMatrix | null> {
+async function waitForOther(
+  deps: MatrixDeps,
+  keyHash: string,
+  graphSha256: string,
+): Promise<CachedMatrix | null> {
   const attempts = deps.waitAttempts ?? 10;
   const delayMs = deps.waitDelayMs ?? 300;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
 
-    const fresh = await readFresh(deps, keyHash, clockOf(deps));
+    const fresh = await readFresh(deps, keyHash, graphSha256, clockOf(deps));
     if (fresh !== null) {
       return fresh;
     }
