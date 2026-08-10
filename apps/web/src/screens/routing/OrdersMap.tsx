@@ -11,17 +11,19 @@
  * данных ещё не существует, а нарисованная линия выглядела бы как расчёт.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   addProtocol,
   Map as MapLibreMap,
   Marker,
   NavigationControl,
   type MapMouseEvent,
+  type StyleSpecification,
 } from 'maplibre-gl';
 import { Protocol } from 'pmtiles';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { markerKind, toLngLat, type MapPoint } from './geo';
+import { resolveStyleUrls, type StyleDocument } from './style-urls';
 
 /** Москва: карта открывается там, где работает служба. */
 const DEFAULT_CENTER: [number, number] = [37.6173, 55.7558];
@@ -72,6 +74,12 @@ export function OrdersMap({
   onPick,
   onLoadError,
 }: OrdersMapProps): React.JSX.Element {
+  /**
+   * Карта создаётся асинхронно: сначала читается стиль, чтобы разрешить его
+   * относительные адреса. Маркеры расставляются только после этого, иначе
+   * первый набор точек не попал бы на карту.
+   */
+  const [mapReady, setMapReady] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
@@ -95,35 +103,105 @@ export function OrdersMap({
 
     registerPmtiles();
 
-    const map = new MapLibreMap({
-      container,
-      style: styleUrl,
-      center: DEFAULT_CENTER,
-      zoom: DEFAULT_ZOOM,
-      // Сбор статистики отключён: он ушёл бы на чужой сервер.
-      attributionControl: attribution === null ? false : { customAttribution: attribution },
-    });
-    map.addControl(new NavigationControl({ showCompass: false }), 'top-right');
+    let cancelled = false;
+    let map: MapLibreMap | null = null;
 
-    // Ошибка загрузки стиля или тайлов. Внешнего запасного источника нет
-    // и быть не может: публичные серверы OSM в работе не используются.
-    map.on('error', () => {
-      loadErrorRef.current();
-    });
+    /**
+     * Состояние подложки в разметке: `loading`, `ready` или `error`.
+     *
+     * «Карта загрузилась» — это не «компонент смонтирован», а «стиль применён
+     * и первый кадр отрисован». Признак нужен и человеку, и проверке после
+     * выкатки. Глобального отладочного объекта у приложения нет и не
+     * появляется: состояние живёт там же, где сама карта.
+     */
+    const markState = (state: 'loading' | 'ready' | 'error'): void => {
+      container.dataset['mapState'] = state;
+    };
+    markState('loading');
 
-    map.on('click', (event: MapMouseEvent) => {
-      if (pickingRef.current) {
-        pickRef.current({ lat: event.lngLat.lat, lon: event.lngLat.lng });
+    /**
+     * Стиль читается сам, а не передаётся адресом.
+     *
+     * Так база для относительных адресов внутри стиля — его ФАКТИЧЕСКИЙ адрес,
+     * а не догадка. Это принципиально: MapLibre разрешает такие пути не везде.
+     * Спрайт обязан быть абсолютным — относительный отвергается при разборе
+     * стиля. Адрес с собственным протоколом `pmtiles://` уходит в обработчик
+     * как есть и разрешается относительно СТРАНИЦЫ: на `/routing` это давало
+     * запрос `/tiles-….pmtiles` вместо `/maps/tiles-….pmtiles`, в ответ
+     * приходила оболочка приложения, и карта не открывалась.
+     */
+    const start = async (): Promise<void> => {
+      let style: StyleDocument;
+      try {
+        const response = await fetch(styleUrl, { credentials: 'same-origin' });
+        if (!response.ok) {
+          throw new Error(`стиль недоступен: ${response.status}`);
+        }
+        style = resolveStyleUrls(
+          (await response.json()) as StyleDocument,
+          response.url,
+          window.location.origin,
+        );
+      } catch {
+        // Внешнего запасного источника нет и быть не может: публичные серверы
+        // OSM в работе не используются.
+        markState('error');
+        loadErrorRef.current();
+        return;
       }
-    });
 
-    mapRef.current = map;
+      if (cancelled) {
+        return;
+      }
+
+      const instance = new MapLibreMap({
+        container,
+        style: style as unknown as StyleSpecification,
+        center: DEFAULT_CENTER,
+        zoom: DEFAULT_ZOOM,
+        // Сбор статистики отключён: он ушёл бы на чужой сервер.
+        attributionControl: attribution === null ? false : { customAttribution: attribution },
+      });
+      instance.addControl(new NavigationControl({ showCompass: false }), 'top-right');
+
+      // Ошибка загрузки стиля или тайлов. Внешнего запасного источника нет
+      // и быть не может: публичные серверы OSM в работе не используются.
+      instance.on('error', () => {
+        markState('error');
+        loadErrorRef.current();
+      });
+
+      instance.on('load', () => {
+        markState('ready');
+      });
+
+      instance.on('idle', () => {
+        if (container.dataset['mapState'] !== 'error') {
+          markState('ready');
+        }
+      });
+
+      instance.on('click', (event: MapMouseEvent) => {
+        if (pickingRef.current) {
+          pickRef.current({ lat: event.lngLat.lat, lon: event.lngLat.lng });
+        }
+      });
+
+      map = instance;
+      mapRef.current = instance;
+      setMapReady(true);
+    };
+
+    void start();
 
     return () => {
+      cancelled = true;
       markersRef.current.forEach((marker) => marker.remove());
       markersRef.current.clear();
-      map.remove();
+      map?.remove();
+      map = null;
       mapRef.current = null;
+      setMapReady(false);
     };
   }, [styleUrl, attribution]);
 
@@ -172,7 +250,7 @@ export function OrdersMap({
         markers.delete(orderId);
       }
     }
-  }, [points, selectedOrderId]);
+  }, [points, selectedOrderId, mapReady]);
 
   // Выбор строки в списке подсвечивает маркер и подводит к нему карту.
   useEffect(() => {
