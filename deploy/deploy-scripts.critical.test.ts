@@ -113,12 +113,6 @@ cmd="\${*: -1}"
 # проверяется, что провалившаяся проверка останавливает выкатку ДО миграций
 # и до запуска приложения — схема и работающая версия остаются прежними.
 case "$cmd" in
-  *"verify-geo.mjs 'graph'"*)
-    if [ "\${GRAPH_FAILS:-0}" = "1" ]; then
-      printf 'ОТКАЗ: содержимое набора тайлов не совпало\\n' >&2
-      exit 1
-    fi
-    ;;
   *'verify-geo.mjs routing'*)
     if [ "\${ROUTING_FAILS:-0}" = "1" ]; then
       printf 'ОТКАЗ: маршрутизатор не сообщил, что набор тайлов загружен\\n' >&2
@@ -239,8 +233,6 @@ interface SandboxOptions {
   productionMarkerReply?: string;
   /** Заставляет проверку маршрутизатора отвечать отказом. */
   routingFails?: boolean;
-  /** Заставляет проверку содержимого графа отвечать отказом. */
-  graphFails?: boolean;
   /** Заставляет пробный расчёт отвечать отказом. Значение — имя профиля. */
   matrixFails?: 'auto' | 'pedestrian';
   /** Подменённый ответ сервера на sha256sum: моделирует повреждение передачи. */
@@ -396,7 +388,6 @@ async function runInSandbox(options: SandboxOptions): Promise<
     PRODUCTION_DIR: production.REMOTE_DIR,
     STAGING_HAS_VERSION: options.stagingHasVersion === false ? '0' : '1',
     ROUTING_FAILS: options.routingFails === true ? '1' : '0',
-    GRAPH_FAILS: options.graphFails === true ? '1' : '0',
     ...(options.matrixFails === undefined ? {} : { MATRIX_FAILS: options.matrixFails }),
     // Проверке незачем ждать загрузку графа: она проверяет поведение при
     // отказе, а не терпение команды выкатки.
@@ -1038,36 +1029,6 @@ describe('геостек в командах выкатки', () => {
     expect(result.stdout).not.toContain('проверки пройдены');
   });
 
-  it('маршрутизатор не запускается раньше проверки содержимого графа', async () => {
-    const result = await runInSandbox({
-      // Проверяющий скрипт доставляется из дерева VERSION, поэтому песочнице
-      // нужна история репозитория.
-      withGitHistory: true,
-      body: [
-        LOAD_BOTH,
-        'activate_environment STAGING',
-        'prepare_known_hosts',
-        'require_geo_artifacts',
-        `remote "$(compose_command) up -d --no-build valhalla"`,
-      ].join('\n'),
-    });
-
-    expect(result.code).toBe(0);
-
-    const lines = result.ssh.split('\n').filter((line) => line !== '');
-    // Режим передаётся закавыченным аргументом: `verify-geo.mjs 'graph' …`.
-    const graphCheck = lines.findIndex((line) => /verify-geo\.mjs '?graph/.test(line));
-    const valhallaUp = lines.findIndex((line) => line.includes('up -d --no-build valhalla'));
-
-    // Сервис не должен подниматься на непроверенном наборе: иначе он
-    // отрапортует о готовности по тому, что нашёл, каким бы оно ни было.
-    expect(graphCheck).toBeGreaterThan(-1);
-    expect(valhallaUp).toBeGreaterThan(graphCheck);
-
-    // Проверка идёт по содержимому: SHA-256 передаётся аргументом.
-    expect(lines[graphCheck]).toContain(GRAPH_SHA);
-  });
-
   it('приложение не запускается раньше пробной матрицы', async () => {
     const result = await runInSandbox({
       body: [
@@ -1103,6 +1064,24 @@ describe('геостек в командах выкатки', () => {
     expect(result.stderr).toContain('VALHALLA_GRAPH_SHA256 задан неверно');
     // Ни одного обращения к серверу: значение отвергнуто по форме.
     expect(result.ssh.trim()).toBe('');
+  });
+
+  it('содержимое графа проверяется до запуска маршрутизатора', async () => {
+    // Сервис не должен подниматься на непроверенном наборе: иначе он
+    // отрапортует о готовности по тому, что нашёл, каким бы оно ни было.
+    // Живое поведение самой проверки — в geo-verification.critical.test.ts:
+    // после отвязки запуска команда ssh несёт base64, и режим проверки
+    // из журнала соединений не виден.
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const whole = withoutComments(await readFile(script, 'utf8'));
+      const content = whole.slice(whole.indexOf('\nPLAN\n'));
+
+      const geo = content.indexOf('require_geo_artifacts');
+      const valhallaUp = content.indexOf('up -d --no-build valhalla');
+
+      expect(geo, script).toBeGreaterThan(-1);
+      expect(valhallaUp, script).toBeGreaterThan(geo);
+    }
   });
 
   it('миграции идут после обеих матриц и до запуска приложения', async () => {
@@ -1159,29 +1138,6 @@ describe('геостек в командах выкатки', () => {
       expect(migrate, script).toBeGreaterThan(matrix);
       expect(app, script).toBeGreaterThan(migrate);
     }
-  });
-
-  it('отказ проверки содержимого не доводит до миграций', async () => {
-    const result = await runInSandbox({
-      withGitHistory: true,
-      graphFails: true,
-      body: [
-        LOAD_BOTH,
-        'activate_environment STAGING',
-        'prepare_known_hosts',
-        'require_geo_artifacts',
-        `remote "$(compose_command) up -d --no-build valhalla"`,
-        'require_routing_ready',
-        `remote "$(compose_command) run --rm app npx prisma migrate deploy"`,
-        `remote "$(compose_command) up -d --no-build app"`,
-      ].join('\n'),
-    });
-
-    expect(result.code).not.toBe(0);
-    // Ни схема, ни работающая версия не тронуты.
-    expect(result.ssh).not.toContain('prisma migrate deploy');
-    expect(result.ssh).not.toContain('up -d --no-build app');
-    expect(result.ssh).not.toContain('up -d --no-build valhalla');
   });
 
   it('отказ /status не доводит до миграций', async () => {

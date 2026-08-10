@@ -34,6 +34,14 @@ const COPY_TIME = new Date('2026-08-10T14:48:00Z');
 
 const GRAPH_FORMAT = 'flowers-logistics/valhalla-manifest@1';
 
+/**
+ * Коды возврата. Различать их обязательно: вызывающая сторона по коду решает,
+ * сказать «артефакты не совпали» или «проверка не состоялась». Один общий код
+ * заставлял бы обвинять файлы в том, чего они не делали.
+ */
+const EXIT_MISMATCH = 10;
+const EXIT_INTERNAL = 20;
+
 interface RunResult {
   code: number;
   stderr: string;
@@ -115,7 +123,7 @@ describe('идентичность дорожного графа определ�
 
     const result = await runVerifier(['graph', root, tilesSha]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('содержимое набора тайлов не совпало');
   });
 
@@ -127,7 +135,7 @@ describe('идентичность дорожного графа определ�
 
     const result = await runVerifier(['graph', root, tilesSha]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toMatch(
       /размер набора тайлов не совпал|содержимое набора тайлов не совпало/,
     );
@@ -138,7 +146,7 @@ describe('идентичность дорожного графа определ�
 
     const result = await runVerifier(['graph', root, otherSha]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('не совпадает с конфигурацией');
   });
 
@@ -147,7 +155,7 @@ describe('идентичность дорожного графа определ�
     for (const wrong of ['1786349243', '', 'ABCDEF', `${tilesSha}0`, tilesSha.toUpperCase()]) {
       const result = await runVerifier(['graph', root, wrong]);
 
-      expect(result.code, `значение «${wrong}» должно быть отклонено`).toBe(1);
+      expect(result.code, `значение «${wrong}» должно быть отклонено`).toBe(EXIT_MISMATCH);
       expect(result.stderr).toContain('ожидаемая ревизия графа задана неверно');
     }
   });
@@ -159,8 +167,23 @@ describe('идентичность дорожного графа определ�
 
     const result = await runVerifier(['graph', root, tilesSha]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('корректного SHA-256');
+  });
+
+  it('внутренняя ошибка отличима от несовпадения по коду возврата', async () => {
+    // Манифест синтаксически верен, но испорчен по структуре: проверка падает,
+    // ничего не установив о файлах. Это НЕ вывод о несовпадении.
+    await writeFile(
+      path.join(root, 'manifest.json'),
+      JSON.stringify({ format: 'flowers-logistics/basemap-manifest@1', artifacts: [null] }),
+    );
+
+    const result = await runVerifier(['basemap', root]);
+
+    expect(result.code).toBe(EXIT_INTERNAL);
+    expect(result.code).not.toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('ВНУТРЕННЯЯ ОШИБКА ПРОВЕРКИ');
   });
 
   it('не трогает проверяемый набор', async () => {
@@ -244,7 +267,7 @@ describe('готовность маршрутизатора проверяетс
 
     const result = await runVerifier(['routing', url]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('не сообщил, что набор тайлов загружен');
   });
 
@@ -253,7 +276,7 @@ describe('готовность маршрутизатора проверяетс
 
     const result = await runVerifier(['routing', url]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('набор тайлов недоступен');
   });
 
@@ -296,7 +319,7 @@ describe('готовность маршрутизатора проверяетс
 
     const result = await runVerifier(['matrix', url]);
 
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('не нашёл ни одного пути');
   });
 
