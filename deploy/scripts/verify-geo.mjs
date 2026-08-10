@@ -9,10 +9,23 @@
  * Скрипт доставляется на сервер вместе с командой выкатки, поэтому источник
  * правды один — этот файл в репозитории.
  *
- * Три режима:
- *   basemap  — манифест подложки и SHA-256 каждого её файла;
- *   graph    — манифест графа, SHA-256 tiles.tar и заявленная ревизия;
- *   routing  — фактический ответ /status маршрутизатора и совпадение ревизии.
+ * ИДЕНТИЧНОСТЬ ГРАФА ОПРЕДЕЛЯЕТСЯ СОДЕРЖИМЫМ.
+ *
+ * Единственный признак того, какой именно дорожный граф установлен, —
+ * полный SHA-256 файла `tiles.tar`. Ни время изменения файла, ни поле
+ * `tileset_last_modified` из `/status` идентичностью не являются: это
+ * метки файловой системы. Они меняются при любом копировании, восстановлении
+ * из резервной копии или пересоздании контейнера, оставляя содержимое тем же,
+ * — и не меняются, если подменить содержимое, сохранив время. Ни в ту, ни
+ * в другую сторону они ничего не доказывают.
+ *
+ * Четыре режима:
+ *   basemap  — манифест подложки и SHA-256 каждой её файла;
+ *   graph    — фактический SHA-256 tiles.tar, его запись в манифесте
+ *              и ожидаемое значение из конфигурации; все три обязаны совпасть;
+ *   routing  — маршрутизатор ответил, набор загружен, сервис готов;
+ *   matrix   — сервис действительно считает: маленькая матрица на
+ *              синтетических точках обоими профилями.
  *
  * Fail closed: любое несовпадение — ненулевой код возврата с понятной причиной.
  */
@@ -24,6 +37,24 @@ import path from 'node:path';
 
 const BASEMAP_FORMAT = 'flowers-logistics/basemap-manifest@1';
 const GRAPH_FORMAT = 'flowers-logistics/valhalla-manifest@1';
+
+/** Ревизия графа — это SHA-256 и ничто другое: ровно 64 шестнадцатеричных символа. */
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Синтетические точки для пробного расчёта.
+ *
+ * Общеизвестные городские координаты в пределах собираемого региона. Ни адресов
+ * заказов, ни персональных данных здесь быть не может: проверка выполняется
+ * при каждой выкатке и её аргументы попадают в журналы.
+ */
+const PROBE_POINTS = [
+  { lat: 55.751244, lon: 37.618423 },
+  { lat: 55.76024, lon: 37.61871 },
+];
+
+/** Профили, которыми пользуется приложение. Оба обязаны считаться. */
+const PROBE_COSTINGS = ['auto', 'pedestrian'];
 
 function fail(message) {
   console.error(`ОТКАЗ: ${message}`);
@@ -81,18 +112,36 @@ async function verifyBasemap(root) {
   );
 }
 
-async function verifyGraph(root, expectedRevision) {
-  const manifest = await readManifest(root, GRAPH_FORMAT);
-
-  if (String(manifest.revision) !== String(expectedRevision)) {
-    fail(
-      `ревизия графа в манифесте «${String(manifest.revision)}» не совпадает с конфигурацией «${expectedRevision}»`,
-    );
+/**
+ * Проверяет содержимое дорожного графа.
+ *
+ * Сходятся три независимых значения: ожидаемое из конфигурации, записанное
+ * в манифесте и вычисленное прямо сейчас по лежащему на сервере файлу.
+ * Совпадение всех трёх — единственное доказательство того, что установлен
+ * именно тот граф. Размер сверяется тоже, но сам по себе он не доказывает
+ * ничего: файл может совпасть по длине и отличаться внутри.
+ */
+async function verifyGraph(root, expectedSha) {
+  if (typeof expectedSha !== 'string' || !SHA256_PATTERN.test(expectedSha)) {
+    // Пустое или неверно записанное ожидание — это не «проверять нечего»,
+    // а неисправная конфигурация: сравнение прошло бы с чем угодно.
+    fail('ожидаемая ревизия графа задана неверно: нужен SHA-256 из 64 шестнадцатеричных символов');
   }
 
+  const manifest = await readManifest(root, GRAPH_FORMAT);
+
   const extract = manifest.extract;
-  if (extract === undefined || typeof extract.path !== 'string') {
+  if (extract === undefined || extract === null || typeof extract.path !== 'string') {
     fail('манифест графа не описывает набор тайлов');
+  }
+
+  const declared = extract.sha256;
+  if (typeof declared !== 'string' || !SHA256_PATTERN.test(declared)) {
+    fail('манифест графа не содержит корректного SHA-256 набора тайлов');
+  }
+
+  if (declared !== expectedSha) {
+    fail(`ревизия графа в манифесте «${declared}» не совпадает с конфигурацией «${expectedSha}»`);
   }
 
   const file = path.join(root, extract.path);
@@ -103,24 +152,21 @@ async function verifyGraph(root, expectedRevision) {
     fail(`набор тайлов отсутствует: ${extract.path}`);
   }
 
-  if (size !== extract.bytes) {
+  if (typeof extract.bytes === 'number' && size !== extract.bytes) {
     fail(`размер набора тайлов не совпал: ${extract.path}`);
   }
-  if ((await sha256(file)) !== extract.sha256) {
-    fail(`контрольная сумма набора тайлов не совпала: ${extract.path}`);
+
+  // Пересчёт по фактическому файлу. Именно он отличает «манифест утверждает»
+  // от «на сервере действительно лежит».
+  const actual = await sha256(file);
+  if (actual !== declared) {
+    fail(`содержимое набора тайлов не совпало с манифестом: ${extract.path}`);
   }
 
-  console.error(`граф проверен: ревизия ${manifest.revision}`);
+  console.error(`граф проверен по содержимому: ${extract.path}, SHA-256 ${actual}`);
 }
 
-/**
- * Спрашивает сам маршрутизатор.
- *
- * Манифест говорит, что мы собрали; `/status` — что сервис действительно
- * загрузил. Совпасть обязаны оба: иначе выкатка объявит успех при работающем
- * приложении и неработающем расчёте.
- */
-async function verifyRouting(url, expectedRevision) {
+async function fetchStatus(url) {
   let response;
   try {
     response = await fetch(`${url.replace(/\/+$/, '')}/status`, {
@@ -134,25 +180,114 @@ async function verifyRouting(url, expectedRevision) {
     fail(`маршрутизатор ответил кодом ${response.status}`);
   }
 
-  let body;
   try {
-    body = await response.json();
+    return await response.json();
   } catch {
     fail('ответ маршрутизатора не разобран');
   }
+}
 
-  const actual = body.tileset_last_modified;
-  if (actual === undefined || actual === null) {
-    fail('маршрутизатор не сообщил ревизию набора тайлов');
+/**
+ * Спрашивает сам маршрутизатор, загрузил ли он набор.
+ *
+ * Содержимое графа проверено отдельно и раньше — здесь выясняется только то,
+ * чего файл на диске не говорит: сервис поднялся, набор прочитан, работать
+ * можно. `tileset_last_modified` используется как признак загруженности
+ * и записывается в журнал как диагностика. Сравнивать его с ревизией
+ * ЗАПРЕЩЕНО: это время файла, а не идентичность содержимого.
+ */
+async function verifyRouting(url) {
+  const body = await fetchStatus(url);
+
+  const version = body.version;
+  if (typeof version !== 'string' || version.trim() === '') {
+    fail('маршрутизатор не сообщил свою версию');
   }
 
-  if (String(actual) !== String(expectedRevision)) {
-    fail(`маршрутизатор работает на графе «${String(actual)}», ожидался «${expectedRevision}»`);
+  const loaded = body.tileset_last_modified;
+  if (loaded === undefined || loaded === null || String(loaded).trim() === '') {
+    // Набор не загружен. Считать в таком состоянии нельзя — и это отказ
+    // готовности, а не отсутствие необязательной диагностики.
+    fail('маршрутизатор не сообщил, что набор тайлов загружен');
+  }
+
+  // Поле появляется не во всех сборках сервиса. Если оно есть, оно обязано
+  // быть истинным: явное «тайлов нет» — прямой отказ.
+  if (body.has_tiles !== undefined && body.has_tiles !== true) {
+    fail('маршрутизатор сообщил, что набор тайлов недоступен');
   }
 
   console.error(
-    `маршрутизатор проверен: версия ${String(body.version)}, ревизия ${String(actual)}`,
+    `маршрутизатор готов: версия ${version}, метка набора ${String(loaded)} (диагностика)`,
   );
+}
+
+/**
+ * Проверяет, что маршрутизатор действительно считает.
+ *
+ * Загруженный набор ещё не означает работоспособный расчёт: тайлы могут быть
+ * прочитаны, а нужного профиля в них не оказаться. Матрица на двух известных
+ * точках стоит доли секунды и отвечает на вопрос, ради которого весь стек
+ * и существует.
+ */
+async function verifyMatrix(url) {
+  const base = url.replace(/\/+$/, '');
+
+  for (const costing of PROBE_COSTINGS) {
+    let response;
+    try {
+      response = await fetch(`${base}/sources_to_targets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          sources: PROBE_POINTS,
+          targets: PROBE_POINTS,
+          costing,
+          units: 'km',
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch {
+      fail(`пробный расчёт «${costing}» не выполнен: сервис не ответил`);
+    }
+
+    if (!response.ok) {
+      fail(`пробный расчёт «${costing}» отклонён кодом ${response.status}`);
+    }
+
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      fail(`ответ пробного расчёта «${costing}» не разобран`);
+    }
+
+    const rows = body.sources_to_targets;
+    if (!Array.isArray(rows)) {
+      fail(`ответ пробного расчёта «${costing}» не содержит матрицы`);
+    }
+
+    const elements = rows.flat();
+    const expected = PROBE_POINTS.length * PROBE_POINTS.length;
+    if (elements.length !== expected) {
+      fail(`пробный расчёт «${costing}» вернул ${elements.length} элементов вместо ${expected}`);
+    }
+
+    // Хотя бы одна пара разных точек обязана быть достижимой. Матрица, целиком
+    // состоящая из недостижимостей, означает, что дороги для профиля не нашлось.
+    const reachable = elements.some(
+      (element) =>
+        element !== null &&
+        typeof element === 'object' &&
+        element.from_index !== element.to_index &&
+        typeof element.time === 'number',
+    );
+    if (!reachable) {
+      fail(`пробный расчёт «${costing}» не нашёл ни одного пути между точками`);
+    }
+
+    console.error(`пробный расчёт «${costing}» выполнен: ${elements.length} элементов`);
+  }
 }
 
 const [mode, first, second] = process.argv.slice(2);
@@ -165,9 +300,14 @@ switch (mode) {
     await verifyGraph(first, second);
     break;
   case 'routing':
-    await verifyRouting(first, second);
+    await verifyRouting(first);
+    break;
+  case 'matrix':
+    await verifyMatrix(first);
     break;
   default:
-    console.error('Использование: verify-geo.mjs basemap|graph|routing <путь|url> [ревизия]');
+    console.error(
+      'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url>',
+    );
     process.exit(2);
 }

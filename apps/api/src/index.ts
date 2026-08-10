@@ -145,12 +145,10 @@ async function main(): Promise<void> {
   // Его недоступность не влияет на готовность приложения: ручные маршруты —
   // основной способ работы, а расчёт времени только ускоряет его.
   const valhalla = new ValhallaClient({ baseUrl: config.VALHALLA_URL ?? null });
-  await probeRouting(db, valhalla, config.VALHALLA_GRAPH_REVISION ?? null).catch(
-    (error: unknown) => {
-      logger.error({ err: error }, 'не удалось определить состояние маршрутизатора');
-      return null;
-    },
-  );
+  await probeRouting(db, valhalla, config.VALHALLA_GRAPH_SHA256 ?? null).catch((error: unknown) => {
+    logger.error({ err: error }, 'не удалось определить состояние маршрутизатора');
+    return null;
+  });
 
   let shuttingDown = false;
 

@@ -48,7 +48,10 @@ services:
       MAP_ARTIFACTS_PATH: /srv/basemap
       # Маршрутизатор доступен только внутри сети Compose по имени сервиса.
       VALHALLA_URL: http://valhalla:8002
-      VALHALLA_GRAPH_REVISION: ${VALHALLA_GRAPH_REVISION}
+      # Идентичность дорожного графа — SHA-256 файла tiles.tar. Время изменения
+      # файла и tileset_last_modified из /status идентичностью не являются:
+      # они меняются от копирования и не меняются от подмены содержимого.
+      VALHALLA_GRAPH_SHA256: ${VALHALLA_GRAPH_SHA256}
     ports:
       # Только петлевой интерфейс: наружу приложение выводится обратным прокси
       # при настройке сервера. Внешний порт свой у каждого окружения.

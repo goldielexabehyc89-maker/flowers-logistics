@@ -100,13 +100,24 @@ const matrixResponseSchema = z.object({
 
 const statusSchema = z.object({
   version: z.string().min(1),
-  /** Unix-время последней сборки набора тайлов. Служит ревизией графа. */
+  /**
+   * Время изменения набора тайлов на диске.
+   *
+   * Признак того, что сервис прочитал набор, — и только. Идентичностью графа
+   * НЕ является: меняется при копировании набора и не меняется при подмене
+   * его содержимого. Идентичность — это SHA-256 файла `tiles.tar`.
+   */
   tileset_last_modified: z.number().int().min(0).optional(),
+  /** Есть ли у сервиса тайлы. Поле присутствует не во всех сборках. */
+  has_tiles: z.boolean().optional(),
 });
 
 export interface ValhallaStatus {
   version: string;
+  /** Диагностика загруженности набора. Не идентичность. */
   tilesetLastModified: number | null;
+  /** `null` — сборка сервиса это поле не отдаёт. */
+  hasTiles: boolean | null;
 }
 
 export interface MatrixElement {
@@ -143,7 +154,7 @@ export class ValhallaClient {
     return this.baseUrl !== null;
   }
 
-  /** Состояние сервиса и ревизия набора тайлов. */
+  /** Состояние сервиса: версия и признаки загруженного набора тайлов. */
   async status(): Promise<ValhallaStatus> {
     const body = await this.request('/status', { method: 'GET' });
     const parsed = statusSchema.safeParse(body);
@@ -153,6 +164,7 @@ export class ValhallaClient {
     return {
       version: parsed.data.version,
       tilesetLastModified: parsed.data.tileset_last_modified ?? null,
+      hasTiles: parsed.data.has_tiles ?? null,
     };
   }
 
