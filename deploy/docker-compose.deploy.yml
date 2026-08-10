@@ -75,14 +75,16 @@ services:
   valhalla:
     image: ${VALHALLA_IMAGE}
     restart: unless-stopped
+    # У официального образа нет ни entrypoint, ни cmd: команда обязана быть
+    # здесь. Переменные вида use_tiles_ignore_pbf относятся к другому,
+    # стороннему образу и в этом не делают ничего — их отсутствие намеренно.
+    #
+    # Второй аргумент — число рабочих потоков. Сервис только читает готовый
+    # граф и ничего не собирает на месте: сборка занимает десятки минут
+    # и не должна происходить при перезапуске контейнера.
+    command: ['valhalla_service', '/custom_files/valhalla.json', '1']
     environment:
       TZ: Europe/Moscow
-      # Сервис только читает готовый граф и ничего не собирает на месте:
-      # сборка занимает десятки минут и не должна происходить при перезапуске.
-      use_tiles_ignore_pbf: 'True'
-      build_tar: 'False'
-      force_rebuild: 'False'
-      serve_tiles: 'True'
     volumes:
       - type: bind
         source: ${VALHALLA_GRAPH_DIR}
