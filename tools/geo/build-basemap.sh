@@ -182,45 +182,13 @@ done
 # Стиль собирается здесь и ссылается только на относительные пути.
 # Абсолютный адрес чужого сервера в стиле означал бы, что карта работает,
 # пока работает он, — и что о наших доставках знает посторонний.
-cat > "${work}/style-${revision}.json" <<STYLE
-{
-  "version": 8,
-  "name": "flowers-logistics-basemap",
-  "sources": {
-    "basemap": {
-      "type": "vector",
-      "url": "pmtiles://./${tiles_name}",
-      "attribution": "${attribution}"
-    }
-  },
-  "sprite": "./sprite/sprite",
-  "glyphs": "./fonts/{fontstack}/{range}.pbf",
-  "layers": [
-    { "id": "background", "type": "background", "paint": { "background-color": "#f5f6f8" } },
-    {
-      "id": "water",
-      "type": "fill",
-      "source": "basemap",
-      "source-layer": "water",
-      "paint": { "fill-color": "#c9d9e8" }
-    },
-    {
-      "id": "roads",
-      "type": "line",
-      "source": "basemap",
-      "source-layer": "transportation",
-      "paint": { "line-color": "#d5dae1", "line-width": 1.2 }
-    },
-    {
-      "id": "buildings",
-      "type": "fill",
-      "source": "basemap",
-      "source-layer": "building",
-      "paint": { "fill-color": "#e9edf2" }
-    }
-  ]
-}
-STYLE
+# Стиль подложки собирается общим модулем.
+#
+# Тот же модуль используется при обновлении одного лишь стиля у собранного
+# набора. Две копии стиля разошлись бы при первой правке, и карта на сервере
+# перестала бы соответствовать тому, что собирает сборщик.
+node "${here}/style.mjs" --tiles "${tiles_name}" --attribution "${attribution}" \
+  > "${work}/style-${revision}.json"
 
 aux_args=()
 for required in "${AUXILIARY_SOURCES[@]}"; do
