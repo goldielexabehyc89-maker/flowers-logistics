@@ -438,6 +438,86 @@ test('собственная подложка: всё с нашего origin и 
   expect(mapRequests.length).toBeGreaterThan(0);
 });
 
+test('адреса подложки: архив запрашивается из /maps и отвечает диапазоном', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const external: string[] = [];
+  /** Обращения к архиву тайлов: путь и запрошенный диапазон. */
+  const archive: { path: string; range: string | undefined; status?: number }[] = [];
+  /** Запросы мимо каталога карты: именно так выглядел дефект. */
+  const outsideMaps: string[] = [];
+  const spriteRequests: string[] = [];
+
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (FORBIDDEN_MAP_HOSTS.some((host) => url.hostname.endsWith(host))) {
+      external.push(request.url());
+    }
+    if (url.pathname.endsWith('.pmtiles')) {
+      archive.push({ path: url.pathname, range: request.headers()['range'] });
+      if (!url.pathname.startsWith('/maps/')) {
+        // Ровно этот запрос уходил раньше: относительный адрес внутри
+        // `pmtiles://` разрешался относительно страницы, а не стиля,
+        // и вместо архива приходила оболочка приложения.
+        outsideMaps.push(url.pathname);
+      }
+    }
+    if (url.pathname.includes('/sprite/')) {
+      spriteRequests.push(url.pathname);
+    }
+  });
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if (url.pathname.endsWith('.pmtiles')) {
+      const entry = archive.find((item) => item.path === url.pathname && item.status === undefined);
+      if (entry !== undefined) {
+        entry.status = response.status();
+      }
+    }
+  });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  // Стиль и манифест в порядке: карта настроена, и интерфейс об этом не спорит.
+  await expect(page.getByText('Карта не настроена')).toHaveCount(0);
+
+  // Архив запрошен, и только из каталога карты.
+  await expect
+    .poll(() => archive.length, { timeout: 20_000, message: 'архив тайлов не запрошен' })
+    .toBeGreaterThan(0);
+  expect(outsideMaps).toEqual([]);
+  for (const request of archive) {
+    expect(request.path.startsWith('/maps/'), request.path).toBe(true);
+  }
+
+  // Первый запрос — заголовок архива диапазоном; ответ обязан быть частичным.
+  const first = archive[0];
+  expect(first?.range).toMatch(/^bytes=0-/);
+  await expect
+    .poll(() => archive.filter((item) => item.status !== undefined).map((item) => item.status), {
+      timeout: 20_000,
+    })
+    .toContain(206);
+
+  // Спрайты берутся из каталога карты по абсолютному адресу: относительный
+  // MapLibre отвергает при разборе стиля целиком.
+  await expect
+    .poll(() => spriteRequests.length, { timeout: 20_000, message: 'спрайты не запрошены' })
+    .toBeGreaterThan(0);
+  for (const path of spriteRequests) {
+    expect(path.startsWith('/maps/sprite/'), path).toBe(true);
+  }
+
+  // И ни одного обращения к публичным картографическим серверам.
+  expect(external).toEqual([]);
+});
+
 test('маршрут: черновик → состав → порядок → подтверждение → маршрутный лист', async ({
   page,
 }: {
