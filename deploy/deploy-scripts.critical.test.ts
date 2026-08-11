@@ -1436,6 +1436,75 @@ describe('решатель в командах выкатки', () => {
     expect(looseImage.stderr).toContain('digest');
   });
 
+  it('план сухого прогона перечисляет НАСТОЯЩИЕ шаги и в том же порядке', async () => {
+    // Сухой прогон — единственное, что человек видит перед выкаткой. План,
+    // отставший от скрипта, обещает не то, что произойдёт: сначала он просто
+    // недоговаривает, а потом кто-то принимает решение по этому обещанию.
+    //
+    // Порядок пар: слева — как шаг назван в плане, справа — чем он выполняется
+    // в теле скрипта. Совпадать обязаны и наличие, и порядок.
+    const STEPS: readonly { plan: RegExp; body: RegExp }[] = [
+      { plan: /сверить OCI-метку/, body: /require_image_revision/ },
+      { plan: /подложк[уи] по манифесту/, body: /require_geo_artifacts/ },
+      { plan: /доставить Compose-файл/, body: /sync_compose_file/ },
+      { plan: /поднять маршрутизатор/, body: /up -d --no-build valhalla"/ },
+      { plan: /пробн(ую|ая) матриц/, body: /require_routing_ready/ },
+      { plan: /поднять решатель/, body: /up -d --no-build vroom"/ },
+      { plan: /проверить решатель пробной задачей/, body: /require_solver_ready/ },
+      { plan: /применить миграции/, body: /run --rm app npx prisma migrate deploy/ },
+      { plan: /(запустить|перезапустить) приложение/, body: /up -d --no-build app"/ },
+      { plan: /\/ready/, body: /require_ready/ },
+    ];
+
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = await readFile(script, 'utf8');
+
+      // План живёт в heredoc между заголовком и закрывающим маркером.
+      const planStart = content.indexOf('План выкатки');
+      const planEnd = content.indexOf('\nPLAN', planStart);
+      expect(planStart, script).toBeGreaterThan(-1);
+      expect(planEnd, script).toBeGreaterThan(planStart);
+
+      const plan = content.slice(planStart, planEnd);
+      const body = content.slice(planEnd);
+
+      let previousPlan = -1;
+      let previousBody = -1;
+
+      for (const step of STEPS) {
+        const inPlan = plan.search(step.plan);
+        const inBody = body.search(step.body);
+
+        expect(inPlan, `${script}: шага нет в плане — ${String(step.plan)}`).toBeGreaterThan(-1);
+        expect(inBody, `${script}: шага нет в теле — ${String(step.body)}`).toBeGreaterThan(-1);
+
+        // Порядок в плане и в теле обязан совпадать: план, переставивший
+        // проверку решателя после миграций, обещал бы безопасность,
+        // которой нет.
+        expect(inPlan, `${script}: порядок в плане — ${String(step.plan)}`).toBeGreaterThan(
+          previousPlan,
+        );
+        expect(inBody, `${script}: порядок в теле — ${String(step.body)}`).toBeGreaterThan(
+          previousBody,
+        );
+
+        previousPlan = inPlan;
+        previousBody = inBody;
+      }
+    }
+  });
+
+  it('план прямо называет остановку до миграций при отказе решателя', async () => {
+    for (const script of [STAGING_SCRIPT, PRODUCTION_SCRIPT]) {
+      const content = await readFile(script, 'utf8');
+      const plan = content.slice(content.indexOf('План выкатки'), content.indexOf('\nPLAN'));
+
+      // Это и есть главное свойство порядка: при отказе решателя схема
+      // остаётся прежней, а работать продолжает уже развёрнутая версия.
+      expect(plan, script).toMatch(/до миграций/);
+    }
+  });
+
   it('проверка решателя выясняет возможность, а не читает номер версии', async () => {
     const verifier = await readFile(path.join(REPO_ROOT, 'deploy/scripts/verify-geo.mjs'), 'utf8');
 

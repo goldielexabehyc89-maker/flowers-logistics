@@ -52,9 +52,21 @@ const ADDRESS_MARKERS = [
   'д.',
 ];
 
+/**
+ * Отчёт импорта.
+ *
+ * Состояния различаются намеренно. «Обновлено» и «не изменилось» — разные
+ * события: первое означает, что снимок принёс новое значение, второе — что
+ * повторный прогон ничего не тронул. Слить их значило бы лишить дежурного
+ * единственного способа отличить настоящее изменение от лишнего запуска.
+ */
 export interface ImportResult {
   created: number;
   updated: number;
+  /** Строка уже совпадала со снимком: не записано ничего, версия не выросла. */
+  unchanged: number;
+  /** Заказ был выведен из области и снимком возвращён обратно. */
+  restored: number;
   /** Заказы снимка, у которых нет псевдонима адреса: точка им не назначается. */
   withoutPoint: number;
 }
@@ -106,6 +118,81 @@ export function assertNoRealData(snapshot: OrdersSnapshot): void {
 }
 
 /**
+ * Контракт ручного интервала: три поля только полным комплектом.
+ *
+ * База требует того же (CHECK `DeliveryOrder_manual_interval_complete`), но
+ * отказ базы приходит уже внутри транзакции и говорит на языке ограничения.
+ * Здесь снимок отвергается ДО неё и с понятной причиной: половинчатый ручной
+ * интервал — это не «почти интервал», а значение, которого логист не задавал.
+ */
+export function assertIntervalContract(snapshot: OrdersSnapshot): void {
+  for (const order of snapshot.orders) {
+    const parts = [
+      order.manualIntervalStartMinute,
+      order.manualIntervalEndMinute,
+      order.manualIntervalSetAt,
+    ];
+    const filled = parts.filter((part) => part !== null).length;
+
+    if (filled === 0) {
+      continue;
+    }
+    if (filled !== parts.length) {
+      throw new SnapshotImportError(
+        'Снимок содержит неполный ручной интервал: нужны начало, окончание и время установки',
+      );
+    }
+
+    const start = order.manualIntervalStartMinute ?? -1;
+    const end = order.manualIntervalEndMinute ?? -1;
+
+    if (start < 0 || start > 1439 || end < 1 || end > 1439 || end <= start) {
+      throw new SnapshotImportError('Снимок содержит некорректный ручной интервал');
+    }
+    if (Number.isNaN(Date.parse(order.manualIntervalSetAt ?? ''))) {
+      throw new SnapshotImportError(
+        'Снимок содержит некорректное время установки ручного интервала',
+      );
+    }
+  }
+}
+
+/**
+ * Исходный текст интервала для синтетического заказа.
+ *
+ * Настоящий текст из МоегоСклада на staging не переносится: он написан
+ * человеком про конкретный заказ и относится к данным клиента. Но и пустая
+ * колонка неверна — интерфейс показывает исходное значение, и логист видел бы
+ * заданный интервал без строки, из которой он получен.
+ *
+ * Поэтому текст ВЫВОДИТСЯ из уже разобранного вида: он честно описывает то,
+ * что лежит в минутах, и ничего не добавляет от себя.
+ */
+export function syntheticIntervalRaw(
+  kind: string,
+  startMinute: number | null,
+  endMinute: number | null,
+): string | null {
+  const hhmm = (minute: number): string =>
+    `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+
+  switch (kind) {
+    case 'RANGE':
+      return startMinute === null || endMinute === null
+        ? null
+        : `с ${hhmm(startMinute)} по ${hhmm(endMinute)}`;
+    case 'EXACT':
+      return startMinute === null ? null : `к ${hhmm(startMinute)}`;
+    case 'UNRECOGNIZED':
+      // Что именно было написано в источнике, снимок не переносит. Заказ при
+      // этом обязан остаться нераспознанным: иначе он молча стал бы пригодным.
+      return 'время доставки не перенесено со снимком';
+    default:
+      return null;
+  }
+}
+
+/**
  * Импортирует снимок.
  *
  * Всё выполняется одной транзакцией: отказ на середине не должен оставить
@@ -124,17 +211,20 @@ export async function importOrdersSnapshot(
   assertStagingEnvironment(config);
   assertSnapshotIsSafe(snapshot);
   assertNoRealData(snapshot);
+  assertIntervalContract(snapshot);
 
-  const result: ImportResult = { created: 0, updated: 0, withoutPoint: 0 };
+  const result: ImportResult = {
+    created: 0,
+    updated: 0,
+    unchanged: 0,
+    restored: 0,
+    withoutPoint: 0,
+  };
 
   await db.$transaction(async (tx) => {
     for (const order of snapshot.orders) {
       const outcome = await upsertOrder(tx, order);
-      if (outcome.created) {
-        result.created += 1;
-      } else {
-        result.updated += 1;
-      }
+      result[outcome.kind] += 1;
       if (!outcome.hasPoint) {
         result.withoutPoint += 1;
       }
@@ -145,8 +235,79 @@ export async function importOrdersSnapshot(
 }
 
 interface UpsertOutcome {
-  created: boolean;
+  kind: 'created' | 'updated' | 'unchanged' | 'restored';
   hasPoint: boolean;
+}
+
+/**
+ * Поля, которыми снимок распоряжается.
+ *
+ * Всё, что здесь перечислено, импорт задаёт целиком и по нему же сравнивает.
+ * Полей, которые он «иногда трогает», нет намеренно: именно из них выросло бы
+ * расхождение между отчётом и действительностью.
+ */
+const COMPARED_FIELDS = [
+  'externalName',
+  'deliveryDate',
+  'deliveryDateRaw',
+  'intervalRaw',
+  'intervalKind',
+  'intervalStartMinute',
+  'intervalEndMinute',
+  'manualIntervalStartMinute',
+  'manualIntervalEndMinute',
+  'manualIntervalSetAt',
+  'address',
+  'recipient',
+  'comment',
+  'externalStateName',
+  'externalStateType',
+  'sumMinor',
+  'payedSumMinor',
+  'cashCollectable',
+  'cashToCollectMinor',
+  'cashAnomaly',
+  'inScope',
+  'scopeExitReason',
+  'sourceArchived',
+  'sourceMissing',
+  'needsAttention',
+  'attentionReasons',
+  'geoState',
+  'geoSource',
+  'geoPrecision',
+  'geoLatMicro',
+  'geoLonMicro',
+  'geoReviewReason',
+] as const;
+
+/**
+ * Сравнимое представление значения.
+ *
+ * Дата, BigInt и массив причин внимания не сравниваются оператором равенства:
+ * два одинаковых `Date` — разные объекты, а `1n` не равно `'1'`. Без приведения
+ * повторный импорт всегда выглядел бы изменением.
+ */
+function comparable(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'null';
+  }
+  if (value instanceof Date) {
+    return `d:${value.getTime()}`;
+  }
+  if (typeof value === 'bigint') {
+    return `n:${value.toString()}`;
+  }
+  if (Array.isArray(value)) {
+    // Порядок причин внимания задаётся снимком и значим: пересортировка
+    // скрыла бы настоящее изменение состава.
+    return `a:${value.map((item) => String(item)).join(',')}`;
+  }
+  return `v:${String(value)}`;
+}
+
+function sameAsStored(stored: Record<string, unknown>, desired: Record<string, unknown>): boolean {
+  return COMPARED_FIELDS.every((field) => comparable(stored[field]) === comparable(desired[field]));
 }
 
 async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise<UpsertOutcome> {
@@ -154,10 +315,11 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
   // идентификатором на staging: настоящий UUID МоегоСклада сюда не попадает.
   const externalId = pseudoUuid(order.key);
   const point = order.addressAlias === null ? null : pointForAlias(order.addressAlias);
+  const hasPoint = point !== null;
 
   const existing = await tx.deliveryOrder.findUnique({
     where: { externalId },
-    select: { id: true },
+    select: Object.fromEntries(COMPARED_FIELDS.map((field) => [field, true])) as never,
   });
 
   // Геоданные задаются ЯВНО в обоих случаях.
@@ -173,7 +335,6 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
           geoPrecision: null,
           geoLatMicro: null,
           geoLonMicro: null,
-          geoResolvedAt: null,
           geoReviewReason: null,
         }
       : {
@@ -184,20 +345,29 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
           geoPrecision: 'EXACT_HOUSE' as const,
           geoLatMicro: point.latMicro,
           geoLonMicro: point.lonMicro,
-          geoResolvedAt: new Date(),
           geoReviewReason: null,
         };
 
-  const data = {
+  const desired = {
     externalName: order.number,
-    externalUpdated: new Date(),
     deliveryDate: order.deliveryDate === null ? null : toDateColumn(order.deliveryDate),
     deliveryDateRaw: order.deliveryDate,
+    // Текст выводится из разобранного вида: настоящий текст источника
+    // на staging не переносится.
+    intervalRaw: syntheticIntervalRaw(
+      order.intervalKind,
+      order.intervalStartMinute,
+      order.intervalEndMinute,
+    ),
     intervalKind: order.intervalKind as never,
     intervalStartMinute: order.intervalStartMinute,
     intervalEndMinute: order.intervalEndMinute,
     manualIntervalStartMinute: order.manualIntervalStartMinute,
     manualIntervalEndMinute: order.manualIntervalEndMinute,
+    // Три поля ручного интервала пишутся вместе: комплектность уже проверена
+    // до транзакции, поэтому здесь достаточно перенести значение как есть.
+    manualIntervalSetAt:
+      order.manualIntervalSetAt === null ? null : new Date(order.manualIntervalSetAt),
     // Псевдонимы попадают в поля адреса и получателя как есть: они и есть
     // всё, что staging знает о клиенте.
     address: order.addressAlias === null ? null : `${order.addressAlias} (${point?.label ?? ''})`,
@@ -211,6 +381,10 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
     cashToCollectMinor: BigInt(order.cashToCollectMinor),
     cashAnomaly: order.cashAnomaly,
     inScope: order.inScope,
+    // Причина выхода снимается вместе с возвратом в область: заказ, снова
+    // числящийся нашим и одновременно «пропавшим из источника», объяснить
+    // логисту было бы нечем.
+    scopeExitReason: null,
     sourceArchived: false,
     sourceMissing: false,
     needsAttention: order.needsAttention,
@@ -219,15 +393,42 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
   };
 
   if (existing === null) {
-    await tx.deliveryOrder.create({ data: { ...data, externalId, version: 1 } });
-    return { created: true, hasPoint: point !== null };
+    await tx.deliveryOrder.create({
+      data: {
+        ...desired,
+        externalId,
+        externalUpdated: new Date(),
+        scopeExitedAt: null,
+        ...(hasPoint ? { geoResolvedAt: new Date() } : { geoResolvedAt: null }),
+        version: 1,
+      },
+    });
+    return { kind: 'created', hasPoint };
   }
+
+  const stored = existing as unknown as Record<string, unknown>;
+
+  // Ничего не изменилось — не пишем ВООБЩЕ. Ни версии, ни времени обновления,
+  // ни времени разрешения точки: повторный прогон обязан быть неотличим
+  // от невыполненного, иначе он сам становится изменением данных.
+  if (sameAsStored(stored, desired as unknown as Record<string, unknown>)) {
+    return { kind: 'unchanged', hasPoint };
+  }
+
+  const wasRetired = stored['sourceMissing'] === true;
 
   await tx.deliveryOrder.update({
     where: { externalId },
-    data: { ...data, version: { increment: 1 } },
+    data: {
+      ...desired,
+      externalUpdated: new Date(),
+      scopeExitedAt: null,
+      ...(hasPoint ? { geoResolvedAt: new Date() } : { geoResolvedAt: null }),
+      version: { increment: 1 },
+    },
   });
-  return { created: false, hasPoint: point !== null };
+
+  return { kind: wasRetired ? 'restored' : 'updated', hasPoint };
 }
 
 /**

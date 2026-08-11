@@ -25,8 +25,16 @@ import { createHash } from 'node:crypto';
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 
-/** Версия формата: staging обязан отказаться импортировать чужой формат. */
-export const SNAPSHOT_FORMAT = 'flowers-logistics/orders-snapshot@1';
+/**
+ * Версия формата: staging обязан отказаться импортировать чужой формат.
+ *
+ * Поднята до `@2` вместе с ручным интервалом. В первой версии снимок нёс две
+ * минуты и не нёс времени установки, а база требует все три поля вместе
+ * (CHECK `DeliveryOrder_manual_interval_complete`) — снимок с ручным интервалом
+ * был неимпортируем в принципе. Молча дописать третье поле в прежний формат
+ * нельзя: получилось бы, что снимок утверждает время, которого в нём не было.
+ */
+export const SNAPSHOT_FORMAT = 'flowers-logistics/orders-snapshot@2';
 
 export interface SnapshotOrder {
   /** Локальный идентификатор снимка. Внешний UUID МоегоСклада не переносится. */
@@ -38,6 +46,12 @@ export interface SnapshotOrder {
   intervalEndMinute: number | null;
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
+  /**
+   * Когда логист задал ручной интервал. Передаётся вместе с минутами и только
+   * полным комплектом: база не принимает половинчатое значение, а «интервал
+   * есть, но неизвестно с каких пор» — не факт, а его видимость.
+   */
+  manualIntervalSetAt: string | null;
   /** Псевдонимы вместо персональных данных. */
   addressAlias: string | null;
   recipientAlias: string | null;
@@ -116,6 +130,7 @@ export async function exportOrdersSnapshot(
       intervalEndMinute: true,
       manualIntervalStartMinute: true,
       manualIntervalEndMinute: true,
+      manualIntervalSetAt: true,
       address: true,
       recipient: true,
       comment: true,
@@ -147,6 +162,7 @@ export async function exportOrdersSnapshot(
       intervalEndMinute: row.intervalEndMinute,
       manualIntervalStartMinute: row.manualIntervalStartMinute,
       manualIntervalEndMinute: row.manualIntervalEndMinute,
+      manualIntervalSetAt: row.manualIntervalSetAt?.toISOString() ?? null,
       addressAlias: alias('addr', row.address, options.aliasSalt),
       recipientAlias: alias('rcpt', row.recipient, options.aliasSalt),
       // Сам текст комментария не нужен даже в псевдониме: важно лишь, был ли он.

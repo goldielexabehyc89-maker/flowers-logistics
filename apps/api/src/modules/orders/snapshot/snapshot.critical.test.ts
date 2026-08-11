@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   closeTestContext,
   createTestContext,
+  seedUser,
   TEST_SECRETS,
   type TestContext,
 } from '../../auth/testing/harness.js';
@@ -17,12 +18,16 @@ import { loadConfig, type AppConfig } from '../../../platform/config.js';
 import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.js';
 import { SNAPSHOT_FORMAT, alias, type OrdersSnapshot } from '../snapshot-export.js';
 import {
+  assertIntervalContract,
   assertNoRealData,
   assertStagingEnvironment,
   importOrdersSnapshot,
   pseudoUuid,
   SnapshotImportError,
+  syntheticIntervalRaw,
 } from './import.js';
+import { RetireBlockedError, retireSnapshotOrders } from './retire.js';
+import { assertExplicitPath, fileArgument, readSnapshotFile, SnapshotFileError } from './file.js';
 import { MIN_SYNTHETIC_POINTS, pointForAlias, SYNTHETIC_POINTS } from './synthetic-points.js';
 
 let ctx: TestContext;
@@ -70,6 +75,7 @@ function snapshotOf(orders: Partial<OrdersSnapshot['orders'][number]>[]): Orders
       intervalEndMinute: 720,
       manualIntervalStartMinute: null,
       manualIntervalEndMinute: null,
+      manualIntervalSetAt: null,
       addressAlias: `addr-${String(index).padStart(10, '0')}`,
       recipientAlias: `rcpt-${String(index).padStart(10, '0')}`,
       hasComment: false,
@@ -272,7 +278,9 @@ describe('импорт на staging', () => {
 
     const second = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
     expect(second.created).toBe(0);
-    expect(second.updated).toBe(2);
+    // Тот же снимок ничего не меняет: ни одной записи, а не «обновлено две».
+    expect(second.updated).toBe(0);
+    expect(second.unchanged).toBe(2);
 
     // Порядок строк задаётся явно: без ORDER BY база вправе вернуть их
     // как угодно, и сравнение списков превратилось бы в проверку удачи.
@@ -369,5 +377,385 @@ describe('импорт на staging', () => {
     expect(order.address).toContain(`addr-${marker}p`);
     expect(order.address?.toLowerCase()).toContain('синтетическ');
     expect(order.recipient?.startsWith('rcpt-')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Идемпотентность, восстановление и вывод из области
+// ---------------------------------------------------------------------------
+
+/** Считает записи, которых у импорта быть не должно. */
+async function sideEffects(): Promise<{ audit: number; realtime: number }> {
+  return {
+    audit: await ctx.db.auditLog.count({ where: { entityType: 'DeliveryOrder' } }),
+    realtime: await ctx.db.realtimeEvent.count({ where: { topic: 'order.scope_changed' } }),
+  };
+}
+
+/** Набор из десяти заказов: столько же, сколько в одобренном синтетическом дне. */
+function tenOrders(marker: string): OrdersSnapshot {
+  return snapshotOf(
+    Array.from({ length: 10 }, (_, index) => ({
+      key: `set-${marker}-${index}`,
+      number: `SYN-${marker}-${index}`,
+      // Три заказа делят один псевдоним: на staging они окажутся в одной точке.
+      addressAlias: index >= 7 ? `addr-${marker}same` : `addr-${marker}${index}`,
+    })),
+  );
+}
+
+describe('повторный импорт', () => {
+  it('первый прогон создаёт десять, идентичный повтор не меняет ничего', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = tenOrders(marker);
+    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+
+    const first = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+    expect(first.created).toBe(10);
+    expect(first.unchanged).toBe(0);
+
+    const stateOf = async (): Promise<string[]> =>
+      (
+        await ctx.db.deliveryOrder.findMany({
+          where: { externalId: { in: ids } },
+          orderBy: { externalId: 'asc' },
+          select: {
+            externalId: true,
+            version: true,
+            updatedAt: true,
+            geoResolvedAt: true,
+            geoLatMicro: true,
+            geoLonMicro: true,
+          },
+        })
+      ).map(
+        (order) =>
+          `${order.externalId}:${order.version}:${order.updatedAt.getTime()}:` +
+          `${order.geoResolvedAt?.getTime() ?? 0}:${order.geoLatMicro}:${order.geoLonMicro}`,
+      );
+
+    const before = await stateOf();
+    const effectsBefore = await sideEffects();
+
+    const second = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+
+    expect(second.created).toBe(0);
+    expect(second.updated).toBe(0);
+    expect(second.restored).toBe(0);
+    expect(second.unchanged).toBe(10);
+
+    // Ни версии, ни времени обновления, ни времени разрешения точки:
+    // повторный прогон обязан быть неотличим от невыполненного.
+    expect(await stateOf()).toEqual(before);
+    expect(await sideEffects()).toEqual(effectsBefore);
+  });
+
+  it('изменившееся значение отличается от неизменившегося в одном снимке', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = tenOrders(marker);
+    await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+
+    const changed: OrdersSnapshot = {
+      ...snapshot,
+      orders: snapshot.orders.map((order, index) =>
+        index === 0 ? { ...order, number: `${order.number}-B` } : order,
+      ),
+    };
+
+    const result = await importOrdersSnapshot(ctx.db, envConfig('staging'), changed);
+    expect(result.updated).toBe(1);
+    expect(result.unchanged).toBe(9);
+  });
+
+  it('три заказа с одним псевдонимом получают одну и ту же точку', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = tenOrders(marker);
+    await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+
+    const shared = await ctx.db.deliveryOrder.findMany({
+      where: { externalId: { in: snapshot.orders.slice(7).map((o) => pseudoUuid(o.key)) } },
+      select: { geoLatMicro: true, geoLonMicro: true },
+    });
+
+    expect(shared).toHaveLength(3);
+    const points = new Set(shared.map((order) => `${order.geoLatMicro}:${order.geoLonMicro}`));
+    expect(points.size).toBe(1);
+  });
+});
+
+describe('ручной интервал в снимке', () => {
+  it('полный комплект из трёх полей принимается', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = snapshotOf([
+      {
+        key: `mi-${marker}`,
+        addressAlias: `addr-${marker}m`,
+        manualIntervalStartMinute: 600,
+        manualIntervalEndMinute: 780,
+        manualIntervalSetAt: '2026-08-20T09:00:00.000Z',
+      },
+    ]);
+
+    const result = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+    expect(result.created).toBe(1);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: pseudoUuid(`mi-${marker}`) },
+      select: {
+        manualIntervalStartMinute: true,
+        manualIntervalEndMinute: true,
+        manualIntervalSetAt: true,
+      },
+    });
+    expect(stored.manualIntervalStartMinute).toBe(600);
+    expect(stored.manualIntervalEndMinute).toBe(780);
+    expect(stored.manualIntervalSetAt).not.toBeNull();
+  });
+
+  it('половинчатый комплект отклоняется ДО транзакции', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const before = await ctx.db.deliveryOrder.count();
+
+    // Прежде такой снимок доходил до базы и падал на ограничении
+    // DeliveryOrder_manual_interval_complete: отказ приходил уже внутри
+    // транзакции и говорил на языке ограничения, а не о снимке.
+    const half = snapshotOf([
+      { key: `half-${marker}`, manualIntervalStartMinute: 600, manualIntervalEndMinute: 780 },
+    ]);
+
+    expect(() => assertIntervalContract(half)).toThrow(/неполный ручной интервал/);
+    await expect(importOrdersSnapshot(ctx.db, envConfig('staging'), half)).rejects.toThrow(
+      SnapshotImportError,
+    );
+    expect(await ctx.db.deliveryOrder.count()).toBe(before);
+  });
+
+  it('обратный и выходящий за сутки интервал отклоняется', async () => {
+    for (const broken of [
+      { manualIntervalStartMinute: 780, manualIntervalEndMinute: 600 },
+      { manualIntervalStartMinute: 0, manualIntervalEndMinute: 1500 },
+    ]) {
+      const snapshot = snapshotOf([{ ...broken, manualIntervalSetAt: '2026-08-20T09:00:00.000Z' }]);
+      expect(() => assertIntervalContract(snapshot)).toThrow(SnapshotImportError);
+    }
+  });
+
+  it('исходный текст интервала выводится из вида, а не переносится из источника', () => {
+    expect(syntheticIntervalRaw('RANGE', 600, 780)).toBe('с 10:00 по 13:00');
+    expect(syntheticIntervalRaw('EXACT', 780, null)).toBe('к 13:00');
+    expect(syntheticIntervalRaw('MISSING', null, null)).toBeNull();
+    // Нераспознанное остаётся нераспознанным: текст источника не переносится,
+    // и выдавать его за разобранное значение нельзя.
+    expect(syntheticIntervalRaw('UNRECOGNIZED', null, null)).toMatch(/не перенесено/);
+  });
+});
+
+describe('вывод набора из области', () => {
+  async function seedSet(marker: string): Promise<OrdersSnapshot> {
+    const snapshot = tenOrders(marker);
+    await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+    return snapshot;
+  }
+
+  it('сухая проверка ничего не меняет, а затем вывод помечает заказы', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = await seedSet(marker);
+    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+
+    const planned = await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, {
+      dryRun: true,
+    });
+    expect(planned.matched).toBe(10);
+    expect(planned.retired).toBe(10);
+    expect(planned.dryRun).toBe(true);
+
+    // Сухая проверка не пишет ничего.
+    expect(
+      await ctx.db.deliveryOrder.count({ where: { externalId: { in: ids }, sourceMissing: true } }),
+    ).toBe(0);
+
+    const done = await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, {
+      dryRun: false,
+    });
+    expect(done.retired).toBe(10);
+
+    const retired = await ctx.db.deliveryOrder.findMany({
+      where: { externalId: { in: ids } },
+      select: { sourceMissing: true, inScope: true, scopeExitReason: true },
+    });
+    expect(retired).toHaveLength(10);
+    for (const order of retired) {
+      expect(order.sourceMissing).toBe(true);
+      expect(order.inScope).toBe(false);
+      expect(order.scopeExitReason).toBe('SOURCE_MISSING');
+    }
+
+    // Ничего не удалено: строки на месте.
+    expect(await ctx.db.deliveryOrder.count({ where: { externalId: { in: ids } } })).toBe(10);
+  });
+
+  it('повторный вывод — безопасное бездействие', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = await seedSet(marker);
+
+    await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, { dryRun: false });
+    const effectsBefore = await sideEffects();
+
+    const again = await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, {
+      dryRun: false,
+    });
+
+    expect(again.retired).toBe(0);
+    expect(again.alreadyRetired).toBe(10);
+    // Второй вывод не пишет ни аудита, ни событий: доменный путь идемпотентен.
+    expect(await sideEffects()).toEqual(effectsBefore);
+  });
+
+  it('активный маршрут останавливает вывод целиком', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = await seedSet(marker);
+    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: ids[0] ?? '' },
+      select: { id: true },
+    });
+    const author = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+
+    // Номер маршрута намеренно не содержит маркера набора: иначе проверка
+    // «в сообщении нет данных снимка» прошла бы по совпадению.
+    const routeNumber = `R-RETIRE-${String(process.hrtime.bigint() % 1_000_000n)}`;
+    const route = await ctx.db.deliveryRoute.create({
+      data: {
+        number: routeNumber,
+        deliveryDate: new Date('2026-08-20T00:00:00.000Z'),
+        vehicleType: 'CAR',
+        createdById: author.id,
+      },
+      select: { id: true, number: true },
+    });
+    await ctx.db.routeOrder.create({
+      data: { routeId: route.id, orderId: order.id, position: 1, addedById: author.id },
+    });
+
+    await expect(
+      retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, { dryRun: true }),
+    ).rejects.toThrow(RetireBlockedError);
+
+    // Отказ целиком: ни один заказ набора не выведен, включая те, что
+    // в маршруте не состоят.
+    expect(
+      await ctx.db.deliveryOrder.count({ where: { externalId: { in: ids }, sourceMissing: true } }),
+    ).toBe(0);
+
+    // Номер маршрута назван, чтобы человек знал, что отменять; псевдонимов
+    // и содержимого снимка в сообщении нет.
+    try {
+      await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, { dryRun: false });
+    } catch (error) {
+      const blocked = error as RetireBlockedError;
+      // Номер маршрута назван: без него человек не знает, что отменять.
+      expect(blocked.routeNumbers).toEqual([route.number]);
+      // Псевдонимов и ключей снимка в сообщении нет.
+      expect(blocked.message).not.toContain('addr-');
+      expect(blocked.message).not.toContain('set-');
+      expect(blocked.message).toContain(route.number);
+    }
+  });
+
+  it('вывод доступен только на staging', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = tenOrders(marker);
+
+    for (const env of ['local', 'production'] as const) {
+      await expect(
+        retireSnapshotOrders(ctx.db, envConfig(env), snapshot, { dryRun: true }),
+      ).rejects.toThrow(SnapshotImportError);
+    }
+  });
+
+  it('снимок с настоящим адресом не принимается и командой вывода', async () => {
+    const snapshot = snapshotOf([{ addressAlias: 'Москва, улица Настоящая, дом 5' }]);
+    await expect(
+      retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, { dryRun: true }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('восстановление после вывода', () => {
+  it('повторный импорт возвращает те же записи и те же точки', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const snapshot = tenOrders(marker);
+    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+
+    await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+
+    const points = async (): Promise<string[]> =>
+      (
+        await ctx.db.deliveryOrder.findMany({
+          where: { externalId: { in: ids } },
+          orderBy: { externalId: 'asc' },
+          select: { externalId: true, geoLatMicro: true, geoLonMicro: true },
+        })
+      ).map((order) => `${order.externalId}:${order.geoLatMicro}:${order.geoLonMicro}`);
+
+    const before = await points();
+
+    await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, { dryRun: false });
+
+    const restored = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+    expect(restored.restored).toBe(10);
+    expect(restored.created).toBe(0);
+    expect(restored.updated).toBe(0);
+
+    // Те же строки и те же синтетические точки: ключ снимка отображается
+    // в тот же идентификатор, псевдоним — в ту же точку.
+    expect(await points()).toEqual(before);
+    expect(await ctx.db.deliveryOrder.count({ where: { externalId: { in: ids } } })).toBe(10);
+
+    const back = await ctx.db.deliveryOrder.findMany({
+      where: { externalId: { in: ids } },
+      select: { inScope: true, sourceMissing: true, scopeExitReason: true },
+    });
+    for (const order of back) {
+      expect(order.inScope).toBe(true);
+      expect(order.sourceMissing).toBe(false);
+      // Причина выхода снята: заказ снова наш и «пропавшим» одновременно быть не может.
+      expect(order.scopeExitReason).toBeNull();
+    }
+
+    // Возвращённый набор снова идемпотентен.
+    const again = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
+    expect(again.unchanged).toBe(10);
+  });
+});
+
+describe('файл снимка', () => {
+  it('маска вместо файла отвергается', () => {
+    for (const value of ['/srv/snapshots/*.json', '/srv/snap?.json', '/srv/{a,b}.json']) {
+      expect(() => assertExplicitPath(value), value).toThrow(SnapshotFileError);
+    }
+  });
+
+  it('относительный и пустой путь отвергаются', () => {
+    for (const value of ['snapshot.json', './snapshot.json', '   ']) {
+      expect(() => assertExplicitPath(value), value).toThrow(SnapshotFileError);
+    }
+  });
+
+  it('абсолютный путь одного файла принимается', () => {
+    expect(() => assertExplicitPath('/srv/flowers/snapshot.json')).not.toThrow();
+  });
+
+  it('отсутствующий файл называется отсутствующим, а не разбирается', async () => {
+    await expect(readSnapshotFile('/srv/заведомо/нет/такого.json')).rejects.toThrow(
+      SnapshotFileError,
+    );
+  });
+
+  it('аргумент --file обязателен', () => {
+    expect(() => fileArgument([])).toThrow(SnapshotFileError);
+    expect(() => fileArgument(['--file'])).toThrow(SnapshotFileError);
+    expect(fileArgument(['--file', '/srv/a.json'])).toBe('/srv/a.json');
   });
 });
