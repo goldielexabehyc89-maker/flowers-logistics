@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
 import { pino } from 'pino';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -19,7 +20,13 @@ import { MoyskladClient, MoyskladError } from './client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
 import { deltaFilter, formatMoment, initialLoadFilter } from './filters.js';
 import { formatMoscow, moscowDate, MoscowTimeParseError, parseMoscow } from './moscow-time.js';
-import { SYNC_LOCK_KEY, acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
+import {
+  SYNC_LOCK_KEY,
+  acquireSyncLock,
+  type LockConnection,
+  type LockDeps,
+  type SyncLock,
+} from './sync-lock.js';
 import { checkSyncOnceEnvironment, performSyncOnce } from './sync-once.js';
 import {
   backoffForAttempt,
@@ -99,6 +106,47 @@ async function terminateLeakedSyncLocks(): Promise<number> {
       AND pid <> pg_backend_pid()
   `;
   return rows.length;
+}
+
+/**
+ * Настоящее соединение блокировки, принадлежащее ТЕСТУ.
+ *
+ * Отличается от боевого одним: у клиента есть обработчик `error`. Страховка
+ * закрывает сессию прерванного сценария, и клиент этой сессии узнаёт об этом
+ * событием — без обработчика оно всплывает как необработанная ошибка процесса
+ * и роняет прогон уже после того, как все проверки прошли.
+ *
+ * В боевом коде такого обработчика нет намеренно: там сессию никто не закрывает
+ * снаружи, а молчаливое проглатывание ошибки соединения скрыло бы настоящий
+ * обрыв связи с базой.
+ */
+async function connectTestLock(connectionString: string): Promise<LockConnection> {
+  const client = new Client({ connectionString });
+  // Обрыв ожидаем: страховка закрывает сессию прерванного сценария сама.
+  client.on('error', () => undefined);
+  await client.connect();
+
+  return {
+    async tryLock(key: bigint) {
+      const result = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock($1::bigint) AS locked',
+        [key.toString()],
+      );
+      return result.rows[0]?.locked === true;
+    },
+    async unlock(key: bigint) {
+      await client.query('SELECT pg_advisory_unlock($1::bigint)', [key.toString()]);
+    },
+    async close() {
+      // Соединение уже могло быть закрыто страховкой: это не ошибка.
+      await client.end().catch(() => undefined);
+    },
+  };
+}
+
+/** Настоящая блокировка на тестовой базе. Соединение принадлежит тесту. */
+function realLock(): LockDeps {
+  return { connectionString: ctx.config.DATABASE_URL, connect: connectTestLock };
 }
 
 /**
@@ -971,7 +1019,7 @@ describe('блокировка на настоящей PostgreSQL', () => {
     // Настоящее соединение PostgreSQL и настоящий pg_try_advisory_lock.
     // Ключ тот же, что раньше брался транзакционно внутри прохода: старая
     // реализация ждала бы его на соединении Prisma и не дошла бы до API.
-    const realLock = { connectionString: ctx.config.DATABASE_URL };
+    const lockDeps = realLock();
 
     let openGate: (() => void) | null = null;
     const gate = new Promise<void>((resolve) => {
@@ -995,13 +1043,13 @@ describe('блокировка на настоящей PostgreSQL', () => {
       }) as unknown as typeof globalThis.fetch,
     };
 
-    const first = runSyncOnce({ ...deps(slowApi), lock: realLock });
+    const first = runSyncOnce({ ...deps(slowApi), lock: lockDeps });
     // Самоблокировки нет: проход дошёл до поддельного API, удерживая замок.
     await withTimeout(reached, 'первый проход не дошёл до API');
 
     const second = fakeApi([[row()]]);
     const skipped = await withTimeout(
-      runSyncOnce({ ...deps(second, new Date('2026-08-06T23:00:00.000Z')), lock: realLock }),
+      runSyncOnce({ ...deps(second, new Date('2026-08-06T23:00:00.000Z')), lock: lockDeps }),
       'параллельный проход не завершился',
     );
 
@@ -1014,13 +1062,13 @@ describe('блокировка на настоящей PostgreSQL', () => {
     expect(slowApi.calls).toHaveLength(1);
 
     // Замок снят: следующий захватчик получает его сразу.
-    const after = await withTimeout(acquireTracked(realLock), 'замок не освобождён');
+    const after = await withTimeout(acquireTracked(lockDeps), 'замок не освобождён');
     expect(after).not.toBeNull();
     await releaseTracked(after);
   });
 
   it('отказ прохода не оставляет замок: следующий получает его сразу', async () => {
-    const realLock = { connectionString: ctx.config.DATABASE_URL };
+    const lockDeps = realLock();
 
     // Проход обрывается ПОСЛЕ захвата замка: именно этот случай раньше
     // заражал соседние сценарии.
@@ -1036,7 +1084,7 @@ describe('блокировка на настоящей PostgreSQL', () => {
     // наружу, и освобождение замка держится только на продуктовом `finally`.
     await expect(
       withTimeout(
-        runSyncOnce({ ...deps(failing), lock: realLock }),
+        runSyncOnce({ ...deps(failing), lock: lockDeps }),
         'проход с отказом не завершился',
       ),
     ).rejects.toThrow();
@@ -1046,7 +1094,7 @@ describe('блокировка на настоящей PostgreSQL', () => {
     // и доходит до источника.
     const next = fakeApi([[row()]]);
     const after = await withTimeout(
-      runSyncOnce({ ...deps(next, new Date('2026-08-06T23:30:00.000Z')), lock: realLock }),
+      runSyncOnce({ ...deps(next, new Date('2026-08-06T23:30:00.000Z')), lock: lockDeps }),
       'следующий проход не завершился',
     );
 
@@ -1065,7 +1113,7 @@ describe('прерванный сценарий не заражает следу
 
     // Ссылка НЕ сохраняется: так выглядит прерванный сценарий — дотянуться
     // до соединения объектом уже невозможно.
-    const real = await acquireSyncLock({ connectionString: ctx.config.DATABASE_URL });
+    const real = await acquireSyncLock(realLock());
     expect(real).not.toBeNull();
 
     expect(heldLocks.has(SYNC_LOCK_KEY.toString())).toBe(true);
@@ -1081,7 +1129,7 @@ describe('прерванный сценарий не заражает следу
     expect(api.calls.length).toBeGreaterThan(0);
 
     // Настоящий замок тоже свободен: сессия прерванного сценария закрыта.
-    const real = await acquireTracked({ connectionString: ctx.config.DATABASE_URL });
+    const real = await acquireTracked(realLock());
     expect(real, 'настоящий замок остался занят прерванным сценарием').not.toBeNull();
     await releaseTracked(real);
   });
