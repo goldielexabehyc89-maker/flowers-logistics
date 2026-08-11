@@ -28,6 +28,7 @@ import { Prisma, type $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import { isPlainCourier, type Role } from '@fl/shared';
+import { readRoleAssignment } from '../../platform/role-assignments.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
@@ -734,21 +735,28 @@ export async function setCourier(
  * получил бы влияние на привилегированную учётную запись. Администратор такого
  * курьера назначить может.
  */
-async function assertCourierAssignable(
+/**
+ * Экспортируется ради направленной проверки совместимости: кандидат с ролью,
+ * которой эта версия не знает, обязан быть отвергнут, а не разобран.
+ */
+export async function assertCourierAssignable(
   tx: TransactionClient,
   actor: AuthenticatedActor,
   courierUserId: string,
 ): Promise<void> {
   const user = await tx.user.findUnique({
     where: { id: courierUserId },
-    select: { id: true, status: true, roles: { select: { role: true } } },
+    select: { id: true, status: true },
   });
 
   if (user === null) {
     throw new AppError('NOT_FOUND', { message: 'courier not found' });
   }
 
-  const roles = user.roles.map((assignment) => assignment.role);
+  // Роли читаются текстом: кандидат с ролью более новой версии не должен ронять
+  // назначение курьера разбором перечисления.
+  const assignments = await readRoleAssignment(tx, user.id);
+  const roles = assignments.known;
 
   if (user.status !== 'ACTIVE' || !roles.includes('COURIER')) {
     throw new AppError('VALIDATION_FAILED', {
@@ -757,7 +765,12 @@ async function assertCourierAssignable(
     });
   }
 
-  if (!actor.roles.includes('ADMIN') && !isPlainCourier(roles)) {
+  // Неизвестная роль не превращает кандидата в обычного курьера: логисту он
+  // недоступен, назначить его может только администратор.
+  if (
+    !actor.roles.includes('ADMIN') &&
+    (assignments.hasUnsupportedRoles || !isPlainCourier(roles))
+  ) {
     throw new AppError('FORBIDDEN', {
       message: 'logistician cannot assign privileged courier',
       publicMessage: 'Этого курьера может назначить только администратор.',

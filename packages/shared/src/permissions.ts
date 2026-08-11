@@ -24,16 +24,24 @@ export function isPlainCourier(roles: readonly Role[]): boolean {
   return roles.includes('COURIER') && !isPrivileged(roles);
 }
 
-/** Может ли актор управлять пользователем с такими ролями (создание, изменение, заморозка). */
+/**
+ * Может ли актор управлять пользователем с такими ролями (создание, изменение, заморозка).
+ *
+ * `targetHasUnsupportedRoles` — признак того, что у цели есть роль, которой эта
+ * версия приложения не знает. Такой пользователь НЕ считается обычным курьером
+ * даже при наличии `COURIER`: раз версия не понимает часть его ролей, она
+ * не вправе решать, что он безопасен для логиста. Fail closed.
+ */
 export function canManageUserWithRoles(
   actorRoles: readonly Role[],
   targetRoles: readonly Role[],
+  targetHasUnsupportedRoles = false,
 ): boolean {
   if (actorRoles.includes('ADMIN')) {
     return true;
   }
   if (actorRoles.includes('LOGISTICIAN')) {
-    return isPlainCourier(targetRoles);
+    return !targetHasUnsupportedRoles && isPlainCourier(targetRoles);
   }
   return false;
 }

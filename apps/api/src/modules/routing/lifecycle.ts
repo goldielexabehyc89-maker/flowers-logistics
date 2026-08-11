@@ -25,6 +25,7 @@
 
 import { Prisma, type $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
+import { readRoleAssignment } from '../../platform/role-assignments.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
@@ -182,7 +183,7 @@ export async function confirmBlockers(
       id: true,
       deliveryDate: true,
       courierUserId: true,
-      courier: { select: { status: true, roles: { select: { role: true } } } },
+      courier: { select: { id: true, status: true } },
       orders: {
         where: { removedAt: null },
         select: {
@@ -233,7 +234,9 @@ export async function confirmBlockers(
   }
 
   if (route.courierUserId !== null) {
-    const roles = route.courier?.roles.map((assignment) => assignment.role) ?? [];
+    // Роли читаются текстом: подтверждение маршрута не должно падать из-за
+    // роли курьера, которой эта версия приложения не знает.
+    const roles = (await readRoleAssignment(tx, route.courierUserId)).known;
     if (route.courier?.status !== 'ACTIVE' || !roles.includes('COURIER')) {
       blockers.push({ kind: 'ROUTE_COURIER_UNAVAILABLE', orderIds: [] });
     }

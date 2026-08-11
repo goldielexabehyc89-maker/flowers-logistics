@@ -337,7 +337,15 @@ export function UsersScreen(): React.JSX.Element {
                   <tr key={item.id}>
                     <td>{item.fullName}</td>
                     <td className="nowrap">{item.phone}</td>
-                    <td>{item.roles.map((role) => ROLE_LABELS[role]).join(', ')}</td>
+                    <td>
+                      {/* Подписи берутся только для известных ролей: обращение
+                          ROLE_LABELS[неизвестная] дало бы пустую ячейку. */}
+                      {item.roles.map((role) => ROLE_LABELS[role]).join(', ') ||
+                        (item.hasUnsupportedRoles ? '—' : '')}
+                      {item.hasUnsupportedRoles && (
+                        <div className="text-sm muted">Роли заданы более новой версией</div>
+                      )}
+                    </td>
                     <td>
                       <StatusBadge tone={STATUS_TONES[item.status]}>
                         {USER_STATUS_LABELS[item.status]}
@@ -352,6 +360,12 @@ export function UsersScreen(): React.JSX.Element {
                     <td>
                       <div className="row">
                         <Button
+                          disabled={item.hasUnsupportedRoles}
+                          title={
+                            item.hasUnsupportedRoles
+                              ? 'Роли этого пользователя заданы в более новой версии приложения'
+                              : undefined
+                          }
                           onClick={() => {
                             setEditing(item);
                             setFormError(null);

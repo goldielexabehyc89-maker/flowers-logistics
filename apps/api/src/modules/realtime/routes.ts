@@ -9,6 +9,7 @@
 import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
+import { readRoleAssignment } from '../../platform/role-assignments.js';
 import { authenticate } from '../auth/guards.js';
 import type { Notifier } from './notifier.js';
 import { parseLastEventId, readEventsForViewer } from './reader.js';
@@ -109,7 +110,6 @@ export function startEventStream(
             select: {
               status: true,
               sessionVersion: true,
-              roles: { select: { role: true } },
             },
           });
 
@@ -128,11 +128,11 @@ export function startEventStream(
             return { valid: false as const };
           }
 
-          const result = await readEventsForViewer(
-            tx,
-            { userId: viewer.userId, roles: user.roles.map((assignment) => assignment.role) },
-            cursor,
-          );
+          // Роли читаются текстом: канал не должен обрываться из-за роли,
+          // которой эта версия не знает. Права даёт только известная часть.
+          const roles = (await readRoleAssignment(tx, viewer.userId)).known;
+
+          const result = await readEventsForViewer(tx, { userId: viewer.userId, roles }, cursor);
 
           return { valid: true as const, result };
         },
