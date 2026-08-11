@@ -22,6 +22,10 @@ import { registerRealtimeRoutes } from '../../modules/realtime/routes.js';
 import { registerOutboxRoutes } from '../../modules/outbox/routes.js';
 import { registerOrderRoutes } from '../../modules/orders/routes.js';
 import { registerRoutingRoutes } from '../../modules/routing/routes.js';
+import { registerDepotRoutes } from '../../modules/depots/routes.js';
+import { registerSettingsRoutes } from '../../modules/settings/routes.js';
+import { registerPlanningRoutes } from '../../modules/planning/routes.js';
+import { createPlanningDeps } from '../../modules/planning/deps.js';
 import { registerBasemapRoutes } from '../../modules/geo/basemap/routes.js';
 import { loadBasemap, type BasemapState } from '../../modules/geo/basemap/manifest.js';
 import { setBasemapStatus } from '../../modules/geo/basemap/status.js';
@@ -131,6 +135,15 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerOrderRoutes(app, { db, config, basemap: () => basemap });
   await registerBasemapRoutes(app, { state: () => basemap });
   await registerRoutingRoutes(app, { db, config });
+  await registerDepotRoutes(app, { db, config });
+  await registerSettingsRoutes(app, { db, config });
+  // HTTP-слой планирования аренд не берёт и в сеть не ходит: расчёт выполняет
+  // фоновый исполнитель со своим владельцем аренды (см. index.ts).
+  await registerPlanningRoutes(app, {
+    db,
+    config,
+    planning: createPlanningDeps({ db, config, logger }),
+  });
 
   await app.register(async (api) => {
     /**

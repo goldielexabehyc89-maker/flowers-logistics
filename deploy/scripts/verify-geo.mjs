@@ -419,6 +419,102 @@ async function verifyMatrix(url) {
   }
 }
 
+/** Время обслуживания пробной задачи решателя. Любое ненулевое подходит. */
+const SOLVER_PROBE_SERVICE = 600;
+
+/**
+ * Проверяет решатель — и не версию из настройки, а его фактическую возможность.
+ *
+ * Разное время обслуживания по типам транспорта появилось в VROOM 1.15.0.
+ * Решатель более старой версии неизвестный ключ просто проигнорирует и вернёт
+ * правдоподобный план с НУЛЕВЫМ временем обслуживания. Такой план выглядит
+ * выполнимым и таковым не является, поэтому проверяется поведение, а не
+ * объявленный номер.
+ *
+ * Пробная задача не содержит ни координат, ни описаний — ровно как рабочие
+ * запросы: решатель работает по индексам и готовым матрицам.
+ */
+async function verifySolver(url) {
+  const base = url.replace(/\/+$/, '');
+
+  const problem = {
+    jobs: [
+      {
+        id: 1,
+        location_index: 1,
+        service: 0,
+        service_per_type: { PROBE: SOLVER_PROBE_SERVICE },
+        delivery: [1],
+      },
+    ],
+    vehicles: [
+      {
+        id: 1,
+        profile: 'car',
+        type: 'PROBE',
+        start_index: 0,
+        end_index: 0,
+        capacity: [1],
+        time_window: [0, 86400],
+      },
+    ],
+    matrices: {
+      car: {
+        durations: [
+          [0, 10],
+          [10, 0],
+        ],
+        distances: [
+          [0, 10],
+          [10, 0],
+        ],
+      },
+    },
+  };
+
+  let response;
+  try {
+    response = await fetch(`${base}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(problem),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    fail('решатель не ответил на пробную задачу');
+  }
+
+  if (!response.ok) {
+    fail(`решатель отклонил пробную задачу кодом ${response.status}`);
+  }
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    fail('ответ решателя на пробную задачу не разобран');
+  }
+
+  if (body.code !== 0) {
+    fail(`решатель вернул код ${body.code} вместо нуля`);
+  }
+
+  const unassigned = Array.isArray(body.unassigned) ? body.unassigned.length : 0;
+  if (unassigned !== 0) {
+    fail('решатель не разместил заказ заведомо решаемой пробной задачи');
+  }
+
+  const service = body.summary?.service ?? 0;
+  if (service !== SOLVER_PROBE_SERVICE) {
+    fail(
+      `решатель не учитывает время обслуживания по типу машины: ${service} вместо ${SOLVER_PROBE_SERVICE}. ` +
+        'Нужна версия VROOM не ниже 1.15.0',
+    );
+  }
+
+  console.error('решатель подтверждён: время обслуживания по типу машины учитывается');
+}
+
 /**
  * Разбор аргументов и запуск.
  *
@@ -443,9 +539,12 @@ async function main() {
       case 'matrix':
         await verifyMatrix(first);
         break;
+      case 'solver':
+        await verifySolver(first);
+        break;
       default:
         console.error(
-          'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url>',
+          'Использование: verify-geo.mjs basemap <путь> | graph <путь> <sha256> | routing <url> | matrix <url> | solver <url>',
         );
         process.exit(EXIT_USAGE);
     }

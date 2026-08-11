@@ -30,6 +30,11 @@ import { clearHalt } from './modules/orders/geocoding/provider-state.js';
 import { ValhallaClient } from './modules/integrations/valhalla/client.js';
 import { probeRouting } from './modules/geo/routing-status.js';
 import { shouldGeocodeAutomatically } from './modules/orders/geocoding/enabled.js';
+import { VroomClient } from './modules/integrations/vroom/client.js';
+import { probeSolver } from './modules/planning/solver-status.js';
+import { createPlanningDeps } from './modules/planning/deps.js';
+import { createPlanningRunner } from './modules/planning/runner.js';
+import { newPlanningWorkerId } from './modules/planning/service.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -150,6 +155,28 @@ async function main(): Promise<void> {
     return null;
   });
 
+  // Решатель VROOM. Его недоступность тоже не влияет на готовность приложения:
+  // без планирования логист продолжает собирать маршруты руками.
+  //
+  // Пробная задача при старте проверяет не версию из настройки, а фактическую
+  // возможность: решатель обязан учитывать время обслуживания по типу машины.
+  const vroom = new VroomClient({ baseUrl: config.VROOM_URL ?? null });
+  await probeSolver(db, vroom, config.VROOM_VERSION ?? null).catch((error: unknown) => {
+    logger.error({ err: error }, 'не удалось определить состояние решателя');
+    return null;
+  });
+
+  // Расчёты планирования выполняет фоновый исполнитель со своим владельцем
+  // аренды: HTTP-запрос столько ждать не может, а без отдельного владельца
+  // два экземпляра приложения считали бы аренду друг друга своей.
+  const planningRunner =
+    config.VROOM_URL === undefined
+      ? null
+      : createPlanningRunner(
+          createPlanningDeps({ db, config, logger, workerId: newPlanningWorkerId() }),
+        );
+  planningRunner?.start();
+
   let shuttingDown = false;
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -175,6 +202,7 @@ async function main(): Promise<void> {
         maintenance.stop(),
         syncWorker?.stop() ?? Promise.resolve(),
         geocodeWorker?.stop() ?? Promise.resolve(),
+        planningRunner?.stop() ?? Promise.resolve(),
         // Наполнение опрашивает флаг между пачками, поэтому ожидание короткое.
         backfill ?? Promise.resolve(),
       ]);
