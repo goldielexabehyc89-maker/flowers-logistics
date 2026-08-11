@@ -22,6 +22,7 @@ import type { AppConfig } from '../../platform/config.js';
 import { createLogger } from '../../platform/logging/logger.js';
 import { createDatabase, type Database } from '../../platform/db.js';
 import { resolveTestDatabaseUrl } from '../../platform/testing/test-database.js';
+import { ROLES } from '@fl/shared';
 import { splitRoleValues } from '../../platform/role-assignments.js';
 import { testConfig, TEST_SECRETS } from '../auth/testing/harness.js';
 import { hashSecretCode } from '../auth/crypto.js';
@@ -36,8 +37,23 @@ const REPOSITORY_ROOT = path.resolve(
   '../../../../..',
 );
 
-/** Значения, которых эта версия ещё не знает. Ровно те, что добавит следующий релиз. */
-const FUTURE_ROLES = ['FLORIST', 'MANAGER'] as const;
+/**
+ * Значение, которого эта версия НЕ знает.
+ *
+ * Раньше здесь стояли `FLORIST` и `MANAGER`. После того как их добавили
+ * в перечисление, они стали известными, и проверка перестала бы проверять
+ * механизм отката: она бы «успешно» доказывала совместимость с ролями,
+ * которые версия прекрасно понимает. Поэтому берётся значение из СЛЕДУЮЩЕГО
+ * будущего, которого нет ни в схеме, ни в `ROLES`.
+ *
+ * Оно существует только в одноразовой базе этой проверки и никогда —
+ * в миграции и продуктовых константах.
+ */
+const FUTURE_ROLES = ['FUTURE_ROLE_TEST'] as const;
+const FUTURE = FUTURE_ROLES[0];
+
+/** Роли, добавленные текущим срезом: здесь они обязаны читаться как ИЗВЕСТНЫЕ. */
+const NEW_KNOWN_ROLES = ['FLORIST', 'MANAGER'] as const;
 
 const META = { ip: '10.9.0.1', userAgent: 'vitest' };
 const CONTEXT = { ip: '10.9.0.1', userAgent: 'vitest', deviceLabel: null };
@@ -57,6 +73,9 @@ interface Seeded {
   adminPlusUnknown: string;
   /** Отдельный кандидат для маршрутизации: его не замораживают другие сценарии. */
   routingCandidate: string;
+  /** Носители ролей ТЕКУЩЕГО среза: они обязаны читаться как известные. */
+  florist: string;
+  courierManager: string;
 }
 
 let seeded: Seeded;
@@ -138,14 +157,22 @@ beforeAll(async () => {
     return id;
   };
 
+  // Страховка от повторения прежней ошибки: значение обязано остаться
+  // неизвестным текущей версии, иначе проверка ничего не доказывает.
+  if ((ROLES as readonly string[]).includes(FUTURE)) {
+    throw new Error(`${FUTURE} стало известной ролью: проверка отката потеряла смысл`);
+  }
+
   seeded = {
     admin: await make('Администратор', ['ADMIN']),
     logist: await make('Логист', ['LOGISTICIAN']),
     courier: await make('Обычный курьер', ['COURIER']),
-    onlyUnknown: await make('Только будущая роль', ['FLORIST']),
-    courierPlusUnknown: await make('Курьер и будущая роль', ['COURIER', 'FLORIST']),
-    adminPlusUnknown: await make('Администратор и будущая роль', ['ADMIN', 'MANAGER']),
-    routingCandidate: await make('Кандидат в курьеры и будущая роль', ['COURIER', 'FLORIST']),
+    onlyUnknown: await make('Только будущая роль', [FUTURE]),
+    courierPlusUnknown: await make('Курьер и будущая роль', ['COURIER', FUTURE]),
+    adminPlusUnknown: await make('Администратор и будущая роль', ['ADMIN', FUTURE]),
+    routingCandidate: await make('Кандидат в курьеры и будущая роль', ['COURIER', FUTURE]),
+    florist: await make('Флорист', ['FLORIST']),
+    courierManager: await make('Курьер и менеджер выдачи', ['COURIER', 'MANAGER']),
   };
 });
 
@@ -170,7 +197,7 @@ const logistActor = (): Actor => ({ userId: seeded.logist, roles: ['LOGISTICIAN'
 
 describe('разбор значений роли', () => {
   it('известные и неизвестные значения разделяются, а не смешиваются', () => {
-    expect(splitRoleValues(['COURIER', 'FLORIST', 'ADMIN'])).toEqual({
+    expect(splitRoleValues(['COURIER', FUTURE, 'ADMIN'])).toEqual({
       known: ['COURIER', 'ADMIN'],
       hasUnsupportedRoles: true,
     });
@@ -178,8 +205,14 @@ describe('разбор значений роли', () => {
       known: ['COURIER'],
       hasUnsupportedRoles: false,
     });
-    expect(splitRoleValues(['FLORIST'])).toEqual({ known: [], hasUnsupportedRoles: true });
+    expect(splitRoleValues([FUTURE])).toEqual({ known: [], hasUnsupportedRoles: true });
     expect(splitRoleValues([])).toEqual({ known: [], hasUnsupportedRoles: false });
+
+    // Роли текущего среза известны и признака несовместимости не поднимают.
+    expect(splitRoleValues(['FLORIST', 'MANAGER'])).toEqual({
+      known: ['FLORIST', 'MANAGER'],
+      hasUnsupportedRoles: false,
+    });
   });
 });
 
@@ -191,8 +224,11 @@ describe('чтение базы с будущими ролями', () => {
     );
     const values = rows.map((row) => row.value);
 
-    expect(values).toContain('FLORIST');
-    expect(values).toContain('MANAGER');
+    expect(values).toContain(FUTURE);
+    // Роли текущего среза в базе тоже есть — они пришли миграцией №20.
+    for (const role of NEW_KNOWN_ROLES) {
+      expect(values).toContain(role);
+    }
     expect(databaseNameOf(compatUrl)).toBe(compatName);
     expect(compatName.startsWith('fl_role_compat_')).toBe(true);
   });
@@ -200,8 +236,8 @@ describe('чтение базы с будущими ролями', () => {
   it('администраторский список отдаётся полностью и без P2023', async () => {
     const result = await listUsers({ db, config }, adminActor(), { limit: 100, offset: 0 });
 
-    expect(result.total).toBe(7);
-    expect(result.items).toHaveLength(7);
+    expect(result.total).toBe(9);
+    expect(result.items).toHaveLength(9);
 
     const byId = new Map(result.items.map((item) => [item.id, item]));
 
@@ -219,8 +255,7 @@ describe('чтение базы с будущими ролями', () => {
     expect(byId.get(seeded.adminPlusUnknown)?.hasUnsupportedRoles).toBe(true);
 
     // Имя неизвестной роли наружу не выносится ни в одном поле.
-    expect(JSON.stringify(result.items)).not.toContain('FLORIST');
-    expect(JSON.stringify(result.items)).not.toContain('MANAGER');
+    expect(JSON.stringify(result.items)).not.toContain(FUTURE);
   });
 
   it('карточка каждой разновидности читается', async () => {
@@ -228,6 +263,56 @@ describe('чтение базы с будущими ролями', () => {
       const view = await getUser({ db, config }, adminActor(), id);
       expect(view.id).toBe(id);
     }
+  });
+});
+
+describe('роли текущего среза читаются как известные', () => {
+  it('флорист и менеджер не поднимают признак несовместимости', async () => {
+    for (const id of [seeded.florist, seeded.courierManager]) {
+      const view = await getUser({ db, config }, adminActor(), id);
+
+      expect(view.hasUnsupportedRoles).toBe(false);
+      expect(view.roles.length).toBeGreaterThan(0);
+      for (const role of view.roles) {
+        expect(ROLES).toContain(role);
+      }
+    }
+
+    const florist = await getUser({ db, config }, adminActor(), seeded.florist);
+    expect(florist.roles).toEqual(['FLORIST']);
+
+    const mixed = await getUser({ db, config }, adminActor(), seeded.courierManager);
+    expect([...mixed.roles].sort()).toEqual(['COURIER', 'MANAGER']);
+  });
+
+  it('курьер с MANAGER защищён от логиста, но признак несовместимости не поднят', async () => {
+    // Защита идёт по внутренней роли, а не по неизвестности значения.
+    await expect(
+      getUser({ db, config }, logistActor(), seeded.courierManager),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    const list = await listUsers({ db, config }, logistActor(), { limit: 100, offset: 0 });
+    expect(list.items.map((item) => item.id)).not.toContain(seeded.courierManager);
+  });
+
+  it('администратор меняет роли флористу: перезапись не блокируется', async () => {
+    const version = (
+      await db.user.findUniqueOrThrow({
+        where: { id: seeded.florist },
+        select: { version: true },
+      })
+    ).version;
+
+    const updated = await updateUser(
+      { db, config },
+      adminActor(),
+      seeded.florist,
+      { version, roles: ['FLORIST', 'COURIER'] },
+      META,
+    );
+
+    expect([...updated.roles].sort()).toEqual(['COURIER', 'FLORIST']);
+    expect(updated.hasUnsupportedRoles).toBe(false);
   });
 });
 
@@ -258,8 +343,8 @@ describe('сессии и права', () => {
       await login({ db, config }, { phone: user.phone, pin }, CONTEXT);
       expect.unreachable('вход обязан быть отклонён');
     } catch (error) {
-      expect(JSON.stringify(error)).not.toContain('FLORIST');
-      expect((error as { publicMessage?: string }).publicMessage ?? '').not.toContain('FLORIST');
+      expect(JSON.stringify(error)).not.toContain(FUTURE);
+      expect((error as { publicMessage?: string }).publicMessage ?? '').not.toContain(FUTURE);
     }
   });
 
@@ -374,7 +459,7 @@ describe('старая версия не затирает неизвестную
 
     // Состояние строки до и после отказа совпадает полностью.
     expect(after).toEqual(before);
-    expect(after.map((row) => row.role)).toEqual(['COURIER', 'FLORIST']);
+    expect(after.map((row) => row.role)).toEqual(['COURIER', FUTURE]);
     expect(versionAfter).toBe(versionBefore);
   });
 
@@ -412,7 +497,7 @@ describe('старая версия не затирает неизвестную
       `SELECT "role"::text AS role FROM "UserRoleAssignment" WHERE "userId" = $1::uuid ORDER BY "role"`,
       seeded.courierPlusUnknown,
     );
-    expect(roles.map((row) => row.role)).toEqual(['COURIER', 'FLORIST']);
+    expect(roles.map((row) => row.role)).toEqual(['COURIER', FUTURE]);
   });
 
   it('сброс PIN пользователю только с неизвестной ролью не ломается и не трогает роли', async () => {
@@ -436,7 +521,7 @@ describe('старая версия не затирает неизвестную
       `SELECT "role"::text AS role FROM "UserRoleAssignment" WHERE "userId" = $1::uuid`,
       seeded.onlyUnknown,
     );
-    expect(roles.map((row) => row.role)).toEqual(['FLORIST']);
+    expect(roles.map((row) => row.role)).toEqual([FUTURE]);
   });
 });
 
