@@ -33,6 +33,7 @@ import {
 import { formatDate, moscowToday } from '../routing/routing';
 import {
   assignedCount,
+  availableCouriers,
   canApply,
   failureLabel,
   formatDistance,
@@ -42,6 +43,7 @@ import {
   needsUnassignedConfirmation,
   PLAN_STATE_LABELS,
   VEHICLE_LABELS,
+  type CourierOption,
   type PlanRunState,
   type PlanRunView,
   type VehicleType,
@@ -78,6 +80,8 @@ interface DepotListResponse {
 interface SlotDraft {
   vehicleType: VehicleType;
   capacityOrders: number;
+  /** Пусто — машина без человека: её маршрут станет черновиком без курьера. */
+  courierUserId: string | null;
 }
 
 /** Пока расчёт идёт, состояние перезапрашивается. Готовое превью — нет. */
@@ -89,7 +93,9 @@ export function PlanningScreen(): React.JSX.Element {
   const { showToast } = useToast();
 
   const [date, setDate] = useState(moscowToday());
-  const [slots, setSlots] = useState<SlotDraft[]>([{ vehicleType: 'CAR', capacityOrders: 20 }]);
+  const [slots, setSlots] = useState<SlotDraft[]>([
+    { vehicleType: 'CAR', capacityOrders: 20, courierUserId: null },
+  ]);
   const [openRunId, setOpenRunId] = useState<string | null>(null);
   const [confirmingApply, setConfirmingApply] = useState(false);
 
@@ -101,6 +107,15 @@ export function PlanningScreen(): React.JSX.Element {
   const depots = useQuery({
     queryKey: ['depots'],
     queryFn: () => client.get<DepotListResponse>('/api/depots'),
+  });
+
+  // Замороженные и лишённые роли курьера сюда не попадают: фильтрует сервер.
+  // Скрытая строка списка не защита — сервер проверяет кандидата ещё раз, —
+  // но предлагать человека, которого нельзя назначить, незачем.
+  const couriers = useQuery({
+    queryKey: ['couriers-for-planning'],
+    queryFn: () =>
+      client.get<{ items: CourierOption[] }>('/api/users?role=COURIER&status=ACTIVE&limit=100'),
   });
 
   const runs = useQuery({
@@ -132,7 +147,7 @@ export function PlanningScreen(): React.JSX.Element {
       client.post<PlanRunView>('/api/route-plans', {
         deliveryDate: date,
         slots: slots.map((slot) => ({
-          courierUserId: null,
+          courierUserId: slot.courierUserId,
           vehicleType: slot.vehicleType,
           capacityOrders: slot.capacityOrders,
         })),
@@ -287,6 +302,38 @@ export function PlanningScreen(): React.JSX.Element {
                 />
               )}
             </Field>
+            <Field label="Курьер">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  data-testid={`slot-courier-${index}`}
+                  value={slot.courierUserId ?? ''}
+                  onChange={(event) =>
+                    setSlots((current) =>
+                      current.map((item, position) =>
+                        position === index
+                          ? {
+                              ...item,
+                              courierUserId: event.target.value === '' ? null : event.target.value,
+                            }
+                          : item,
+                      ),
+                    )
+                  }
+                >
+                  <option value="">Без курьера</option>
+                  {availableCouriers(
+                    couriers.data?.items ?? [],
+                    slots.map((item) => item.courierUserId),
+                    index,
+                  ).map((courier) => (
+                    <option key={courier.id} value={courier.id}>
+                      {courier.fullName}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
             <div className="routes__filter-actions">
               <Button
                 disabled={slots.length === 1}
@@ -301,7 +348,10 @@ export function PlanningScreen(): React.JSX.Element {
         <div className="routes__panel-actions">
           <Button
             onClick={() =>
-              setSlots((current) => [...current, { vehicleType: 'CAR', capacityOrders: 20 }])
+              setSlots((current) => [
+                ...current,
+                { vehicleType: 'CAR', capacityOrders: 20, courierUserId: null },
+              ])
             }
           >
             Добавить машину

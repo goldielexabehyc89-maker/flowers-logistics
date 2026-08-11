@@ -50,6 +50,13 @@ export interface SnapshotOrder {
   windowEndMinute: number | null;
   /** Откуда взято окно: из МоегоСклада или задано логистом вручную. */
   windowSource: 'MOYSKLAD' | 'MANUAL' | null;
+  /**
+   * Окно нулевой ширины: клиенту названо точное время, а не диапазон.
+   *
+   * Хранится отдельно от совпадения границ намеренно: по снимку должно быть
+   * видно, что ноль ширины — это решение, а не следствие ошибки в данных.
+   */
+  windowExact: boolean;
 }
 
 export interface SnapshotSlot {
@@ -103,20 +110,28 @@ export interface PlanningOrderRow {
   manualIntervalEndMinute: number | null;
 }
 
-export type OrderProblem =
-  'NO_CONFIRMED_POINT' | 'INTERVAL_UNRECOGNIZED' | 'INTERVAL_NOT_A_RANGE' | 'INTERVAL_OUT_OF_SHIFT';
+/**
+ * Почему заказ вообще нельзя отдать решателю.
+ *
+ * Список короткий намеренно. Блокирует расчёт только то, о чём мы НИЧЕГО
+ * не знаем: точки нет либо время доставки не разобрано. «Ограничение
+ * невыполнимо» блокировкой не является — на такой вопрос отвечает решатель,
+ * отправляя заказ в неразмещённые. Требовать ручной правки до запуска там,
+ * где ответ можно получить расчётом, значит заставлять человека угадывать.
+ */
+export type OrderProblem = 'NO_CONFIRMED_POINT' | 'INTERVAL_UNRECOGNIZED';
 
 export const ORDER_PROBLEM_MESSAGES: Record<OrderProblem, string> = {
   NO_CONFIRMED_POINT: 'у заказа нет подтверждённой точки на карте',
   INTERVAL_UNRECOGNIZED: 'время доставки не распознано — задайте интервал вручную',
-  INTERVAL_NOT_A_RANGE: 'указано одно время без интервала — задайте интервал вручную',
-  INTERVAL_OUT_OF_SHIFT: 'интервал доставки не помещается в смену',
 };
 
 export interface OrderWindow {
   startMinute: number;
   endMinute: number;
   source: 'MOYSKLAD' | 'MANUAL';
+  /** Точное время: окно нулевой ширины, а не диапазон. */
+  exact: boolean;
 }
 
 /**
@@ -125,11 +140,15 @@ export interface OrderWindow {
  * Ручной интервал старше импортированного: логист задал его именно потому,
  * что значение из МоегоСклада не годилось.
  *
- * `EXACT` окном НЕ становится. Указано одно время — это обещание клиенту,
- * а не диапазон; достроить из него интервал значило бы выдумать за логиста
- * ширину окна, а считать «в любое время смены» — молча нарушить обещание.
- * Такой заказ ждёт ручного интервала, для которого в системе есть отдельная
- * операция.
+ * `EXACT` становится окном НУЛЕВОЙ ШИРИНЫ `[t, t]`. Границы окна решателя
+ * включительны с обеих сторон, поэтому такое окно означает ровно то, что
+ * сказано клиенту: обслуживание начинается в указанную минуту. Никакого
+ * допуска при этом не выдумывается — в отличие от достроенного диапазона,
+ * ширину которого пришлось бы взять с потолка.
+ *
+ * Если выполнить такое ограничение невозможно, заказ попадёт в неразмещённые.
+ * Это ответ, а не отказ считать: логист увидит конкретный заказ и решит, что
+ * с ним делать, вместо того чтобы чинить его вслепую до запуска.
  */
 export function orderWindow(order: PlanningOrderRow): OrderWindow | null | OrderProblem {
   if (order.manualIntervalStartMinute !== null && order.manualIntervalEndMinute !== null) {
@@ -137,6 +156,7 @@ export function orderWindow(order: PlanningOrderRow): OrderWindow | null | Order
       startMinute: order.manualIntervalStartMinute,
       endMinute: order.manualIntervalEndMinute,
       source: 'MANUAL',
+      exact: false,
     };
   }
 
@@ -153,9 +173,19 @@ export function orderWindow(order: PlanningOrderRow): OrderWindow | null | Order
         startMinute: order.intervalStartMinute,
         endMinute: order.intervalEndMinute,
         source: 'MOYSKLAD',
+        exact: false,
       };
-    case 'EXACT':
-      return 'INTERVAL_NOT_A_RANGE';
+    case 'EXACT': {
+      if (order.intervalStartMinute === null) {
+        return 'INTERVAL_UNRECOGNIZED';
+      }
+      return {
+        startMinute: order.intervalStartMinute,
+        endMinute: order.intervalStartMinute,
+        source: 'MOYSKLAD',
+        exact: true,
+      };
+    }
     case 'UNRECOGNIZED':
       return 'INTERVAL_UNRECOGNIZED';
     default:
@@ -163,26 +193,20 @@ export function orderWindow(order: PlanningOrderRow): OrderWindow | null | Order
   }
 }
 
-/** Почему заказ непригоден для планирования. `null` — пригоден. */
-export function orderProblem(order: PlanningOrderRow, shift: Shift): OrderProblem | null {
+/**
+ * Почему заказ непригоден для планирования. `null` — пригоден.
+ *
+ * Смена в проверке не участвует: окно вне смены невыполнимо, но это вывод
+ * расчёта, а не порок данных. Такой заказ уходит решателю и возвращается
+ * неразмещённым вместе с остальными невыполнимыми.
+ */
+export function orderProblem(order: PlanningOrderRow): OrderProblem | null {
   if (order.geoState !== 'RESOLVED' || order.geoLatMicro === null || order.geoLonMicro === null) {
     return 'NO_CONFIRMED_POINT';
   }
 
   const window = orderWindow(order);
-  if (typeof window === 'string') {
-    return window;
-  }
-
-  if (window !== null) {
-    // Окно, целиком лежащее вне смены, невыполнимо. Решатель отправил бы заказ
-    // в неразмещённые, но объяснить это логисту было бы нечем.
-    if (window.startMinute >= shift.endMinute || window.endMinute <= shift.startMinute) {
-      return 'INTERVAL_OUT_OF_SHIFT';
-    }
-  }
-
-  return null;
+  return typeof window === 'string' ? window : null;
 }
 
 export interface BuildSnapshotInput {
@@ -261,6 +285,7 @@ export function buildInputSnapshot(input: BuildSnapshotInput): PlanInputSnapshot
       windowStartMinute: usable?.startMinute ?? null,
       windowEndMinute: usable?.endMinute ?? null,
       windowSource: usable?.source ?? null,
+      windowExact: usable?.exact ?? false,
     };
   });
 

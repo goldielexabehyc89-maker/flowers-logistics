@@ -727,3 +727,102 @@ test('печатная версия листа не содержит навиг�
 
   await page.emulateMedia({ media: null });
 });
+
+/**
+ * Планирование: настройка условий, готовое превью, явное применение.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Сам расчёт здесь не выполняется: он требует дорожного
+ * графа Valhalla — гигабайтов, которых в браузерной проверке нет и быть
+ * не должно. Превью создаётся фикстурой `seed:e2e-plan` ровно в том виде,
+ * в каком его оставил бы расчёт. Контракт решателя и путь расчёта доказаны
+ * направленными проверками, где Valhalla и VROOM подменены.
+ *
+ * Здесь проверяется остальное и целиком: формы обязательных настроек, склад,
+ * видимое превью с отдельным блоком неразмещённых заказов, явное применение
+ * и появившиеся после него черновики.
+ */
+test('планирование: настройки, превью и применение', async ({ page }: { page: Page }) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  // 1. Настройки: обязательные условия задаются формами, а не запросами к API.
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  const settings = page.getByTestId('planning-settings');
+  await expect(settings).toBeVisible();
+
+  // Склад уже есть — он создан фикстурой и стал складом по умолчанию.
+  // Отметка ищется точным текстом: кнопка «Сделать складом по умолчанию»
+  // содержит те же слова, и по вхождению нашлись бы обе.
+  const defaultBadge = settings.getByText('по умолчанию', { exact: true });
+  await expect(defaultBadge).toHaveCount(1);
+
+  // Второй склад создаётся формой и складом по умолчанию НЕ становится.
+  const before = await settings.getByTestId('depot-item').count();
+  await settings.getByTestId('depot-name').fill('Запасной склад');
+  await settings.getByTestId('depot-address').fill('Москва, запасной адрес');
+  await settings.getByTestId('depot-lat').fill('55,800000');
+  await settings.getByTestId('depot-lon').fill('37,700000');
+  await settings.getByTestId('depot-save').click();
+  await expect(settings.getByTestId('depot-item')).toHaveCount(before + 1);
+  await expect(defaultBadge).toHaveCount(1);
+
+  // Форма смены отвергает окончание раньше начала — и не даёт сохранить.
+  await settings.getByTestId('shift-start').fill('21:00');
+  await settings.getByTestId('shift-end').fill('09:00');
+  await expect(settings.getByTestId('shift-save')).toBeDisabled();
+
+  // Те же значения, что использовал расчёт: условия плана не меняются.
+  await settings.getByTestId('shift-start').fill('09:00');
+  await settings.getByTestId('shift-end').fill('21:00');
+  await expect(settings.getByTestId('shift-save')).toBeEnabled();
+  await settings.getByTestId('shift-save').click();
+  await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
+
+  // 2. Планирование: превью видно целиком, включая неразмещённые заказы.
+  await page.getByRole('link', { name: 'Планирование' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Планирование маршрутов' })).toBeVisible();
+
+  // Условия расчёта показаны до кнопки: логист видит, из чего сложится план.
+  await expect(page.getByText('Смена: 09:00 — 21:00')).toBeVisible();
+
+  await page
+    .getByRole('button', { name: /^\d{2}\.\d{2}\.\d{4}/ })
+    .first()
+    .click();
+
+  const unassignedBlock = page.getByTestId('plan-unassigned');
+  await expect(unassignedBlock).toBeVisible();
+  await expect(unassignedBlock.getByRole('listitem')).toHaveCount(1);
+
+  // 3. Применение требует отдельного подтверждения: заказ, который никто
+  //    не повезёт, не должен уехать в черновики молча.
+  await page.getByRole('button', { name: 'Применить' }).click();
+  await expect(page.getByRole('heading', { name: /неразмещёнными заказами/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Применить частично' }).click();
+
+  // Черновики созданы, и запуск перешёл в применённое состояние.
+  await expect(page.locator('[data-plan-state="APPLIED"]')).toBeVisible();
+  await expect(
+    page.locator('[data-plan-state="APPLIED"]').getByText(/Создано черновиков: 1/),
+  ).toBeVisible();
+
+  // 4. Черновик действительно появился в маршрутизации.
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.locator('.routes__number-button').first()).toBeVisible();
+
+  // 5. Третья обязательная форма: время обслуживания. Меняется после
+  //    применения, поэтому условия уже применённого плана не задевает.
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await settings.getByTestId('service-car').fill('12');
+  await settings.getByTestId('service-foot').fill('15');
+  await settings.getByTestId('service-save').click();
+  await expect(
+    page.locator('.toast-region').getByText('Время обслуживания сохранено'),
+  ).toBeVisible();
+
+  await page.reload();
+  await expect(settings.getByTestId('service-car')).toHaveValue('12');
+  await expect(settings.getByTestId('service-foot')).toHaveValue('15');
+});

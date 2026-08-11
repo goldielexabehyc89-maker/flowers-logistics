@@ -157,3 +157,32 @@ export const VEHICLE_LABELS: Record<VehicleType, string> = {
   CAR: 'Автомобиль',
   FOOT: 'Пешком',
 };
+
+export interface CourierOption {
+  id: string;
+  fullName: string;
+}
+
+/**
+ * Кого можно предложить в строке машины.
+ *
+ * Курьер, уже выбранный в другой машине, из списка убирается: один человек
+ * не может вести две машины одновременно, и предлагать это значило бы вести
+ * к заведомому отказу сервера. Собственный выбор строки остаётся видимым —
+ * иначе поле показывало бы пустоту при заполненном значении.
+ *
+ * Замороженных и лишённых роли курьера здесь нет по другой причине: их
+ * не присылает сервер. Скрытая строка списка защитой не является — кандидата
+ * проверяет сервер и при постановке расчёта, и повторно при применении плана.
+ */
+export function availableCouriers(
+  couriers: readonly CourierOption[],
+  chosen: readonly (string | null)[],
+  index: number,
+): CourierOption[] {
+  return couriers.filter(
+    (courier) =>
+      courier.id === chosen[index] ||
+      !chosen.some((other, position) => position !== index && other === courier.id),
+  );
+}

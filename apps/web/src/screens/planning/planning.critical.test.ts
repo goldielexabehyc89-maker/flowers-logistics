@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assignedCount,
+  availableCouriers,
   canApply,
   failureLabel,
   formatDistance,
@@ -131,6 +132,34 @@ describe('причина отказа', () => {
 
   it('отсутствие кода не превращается в текст', () => {
     expect(failureLabel(null)).toBeNull();
+  });
+});
+
+describe('выбор курьера в строке машины', () => {
+  const couriers = [
+    { id: 'courier-a', fullName: 'Анна' },
+    { id: 'courier-b', fullName: 'Борис' },
+  ];
+
+  it('пока никто не выбран, предлагаются все', () => {
+    expect(availableCouriers(couriers, [null, null], 0)).toEqual(couriers);
+  });
+
+  it('занятый в другой машине курьер из списка убирается', () => {
+    // Один человек не может вести две машины: предлагать это значило бы
+    // вести к заведомому отказу сервера.
+    const options = availableCouriers(couriers, ['courier-a', null], 1);
+    expect(options.map((option) => option.id)).toEqual(['courier-b']);
+  });
+
+  it('собственный выбор строки остаётся видимым', () => {
+    // Иначе поле показывало бы пустоту при заполненном значении.
+    const options = availableCouriers(couriers, ['courier-a', null], 0);
+    expect(options.map((option) => option.id)).toEqual(['courier-a', 'courier-b']);
+  });
+
+  it('пустое значение допустимо: машина может ехать без человека', () => {
+    expect(availableCouriers([], [null], 0)).toEqual([]);
   });
 });
 

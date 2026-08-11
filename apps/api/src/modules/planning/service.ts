@@ -165,7 +165,7 @@ export async function requestPlan(
   await assertCouriersAssignable(deps.db, actor, slots);
 
   const orders = await eligibleOrders(deps.db, input.deliveryDate);
-  assertOrdersArePlannable(orders, shift);
+  assertOrdersArePlannable(orders);
 
   const snapshot = buildInputSnapshot({
     deliveryDate: input.deliveryDate,
@@ -411,13 +411,18 @@ export async function eligibleOrders(
 }
 
 /**
- * Fail closed.
+ * Fail closed — но только там, где данных НЕТ.
  *
- * Достаточно одного непригодного заказа, чтобы отказать целиком: частичный план
- * выглядит готовым, а заказ, тихо выпавший из расчёта, обнаружился бы вечером.
- * Отказ называет конкретные заказы — чинить придётся именно их.
+ * Отсутствие подтверждённой точки и неразобранное время доставки означают, что
+ * неизвестно, куда и когда везти: считать нечего, и отказ называет конкретные
+ * заказы, чтобы логист чинил именно их.
+ *
+ * Невыполнимое ограничение сюда НЕ относится. Точное время, в которое нельзя
+ * успеть, и окно вне смены — это вывод расчёта, а не порок данных: такой заказ
+ * уходит решателю и возвращается неразмещённым. Требовать ручной правки там,
+ * где ответ даёт расчёт, значит заставлять человека угадывать.
  */
-export function assertOrdersArePlannable(orders: readonly PlanningOrderRow[], shift: Shift): void {
+export function assertOrdersArePlannable(orders: readonly PlanningOrderRow[]): void {
   if (orders.length === 0) {
     throw new AppError('VALIDATION_FAILED', {
       message: 'no orders to plan',
@@ -426,7 +431,7 @@ export function assertOrdersArePlannable(orders: readonly PlanningOrderRow[], sh
   }
 
   const problems = orders
-    .map((order) => ({ orderId: order.id, problem: orderProblem(order, shift) }))
+    .map((order) => ({ orderId: order.id, problem: orderProblem(order) }))
     .filter(
       (item): item is { orderId: string; problem: NonNullable<typeof item.problem> } =>
         item.problem !== null,

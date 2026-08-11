@@ -1,14 +1,17 @@
 /**
- * Настройки — честная заглушка, а не редактор.
+ * Настройки.
  *
- * Реального редактирования нет намеренно: набор полей интеграции определяется
- * только после read-only исследования МоегоСклада, а провайдер карт выбирает
- * владелец. Сохранять настройки «только на клиенте» нельзя — это создало бы
- * видимость работы.
+ * Редактируется то, состав чего уже определён: смена, время обслуживания
+ * и склады планирования (раздел `PlanningSettings`). Остальное остаётся
+ * честным перечнем: набор полей интеграции определяется только после
+ * read-only исследования МоегоСклада, а провайдера карт выбирает владелец.
+ * Сохранять настройки «только на клиенте» нельзя — это создало бы видимость
+ * работы.
  */
 
 import { useQuery } from '@tanstack/react-query';
 import { OutboxFailures } from './OutboxFailures';
+import { PlanningSettings } from './settings/PlanningSettings';
 import { useAuth } from '../auth/AuthContext';
 import { ErrorState, LoadingState, StatusBadge, type StatusTone } from '../ui/components';
 
@@ -103,6 +106,8 @@ export function SettingsScreen(): React.JSX.Element {
           </div>
         )}
       </section>
+
+      <PlanningSettings />
 
       <OutboxFailures />
 

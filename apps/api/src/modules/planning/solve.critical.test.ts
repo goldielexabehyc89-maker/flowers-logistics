@@ -16,6 +16,8 @@ import {
 import {
   buildInputSnapshot,
   canonicalJson,
+  orderProblem,
+  orderWindow,
   snapshotHash,
   type PlanInputSnapshot,
 } from './input.js';
@@ -75,8 +77,9 @@ function order(
   id: string,
   latMicro: number,
   lonMicro: number,
-  window?: { start: number; end: number },
+  window?: { start: number; end?: number },
 ) {
+  const exact = window !== undefined && window.end === undefined;
   return {
     id,
     version: 1,
@@ -84,7 +87,8 @@ function order(
     geoState: 'RESOLVED' as const,
     geoLatMicro: latMicro,
     geoLonMicro: lonMicro,
-    intervalKind: window === undefined ? ('MISSING' as const) : ('RANGE' as const),
+    intervalKind:
+      window === undefined ? ('MISSING' as const) : exact ? ('EXACT' as const) : ('RANGE' as const),
     intervalStartMinute: window?.start ?? null,
     intervalEndMinute: window?.end ?? null,
     manualIntervalStartMinute: null,
@@ -148,6 +152,179 @@ describe('снимок входа', () => {
     const reordered = { ...right, orders: right.orders, version: right.version };
     expect(snapshotHash(left)).toBe(snapshotHash(reordered as PlanInputSnapshot));
     expect(canonicalJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
+  });
+});
+
+describe('точное время доставки', () => {
+  const exactOrder = order('order-exact', 55_780_000, 37_660_000, { start: 840 });
+
+  it('становится окном нулевой ширины, а не достроенным диапазоном', () => {
+    const window = orderWindow(exactOrder);
+
+    expect(window).toEqual({
+      startMinute: 840,
+      endMinute: 840,
+      source: 'MOYSKLAD',
+      exact: true,
+    });
+  });
+
+  it('не блокирует расчёт: непригодным заказ от этого не становится', () => {
+    // Прежде такой заказ требовал ручного интервала до запуска. Ответ на вопрос
+    // «успеем ли» даёт расчёт, а не человек вслепую.
+    expect(orderProblem(exactOrder)).toBeNull();
+  });
+
+  it('невыполнимое окно вне смены тоже не блокирует расчёт', () => {
+    // Ограничение невыполнимо — это вывод решателя, а не порок данных:
+    // заказ уйдёт в неразмещённые вместе с остальными невыполнимыми.
+    const nightly = order('order-night', 55_781_000, 37_661_000, { start: 60, end: 120 });
+    expect(orderProblem(nightly)).toBeNull();
+  });
+
+  it('нераспознанное время по-прежнему блокирует: считать нечего', () => {
+    const broken = {
+      ...order('order-broken', 55_782_000, 37_662_000),
+      intervalKind: 'UNRECOGNIZED' as const,
+    };
+    expect(orderProblem(broken)).toBe('INTERVAL_UNRECOGNIZED');
+  });
+
+  it('уходит решателю ровно как [t, t]: границы окна включительны с обеих сторон', () => {
+    const built = buildInputSnapshot({
+      deliveryDate: '2026-09-01',
+      graphSha256: '0f'.repeat(32),
+      trafficMode: 'STATIC',
+      maxPoints: 60,
+      shift: { startMinute: 540, endMinute: 1080 },
+      shiftVersion: 1,
+      serviceTime: { carMinutes: 10, footMinutes: 10 },
+      serviceTimeVersion: 1,
+      depots: [DEPOT],
+      orders: [exactOrder, order('order-free', 55_790_000, 37_670_000)],
+      slots: [
+        {
+          slotIndex: 1,
+          courierUserId: null,
+          vehicleType: 'CAR',
+          capacityOrders: 2,
+          shiftStartMinute: 540,
+          shiftEndMinute: 1080,
+          startDepotId: DEPOT.id,
+          endDepotId: DEPOT.id,
+        },
+      ],
+      slotIds: ['slot-1'],
+    });
+
+    expect(built.orders[0]?.windowExact).toBe(true);
+
+    const request = buildSolverRequest({
+      snapshot: built,
+      matrices: { CAR: fullMatrix(built.points.length, 60) },
+    });
+
+    expect(request.jobs[0]?.time_windows).toEqual([[840 * 60, 840 * 60]]);
+    // Заказ без интервала окна не получает: отсутствие интервала не срочность.
+    expect(request.jobs[1]?.time_windows).toBeUndefined();
+  });
+
+  it('прибытие позже точного времени отвергается как нарушение обещания', () => {
+    const built = buildInputSnapshot({
+      deliveryDate: '2026-09-01',
+      graphSha256: '0f'.repeat(32),
+      trafficMode: 'STATIC',
+      maxPoints: 60,
+      shift: { startMinute: 540, endMinute: 1080 },
+      shiftVersion: 1,
+      serviceTime: { carMinutes: 10, footMinutes: 10 },
+      serviceTimeVersion: 1,
+      depots: [DEPOT],
+      orders: [exactOrder],
+      slots: [
+        {
+          slotIndex: 1,
+          courierUserId: null,
+          vehicleType: 'CAR',
+          capacityOrders: 1,
+          shiftStartMinute: 540,
+          shiftEndMinute: 1080,
+          startDepotId: DEPOT.id,
+          endDepotId: DEPOT.id,
+        },
+      ],
+      slotIds: ['slot-1'],
+    });
+
+    const late: VroomSolution = {
+      code: 0,
+      routes: [
+        {
+          vehicle: 1,
+          steps: [
+            { type: 'start', arrival: 540 * 60 },
+            { type: 'job', id: 1, arrival: 900 * 60 },
+            { type: 'end', arrival: 950 * 60 },
+          ],
+        },
+      ],
+      unassigned: [],
+    };
+
+    expect(() => parseSolution(built, late)).toThrowError(PlanContractError);
+
+    // Приезд РАНЬШЕ точного времени нарушением не является: курьер подождёт,
+    // а обслуживание начнётся в названную минуту.
+    const early: VroomSolution = {
+      code: 0,
+      routes: [
+        {
+          vehicle: 1,
+          steps: [
+            { type: 'start', arrival: 540 * 60 },
+            { type: 'job', id: 1, arrival: 800 * 60 },
+            { type: 'end', arrival: 860 * 60 },
+          ],
+        },
+      ],
+      unassigned: [],
+    };
+
+    expect(parseSolution(built, early).routes[0]?.stops).toHaveLength(1);
+  });
+
+  it('невыполнимое точное время возвращается неразмещённым заказом', () => {
+    const built = buildInputSnapshot({
+      deliveryDate: '2026-09-01',
+      graphSha256: '0f'.repeat(32),
+      trafficMode: 'STATIC',
+      maxPoints: 60,
+      shift: { startMinute: 540, endMinute: 1080 },
+      shiftVersion: 1,
+      serviceTime: { carMinutes: 10, footMinutes: 10 },
+      serviceTimeVersion: 1,
+      depots: [DEPOT],
+      orders: [exactOrder],
+      slots: [
+        {
+          slotIndex: 1,
+          courierUserId: null,
+          vehicleType: 'CAR',
+          capacityOrders: 1,
+          shiftStartMinute: 540,
+          shiftEndMinute: 1080,
+          startDepotId: DEPOT.id,
+          endDepotId: DEPOT.id,
+        },
+      ],
+      slotIds: ['slot-1'],
+    });
+
+    const solution: VroomSolution = { code: 0, routes: [], unassigned: [{ id: 1, type: 'job' }] };
+    const plan = parseSolution(built, solution);
+
+    expect(plan.unassignedOrderIds).toEqual(['order-exact']);
+    expect(plan.routes).toHaveLength(0);
   });
 });
 

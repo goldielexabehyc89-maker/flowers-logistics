@@ -386,25 +386,22 @@ describe('условия планирования', () => {
     });
   });
 
-  it('одно указанное время интервалом не считается: заказ ждёт ручного интервала', async () => {
+  it('точное время расчёт не блокирует и уходит решателю окном нулевой ширины', async () => {
     const actor = await actorWith(['LOGISTICIAN']);
-    const exact = await seedOrder({ day: DAY_THREE, interval: 'к 14:00' });
-
-    const deps = planningDeps({ solver: fakeSolver() });
-    await expect(
-      requestPlan(deps, actor, { deliveryDate: DAY_THREE, slots: [slot()] }, CONTEXT),
-    ).rejects.toMatchObject({ details: { orderIds: [exact] } });
-
-    // Логист задаёт интервал вручную — и расчёт становится возможным.
-    await ctx.db.deliveryOrder.update({
-      where: { id: exact },
-      data: {
-        manualIntervalStartMinute: 13 * 60,
-        manualIntervalEndMinute: 15 * 60,
-        manualIntervalSetAt: NOW,
-      },
+    const exact = await seedOrder({
+      day: DAY_THREE,
+      interval: 'к 14:00',
+      latMicro: 55_755_000,
+      lonMicro: 37_615_000,
     });
+    await seedOrder({ day: DAY_THREE, latMicro: 55_756_000, lonMicro: 37_616_000 });
 
+    const solver = fakeSolver();
+    const deps = planningDeps({ solver });
+    await clearQueue();
+
+    // Прежде такой заказ требовал ручного интервала ДО запуска. Теперь ответ
+    // на вопрос «успеем ли» даёт расчёт, а не человек вслепую.
     const created = await requestPlan(
       deps,
       actor,
@@ -412,6 +409,75 @@ describe('условия планирования', () => {
       CONTEXT,
     );
     expect(created.state).toBe('QUEUED');
+
+    await runPlanningOnce(deps);
+
+    const stored = await ctx.db.routePlanInputSnapshot.findUniqueOrThrow({
+      where: { runId: created.id },
+      select: { payload: true },
+    });
+    const snapshot = stored.payload as unknown as PlanInputSnapshot;
+    const exactOrder = snapshot.orders.find((order) => order.orderId === exact);
+
+    expect(exactOrder?.windowExact).toBe(true);
+    expect(exactOrder?.windowStartMinute).toBe(14 * 60);
+    expect(exactOrder?.windowEndMinute).toBe(14 * 60);
+
+    // Границы окна решателя включительны с обеих сторон: [t, t] означает
+    // начало обслуживания ровно в названную минуту, без выдуманного допуска.
+    const jobs = solver.requests[0]?.jobs ?? [];
+    const index = snapshot.orders.findIndex((order) => order.orderId === exact);
+    expect(jobs[index]?.time_windows).toEqual([[14 * 60 * 60, 14 * 60 * 60]]);
+  });
+
+  it('невыполнимое точное время возвращается неразмещённым заказом, а не отказом', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    const day = '2026-12-18';
+    // Время названо вне смены: выполнить нельзя. Прежде это был бы отказ
+    // считать весь день; теперь ответ даёт решатель.
+    const impossible = await seedOrder({
+      day,
+      interval: 'к 03:00',
+      latMicro: 55_757_000,
+      lonMicro: 37_617_000,
+    });
+    await seedOrder({ day, latMicro: 55_758_000, lonMicro: 37_618_000 });
+
+    const solver = fakeSolver((request) => {
+      const vehicle = request.vehicles[0];
+      const at = vehicle?.time_window[0] ?? 0;
+      const impossibleJob = request.jobs.find(
+        (job) => (job.time_windows?.[0]?.[1] ?? Number.MAX_SAFE_INTEGER) < at,
+      );
+      const rest = request.jobs.filter((job) => job.id !== impossibleJob?.id);
+      return {
+        code: 0,
+        routes: [
+          {
+            vehicle: vehicle?.id ?? 1,
+            steps: [
+              { type: 'start', arrival: at },
+              ...rest.map((job) => ({ type: 'job', id: job.id, arrival: at })),
+              { type: 'end', arrival: at },
+            ],
+          },
+        ],
+        unassigned: impossibleJob === undefined ? [] : [{ id: impossibleJob.id, type: 'job' }],
+      };
+    });
+
+    const deps = planningDeps({ solver });
+    await clearQueue();
+    const created = await requestPlan(deps, actor, { deliveryDate: day, slots: [slot()] }, CONTEXT);
+    await runPlanningOnce(deps);
+
+    const result = await ctx.db.routePlanResultSnapshot.findUniqueOrThrow({
+      where: { runId: created.id },
+      select: { plan: true },
+    });
+    const plan = result.plan as unknown as { unassignedOrderIds: string[] };
+
+    expect(plan.unassignedOrderIds).toEqual([impossible]);
   });
 });
 
@@ -1008,6 +1074,97 @@ describe('применение превью', () => {
       expectedVersion: restored.version,
       ...CONTEXT,
     });
+  });
+
+  it('замороженный до применения курьер снимает превью и не создаёт черновиков', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
+    const day = '2026-12-19';
+    await seedOrder({ day, latMicro: 55_759_000, lonMicro: 37_619_000 });
+    await seedOrder({ day, latMicro: 55_759_500, lonMicro: 37_619_500 });
+
+    const deps = planningDeps({ solver: fakeSolver() });
+    await clearQueue();
+    const run = await requestPlan(
+      deps,
+      actor,
+      { deliveryDate: day, slots: [{ ...slot(), courierUserId: courier.id }] },
+      CONTEXT,
+    );
+    await runPlanningOnce(deps);
+
+    const preview = await ctx.db.routePlanRun.findUniqueOrThrow({
+      where: { id: run.id },
+      select: { version: true, state: true },
+    });
+    expect(preview.state).toBe('PREVIEW');
+
+    // Курьера заморозили между расчётом и применением: маршрут достался бы
+    // человеку, который его не выполнит.
+    await ctx.db.user.update({
+      where: { id: courier.id },
+      data: { status: 'FROZEN', frozenAt: new Date() },
+    });
+
+    await expect(
+      applyPlan(
+        { db: ctx.db },
+        actor,
+        run.id,
+        { expectedVersion: preview.version, allowUnassigned: false },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ conflict: { kind: 'PLAN_INPUT_STALE' } });
+
+    const after = await ctx.db.routePlanRun.findUniqueOrThrow({
+      where: { id: run.id },
+      select: { state: true, failureCode: true },
+    });
+    expect(after.state).toBe('EXPIRED');
+    expect(after.failureCode).toBe('INPUT_STALE');
+    expect(await ctx.db.deliveryRoute.count({ where: { planRunId: run.id } })).toBe(0);
+
+    const audit = await ctx.db.auditLog.findFirst({
+      where: { entityType: 'RoutePlanRun', entityId: run.id, action: 'ROUTE_PLAN_EXPIRED' },
+      select: { newValue: true },
+    });
+    expect(JSON.stringify(audit?.newValue)).toContain('COURIER_UNAVAILABLE');
+  });
+
+  it('пересохранение тех же настроек превью не отменяет', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    const admin = await actorWith(['ADMIN']);
+    const day = '2026-12-20';
+    await seedOrder({ day, latMicro: 55_759_700, lonMicro: 37_619_700 });
+    await seedOrder({ day, latMicro: 55_759_900, lonMicro: 37_619_900 });
+
+    const deps = planningDeps({ solver: fakeSolver() });
+    await clearQueue();
+    const run = await requestPlan(deps, actor, { deliveryDate: day, slots: [slot()] }, CONTEXT);
+    await runPlanningOnce(deps);
+
+    const preview = await ctx.db.routePlanRun.findUniqueOrThrow({
+      where: { id: run.id },
+      select: { version: true },
+    });
+
+    // Значения те же, версия настройки новая. Условия плана не изменились,
+    // и отказывать не в чем: сверяются значения, а не номера версий.
+    const shift = await readShift(ctx.db);
+    await saveShift(ctx.db, admin, {
+      value: SHIFT,
+      expectedVersion: shift.version,
+      ...CONTEXT,
+    });
+
+    const applied = await applyPlan(
+      { db: ctx.db },
+      actor,
+      run.id,
+      { expectedVersion: preview.version, allowUnassigned: false },
+      CONTEXT,
+    );
+    expect(applied.routeIds).toHaveLength(1);
   });
 
   it('неразмещённые заказы требуют отдельного подтверждения', async () => {

@@ -343,9 +343,14 @@ async function verifyInput(
 
   // Настройки. Изменение смены или времени обслуживания меняет сам смысл
   // расчёта: окна и длительности были посчитаны по прежним значениям.
+  //
+  // Сверяются ЗНАЧЕНИЯ, а не номера версий. Вопрос, на который отвечает
+  // проверка, — «действуют ли ещё те условия, для которых посчитан план».
+  // Номер версии на него отвечает лишь приблизительно: пересохранение тех же
+  // значений его меняет, хотя условия остались прежними, — и логист получал бы
+  // отказ там, где ничего не изменилось.
   const shift = await readShift(tx);
   if (
-    shift.version !== snapshot.shift.settingVersion ||
     shift.value === null ||
     shift.value.startMinute !== snapshot.shift.startMinute ||
     shift.value.endMinute !== snapshot.shift.endMinute
@@ -355,7 +360,6 @@ async function verifyInput(
 
   const serviceTime = await readServiceTime(tx);
   if (
-    serviceTime.version !== snapshot.serviceTime.settingVersion ||
     serviceTime.value.carMinutes !== snapshot.serviceTime.carMinutes ||
     serviceTime.value.footMinutes !== snapshot.serviceTime.footMinutes
   ) {
