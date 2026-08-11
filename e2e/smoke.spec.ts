@@ -883,3 +883,95 @@ test('планирование: настройки, превью и примен
   await expect(settings.getByTestId('service-car')).toHaveValue('12');
   await expect(settings.getByTestId('service-foot')).toHaveValue('15');
 });
+
+test('склад: кладовщик видит только свой раздел и меняет готовность заказа', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(orderNumber === '', 'не передан номер проверочного заказа (E2E_ORDER_NUMBER)');
+
+  const WAREHOUSE_PIN = '9753';
+
+  // 1. Администратор заводит кладовщика.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const warehousePhone = uniquePhone();
+  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Кладовщик проверки');
+  await page.getByLabel('Телефон').fill(warehousePhone);
+
+  const warehouseRole = page.getByRole('checkbox', { name: 'Кладовщик' });
+  await warehouseRole.check();
+  // Роль курьера может быть отмечена по умолчанию: с ней проверка «чужих
+  // разделов нет» перестала бы что-либо доказывать.
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+
+  const codeText = await page.locator('.one-time-code').innerText();
+  const warehouseCode = codeText.trim();
+  expect(warehouseCode).toMatch(/^\d{4}$/);
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // 2. Первый вход кладовщика: его стартовая страница — «Склад».
+  const context = await browser.newContext();
+  const warehousePage = await context.newPage();
+  await activate(warehousePage, warehousePhone, warehouseCode, WAREHOUSE_PIN);
+  await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+  // 3. Чужих разделов нет ни одного.
+  for (const foreign of [
+    'Настройки',
+    'Сотрудники и курьеры',
+    'Сделки',
+    'Маршрутизация',
+    'Планирование',
+    'Маршрутные листы',
+    'Отчёты',
+    'Активные',
+    'История',
+  ]) {
+    await expect(warehousePage.getByRole('link', { name: foreign })).toHaveCount(0);
+  }
+
+  // 4. Заказ дня виден, и в нём нет чужих персональных данных.
+  const row = warehousePage.locator('[data-testid="warehouse-row"]', { hasText: orderNumber });
+  await expect(row).toBeVisible();
+  for (const secret of [
+    'Москва, проверочный адрес 1',
+    'Проверочный Получатель',
+    'Проверочный заказ браузерного сценария',
+  ]) {
+    await expect(warehousePage.locator('body')).not.toContainText(secret);
+  }
+
+  // 5. Смена готовности: отметка появляется без перезагрузки страницы.
+  //    Состояние читается из самой отметки, а не из подписи кнопки: кнопка
+  //    называет будущее действие, и перепутать их — значит проверять не то.
+  const badge = row.locator('.badge');
+  await expect(badge).toHaveText('Не готов');
+  await row.getByRole('button', { name: 'Готов', exact: true }).click();
+  await expect(badge).toHaveText('Готов');
+
+  // 6. Обратный переход тоже доступен и причины не требует.
+  await row.getByRole('button', { name: 'Не готов', exact: true }).click();
+  await expect(badge).toHaveText('Не готов');
+
+  // 7. Отметка переживает перезагрузку: она сохранена на сервере, а не в памяти вкладки.
+  await warehousePage.reload();
+  const reloaded = warehousePage.locator('[data-testid="warehouse-row"]', { hasText: orderNumber });
+  await expect(reloaded.locator('.badge')).toHaveText('Не готов');
+
+  // 8. Чужой раздел закрыт и по прямому адресу.
+  await warehousePage.goto('/settings');
+  await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+  await context.close();
+});

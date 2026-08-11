@@ -25,6 +25,18 @@ describe('обновление данных по событиям', () => {
     expect(keys).not.toContain('orders');
   });
 
+  it('готовность к отгрузке обновляет только список склада', () => {
+    const keys = invalidationKeysFor('order.shipment_readiness_changed').map((key) =>
+      key.join('.'),
+    );
+
+    expect(keys).toEqual(['warehouse-orders']);
+    // Неготовность пока ни на что у логиста не влияет, и гонять его тяжёлые
+    // списки из-за складской отметки незачем.
+    expect(keys).not.toContain('orders');
+    expect(keys).not.toContain('unassigned-orders');
+  });
+
   it('потеря сессии ничего не перезапрашивает', () => {
     // Запросы после отзыва сессии всё равно вернули бы 401 и только шумели бы.
     expect(invalidationKeysFor('session.revoked')).toEqual([]);

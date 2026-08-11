@@ -54,11 +54,46 @@ describe('видимость разделов', () => {
     }
   });
 
-  it('кладовщик не получает чужих разделов', () => {
-    // Складской модуль ещё не реализован: доступных разделов нет,
-    // интерфейс показывает честную заглушку.
-    expect(keysFor(['WAREHOUSE'])).toEqual([]);
-    expect(firstAvailablePath(['WAREHOUSE'])).toBeNull();
+  it('кладовщик видит ровно один раздел «Склад» и ни одного чужого', () => {
+    // Этап 6.1 дал роли WAREHOUSE её первый и единственный раздел. Прежнее
+    // утверждение «разделов нет» заменено осознанно: оно описывало состояние
+    // до появления готовности заказа к отгрузке.
+    expect(keysFor(['WAREHOUSE'])).toEqual(['warehouse']);
+    expect(firstAvailablePath(['WAREHOUSE'])).toBe('/warehouse');
+
+    for (const forbidden of [
+      'settings',
+      'couriers',
+      'deals',
+      'routing',
+      'planning',
+      'route-sheets',
+      'active',
+      'history',
+      'reports',
+    ]) {
+      expect(keysFor(['WAREHOUSE'])).not.toContain(forbidden);
+    }
+  });
+
+  it('раздел «Склад» доступен администратору и закрыт логисту и курьеру', () => {
+    expect(keysFor(['ADMIN'])).toContain('warehouse');
+    expect(isSectionVisible(['ADMIN'], '/warehouse')).toBe(true);
+
+    expect(keysFor(['LOGISTICIAN'])).not.toContain('warehouse');
+    expect(isSectionVisible(['LOGISTICIAN'], '/warehouse')).toBe(false);
+
+    expect(keysFor(['COURIER'])).not.toContain('warehouse');
+    expect(isSectionVisible(['COURIER'], '/warehouse')).toBe(false);
+  });
+
+  it('появление «Склада» не изменило стартовые разделы остальных ролей', () => {
+    // Раздел добавлен в конец списка намеренно: администратор по-прежнему
+    // начинает со «Сделок», а не со склада.
+    expect(firstAvailablePath(['ADMIN'])).toBe('/deals');
+    expect(firstAvailablePath(['LOGISTICIAN'])).toBe('/deals');
+    expect(firstAvailablePath(['COURIER'])).toBe('/active');
+    expect(firstAvailablePath([])).toBeNull();
   });
 
   it('несколько ролей объединяются', () => {

@@ -116,6 +116,8 @@ model User {
   appliedPlanRuns   RoutePlanRun[]         @relation("PlanRunAppliedBy")
   planVehicleSlots  RoutePlanVehicleSlot[] @relation("PlanSlotCourier")
 
+  shipmentReadinessChanges DeliveryOrder[] @relation("OrderShipmentReadinessSetBy")
+
   @@index([status])
   @@index([createdAt])
 }
@@ -417,6 +419,22 @@ enum OrderScopeExitReason {
   SOURCE_MISSING
 }
 
+/// Готовность заказа К ОТГРУЗКЕ — внутреннее состояние нашего приложения (этап 6.1).
+///
+/// К внешнему статусу МоегоСклада отношения не имеет и из него не выводится:
+/// решение владельца `WH-001` и активное `MS-007` прямо это запрещают. Состояние
+/// меняет только человек; синхронизация, повтор снимка, выход из области
+/// и восстановление источника его не трогают.
+///
+/// Значений сознательно два. Промежуточная «сборка» описывала бы работу склада,
+/// которую никто пока не измеряет, а отгрузку разрешает или запрещает ровно один
+/// признак: готов заказ или нет.
+enum OrderShipmentReadiness {
+  /// Значение по умолчанию: пока человек не сказал обратного, заказ не готов.
+  NOT_READY
+  READY
+}
+
 /// Причина создания неизменяемой ревизии заказа.
 enum OrderRevisionReason {
   INITIAL_IMPORT
@@ -536,6 +554,24 @@ model DeliveryOrder {
   /// вернувшийся после смены адреса, распознаётся как устаревший и отбрасывается.
   geoGeneration Int @default(0)
 
+  /// Внутренняя готовность заказа К ОТГРУЗКЕ (этап 6.1).
+  ///
+  /// Отдельная ось, как и георазрешение: она не заменяет внутреннее состояние
+  /// заказа, не выводится из внешнего статуса МоегоСклада и наружу не пишется.
+  /// Автоматика её не меняет — ни синхронизация, ни повтор снимка, ни выход
+  /// из области, ни восстановление источника.
+  ///
+  /// База гарантирует два правила, которые нельзя оставить на дисциплину кода:
+  /// автор и время последнего изменения существуют только вместе
+  /// (`DeliveryOrder_shipment_readiness_actor`), а `READY` невозможно получить
+  /// без следа человека (`DeliveryOrder_shipment_readiness_manual`). Поэтому
+  /// новый заказ всегда `NOT_READY`, а «готов, но неизвестно от кого» — состояние,
+  /// которого физически не существует.
+  shipmentReadiness        OrderShipmentReadiness @default(NOT_READY)
+  shipmentReadinessSetAt   DateTime?
+  shipmentReadinessSetById String?                @db.Uuid
+  shipmentReadinessSetBy   User?                  @relation("OrderShipmentReadinessSetBy", fields: [shipmentReadinessSetById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   /// Оптимистическая блокировка для будущих конкурентных изменений.
   version   Int      @default(0)
   createdAt DateTime @default(now())
@@ -550,6 +586,9 @@ model DeliveryOrder {
   @@index([needsAttention])
   @@index([externalUpdated])
   @@index([storeId, deliveryMethodId])
+  /// Рабочий список склада: заказы нашей области на выбранный день,
+  /// при необходимости суженные по готовности.
+  @@index([inScope, deliveryDate, shipmentReadiness])
 }
 
 /// Неизменяемая история внешних версий заказа.
