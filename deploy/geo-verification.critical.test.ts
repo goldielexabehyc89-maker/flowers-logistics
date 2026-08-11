@@ -16,7 +16,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,8 +74,55 @@ printf 'проверка выполнена\\n'
 exit "\${DOCKER_EXIT:-0}"
 `;
 
+/**
+ * Тестовый шаг опроса.
+ *
+ * Боевые значения (`GEO_VERIFY_DELAY=10`, `GEO_VERIFY_ATTEMPTS=120`) живут
+ * в `common.sh` и здесь НЕ меняются: они рассчитаны на настоящий сервер,
+ * где подсчёт SHA-256 гигабайтного набора занимает минуты.
+ *
+ * Проверке нужна не длительность паузы, а её наличие: опрос обязан повторяться,
+ * переживать обрывы и когда-нибудь сдаваться. Раньше здесь стояла настоящая
+ * секунда, и один тест стоил двух-шести секунд реального времени — а вместе
+ * с ними приносил зависимость от загруженности машины.
+ */
+const TEST_POLL_DELAY = 0.02;
+
+/**
+ * Запас попыток.
+ *
+ * Считается не «сколько раз», а «сколько времени»: 800 попыток по 20 мс плюс
+ * запуск процесса на каждую дают около двадцати секунд ожидания при типичном
+ * времени в десятки миллисекунд. Прежние 40 попыток по секунде давали тот же
+ * запас, но платили за него реальным временем каждого прогона.
+ */
+const TEST_POLL_ATTEMPTS = 800;
+
+/**
+ * Модель долгой проверки.
+ *
+ * Смысл в том, что проверка ПЕРЕЖИВАЕТ запускающее соединение, а не в том,
+ * сколько именно она длится. Триста миллисекунд заведомо больше времени
+ * возврата запуска и заведомо меньше запаса опроса — этого достаточно,
+ * и двух секунд для того же утверждения не нужно.
+ */
+const LONG_VERIFICATION_SECONDS = 0.3;
+
+/**
+ * Полный вывод прогона для сообщения об отказе.
+ *
+ * Отчёт vitest обрезает длинные значения, и по журналу CI приходилось гадать,
+ * какой статус пришёл вместо ожидаемого. Сообщение проверки печатается целиком.
+ */
+function describeRun(result: RunResult): string {
+  const spawn = result.spawnError === null ? '' : `\nзапуск: ${result.spawnError}`;
+  return `\nкод: ${result.code}${spawn}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+}
+
 interface RunResult {
   code: number;
+  /** Почему процесс не удалось выполнить. Пусто — выполнен. */
+  spawnError: string | null;
   stdout: string;
   stderr: string;
   ssh: string;
@@ -92,6 +139,46 @@ interface SandboxOptions {
   dockerSleep?: number;
   attempts?: number;
   delay?: number;
+}
+
+/**
+ * Заготовка репозитория для песочниц.
+ *
+ * Раньше каждая песочница создавала свой репозиторий: шесть запусков `git`
+ * на проверку, около сотни на файл. Под нагрузкой очередной запуск процесса
+ * иногда не удавался, и проверка падала с пустым выводом — то есть сообщала
+ * о чём угодно, кроме настоящей причины.
+ *
+ * Заготовка собирается один раз и копируется: содержимое то же, запусков
+ * процессов на два порядка меньше.
+ */
+let template: { dir: string; version: string } | null = null;
+
+async function repositoryTemplate(): Promise<{ dir: string; version: string }> {
+  if (template !== null) {
+    return template;
+  }
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'geo-verify-template-'));
+  await mkdir(path.join(dir, 'deploy/scripts'), { recursive: true });
+  await writeFile(
+    path.join(dir, 'deploy/scripts/verify-geo.mjs'),
+    '// проверяющий скрипт\n',
+    'utf8',
+  );
+
+  const git = async (...args: string[]): Promise<string> => {
+    const { stdout } = await execFileAsync('git', ['-C', dir, ...args]);
+    return stdout.trim();
+  };
+  await git('init', '-q');
+  await git('config', 'user.email', 'test@example.invalid');
+  await git('config', 'user.name', 'Проверка');
+  await git('add', '-A');
+  await git('commit', '-q', '-m', 'версия');
+
+  template = { dir, version: await git('rev-parse', 'HEAD') };
+  return template;
 }
 
 async function runInSandbox(options: SandboxOptions): Promise<RunResult> {
@@ -126,22 +213,11 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult> {
   }
 
   // Настоящий репозиторий: проверяющий скрипт доставляется из дерева VERSION.
-  const git = async (...args: string[]): Promise<string> => {
-    const { stdout } = await execFileAsync('git', ['-C', dir, ...args]);
-    return stdout.trim();
-  };
-  await mkdir(path.join(dir, 'deploy/scripts'), { recursive: true });
-  await writeFile(
-    path.join(dir, 'deploy/scripts/verify-geo.mjs'),
-    '// проверяющий скрипт\n',
-    'utf8',
-  );
-  await git('init', '-q');
-  await git('config', 'user.email', 'test@example.invalid');
-  await git('config', 'user.name', 'Проверка');
-  await git('add', '-A');
-  await git('commit', '-q', '-m', 'версия');
-  const version = await git('rev-parse', 'HEAD');
+  // Заготовка копируется целиком вместе с .git — история та же, а запускать
+  // git заново на каждую песочницу незачем.
+  const prepared = await repositoryTemplate();
+  await cp(prepared.dir, dir, { recursive: true });
+  const version = prepared.version;
 
   await mkdir(path.join(dir, 'deploy/private'), { recursive: true });
   await writeFile(
@@ -197,30 +273,36 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult> {
     POLL_DROPS: String(options.pollDrops ?? 0),
     DOCKER_EXIT: String(options.dockerExit ?? 0),
     DOCKER_SLEEP: String(options.dockerSleep ?? 0),
-    GEO_VERIFY_ATTEMPTS: String(options.attempts ?? 40),
-    GEO_VERIFY_DELAY: String(options.delay ?? 0),
+    GEO_VERIFY_ATTEMPTS: String(options.attempts ?? TEST_POLL_ATTEMPTS),
+    GEO_VERIFY_DELAY: String(options.delay ?? TEST_POLL_DELAY),
     VERSION_UNDER_TEST: VALID_SHA,
   };
 
   let code: number;
   let stdout: string;
   let stderr: string;
+  let spawnError: string | null = null;
   try {
     const done = await execFileAsync(harness, [], { cwd: dir, env });
     code = 0;
     stdout = done.stdout;
     stderr = done.stderr;
   } catch (error) {
-    const failure = error as { code?: number; stdout?: string; stderr?: string };
+    const failure = error as { code?: number; stdout?: string; stderr?: string; message?: string };
     code = failure.code ?? 1;
     stdout = failure.stdout ?? '';
     stderr = failure.stderr ?? '';
+    // Пустой вывод при отказе означает, что процесс не запустился вовсе.
+    // Без этой строки проверка сообщала бы «нет нужного текста» и молчала
+    // о том, что текста не было вообще.
+    spawnError = stdout === '' && stderr === '' ? (failure.message ?? 'процесс не выполнен') : null;
   }
 
   const dockerLogText = await readFile(dockerLog, 'utf8');
 
   return {
     code,
+    spawnError,
     stdout,
     stderr,
     ssh: await readFile(sshLog, 'utf8'),
@@ -259,19 +341,21 @@ const MESSAGE_BODY = [
 ].join('\n');
 
 describe('проверка геоартефактов переживает обрыв SSH', () => {
-  // Проверки намеренно ждут по-настоящему: обрыв опроса стоит паузы, и без неё
-  // сорок мгновенных попыток обогнали бы саму проверку. Стандартных пяти секунд
-  // на такой сценарий не хватает, и это свойство проверки, а не медлительность.
+  // Опрос идёт тестовым шагом в двадцать миллисекунд, а не боевой секундой:
+  // проверяется, что он повторяется, переживает обрывы и когда-нибудь сдаётся,
+  // а не то, сколько он спит. Запас тайм-аута оставлен прежним намеренно —
+  // он покрывает медленную машину, но сам по себе временем прогона не является:
+  // типичный сценарий укладывается в десятки миллисекунд.
   vi.setConfig({ testTimeout: 60_000 });
 
   it('исходное соединение закрывается сразу, а проверка доходит до конца', async () => {
     // Проверка длится дольше, чем живёт запускающее соединение. Раньше это
     // означало её смерть; теперь запуск возвращается сразу, а результат
     // забирается отдельными короткими соединениями.
-    const result = await runInSandbox({ body: CHECK_BODY, dockerSleep: 2, delay: 1, attempts: 30 });
+    const result = await runInSandbox({ body: CHECK_BODY, dockerSleep: LONG_VERIFICATION_SECONDS });
 
-    expect(result.stdout, result.stderr).toContain('ИТОГ: успех');
-    expect(result.stdout).toContain('СТАТУС: OK');
+    expect(result.stdout, describeRun(result)).toContain('ИТОГ: успех');
+    expect(result.stdout, describeRun(result)).toContain('СТАТУС: OK');
 
     // Запуск и опрос — разные соединения, и опрос застал проверку идущей.
     const launches = result.ssh.split('\n').filter((line) => line.includes('nohup sh'));
@@ -281,18 +365,18 @@ describe('проверка геоартефактов переживает об�
   });
 
   it('обрыв опроса не перезапускает проверку', async () => {
-    const result = await runInSandbox({ body: CHECK_BODY, pollDrops: 1, delay: 1, attempts: 30 });
+    const result = await runInSandbox({ body: CHECK_BODY, pollDrops: 1 });
 
-    expect(result.stdout, result.stderr).toContain('ИТОГ: успех');
+    expect(result.stdout, describeRun(result)).toContain('ИТОГ: успех');
     // Ровно два запуска docker: подложка и граф. Обрыв опроса не добавил
     // третьего — иначе один и тот же гигабайтный набор считался бы дважды.
     expect(result.dockerRuns).toBe(2);
   });
 
   it('несколько обрывов подряд тоже не перезапускают проверку', async () => {
-    const result = await runInSandbox({ body: CHECK_BODY, pollDrops: 5, delay: 1, attempts: 30 });
+    const result = await runInSandbox({ body: CHECK_BODY, pollDrops: 5 });
 
-    expect(result.stdout, result.stderr).toContain('ИТОГ: успех');
+    expect(result.stdout, describeRun(result)).toContain('ИТОГ: успех');
     expect(result.dockerRuns).toBe(2);
     // Обрывы замечены и названы, а не выданы за отказ артефактов.
     expect(result.stdout).toContain('опрос прерывался');
@@ -302,22 +386,20 @@ describe('проверка геоартефактов переживает об�
     const result = await runInSandbox({
       body: CHECK_BODY,
       pollDrops: 3,
-      dockerSleep: 2,
-      delay: 1,
-      attempts: 30,
+      dockerSleep: LONG_VERIFICATION_SECONDS,
     });
 
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain('СТАТУС: OK');
+    expect(result.code, describeRun(result)).toBe(0);
+    expect(result.stdout, describeRun(result)).toContain('СТАТУС: OK');
   });
 
   it('несовпадение содержимого названо несовпадением', async () => {
-    const status = await runInSandbox({ body: STATUS_BODY, dockerExit: 10, delay: 1 });
+    const status = await runInSandbox({ body: STATUS_BODY, dockerExit: 10 });
 
-    expect(status.stdout).toContain('ИТОГ: отказ');
-    expect(status.stdout).toContain('СТАТУС: MISMATCH');
+    expect(status.stdout, describeRun(status)).toContain('ИТОГ: отказ');
+    expect(status.stdout, describeRun(status)).toContain('СТАТУС: MISMATCH');
 
-    const message = await runInSandbox({ body: MESSAGE_BODY, dockerExit: 10, delay: 1 });
+    const message = await runInSandbox({ body: MESSAGE_BODY, dockerExit: 10 });
 
     expect(message.stderr).toContain('не совпадает с проверенным содержимым');
     // Единственный случай, когда обвинять артефакты можно.
@@ -327,11 +409,14 @@ describe('проверка геоартефактов переживает об�
   });
 
   it('внутренняя ошибка проверки не выдаётся за несовпадение', async () => {
-    const status = await runInSandbox({ body: STATUS_BODY, dockerExit: 20, delay: 1 });
+    const status = await runInSandbox({ body: STATUS_BODY, dockerExit: 20 });
 
-    expect(status.stdout).toContain('СТАТУС: INTERNAL');
+    // Сообщение несёт весь вывод: отчёт vitest обрезает длинные строки,
+    // и в прошлый раз по журналу CI нельзя было понять, что именно случилось —
+    // INTERNAL не пришёл, а какой статус пришёл вместо него, осталось неизвестным.
+    expect(status.stdout, describeRun(status)).toContain('СТАТУС: INTERNAL');
 
-    const message = await runInSandbox({ body: MESSAGE_BODY, dockerExit: 20, delay: 1 });
+    const message = await runInSandbox({ body: MESSAGE_BODY, dockerExit: 20 });
 
     expect(message.stderr).toContain('не состоялась');
     expect(message.stderr).toContain('Артефакты несовпавшими НЕ признаны');
@@ -374,7 +459,6 @@ describe('проверка геоартефактов переживает об�
         'remote "docker compose up -d --no-build app"',
       ].join('\n'),
       dockerExit: 10,
-      delay: 1,
     });
 
     expect(result.code).not.toBe(0);
@@ -446,7 +530,7 @@ describe('проверка геоартефактов переживает об�
   });
 
   it('каталог задания уникален и убирается после получения результата', async () => {
-    const result = await runInSandbox({ body: CHECK_BODY, delay: 1, attempts: 30 });
+    const result = await runInSandbox({ body: CHECK_BODY });
 
     const created = result.ssh
       .split('\n')
@@ -466,7 +550,7 @@ describe('проверка геоартефактов переживает об�
   });
 
   it('права каталога и служебных файлов ограничены', async () => {
-    const result = await runInSandbox({ body: CHECK_BODY, delay: 1, attempts: 30 });
+    const result = await runInSandbox({ body: CHECK_BODY });
 
     const launch = result.ssh.split('\n').find((line) => line.includes('nohup sh'));
     expect(launch).toBeDefined();

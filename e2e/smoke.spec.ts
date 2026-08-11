@@ -11,7 +11,7 @@
  * и в отчёт не печатаются.
  */
 
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
 
 const ADMIN_PHONE = process.env['E2E_ADMIN_PHONE'] ?? '+79990000001';
 const ADMIN_CODE = process.env['E2E_ADMIN_CODE'] ?? '';
@@ -49,6 +49,49 @@ async function logout(page: Page): Promise<void> {
   await page.locator('.shell__topbar button').last().click();
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
+}
+
+/**
+ * Выбирает маршрут в списке ПО НОМЕРУ, а не по позиции.
+ *
+ * Выбор по индексу молча зависит от того, сколько ещё черновиков этого дня
+ * существует и как они отсортированы (по номеру). Достаточно одного лишнего
+ * черновика — и заказы уезжают не туда, а тест падает на следующем шаге,
+ * сообщая про количество остановок вместо настоящей причины.
+ */
+async function selectRouteByNumber(select: Locator, number: string): Promise<void> {
+  const option = select.locator(`option:has-text("${number}")`);
+  await expect(option).toHaveCount(1);
+  const value = await option.getAttribute('value');
+  expect(value, `в списке нет маршрута ${number}`).not.toBeNull();
+  await select.selectOption(value ?? '');
+}
+
+/**
+ * Нажимает кнопку и дожидается ОТВЕТА на конкретную мутацию.
+ *
+ * Без этого тест продолжает действовать, не зная, завершилась ли операция:
+ * отказ сервера (устаревшая версия, потерянная блокировка, непригодный заказ)
+ * превращается в загадочное «остановок не столько» вместо названной причины.
+ * Пауза для этого не годится — она гадает о времени вместо наблюдения факта.
+ */
+async function clickAndAwait(
+  page: Page,
+  button: Locator,
+  method: string,
+  pathPart: string,
+): Promise<void> {
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (candidate) => candidate.url().includes(pathPart) && candidate.request().method() === method,
+    ),
+    button.click(),
+  ]);
+
+  expect(
+    response.status(),
+    `${method} ${pathPart} → ${response.status()}: ${await response.text()}`,
+  ).toBeLessThan(300);
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -568,8 +611,13 @@ test('маршрут: черновик → состав → порядок → �
   // Оба заказа отмечаются и добавляются в маршрут.
   await page.getByLabel(`Выбрать заказ ${first}`).check();
   await page.getByLabel(`Выбрать заказ ${second}`).check();
-  await page.getByLabel('Маршрут для добавления').selectOption({ index: 1 });
-  await page.getByRole('button', { name: /Добавить выбранные/ }).click();
+  await selectRouteByNumber(page.getByLabel('Маршрут для добавления'), routeNumber);
+  await clickAndAwait(
+    page,
+    page.getByRole('button', { name: /Добавить выбранные/ }),
+    'POST',
+    '/orders',
+  );
 
   const stops = card.locator('.routes__stop');
   await expect(stops).toHaveCount(2);
@@ -594,8 +642,13 @@ test('маршрут: черновик → состав → порядок → �
   await expect(card.locator('.routes__stop')).toHaveCount(2);
 
   await card.getByLabel(`Выбрать заказ ${second}`).check();
-  await card.getByLabel('Перенести в маршрут').selectOption({ index: 1 });
-  await card.getByRole('button', { name: /Перенести/ }).click();
+  await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), secondCardNumber);
+  await clickAndAwait(
+    page,
+    card.getByRole('button', { name: /Перенести/ }),
+    'POST',
+    '/routes/move',
+  );
   // Один заказ ушёл: перенос действительно выполнен, а не отклонён блокировкой.
   await expect(card.locator('.routes__stop')).toHaveCount(1);
 
@@ -606,9 +659,13 @@ test('маршрут: черновик → состав → порядок → �
     .click();
   await expect(card.locator('.routes__stop')).toHaveCount(1);
   await card.getByLabel(`Выбрать заказ ${second}`).check();
-  // Список коротких: выбираем первый доступный — это и есть исходный маршрут.
-  await card.getByLabel('Перенести в маршрут').selectOption({ index: 1 });
-  await card.getByRole('button', { name: /Перенести/ }).click();
+  await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), routeNumber);
+  await clickAndAwait(
+    page,
+    card.getByRole('button', { name: /Перенести/ }),
+    'POST',
+    '/routes/move',
+  );
   await expect(card.locator('.routes__stop')).toHaveCount(0);
 
   await page
