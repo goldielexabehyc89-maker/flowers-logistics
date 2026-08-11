@@ -20,7 +20,8 @@
 -- заказы утверждённого склада без фильтра по способу получения.
 --
 -- Значение по умолчанию `false` безопасно: неизвестная строка не попадает
--- в производственные выборки, пока её не подтвердит импорт.
+-- в производственные выборки, пока её не подтвердит импорт. Безусловным
+-- включением всех строк это НЕ является — см. совместимость ниже.
 ALTER TABLE "DeliveryOrder"
   ADD COLUMN "fulfillmentInScope" BOOLEAN NOT NULL DEFAULT false;
 
@@ -28,6 +29,49 @@ UPDATE "DeliveryOrder" SET "fulfillmentInScope" = true WHERE "inScope" = true;
 
 CREATE INDEX "DeliveryOrder_fulfillmentInScope_deliveryDate_idx"
   ON "DeliveryOrder" ("fulfillmentInScope", "deliveryDate");
+
+-- ИНВАРИАНТ «ПРОИЗВОДСТВЕННАЯ ОБЛАСТЬ СТРОГО ШИРЕ» ДЕРЖИТ БАЗА, А НЕ ТОЛЬКО КОД.
+--
+-- Засыпки существующих строк недостаточно. Между применением этой миграции
+-- и выкаткой новой версии — а также при откате на предыдущую — работает код,
+-- который о колонке не знает. Создавая доставочный заказ, он запишет
+-- `inScope = true`, а `fulfillmentInScope` получит значение по умолчанию
+-- `false`. Заказ оказался бы вне производственной области и после возврата
+-- новой версии остался бы невидимым: delta приносит только изменившиеся
+-- документы, а этот не изменится.
+--
+-- ПОЧЕМУ ТРИГГЕР, А НЕ ОДИН ТОЛЬКО CHECK.
+--
+-- CHECK отверг бы такую вставку целиком, и старая версия перестала бы
+-- импортировать заказы — то есть миграция сломала бы работающее приложение.
+-- Триггер BEFORE вместо этого ДОПОЛНЯЕТ строку: он не выдумывает область,
+-- а выводит её из уже записанного `inScope = true`, которое по определению
+-- означает утверждённый склад и неархивный документ.
+--
+-- Обратное правило не вводится намеренно: `fulfillmentInScope = true`
+-- при `inScope = false` — это штатный самовывоз, а обе области `false` —
+-- штатный чужой склад или архив. Триггер их не трогает.
+CREATE OR REPLACE FUNCTION fulfillment_scope_covers_logistics() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW."inScope" AND NOT NEW."fulfillmentInScope" THEN
+    NEW."fulfillmentInScope" := true;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER delivery_order_fulfillment_scope_covers_logistics
+  BEFORE INSERT OR UPDATE ON "DeliveryOrder"
+  FOR EACH ROW EXECUTE FUNCTION fulfillment_scope_covers_logistics();
+
+-- Сам инвариант записан ограничением. Обычные записи до него не доходят —
+-- их уже нормализовал триггер, — но снятие или поломка триггера в будущем
+-- обязаны привести к явному отказу, а не к молчаливому расхождению областей.
+ALTER TABLE "DeliveryOrder"
+  ADD CONSTRAINT "DeliveryOrder_fulfillment_scope_covers_logistics"
+  CHECK (NOT "inScope" OR "fulfillmentInScope");
 
 -- Признак завершения расширенной загрузки.
 --

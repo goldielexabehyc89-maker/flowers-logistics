@@ -58,18 +58,19 @@ const configSchema = z.object({
   /**
    * Режим «только чтение» серверного контура МоегоСклада.
    *
-   * Несекретный параметр: он не даёт доступа, а отнимает его. Значение `true`
-   * заставляет единственную сетевую границу клиента отвергать любой метод, кроме
-   * `GET` и `HEAD`, ДО обращения к сети.
+   * Несекретный параметр: он не даёт доступа, а отнимает его. Значением по
+   * умолчанию НЕ снабжён намеренно — различаются три состояния:
    *
-   * По умолчанию `true` — fail closed: забытый параметр запрещает запись,
-   * а не разрешает её. Для staging значение `true` обязательно и является
-   * условием допуска токена (`ENV-004`).
+   *   `'true'`     — явное согласие на живой read-only контур; обязательное
+   *                  условие допуска токена и синхронизации на staging;
+   *   отсутствует  — контур не настраивают. Безопасно означает «только чтение»
+   *                  для окружения без токена, но разрешением начать живую
+   *                  staging-синхронизацию не является;
+   *   `'false'`    — режим записи. Он ещё не существует ни в одном окружении,
+   *                  поэтому запуск останавливается: молча стартовать с
+   *                  настройкой, которой код не поддерживает, нельзя.
    */
-  MOYSKLAD_READ_ONLY: z
-    .enum(['true', 'false'])
-    .default('true')
-    .transform((value) => value === 'true'),
+  MOYSKLAD_READ_ONLY: z.enum(['true', 'false']).optional(),
   /** Автоматический фоновый опрос. По умолчанию выключен во всех окружениях. */
   MOYSKLAD_SYNC_ENABLED: z
     .enum(['true', 'false'])
@@ -292,7 +293,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 export function moyskladAccess(data: {
   APP_ENV: 'local' | 'staging' | 'production';
   APP_ENVIRONMENT_MARKER: string;
-  MOYSKLAD_READ_ONLY: boolean;
+  MOYSKLAD_READ_ONLY?: 'true' | 'false' | undefined;
 }): 'production' | 'staging-read-only' | 'denied' {
   // Оба признака обязаны совпасть: смешанная конфигурация вроде
   // APP_ENV=staging с production-маркером означает ошибку развёртывания,
@@ -300,12 +301,13 @@ export function moyskladAccess(data: {
   if (data.APP_ENV === 'production' && data.APP_ENVIRONMENT_MARKER === 'production') {
     return 'production';
   }
-  // Staging допускается только вместе с явным несекретным режимом read-only:
-  // сам по себе совпавший маркер доступа не даёт.
+  // Staging допускается только вместе с ЯВНЫМ несекретным режимом чтения.
+  // Совпавшего маркера мало, и отсутствующего значения тоже: молчание — это
+  // «контур не настраивают», а не согласие включить живую синхронизацию.
   if (
     data.APP_ENV === 'staging' &&
     data.APP_ENVIRONMENT_MARKER === 'staging' &&
-    data.MOYSKLAD_READ_ONLY
+    data.MOYSKLAD_READ_ONLY === 'true'
   ) {
     return 'staging-read-only';
   }
@@ -313,12 +315,23 @@ export function moyskladAccess(data: {
 }
 
 function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
+  // Режима записи не существует ни в одном окружении: клиент отвергает всё,
+  // кроме GET и HEAD, безусловно. Настройка, обещающая обратное, — это ошибка
+  // развёртывания, а не выбор режима, поэтому запуск останавливается.
+  if (data.MOYSKLAD_READ_ONLY === 'false') {
+    throw new Error(
+      'MOYSKLAD_READ_ONLY=false не поддерживается: серверный контур МоегоСклада ' +
+        'работает только на чтение во всех окружениях, включая production. ' +
+        'Операции записи вводятся отдельным заданием с идемпотентностью и аудитом',
+    );
+  }
+
   const access = moyskladAccess(data);
 
   if (data.MOYSKLAD_TOKEN !== undefined && access === 'denied') {
     throw new Error(
       'MOYSKLAD_TOKEN допустим только при APP_ENV=production с APP_ENVIRONMENT_MARKER=production ' +
-        'либо при APP_ENV=staging с APP_ENVIRONMENT_MARKER=staging и MOYSKLAD_READ_ONLY=true: ' +
+        'либо при APP_ENV=staging с APP_ENVIRONMENT_MARKER=staging и явным MOYSKLAD_READ_ONLY=true: ' +
         'рабочий токен не размещается в local и CI, а на staging — только в режиме чтения',
     );
   }
@@ -326,7 +339,7 @@ function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
   if (data.MOYSKLAD_SYNC_ENABLED && access === 'denied') {
     throw new Error(
       'MOYSKLAD_SYNC_ENABLED=true допустим только при совпавших маркерах production ' +
-        'либо staging с MOYSKLAD_READ_ONLY=true',
+        'либо staging с явным MOYSKLAD_READ_ONLY=true',
     );
   }
 

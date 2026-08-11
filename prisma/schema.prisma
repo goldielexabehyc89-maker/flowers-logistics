@@ -520,6 +520,12 @@ model DeliveryOrder {
   /// Это второе представление ОДНОГО заказа, а не второй заказ: ключ
   /// `externalId` и строка остаются едиными, второго прохода синхронизации
   /// и второй таблицы не существует.
+  ///
+  /// Инвариант `inScope = true => fulfillmentInScope = true` держит база:
+  /// триггер `delivery_order_fulfillment_scope_covers_logistics` дополняет
+  /// строку, а ограничение с тем же именем фиксирует само правило. Это нужно
+  /// для отката: код прежней версии колонки не знает и записал бы `false`
+  /// рядом с `inScope = true`.
   fulfillmentInScope Boolean            @default(false)
   scopeExitReason OrderScopeExitReason?
   scopeExitedAt   DateTime?

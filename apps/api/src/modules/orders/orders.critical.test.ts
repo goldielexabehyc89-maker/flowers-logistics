@@ -386,29 +386,30 @@ describe('конфигурация fail closed', () => {
       MOYSKLAD_TOKEN: 'x',
     };
 
-    // Без явного значения режим чтения включён по умолчанию, поэтому запуск возможен.
-    const config = loadConfig(staging as NodeJS.ProcessEnv);
-    expect(config.MOYSKLAD_READ_ONLY).toBe(true);
+    // Допуск даёт только ЯВНОЕ значение.
+    const config = loadConfig({ ...staging, MOYSKLAD_READ_ONLY: 'true' } as NodeJS.ProcessEnv);
+    expect(config.MOYSKLAD_READ_ONLY).toBe('true');
     expect(config.moyskladAccess).toBe('staging-read-only');
 
-    // Снятый режим чтения вместе с токеном останавливает запуск.
+    // Без него токен на staging не принимается.
+    expect(() => loadConfig(staging as NodeJS.ProcessEnv)).toThrow(/MOYSKLAD_TOKEN/);
+
+    // Объявленный режим записи останавливает запуск отдельной причиной.
     expect(() =>
       loadConfig({ ...staging, MOYSKLAD_READ_ONLY: 'false' } as NodeJS.ProcessEnv),
-    ).toThrow(/MOYSKLAD_TOKEN/);
+    ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
   });
 
-  it('токен в local и CI останавливает запуск при любом режиме чтения', () => {
-    for (const readOnly of ['true', 'false']) {
-      expect(() =>
-        loadConfig({
-          ...base,
-          APP_ENV: 'local',
-          APP_ENVIRONMENT_MARKER: 'local',
-          MOYSKLAD_TOKEN: 'x',
-          MOYSKLAD_READ_ONLY: readOnly,
-        } as NodeJS.ProcessEnv),
-      ).toThrow(/MOYSKLAD_TOKEN/);
-    }
+  it('токен в local и CI останавливает запуск даже с явным режимом чтения', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        MOYSKLAD_TOKEN: 'x',
+        MOYSKLAD_READ_ONLY: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_TOKEN/);
   });
 
   it('смешанные маркеры не спасает даже режим чтения', () => {
@@ -436,6 +437,7 @@ describe('конфигурация fail closed', () => {
         ...base,
         APP_ENV: 'staging',
         APP_ENVIRONMENT_MARKER: 'staging',
+        MOYSKLAD_READ_ONLY: 'true',
         MOYSKLAD_SYNC_ENABLED: 'true',
       } as NodeJS.ProcessEnv),
     ).toThrow(/требует MOYSKLAD_TOKEN/);
@@ -456,6 +458,7 @@ describe('конфигурация fail closed', () => {
         ...base,
         APP_ENV: env,
         APP_ENVIRONMENT_MARKER: marker,
+        ...(env === 'staging' ? { MOYSKLAD_READ_ONLY: 'true' } : {}),
         ...(allowed ? { MOYSKLAD_TOKEN: 'x', MOYSKLAD_SYNC_ENABLED: 'true' } : {}),
       } as NodeJS.ProcessEnv);
 
@@ -473,6 +476,7 @@ describe('конфигурация fail closed', () => {
       ...base,
       APP_ENV: 'staging',
       APP_ENVIRONMENT_MARKER: 'staging',
+      MOYSKLAD_READ_ONLY: 'true',
     } as NodeJS.ProcessEnv);
 
     expect(config.MOYSKLAD_TOKEN).toBeUndefined();
@@ -482,20 +486,38 @@ describe('конфигурация fail closed', () => {
     expect(checkSyncOnceEnvironment(config)?.reason).toContain('MOYSKLAD_TOKEN');
   });
 
-  it('режим чтения доходит до клиента интеграции', async () => {
-    const { loadMoyskladConfig } = await import('../integrations/moysklad/config.js');
+  it('объявленный режим записи останавливает запуск в любом окружении', () => {
+    for (const [env, marker] of [
+      ['local', 'local'],
+      ['staging', 'staging'],
+      ['production', 'production'],
+    ] as const) {
+      expect(() =>
+        loadConfig({
+          ...base,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: marker,
+          MOYSKLAD_READ_ONLY: 'false',
+        } as NodeJS.ProcessEnv),
+      ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
+    }
+  });
 
-    expect(loadMoyskladConfig({} as NodeJS.ProcessEnv).readOnly).toBe(true);
-    expect(loadMoyskladConfig({ MOYSKLAD_READ_ONLY: 'true' } as NodeJS.ProcessEnv).readOnly).toBe(
-      true,
+  it('staging без явного режима чтения к живому контуру не допускается', () => {
+    const staging = { ...base, APP_ENV: 'staging', APP_ENVIRONMENT_MARKER: 'staging' };
+
+    // Молчание — это «контур не настраивают»: приложение стартует, но токен
+    // и синхронизация не разрешены.
+    const config = loadConfig(staging as NodeJS.ProcessEnv);
+    expect(config.MOYSKLAD_READ_ONLY).toBeUndefined();
+    expect(config.moyskladAccess).toBe('denied');
+
+    expect(() => loadConfig({ ...staging, MOYSKLAD_TOKEN: 'x' } as NodeJS.ProcessEnv)).toThrow(
+      /MOYSKLAD_TOKEN/,
     );
-    // Любое значение, кроме явного false, оставляет запись запрещённой.
-    expect(loadMoyskladConfig({ MOYSKLAD_READ_ONLY: 'да' } as NodeJS.ProcessEnv).readOnly).toBe(
-      true,
-    );
-    expect(loadMoyskladConfig({ MOYSKLAD_READ_ONLY: 'false' } as NodeJS.ProcessEnv).readOnly).toBe(
-      false,
-    );
+    expect(() =>
+      loadConfig({ ...staging, MOYSKLAD_SYNC_ENABLED: 'true' } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_SYNC_ENABLED/);
   });
 });
 
@@ -1321,9 +1343,25 @@ describe('снимок заказов для staging', () => {
     const { exportOrdersSnapshot, assertSnapshotIsSafe, alias } =
       await import('./snapshot-export.js');
 
+    // Предел считается от фактического содержимого одноразовой базы, а не
+    // задан числом: соседние сценарии копят строки, и заказ без даты, который
+    // PostgreSQL сортирует последним, однажды выпал бы за `take` — проверка
+    // молча превратилась бы в проверку удачи.
+    const matching = await ctx.db.deliveryOrder.count({
+      where: {
+        inScope: true,
+        sourceMissing: false,
+        sourceArchived: false,
+        OR: [
+          { deliveryDate: { gte: new Date('2026-01-01T00:00:00.000Z') } },
+          { deliveryDate: null },
+        ],
+      },
+    });
+
     const exported = await exportOrdersSnapshot(ctx.db, {
       since: new Date('2026-01-01T00:00:00.000Z'),
-      limit: 500,
+      limit: matching + 10,
       aliasSalt: 'test-salt',
       now: NOW,
     });
@@ -1347,6 +1385,61 @@ describe('снимок заказов для staging', () => {
     // Соль в снимок не попадает — только её отпечаток.
     expect(serialized).not.toContain('test-salt');
     assertSnapshotIsSafe(exported);
+  });
+
+  it('самовывозы не попадают в снимок и не расходуют предел', async () => {
+    const { exportOrdersSnapshot } = await import('./snapshot-export.js');
+
+    // Самовывозы утверждённого склада: производственная область без логистической.
+    const pickupIds: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const pickup = snapshotOf({
+        deliveryPlannedMoment: '2026-09-01 12:00:00.000',
+        attributes: [
+          {
+            id: IDS.deliveryMethodAttribute,
+            value: {
+              name: 'Самовывоз',
+              meta: { href: href('customentity', '76f4977e-d33e-11ef-0a80-03b6000e555e') },
+            },
+          },
+          { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
+          { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+        ],
+      });
+      await apply(pickup);
+      pickupIds.push(pickup.externalId);
+    }
+
+    // Один активный логистический заказ — тот, ради которого снимок и нужен.
+    const delivery = snapshotOf({ deliveryPlannedMoment: '2026-09-02 12:00:00.000' });
+    await apply(delivery);
+
+    const pickupOrders = await ctx.db.deliveryOrder.findMany({
+      where: { externalId: { in: pickupIds } },
+      select: { externalName: true, fulfillmentInScope: true, inScope: true },
+    });
+    expect(pickupOrders).toHaveLength(6);
+    expect(pickupOrders.every((row) => row.fulfillmentInScope && !row.inScope)).toBe(true);
+
+    const deliveryOrder = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: delivery.externalId },
+    });
+
+    // Предел заведомо меньше числа самовывозов: если бы они попадали в выборку,
+    // логистический заказ был бы вытеснен.
+    const exported = await exportOrdersSnapshot(ctx.db, {
+      since: new Date('2026-09-01T00:00:00.000Z'),
+      limit: 3,
+      aliasSalt: 'test-salt',
+      now: NOW,
+    });
+
+    const numbers = exported.orders.map((row) => row.number);
+    expect(numbers).toContain(deliveryOrder.externalName);
+    for (const pickup of pickupOrders) {
+      expect(numbers).not.toContain(pickup.externalName);
+    }
   });
 
   it('импорт снимка чужого формата и снимка с настоящими данными отклоняется', async () => {

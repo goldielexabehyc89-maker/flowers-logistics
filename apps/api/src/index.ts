@@ -74,7 +74,6 @@ async function main(): Promise<void> {
         baseUrl: MOYSKLAD_BASE_URL,
         token: config.MOYSKLAD_TOKEN ?? null,
         ids: MOYSKLAD_IDS,
-        readOnly: config.MOYSKLAD_READ_ONLY,
       },
     }),
     logger,

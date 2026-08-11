@@ -328,7 +328,7 @@ function deps(api: FakeApi, now = new Date('2026-08-06T09:00:00.000Z')): SyncDep
   return {
     db: ctx.db,
     client: new MoyskladClient({
-      config: { baseUrl: MOYSKLAD_BASE_URL, token: 'test-token', ids: IDS, readOnly: true },
+      config: { baseUrl: MOYSKLAD_BASE_URL, token: 'test-token', ids: IDS },
       fetch: api.fetch,
       now: () => 0,
       sleep: async () => undefined,
