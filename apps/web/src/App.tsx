@@ -10,7 +10,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { useAuth } from './auth/AuthContext';
 import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
-import { PLACEHOLDERS, PlaceholderScreen, WarehousePlaceholder } from './screens/PlaceholderScreen';
+import { NoSectionsScreen, PLACEHOLDERS, PlaceholderScreen } from './screens/PlaceholderScreen';
 import { DealsScreen } from './screens/deals/DealsScreen';
 import { RoutingScreen } from './screens/routing/RoutingScreen';
 import { RouteSheetsScreen } from './screens/routing/RouteSheetsScreen';
@@ -38,7 +38,7 @@ function SectionRoute({ children }: { children: React.JSX.Element }): React.JSX.
 
   if (!isSectionVisible(roles, location.pathname)) {
     const fallback = firstAvailablePath(roles);
-    return fallback === null ? <WarehousePlaceholder /> : <Navigate to={fallback} replace />;
+    return fallback === null ? <NoSectionsScreen /> : <Navigate to={fallback} replace />;
   }
 
   return children;
@@ -64,9 +64,9 @@ export function App(): React.JSX.Element {
   const roles = user?.roles ?? [];
   const home = firstAvailablePath(roles);
 
-  // Роль без доступных разделов (кладовщик) получает честную заглушку.
+  // Набор ролей без единого раздела получает нейтральный экран с выходом.
   if (home === null) {
-    return <WarehousePlaceholder />;
+    return <NoSectionsScreen />;
   }
 
   return (

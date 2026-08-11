@@ -74,6 +74,33 @@ export const APP_SECTIONS: readonly AppSection[] = [
     shortTitle: 'Курьеры',
     roles: ['ADMIN', 'LOGISTICIAN'],
   },
+  // Разделы производственного контура. Каждая роль видит ровно свой раздел
+  // и не видит соседние: флорист не попадает на склад, кладовщик — в самовывоз.
+  //
+  // Порядок важен: новые разделы стоят ПОСЛЕ логистических, поэтому первый
+  // доступный путь администратора и логиста остаётся `/deals`, а курьера —
+  // `/active`. Перестановка молча сменила бы им домашнюю страницу.
+  {
+    key: 'florist',
+    path: '/florist',
+    title: 'Флорист',
+    shortTitle: 'Флорист',
+    roles: ['ADMIN', 'FLORIST'],
+  },
+  {
+    key: 'warehouse',
+    path: '/warehouse',
+    title: 'Склад',
+    shortTitle: 'Склад',
+    roles: ['ADMIN', 'WAREHOUSE'],
+  },
+  {
+    key: 'pickup',
+    path: '/pickup',
+    title: 'Самовывоз',
+    shortTitle: 'Самовывоз',
+    roles: ['ADMIN', 'MANAGER'],
+  },
   {
     key: 'settings',
     path: '/settings',
@@ -98,7 +125,10 @@ export function isSectionVisible(roles: readonly Role[], path: string): boolean 
 /**
  * Первый доступный раздел. Используется как стартовая страница и как цель
  * перенаправления с неизвестного или запрещённого адреса.
- * `null` означает, что доступных разделов нет — например, у кладовщика.
+ *
+ * `null` означает, что доступных разделов нет вовсе. Сейчас такого набора ролей
+ * не существует — у каждой роли есть свой раздел, — но проверка остаётся: роль,
+ * заведённая раньше своего раздела, не должна показывать пустой экран без выхода.
  */
 export function firstAvailablePath(roles: readonly Role[]): string | null {
   return visibleSections(roles)[0]?.path ?? null;
