@@ -16,7 +16,16 @@ import {
 } from '../../auth/testing/harness.js';
 import { loadConfig, type AppConfig } from '../../../platform/config.js';
 import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.js';
-import { SNAPSHOT_FORMAT, alias, type OrdersSnapshot } from '../snapshot-export.js';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { rm, writeFile } from 'node:fs/promises';
+import {
+  SNAPSHOT_FORMAT,
+  alias,
+  assertSnapshotIsSafe,
+  SnapshotSafetyError,
+  type OrdersSnapshot,
+} from '../snapshot-export.js';
 import {
   assertIntervalContract,
   assertNoRealData,
@@ -27,7 +36,13 @@ import {
   syntheticIntervalRaw,
 } from './import.js';
 import { RetireBlockedError, retireSnapshotOrders } from './retire.js';
-import { assertExplicitPath, fileArgument, readSnapshotFile, SnapshotFileError } from './file.js';
+import {
+  assertExplicitPath,
+  describeSnapshotFailure,
+  fileArgument,
+  readSnapshotFile,
+  SnapshotFileError,
+} from './file.js';
 import { MIN_SYNTHETIC_POINTS, pointForAlias, SYNTHETIC_POINTS } from './synthetic-points.js';
 
 let ctx: TestContext;
@@ -757,5 +772,96 @@ describe('файл снимка', () => {
     expect(() => fileArgument([])).toThrow(SnapshotFileError);
     expect(() => fileArgument(['--file'])).toThrow(SnapshotFileError);
     expect(fileArgument(['--file', '/srv/a.json'])).toBe('/srv/a.json');
+  });
+});
+
+describe('снимок прежнего формата @1', () => {
+  /** Снимок, собранный по прежнему договору: ручной интервал без времени установки. */
+  function legacySnapshot(): OrdersSnapshot {
+    const current = snapshotOf([
+      {
+        key: `legacy-${String(process.hrtime.bigint() % 1_000_000n)}`,
+        manualIntervalStartMinute: 600,
+        manualIntervalEndMinute: 780,
+      },
+    ]);
+
+    const orders = current.orders.map((order) => {
+      // Поля времени установки в формате @1 не существовало вовсе.
+      const { manualIntervalSetAt: _omitted, ...rest } = order;
+      return rest;
+    });
+
+    return {
+      ...current,
+      format: 'flowers-logistics/orders-snapshot@1',
+      orders,
+    } as unknown as OrdersSnapshot;
+  }
+
+  it('отклоняется понятным кодом, а не общей ошибкой', () => {
+    let captured: unknown = null;
+    try {
+      assertSnapshotIsSafe(legacySnapshot());
+    } catch (error) {
+      captured = error;
+    }
+
+    expect(captured).toBeInstanceOf(SnapshotSafetyError);
+    expect((captured as SnapshotSafetyError).code).toBe('SNAPSHOT_FORMAT_UNSUPPORTED');
+
+    // Названы оба формата: человеку нужно понять, что взять, а не гадать.
+    const message = (captured as SnapshotSafetyError).message;
+    expect(message).toContain('orders-snapshot@1');
+    expect(message).toContain(SNAPSHOT_FORMAT);
+  });
+
+  it('отказ происходит ДО транзакции: ни одной записи не создано', async () => {
+    const before = await ctx.db.deliveryOrder.count();
+
+    await expect(
+      importOrdersSnapshot(ctx.db, envConfig('staging'), legacySnapshot()),
+    ).rejects.toBeInstanceOf(SnapshotSafetyError);
+
+    expect(await ctx.db.deliveryOrder.count()).toBe(before);
+
+    // Команда вывода из области отвергает прежний формат так же.
+    await expect(
+      retireSnapshotOrders(ctx.db, envConfig('staging'), legacySnapshot(), { dryRun: true }),
+    ).rejects.toBeInstanceOf(SnapshotSafetyError);
+  });
+
+  it('это не ошибка разбора JSON: файл прежнего формата читается штатно', async () => {
+    const file = path.join(tmpdir(), `snapshot-legacy-${process.hrtime.bigint()}.json`);
+    await writeFile(file, JSON.stringify(legacySnapshot()), 'utf8');
+
+    try {
+      // Файл — корректный JSON, и чтение проходит. Отказ приходит именно
+      // от проверки формата, а не от парсера: иначе причина «не тот формат»
+      // была бы неотличима от «файл испорчен».
+      const parsed = await readSnapshotFile(file);
+      expect(parsed.format).toBe('flowers-logistics/orders-snapshot@1');
+      expect(() => assertSnapshotIsSafe(parsed)).toThrow(SnapshotSafetyError);
+    } finally {
+      await rm(file, { force: true });
+    }
+  });
+
+  it('команда показывает причину и код, а чужую ошибку — нет', () => {
+    let captured: unknown = null;
+    try {
+      assertSnapshotIsSafe(legacySnapshot());
+    } catch (error) {
+      captured = error;
+    }
+
+    const shown = describeSnapshotFailure(captured);
+    expect(shown).toContain('SNAPSHOT_FORMAT_UNSUPPORTED');
+    expect(shown).toContain(SNAPSHOT_FORMAT);
+
+    // Чужая ошибка не печатается: её текст вправе процитировать содержимое файла.
+    const alien = new SyntaxError('Unexpected token } in JSON at position 42: {"addr-secret"');
+    expect(describeSnapshotFailure(alien)).toBe('ошибка выполнения');
+    expect(describeSnapshotFailure(alien)).not.toContain('addr-');
   });
 });

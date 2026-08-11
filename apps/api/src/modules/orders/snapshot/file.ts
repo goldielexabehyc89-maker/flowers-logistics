@@ -86,3 +86,30 @@ export function fileArgument(argv: readonly string[]): string {
   }
   return value;
 }
+
+/**
+ * Что можно показать человеку, не показав содержимого снимка.
+ *
+ * Наши собственные исключения безопасны: в них только причина, код и, для
+ * заблокированного вывода, номера маршрутов. Всё остальное сводится к общему
+ * сообщению — чужая ошибка вправе процитировать место разбора, а вместе
+ * с ним и данные файла.
+ *
+ * Вынесено в функцию, чтобы правило проверялось тестом, а не повторялось
+ * в двух командах по памяти.
+ */
+const REPORTABLE_ERRORS = [
+  'SnapshotFileError',
+  'SnapshotSafetyError',
+  'SnapshotImportError',
+  'RetireBlockedError',
+];
+
+export function describeSnapshotFailure(error: unknown): string {
+  if (!(error instanceof Error) || !REPORTABLE_ERRORS.includes(error.name)) {
+    return 'ошибка выполнения';
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? `[${code}] ${error.message}` : error.message;
+}

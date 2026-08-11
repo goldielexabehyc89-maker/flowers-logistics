@@ -182,30 +182,81 @@ export async function exportOrdersSnapshot(
 }
 
 /**
+ * Почему снимок признан непригодным.
+ *
+ * Код, а не только текст: команда печатает его рядом с сообщением, и по нему
+ * отличают «файл не того формата» от «в файле оказались настоящие данные».
+ * Для первого достаточно взять правильный снимок, второе означает утечку.
+ */
+export type SnapshotSafetyCode =
+  | 'SNAPSHOT_FORMAT_UNSUPPORTED'
+  | 'SNAPSHOT_SECRET_TRACE'
+  | 'SNAPSHOT_REAL_ADDRESS'
+  | 'SNAPSHOT_REAL_RECIPIENT';
+
+/**
+ * Отказ проверки снимка.
+ *
+ * Отдельный тип, а не обычная ошибка. Команда печатает как есть только свои
+ * исключения — чужое сообщение могло бы процитировать содержимое файла, —
+ * и обычная `Error` сводилась бы к общему «ошибка выполнения». Отказ по формату
+ * при этом самый частый и самый безобидный: человеку нужно понятное «нужен @2,
+ * дан @1», а не молчание.
+ */
+export class SnapshotSafetyError extends Error {
+  readonly code: SnapshotSafetyCode;
+
+  constructor(code: SnapshotSafetyCode, message: string) {
+    super(message);
+    this.name = 'SnapshotSafetyError';
+    this.code = code;
+  }
+}
+
+/**
  * Проверка снимка перед импортом на staging.
  *
  * Fail closed: неизвестный формат, следы секретов или похожие на настоящие
  * персональные данные останавливают импорт целиком. Частичный импорт хуже
  * отказа: он оставил бы в staging реальные данные без следа в отчёте.
+ *
+ * Все отказы происходят ДО транзакции: ни одной записи к этому моменту
+ * не создано и не изменено.
  */
 export function assertSnapshotIsSafe(snapshot: OrdersSnapshot): void {
   if (snapshot.format !== SNAPSHOT_FORMAT) {
-    throw new Error('Неизвестный формат снимка заказов');
+    // Оба формата названы явно. Снимок версии @1 не «испорчен» — он собран
+    // по прежнему договору, в котором ручной интервал приходил без времени
+    // установки. Дописать это время за него нельзя: получилось бы, что снимок
+    // утверждает то, чего в нём не было.
+    throw new SnapshotSafetyError(
+      'SNAPSHOT_FORMAT_UNSUPPORTED',
+      `Формат снимка «${String(snapshot.format)}» не поддерживается: нужен «${SNAPSHOT_FORMAT}»`,
+    );
   }
 
   const serialized = JSON.stringify(snapshot);
   for (const forbidden of ['token', 'secret', 'password', 'pinHash', 'Authorization']) {
     if (serialized.toLowerCase().includes(forbidden.toLowerCase())) {
-      throw new Error('Снимок содержит признаки секрета и не может быть импортирован');
+      throw new SnapshotSafetyError(
+        'SNAPSHOT_SECRET_TRACE',
+        'Снимок содержит признаки секрета и не может быть импортирован',
+      );
     }
   }
 
   for (const order of snapshot.orders) {
     if (order.addressAlias !== null && !order.addressAlias.startsWith('addr-')) {
-      throw new Error('Снимок содержит адрес вместо псевдонима');
+      throw new SnapshotSafetyError(
+        'SNAPSHOT_REAL_ADDRESS',
+        'Снимок содержит адрес вместо псевдонима',
+      );
     }
     if (order.recipientAlias !== null && !order.recipientAlias.startsWith('rcpt-')) {
-      throw new Error('Снимок содержит получателя вместо псевдонима');
+      throw new SnapshotSafetyError(
+        'SNAPSHOT_REAL_RECIPIENT',
+        'Снимок содержит получателя вместо псевдонима',
+      );
     }
   }
 }

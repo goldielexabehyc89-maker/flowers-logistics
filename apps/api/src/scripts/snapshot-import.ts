@@ -14,7 +14,11 @@
 import { loadConfig } from '../platform/config.js';
 import { createLogger } from '../platform/logging/logger.js';
 import { createDatabase } from '../platform/db.js';
-import { fileArgument, readSnapshotFile } from '../modules/orders/snapshot/file.js';
+import {
+  describeSnapshotFailure,
+  fileArgument,
+  readSnapshotFile,
+} from '../modules/orders/snapshot/file.js';
 import {
   assertStagingEnvironment,
   importOrdersSnapshot,
@@ -62,15 +66,7 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((error: unknown) => {
-    // Текст ошибки печатается как есть только для наших собственных исключений:
-    // они не содержат данных снимка. Всё остальное сводится к общему сообщению,
-    // потому что чужое сообщение могло бы процитировать содержимое файла.
-    const known =
-      error instanceof Error && ['SnapshotImportError', 'SnapshotFileError'].includes(error.name);
-
-    console.error(
-      'Импорт снимка не выполнен:',
-      known ? (error as Error).message : 'ошибка выполнения',
-    );
+    // Правило «что можно показать» одно на обе команды и проверяется тестом.
+    console.error('Импорт снимка не выполнен:', describeSnapshotFailure(error));
     process.exit(1);
   });

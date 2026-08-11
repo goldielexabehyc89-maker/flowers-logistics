@@ -17,7 +17,11 @@
 import { loadConfig } from '../platform/config.js';
 import { createLogger } from '../platform/logging/logger.js';
 import { createDatabase } from '../platform/db.js';
-import { fileArgument, readSnapshotFile } from '../modules/orders/snapshot/file.js';
+import {
+  describeSnapshotFailure,
+  fileArgument,
+  readSnapshotFile,
+} from '../modules/orders/snapshot/file.js';
 import { assertStagingEnvironment } from '../modules/orders/snapshot/import.js';
 import { retireSnapshotOrders } from '../modules/orders/snapshot/retire.js';
 
@@ -80,14 +84,7 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((error: unknown) => {
-    // Наши исключения безопасны: в них только количества и номера маршрутов.
-    const known =
-      error instanceof Error &&
-      ['SnapshotImportError', 'SnapshotFileError', 'RetireBlockedError'].includes(error.name);
-
-    console.error(
-      'Вывод из области не выполнен:',
-      known ? (error as Error).message : 'ошибка выполнения',
-    );
+    // Правило «что можно показать» одно на обе команды и проверяется тестом.
+    console.error('Вывод из области не выполнен:', describeSnapshotFailure(error));
     process.exit(1);
   });
