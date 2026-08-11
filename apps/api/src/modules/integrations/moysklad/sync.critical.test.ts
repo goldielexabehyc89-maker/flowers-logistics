@@ -16,6 +16,7 @@ import {
   type TestContext,
 } from '../../auth/testing/harness.js';
 import type { AppConfig } from '../../../platform/config.js';
+import { ALLOWED_TEST_DATABASES } from '../../../platform/testing/test-database.js';
 import { MoyskladClient, MoyskladError } from './client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
 import { deltaFilter, formatMoment, initialLoadFilter } from './filters.js';
@@ -45,7 +46,28 @@ const href = (kind: string, id: string): string => `${MOYSKLAD_BASE_URL}/entity/
 
 beforeAll(async () => {
   ctx = await createTestContext();
+  assertDisposableDatabase(ctx.config.DATABASE_URL);
 });
+
+/**
+ * Fail closed для уборки соединений.
+ *
+ * Уборка закрывает соединения с базой, и делать это она вправе только там, где
+ * база одноразовая. `resolveTestDatabaseUrl` уже отказывает при staging- и
+ * production-маркерах, но проверка повторяется здесь и по ИМЕНИ базы: между
+ * созданием контекста и уборкой стоит один шаг, и полагаться на то, что
+ * соседний модуль всё проверил, — это доверие вместо доказательства.
+ */
+function assertDisposableDatabase(connectionString: string): void {
+  const name = decodeURIComponent(new URL(connectionString).pathname.replace(/^\//, ''));
+
+  if (!(ALLOWED_TEST_DATABASES as readonly string[]).includes(name)) {
+    throw new Error(
+      `Уборка соединений допустима только в одноразовой базе (${ALLOWED_TEST_DATABASES.join(', ')}), ` +
+        `а подключение указывает на «${name}»`,
+    );
+  }
+}
 
 afterAll(async () => {
   await closeTestContext(ctx);
@@ -60,52 +82,50 @@ beforeEach(async () => {
  * Страховка освобождения блокировки прохода.
  *
  * Блокировка прохода — уровня СЕССИИ: она живёт, пока живёт соединение, и это
- * правильно для боевого кода. Но в тестах прерванный сценарий уносит замок
- * с собой: продуктовый `finally` до конца не доходит, а следующие сценарии
- * получают «проход уже выполняется» и падают все подряд. Один отказ
- * превращался в семь.
+ * правильно для боевого кода. Но прерванный сценарий уносит замок с собой:
+ * продуктовый `finally` до конца не доходит, а следующие сценарии получают
+ * «проход уже выполняется» и падают все подряд. Один отказ превращался в семь.
  *
- * Поэтому после КАЖДОГО сценария состояние приводится к чистому — двумя
- * независимыми способами, потому что у замка два владельца.
+ * Чужие сессии при этом НЕ завершаются, и нужды в этом нет. Все настоящие
+ * соединения замка в этом файле открывает `connectTestLock`, и каждое
+ * регистрируется в момент создания — включая те, что берёт продуктовый код
+ * внутри прохода. Закрыть собственное соединение можно всегда, а
+ * `pg_terminate_backend` бил бы по сессиям, которых мы не открывали, полагаясь
+ * на признак принадлежности вместо факта владения.
  */
 afterEach(async () => {
+  await releaseSyncLockSessions();
+});
+
+/**
+ * Уборка соединений замка. Вызывается страховкой и направленной проверкой:
+ * утверждение «посторонние сессии не затрагиваются» должно проверять ту же
+ * функцию, что работает после каждого сценария, а не её описание.
+ */
+async function releaseSyncLockSessions(): Promise<void> {
   // 1. Поддельная блокировка. Это состояние ТЕСТА, а не продукта: множество
   //    ключей живёт в модуле и между сценариями обязано быть пустым.
   heldLocks.clear();
 
-  // 2. Настоящие блокировки, взятые сценариями через учтённый захват.
-  //    Освобождаются по-настоящему: unlock и закрытие соединения.
-  const tracked = [...trackedLocks];
-  trackedLocks.clear();
-  for (const lock of tracked) {
-    await lock.release().catch(() => undefined);
+  // 2. Настоящие соединения, открытые этим файлом. Закрытие сессии снимает
+  //    её session-lock — отдельный unlock для этого не нужен и не всегда
+  //    возможен: прерванный сценарий ссылки на замок не оставляет.
+  const opened = [...openedLockClients];
+  openedLockClients.clear();
+  for (const client of opened) {
+    await client.end().catch(() => undefined);
   }
 
-  // 3. Соединение прерванного сценария. Дотянуться до него объектом уже нельзя:
-  //    ссылки на него нет ни у кого. Единственный способ не оставить сессию
-  //    с активным замком — закрыть саму сессию. Ключ наш и только наш,
-  //    база одноразовая, текущее соединение не трогается.
-  await terminateLeakedSyncLocks();
-});
-
-/**
- * Закрывает чужие сессии, удерживающие ключ прохода.
- *
- * Ключ помещается в 32 бита, поэтому в `pg_locks` он лежит в `objid`,
- * а `classid` равен нулю. Проверка узкая намеренно: соседние advisory-замки
- * (геокодирование) не затрагиваются.
- */
-async function terminateLeakedSyncLocks(): Promise<number> {
-  const rows = await ctx.db.$queryRaw<{ pid: number }[]>`
-    SELECT pg_terminate_backend(pid) IS NOT NULL AS ok, pid
-    FROM pg_locks
-    WHERE locktype = 'advisory'
-      AND classid = 0
-      AND objid = ${Number(SYNC_LOCK_KEY)}
-      AND granted
-      AND pid <> pg_backend_pid()
-  `;
-  return rows.length;
+  // 3. Ожидание ФАКТА, а не времени. Сервер освобождает session-lock при выходе
+  //    backend-процесса, и между end() и этим моментом есть окно. Пауза здесь
+  //    гадала бы о его длине; вместо неё тот же ключ берётся транзакционно —
+  //    запрос ждёт ровно до освобождения и возвращается сразу, как только оно
+  //    произошло. lock_timeout ограничивает ожидание сверху, чтобы настоящая
+  //    утечка стала громким отказом, а не зависанием.
+  await ctx.db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '10s'");
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${Number(SYNC_LOCK_KEY)}::bigint)`;
+  });
 }
 
 /**
@@ -120,11 +140,23 @@ async function terminateLeakedSyncLocks(): Promise<number> {
  * снаружи, а молчаливое проглатывание ошибки соединения скрыло бы настоящий
  * обрыв связи с базой.
  */
+const openedLockClients = new Set<Client>();
+
+/** Метка сессий этого файла. Нужна для разбора, а не для принятия решений. */
+const TEST_LOCK_APPLICATION = 'fl-critical-sync-lock';
+
+/** Соседний ключ: им пользуется геокодирование. Уборка его не касается. */
+const FOREIGN_LOCK_KEY = 730_205n;
+
 async function connectTestLock(connectionString: string): Promise<LockConnection> {
-  const client = new Client({ connectionString });
-  // Обрыв ожидаем: страховка закрывает сессию прерванного сценария сама.
+  const client = new Client({ connectionString, application_name: TEST_LOCK_APPLICATION });
+  // Обрыв соединения ожидаем: страховка закрывает его сама.
   client.on('error', () => undefined);
   await client.connect();
+  // Регистрация в момент создания — до того, как соединение кому-либо отдано.
+  // Именно это делает ненужным завершение чужих сессий: даже если замок возьмёт
+  // продуктовый код, а сценарий прервётся, соединение останется нашим.
+  openedLockClients.add(client);
 
   return {
     async tryLock(key: bigint) {
@@ -138,6 +170,7 @@ async function connectTestLock(connectionString: string): Promise<LockConnection
       await client.query('SELECT pg_advisory_unlock($1::bigint)', [key.toString()]);
     },
     async close() {
+      openedLockClients.delete(client);
       // Соединение уже могло быть закрыто страховкой: это не ошибка.
       await client.end().catch(() => undefined);
     },
@@ -1117,6 +1150,61 @@ describe('прерванный сценарий не заражает следу
     expect(real).not.toBeNull();
 
     expect(heldLocks.has(SYNC_LOCK_KEY.toString())).toBe(true);
+  });
+
+  it('уборка отказывается работать вне одноразовой базы', () => {
+    // Fail closed по ИМЕНИ базы, а не по маркерам окружения: маркеры проверяет
+    // соседний модуль, и полагаться на это — доверие вместо доказательства.
+    for (const name of ['fl_production', 'fl_staging', 'fl_dev', 'postgres']) {
+      expect(
+        () => assertDisposableDatabase(`postgresql://u:p@db:5432/${name}?schema=public`),
+        name,
+      ).toThrow(/одноразовой базе/);
+    }
+
+    for (const name of ALLOWED_TEST_DATABASES) {
+      expect(
+        () => assertDisposableDatabase(`postgresql://u:p@db:5432/${name}?schema=public`),
+        name,
+      ).not.toThrow();
+    }
+  });
+
+  it('посторонняя сессия PostgreSQL уборкой не затрагивается', async () => {
+    // Соединение открыто НАПРЯМУЮ, минуя connectTestLock: для уборки оно чужое.
+    const foreign = new Client({
+      connectionString: ctx.config.DATABASE_URL,
+      application_name: 'посторонняя сессия проверки',
+    });
+    foreign.on('error', () => undefined);
+    await foreign.connect();
+
+    try {
+      const identity = await foreign.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const pid = identity.rows[0]?.pid ?? 0;
+      expect(pid).toBeGreaterThan(0);
+
+      // Держит СВОЙ ключ — соседний замок геокодирования. Наш ключ трогать
+      // нельзя: это была бы настоящая утечка, и страховка обязана её заметить.
+      await foreign.query('SELECT pg_advisory_lock($1::bigint)', [FOREIGN_LOCK_KEY.toString()]);
+
+      // Та же уборка, что работает после каждого сценария.
+      await releaseSyncLockSessions();
+
+      // Сессия жива и отвечает.
+      const alive = await foreign.query<{ ok: number }>('SELECT 1 AS ok');
+      expect(alive.rows[0]?.ok).toBe(1);
+
+      // И по-прежнему держит свой замок: уборка не сняла чужую блокировку.
+      const held = await ctx.db.$queryRaw<{ count: bigint }[]>`
+        SELECT count(*) AS count FROM pg_locks
+        WHERE locktype = 'advisory' AND objid = ${Number(FOREIGN_LOCK_KEY)} AND pid = ${pid}
+      `;
+      expect(Number(held[0]?.count ?? 0)).toBe(1);
+    } finally {
+      await foreign.query('SELECT pg_advisory_unlock_all()').catch(() => undefined);
+      await foreign.end().catch(() => undefined);
+    }
   });
 
   it('следующий сценарий берёт оба замка сразу и доходит до источника', async () => {
