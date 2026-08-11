@@ -878,11 +878,11 @@ describe('смена адреса обесценивает точку', () => {
 describe('выборка для карты и список', () => {
   it('карта отдаёт только заказы выбранного дня с подтверждённой точкой', async () => {
     const token = await tokenFor(['LOGISTICIAN']);
-    const day = '2026-11-20';
+    const day = '2027-02-20';
 
     const withPoint = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
     const withoutPoint = await seedOrder({ deliveryPlannedMoment: `${day} 13:00:00.000` });
-    const otherDay = await seedOrder({ deliveryPlannedMoment: '2026-11-21 12:00:00.000' });
+    const otherDay = await seedOrder({ deliveryPlannedMoment: '2027-02-21 12:00:00.000' });
 
     for (const seeded of [withPoint, otherDay]) {
       const response = await setPoint(token, seeded.order.id, {
@@ -922,7 +922,7 @@ describe('выборка для карты и список', () => {
 
   it('архивированный и пропавший в источнике заказ на карту не попадают', async () => {
     const token = await tokenFor(['LOGISTICIAN']);
-    const day = '2026-11-25';
+    const day = '2027-02-25';
 
     const normal = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
     const archived = await seedOrder({ deliveryPlannedMoment: `${day} 13:00:00.000` });
@@ -975,7 +975,7 @@ describe('выборка для карты и список', () => {
 
   it('фильтр по состоянию георазрешения работает', async () => {
     const token = await tokenFor(['LOGISTICIAN']);
-    const day = '2026-11-22';
+    const day = '2027-02-22';
     const resolved = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
     const unresolved = await seedOrder({ deliveryPlannedMoment: `${day} 13:00:00.000` });
 
