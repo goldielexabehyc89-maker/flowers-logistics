@@ -2,10 +2,28 @@
  * Роли и состояния пользователя.
  *
  * Один пользователь может иметь несколько ролей одновременно.
- * `WAREHOUSE` — задел на будущую роль кладовщика; складской модуль на этапе 1 не реализуется.
+ *
+ * Этот список — единственный источник полного множества ролей для приложения:
+ * из него выводятся и серверная валидация, и форма назначения ролей. Второй
+ * рукописный перечень однажды разошёлся бы с первым, и роль, существующая
+ * в базе, оказалась бы недоступной в интерфейсе.
+ *
+ * Порядок совпадает с порядком значений перечисления `Role` в PostgreSQL:
+ * новые значения добавляются только в конец.
+ *
+ * `WAREHOUSE`, `FLORIST` и `MANAGER` — роли производственного контура
+ * (`docs/OWNER_DECISIONS.md`, `FUL-001`). Их разделы существуют, но пока
+ * содержат только честные заглушки.
  */
 
-export const ROLES = ['ADMIN', 'LOGISTICIAN', 'COURIER', 'WAREHOUSE'] as const;
+export const ROLES = [
+  'ADMIN',
+  'LOGISTICIAN',
+  'COURIER',
+  'WAREHOUSE',
+  'FLORIST',
+  'MANAGER',
+] as const;
 export type Role = (typeof ROLES)[number];
 
 export const ROLE_LABELS: Record<Role, string> = {
@@ -13,6 +31,8 @@ export const ROLE_LABELS: Record<Role, string> = {
   LOGISTICIAN: 'Логист',
   COURIER: 'Курьер',
   WAREHOUSE: 'Кладовщик',
+  FLORIST: 'Флорист',
+  MANAGER: 'Менеджер выдачи',
 };
 
 /**

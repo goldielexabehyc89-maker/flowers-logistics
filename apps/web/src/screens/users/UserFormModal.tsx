@@ -7,7 +7,13 @@
  */
 
 import { useEffect, useState, type FormEvent } from 'react';
-import { ROLE_LABELS, VEHICLE_TYPE_LABELS, type Role, type VehicleType } from '@fl/shared';
+import {
+  assignableRoles,
+  ROLE_LABELS,
+  VEHICLE_TYPE_LABELS,
+  type Role,
+  type VehicleType,
+} from '@fl/shared';
 import { Button, Field, Modal, Select, TextInput } from '../../ui/components';
 import type { UserView } from './types';
 
@@ -27,7 +33,9 @@ const EMPTY: UserFormValues = {
   comment: '',
 };
 
-const ASSIGNABLE_BY_ADMIN: readonly Role[] = ['ADMIN', 'LOGISTICIAN', 'COURIER', 'WAREHOUSE'];
+// Перечень берётся из общей матрицы прав, а не дублируется в интерфейсе:
+// администратор обязан видеть ровно те роли, которые примет сервер.
+const ASSIGNABLE_BY_ADMIN: readonly Role[] = assignableRoles(['ADMIN']);
 
 export function UserFormModal({
   open,

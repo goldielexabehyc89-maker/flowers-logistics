@@ -6,13 +6,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { ROLES } from '@fl/shared';
 import {
+  APP_SECTIONS,
   firstAvailablePath,
   isSectionVisible,
   splitMobileNavigation,
   visibleSections,
   MOBILE_PRIMARY_LIMIT,
 } from './navigation';
+import { PLACEHOLDERS } from '../screens/PlaceholderScreen';
 
 const keysFor = (roles: Parameters<typeof visibleSections>[0]): string[] =>
   visibleSections(roles).map((section) => section.key);
@@ -54,11 +57,61 @@ describe('видимость разделов', () => {
     }
   });
 
-  it('кладовщик не получает чужих разделов', () => {
-    // Складской модуль ещё не реализован: доступных разделов нет,
-    // интерфейс показывает честную заглушку.
-    expect(keysFor(['WAREHOUSE'])).toEqual([]);
-    expect(firstAvailablePath(['WAREHOUSE'])).toBeNull();
+  it('роли производственного контура видят ровно свой раздел', () => {
+    // Прежний контракт «у кладовщика нет разделов» заменён осознанно:
+    // разделы появились, но каждая роль видит только собственный.
+    expect(keysFor(['WAREHOUSE'])).toEqual(['warehouse']);
+    expect(keysFor(['FLORIST'])).toEqual(['florist']);
+    expect(keysFor(['MANAGER'])).toEqual(['pickup']);
+  });
+
+  it('роли производственного контура не видят чужие разделы и логистику', () => {
+    const production = [
+      { roles: ['FLORIST'] as const, own: 'florist' },
+      { roles: ['WAREHOUSE'] as const, own: 'warehouse' },
+      { roles: ['MANAGER'] as const, own: 'pickup' },
+    ];
+
+    for (const { roles, own } of production) {
+      const keys = keysFor([...roles]);
+
+      // Ни соседнего производственного раздела, ни логистики, ни настроек,
+      // ни управления пользователями.
+      for (const forbidden of [
+        'florist',
+        'warehouse',
+        'pickup',
+        'deals',
+        'routing',
+        'planning',
+        'route-sheets',
+        'active',
+        'history',
+        'reports',
+        'couriers',
+        'settings',
+      ].filter((key) => key !== own)) {
+        expect(keys).not.toContain(forbidden);
+      }
+
+      // Прямой переход в чужой раздел закрыт.
+      for (const path of [
+        '/deals',
+        '/settings',
+        '/couriers',
+        '/florist',
+        '/warehouse',
+        '/pickup',
+      ]) {
+        expect(isSectionVisible([...roles], path)).toBe(path === `/${own}`);
+      }
+    }
+  });
+
+  it('администратор видит все три производственных раздела', () => {
+    const keys = keysFor(['ADMIN']);
+
+    expect(keys).toEqual(expect.arrayContaining(['florist', 'warehouse', 'pickup']));
   });
 
   it('несколько ролей объединяются', () => {
@@ -77,9 +130,52 @@ describe('видимость разделов', () => {
   });
 
   it('первый доступный раздел зависит от ролей', () => {
+    // Домашние пути существующих ролей не сдвинулись от появления новых разделов.
     expect(firstAvailablePath(['ADMIN'])).toBe('/deals');
     expect(firstAvailablePath(['LOGISTICIAN'])).toBe('/deals');
     expect(firstAvailablePath(['COURIER'])).toBe('/active');
+
+    // Роль производственного контура попадает в СВОЙ раздел, а не в чужой
+    // и не в логистику.
+    expect(firstAvailablePath(['FLORIST'])).toBe('/florist');
+    expect(firstAvailablePath(['WAREHOUSE'])).toBe('/warehouse');
+    expect(firstAvailablePath(['MANAGER'])).toBe('/pickup');
+  });
+
+  it('у каждой роли есть хотя бы один раздел', () => {
+    // Пока это так, нейтральный экран «доступных разделов нет» в обычной работе
+    // не появляется. Если роль заведут раньше её раздела, проверка это покажет.
+    for (const role of ROLES) {
+      expect(firstAvailablePath([role])).not.toBeNull();
+    }
+  });
+
+  it('каждый раздел навигации имеет экран, а каждая заглушка — раздел', () => {
+    const placeholderKeys = Object.keys(PLACEHOLDERS);
+    const sectionKeys = APP_SECTIONS.map((section) => section.key);
+
+    // Заглушка без раздела недостижима, раздел без экрана дал бы пустую страницу.
+    for (const key of placeholderKeys) {
+      expect(sectionKeys).toContain(key);
+    }
+    for (const key of ['florist', 'warehouse', 'pickup']) {
+      expect(placeholderKeys).toContain(key);
+    }
+  });
+
+  it('заглушки честно называют неготовность и не выдумывают данные', () => {
+    for (const key of ['florist', 'warehouse', 'pickup']) {
+      const placeholder = PLACEHOLDERS[key];
+
+      expect(placeholder).toBeDefined();
+      expect(placeholder?.stage).toMatch(/^6\./);
+      expect(placeholder?.upcoming.length).toBeGreaterThan(0);
+      // Только описание будущего: ни одного числа, которое можно принять
+      // за настоящий счётчик заказов, ячеек или остатков.
+      expect(
+        `${placeholder?.description ?? ''} ${(placeholder?.upcoming ?? []).join(' ')}`,
+      ).not.toMatch(/\d+\s*(заказ|ячей|шт|остат)/i);
+    }
   });
 
   it('мобильная навигация не превышает лимит основных кнопок', () => {

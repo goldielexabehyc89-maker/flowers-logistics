@@ -6,7 +6,7 @@
  */
 
 import { z } from 'zod';
-import { normalizePhone, tryNormalizePhone } from '@fl/shared';
+import { normalizePhone, ROLES, tryNormalizePhone } from '@fl/shared';
 import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
@@ -37,7 +37,10 @@ const phoneSchema = z
   .refine((value) => tryNormalizePhone(value) !== null, 'Некорректный номер телефона')
   .transform((value) => normalizePhone(value));
 
-const roleSchema = z.enum(['ADMIN', 'LOGISTICIAN', 'COURIER', 'WAREHOUSE']);
+// Схема выводится из общего перечня ролей, а не переписывается здесь: копия
+// однажды отстала бы, и роль, существующая в базе и в интерфейсе, отвергалась
+// бы валидацией как несуществующая.
+const roleSchema = z.enum(ROLES);
 const vehicleSchema = z.enum(['CAR', 'FOOT']);
 const uuidSchema = z
   .string()
