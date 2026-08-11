@@ -75,6 +75,15 @@ export const APP_SECTIONS: readonly AppSection[] = [
     roles: ['ADMIN', 'LOGISTICIAN'],
   },
   {
+    // Этап 6.1. Единственный раздел кладовщика и дополнительный — администратора.
+    // Логисту и курьеру он не показывается: готовность к отгрузке ставит склад.
+    key: 'warehouse',
+    path: '/warehouse',
+    title: 'Склад',
+    shortTitle: 'Склад',
+    roles: ['ADMIN', 'WAREHOUSE'],
+  },
+  {
     key: 'settings',
     path: '/settings',
     title: 'Настройки',
@@ -98,7 +107,10 @@ export function isSectionVisible(roles: readonly Role[], path: string): boolean 
 /**
  * Первый доступный раздел. Используется как стартовая страница и как цель
  * перенаправления с неизвестного или запрещённого адреса.
- * `null` означает, что доступных разделов нет — например, у кладовщика.
+ *
+ * `null` означает, что доступных разделов нет вовсе. С появлением раздела
+ * «Склад» (этап 6.1) кладовщик к таким ролям больше не относится: его
+ * стартовая страница — `/warehouse`.
  */
 export function firstAvailablePath(roles: readonly Role[]): string | null {
   return visibleSections(roles)[0]?.path ?? null;

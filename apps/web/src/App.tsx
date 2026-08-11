@@ -10,13 +10,18 @@ import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { useAuth } from './auth/AuthContext';
 import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
-import { PLACEHOLDERS, PlaceholderScreen, WarehousePlaceholder } from './screens/PlaceholderScreen';
+import {
+  PLACEHOLDERS,
+  PlaceholderScreen,
+  NoSectionsPlaceholder,
+} from './screens/PlaceholderScreen';
 import { DealsScreen } from './screens/deals/DealsScreen';
 import { RoutingScreen } from './screens/routing/RoutingScreen';
 import { RouteSheetsScreen } from './screens/routing/RouteSheetsScreen';
 import { PlanningScreen } from './screens/planning/PlanningScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { UsersScreen } from './screens/users/UsersScreen';
+import { WarehouseScreen } from './screens/warehouse/WarehouseScreen';
 import { AppShell } from './shell/AppShell';
 
 function CheckingSession(): React.JSX.Element {
@@ -38,7 +43,7 @@ function SectionRoute({ children }: { children: React.JSX.Element }): React.JSX.
 
   if (!isSectionVisible(roles, location.pathname)) {
     const fallback = firstAvailablePath(roles);
-    return fallback === null ? <WarehousePlaceholder /> : <Navigate to={fallback} replace />;
+    return fallback === null ? <NoSectionsPlaceholder /> : <Navigate to={fallback} replace />;
   }
 
   return children;
@@ -64,9 +69,10 @@ export function App(): React.JSX.Element {
   const roles = user?.roles ?? [];
   const home = firstAvailablePath(roles);
 
-  // Роль без доступных разделов (кладовщик) получает честную заглушку.
+  // Учётная запись без единого доступного раздела получает честную заглушку.
+  // Кладовщик сюда больше не попадает: у него есть раздел «Склад».
   if (home === null) {
-    return <WarehousePlaceholder />;
+    return <NoSectionsPlaceholder />;
   }
 
   return (
@@ -120,6 +126,14 @@ export function App(): React.JSX.Element {
           element={
             <SectionRoute>
               <UsersScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/warehouse"
+          element={
+            <SectionRoute>
+              <WarehouseScreen />
             </SectionRoute>
           }
         />

@@ -42,6 +42,10 @@ export const REALTIME_TOPICS = [
   // ни координат там нет, клиент перезапрашивает карточку сам.
   'route_plan.updated',
   'depot.changed',
+  // Готовность заказа к отгрузке (этап 6.1). Адресуется ADMIN и WAREHOUSE:
+  // логисту и курьеру это событие не показывается. В payload — только
+  // идентификатор заказа, состояние и версия: ни номера, ни адреса, ни денег.
+  'order.shipment_readiness_changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;
