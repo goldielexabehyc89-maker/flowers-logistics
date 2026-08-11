@@ -31,11 +31,11 @@ import {
   assertNoRealData,
   assertStagingEnvironment,
   importOrdersSnapshot,
-  pseudoUuid,
   SnapshotImportError,
   syntheticIntervalRaw,
 } from './import.js';
 import { RetireBlockedError, retireSnapshotOrders } from './retire.js';
+import { ORDER_IDENTITY_NAMESPACE, orderIdentity, resolveIdentities, uuidV5 } from './identity.js';
 import {
   assertExplicitPath,
   describeSnapshotFailure,
@@ -268,7 +268,7 @@ describe('импорт на staging', () => {
     expect(result.withoutPoint).toBe(1);
 
     const withPoint = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { externalId: pseudoUuid(`k-${marker}-1`) },
+      where: { externalId: orderIdentity(`k-${marker}-1`) },
     });
     expect(withPoint.geoState).toBe('RESOLVED');
     // Источник строго SYNTHETIC: по нему на любом экране видно, что точка выдумана.
@@ -276,7 +276,7 @@ describe('импорт на staging', () => {
     expect(withPoint.geoLatMicro).not.toBeNull();
 
     const withoutPoint = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { externalId: pseudoUuid(`k-${marker}-3`) },
+      where: { externalId: orderIdentity(`k-${marker}-3`) },
     });
     expect(withoutPoint.geoState).toBe('UNRESOLVED');
   });
@@ -302,7 +302,9 @@ describe('импорт на staging', () => {
     const points = async (): Promise<string[]> =>
       (
         await ctx.db.deliveryOrder.findMany({
-          where: { externalId: { in: [pseudoUuid(`r-${marker}-1`), pseudoUuid(`r-${marker}-2`)] } },
+          where: {
+            externalId: { in: [orderIdentity(`r-${marker}-1`), orderIdentity(`r-${marker}-2`)] },
+          },
           orderBy: { externalId: 'asc' },
         })
       ).map((order) => `${order.geoLatMicro}:${order.geoLonMicro}`);
@@ -328,7 +330,7 @@ describe('импорт на staging', () => {
     );
 
     const withPoint = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { externalId: pseudoUuid(key) },
+      where: { externalId: orderIdentity(key) },
     });
     expect(withPoint.geoState).toBe('RESOLVED');
     expect(withPoint.geoLatMicro).not.toBeNull();
@@ -342,7 +344,7 @@ describe('импорт на staging', () => {
     expect(result.withoutPoint).toBe(1);
 
     const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { externalId: pseudoUuid(key) },
+      where: { externalId: orderIdentity(key) },
     });
 
     // Прежняя точка снята полностью: заказ без адреса не может остаться
@@ -385,13 +387,194 @@ describe('импорт на staging', () => {
     );
 
     const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { externalId: pseudoUuid(`p-${marker}`) },
+      where: { externalId: orderIdentity(`p-${marker}`) },
     });
 
     // В адресе — псевдоним и вымышленная подпись, и ничего больше.
     expect(order.address).toContain(`addr-${marker}p`);
     expect(order.address?.toLowerCase()).toContain('синтетическ');
     expect(order.recipient?.startsWith('rcpt-')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Идентичность заказа снимка
+// ---------------------------------------------------------------------------
+
+/**
+ * Ключи вида, на котором прежняя схема ломалась.
+ *
+ * Ровно та форма, что была у одобренного синтетического дня: семнадцать
+ * символов, первые шестнадцать общие. Значения синтетические и никаких данных
+ * не несут — они здесь как регрессия, а не как выдержка из чьего-то файла.
+ */
+const SEVENTEEN_CHAR_KEYS = Array.from(
+  { length: 10 },
+  (_, index) => `syn-2026-08-20-${String(index + 1).padStart(2, '0')}`,
+);
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+describe('идентичность заказа снимка', () => {
+  it('пространство имён и алгоритм закреплены как долгоживущий договор', () => {
+    // Пространство имён получено стандартным способом — UUIDv5 в пространстве
+    // URL от постоянного имени. Проверяется тем же кодом, которым пользуется
+    // импорт: смена алгоритма или имени обязана уронить эту строку.
+    expect(ORDER_IDENTITY_NAMESPACE).toBe('c195b54b-2cef-504d-9015-53cb3ef97adf');
+    expect(
+      uuidV5(
+        '6ba7b811-9dad-11d1-80b4-00c04fd430c8',
+        'https://flowers-logistics.invalid/snapshot/order-identity',
+      ),
+    ).toBe(ORDER_IDENTITY_NAMESPACE);
+
+    // Контрольные значения. Посчитаны независимой реализацией UUIDv5 и потому
+    // доказывают не «функция согласна сама с собой», а соответствие стандарту.
+    expect(orderIdentity('syn-2026-08-20-01')).toBe('503c4227-e8e3-5048-8525-6d833cea2de0');
+    expect(orderIdentity('order-fba28548c1')).toBe('a535c4c0-95ff-5555-81ae-d30aae19d93f');
+  });
+
+  it('десять ключей одобренного вида дают десять разных валидных UUID', () => {
+    const ids = SEVENTEEN_CHAR_KEYS.map(orderIdentity);
+
+    expect(new Set(SEVENTEEN_CHAR_KEYS).size).toBe(10);
+    expect(new Set(ids).size).toBe(10);
+
+    for (const id of ids) {
+      expect(id).toMatch(UUID_SHAPE);
+      // Версия 5 и вариант RFC 9562: значение обязано быть настоящим UUID,
+      // а не строкой похожей формы.
+      expect(id[14]).toBe('5');
+      expect('89ab').toContain(id[19]);
+    }
+  });
+
+  it('девять ключей с общими первыми шестнадцатью символами больше не сталкиваются', () => {
+    const nine = SEVENTEEN_CHAR_KEYS.slice(0, 9);
+    const prefixes = new Set(nine.map((key) => key.slice(0, 16)));
+
+    // Условие, при котором прежняя схема давала один идентификатор на девять.
+    expect(prefixes.size).toBe(1);
+    expect(new Set(nine.map(orderIdentity)).size).toBe(9);
+  });
+
+  it('различие после шестнадцатой позиции меняет идентификатор', () => {
+    const base = '0123456789abcdef';
+
+    expect(orderIdentity(`${base}A`)).not.toBe(orderIdentity(`${base}B`));
+    // И длина ключа сама по себе идентичность не ограничивает.
+    expect(orderIdentity(`${base}${'x'.repeat(200)}1`)).not.toBe(
+      orderIdentity(`${base}${'x'.repeat(200)}2`),
+    );
+  });
+
+  it('одинаковый ключ всегда даёт одинаковый UUID', () => {
+    const key = 'повторяемость-ключа-2026';
+
+    expect(orderIdentity(key)).toBe(orderIdentity(key));
+    // Значение не зависит от процесса: оно выводится из ключа и постоянного
+    // пространства имён, и посчитано может быть где угодно.
+    expect(orderIdentity(key)).toBe(uuidV5(ORDER_IDENTITY_NAMESPACE, key));
+  });
+
+  it('версия формата снимка идентичность не меняет', () => {
+    // В имя UUID входит ТОЛЬКО ключ. Иначе будущий `@3` дал бы тому же заказу
+    // другой идентификатор, и повторный импорт создал бы вторую копию.
+    const key = 'order-0011223344';
+    const asIsInFormat2 = orderIdentity(key);
+
+    expect(uuidV5(ORDER_IDENTITY_NAMESPACE, key)).toBe(asIsInFormat2);
+    expect(uuidV5(ORDER_IDENTITY_NAMESPACE, `flowers-logistics/orders-snapshot@3:${key}`)).not.toBe(
+      asIsInFormat2,
+    );
+  });
+
+  it('ключи штатного экспортёра пригодны для нового контракта', () => {
+    const keys = Array.from(
+      { length: 50 },
+      (_, index) =>
+        alias('order', `019ff0bf-93d7-733f-aa91-f96418${String(index).padStart(6, '0')}`, 'salt') ??
+        '',
+    );
+
+    expect(keys.every((key) => key.startsWith('order-') && key.length === 16)).toBe(true);
+    expect(new Set(keys.map(orderIdentity)).size).toBe(new Set(keys).size);
+  });
+
+  it('вывод из области считает те же идентификаторы, что импорт', () => {
+    const snapshot = snapshotOf(SEVENTEEN_CHAR_KEYS.map((key) => ({ key })));
+
+    // Один mapper на обе операции: расхождение означало бы, что команда вывода
+    // ищет не те заказы, которые импорт создал.
+    expect(resolveIdentities(snapshot).map((item) => item.externalId)).toEqual(
+      snapshot.orders.map((order) => orderIdentity(order.key)),
+    );
+  });
+
+  it('повтор ключа и столкновение идентификаторов отвергаются ДО транзакции', async () => {
+    const marker = String(process.hrtime.bigint() % 1_000_000n);
+    const orders = await ctx.db.deliveryOrder.count();
+    const effects = await sideEffects();
+
+    // 1. Один и тот же исходный ключ дважды в одном файле.
+    const duplicated = snapshotOf([
+      { key: `dup-${marker}`, addressAlias: `addr-${marker}a` },
+      { key: `dup-${marker}`, addressAlias: `addr-${marker}b` },
+    ]);
+
+    await expect(importOrdersSnapshot(ctx.db, envConfig('staging'), duplicated)).rejects.toThrow(
+      SnapshotSafetyError,
+    );
+    await expect(
+      importOrdersSnapshot(ctx.db, envConfig('staging'), duplicated),
+    ).rejects.toMatchObject({ code: 'SNAPSHOT_DUPLICATE_KEY' });
+
+    // 2. Искусственное столкновение: разные ключи, один идентификатор.
+    //    Производственный mapper подменить нечем — второй аргумент передаётся
+    //    только здесь, а импорт и вывод зовут `resolveIdentities` без него.
+    const collided = snapshotOf([
+      { key: `one-${marker}`, addressAlias: `addr-${marker}a` },
+      { key: `two-${marker}`, addressAlias: `addr-${marker}b` },
+    ]);
+
+    expect(() => resolveIdentities(collided, () => '00000000-0000-5000-8000-000000000000')).toThrow(
+      SnapshotSafetyError,
+    );
+    try {
+      resolveIdentities(collided, () => '00000000-0000-5000-8000-000000000000');
+      expect.unreachable('столкновение идентификаторов обязано остановить импорт');
+    } catch (error) {
+      expect((error as SnapshotSafetyError).code).toBe('SNAPSHOT_IDENTITY_COLLISION');
+    }
+
+    // 3. Пустой ключ до отображения вообще не доходит.
+    expect(() => resolveIdentities(snapshotOf([{ key: '   ' }]))).toThrow(SnapshotSafetyError);
+
+    // После всех отказов база обязана быть такой же: ни заказа, ни аудита,
+    // ни события. Отказ до транзакции тем и ценен, что следов не оставляет.
+    expect(await ctx.db.deliveryOrder.count()).toBe(orders);
+    expect(await sideEffects()).toEqual(effects);
+  });
+
+  it('сообщения об отказе не содержат ключей, адресов и получателей', () => {
+    const marker = 'секретныйключ0000000001';
+    const snapshot = snapshotOf([
+      { key: marker, addressAlias: 'addr-1111111111', recipientAlias: 'rcpt-2222222222' },
+      { key: marker, addressAlias: 'addr-3333333333', recipientAlias: 'rcpt-4444444444' },
+    ]);
+
+    try {
+      resolveIdentities(snapshot);
+      expect.unreachable('повтор ключа обязан быть отвергнут');
+    } catch (error) {
+      const text = `${(error as Error).message} ${String((error as Error).stack).split('\n')[0]}`;
+      expect(text).not.toContain(marker);
+      expect(text).not.toContain('addr-');
+      expect(text).not.toContain('rcpt-');
+      // Порядковый номер записи назвать можно: он помогает найти строку
+      // в своём файле и ничего не сообщает о данных.
+      expect((error as Error).message).toContain('2');
+    }
   });
 });
 
@@ -423,7 +606,7 @@ describe('повторный импорт', () => {
   it('первый прогон создаёт десять, идентичный повтор не меняет ничего', async () => {
     const marker = String(process.hrtime.bigint() % 1_000_000n);
     const snapshot = tenOrders(marker);
-    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+    const ids = snapshot.orders.map((order) => orderIdentity(order.key));
 
     const first = await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
     expect(first.created).toBe(10);
@@ -488,7 +671,7 @@ describe('повторный импорт', () => {
     await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
 
     const shared = await ctx.db.deliveryOrder.findMany({
-      where: { externalId: { in: snapshot.orders.slice(7).map((o) => pseudoUuid(o.key)) } },
+      where: { externalId: { in: snapshot.orders.slice(7).map((o) => orderIdentity(o.key)) } },
       select: { geoLatMicro: true, geoLonMicro: true },
     });
 
@@ -515,7 +698,7 @@ describe('ручной интервал в снимке', () => {
     expect(result.created).toBe(1);
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { externalId: pseudoUuid(`mi-${marker}`) },
+      where: { externalId: orderIdentity(`mi-${marker}`) },
       select: {
         manualIntervalStartMinute: true,
         manualIntervalEndMinute: true,
@@ -575,7 +758,7 @@ describe('вывод набора из области', () => {
   it('сухая проверка ничего не меняет, а затем вывод помечает заказы', async () => {
     const marker = String(process.hrtime.bigint() % 1_000_000n);
     const snapshot = await seedSet(marker);
-    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+    const ids = snapshot.orders.map((order) => orderIdentity(order.key));
 
     const planned = await retireSnapshotOrders(ctx.db, envConfig('staging'), snapshot, {
       dryRun: true,
@@ -629,7 +812,7 @@ describe('вывод набора из области', () => {
   it('активный маршрут останавливает вывод целиком', async () => {
     const marker = String(process.hrtime.bigint() % 1_000_000n);
     const snapshot = await seedSet(marker);
-    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+    const ids = snapshot.orders.map((order) => orderIdentity(order.key));
 
     const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { externalId: ids[0] ?? '' },
@@ -701,7 +884,7 @@ describe('восстановление после вывода', () => {
   it('повторный импорт возвращает те же записи и те же точки', async () => {
     const marker = String(process.hrtime.bigint() % 1_000_000n);
     const snapshot = tenOrders(marker);
-    const ids = snapshot.orders.map((order) => pseudoUuid(order.key));
+    const ids = snapshot.orders.map((order) => orderIdentity(order.key));
 
     await importOrdersSnapshot(ctx.db, envConfig('staging'), snapshot);
 
