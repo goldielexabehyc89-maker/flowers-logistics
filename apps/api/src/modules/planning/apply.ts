@@ -35,6 +35,7 @@
 
 import { Prisma, type $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
+import { EMPTY_ASSIGNMENTS, readRoleAssignments } from '../../platform/role-assignments.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
@@ -449,15 +450,19 @@ async function verifyInput(
   if (courierIds.length > 0) {
     const couriers = await tx.user.findMany({
       where: { id: { in: courierIds } },
-      select: { id: true, status: true, roles: { select: { role: true } } },
+      select: { id: true, status: true },
     });
+
+    // Роли читаются текстом: слот с курьером, которому успели выдать роль
+    // более новой версии, не должен ронять применение плана целиком.
+    const courierRoles = await readRoleAssignments(tx, courierIds);
 
     const usable = new Set(
       couriers
         .filter(
           (user) =>
             user.status === 'ACTIVE' &&
-            user.roles.some((assignment) => assignment.role === 'COURIER'),
+            (courierRoles.get(user.id) ?? EMPTY_ASSIGNMENTS).known.includes('COURIER'),
         )
         .map((user) => user.id),
     );

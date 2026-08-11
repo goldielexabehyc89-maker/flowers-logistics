@@ -37,6 +37,7 @@ import { writeAudit, type AuditAction } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { isCalendarDate, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { isPlainCourier, type Role } from '@fl/shared';
+import { EMPTY_ASSIGNMENTS, readRoleAssignments } from '../../platform/role-assignments.js';
 import { requireDefaultDepot } from '../depots/service.js';
 import { readServiceTime, readShift, requireShift, type Shift } from '../settings/service.js';
 import { computeMatrix, matrixCacheKey, type MatrixDeps } from '../geo/matrix/service.js';
@@ -347,15 +348,22 @@ async function assertCouriersAssignable(
 
   const users = await db.user.findMany({
     where: { id: { in: ids } },
-    select: { id: true, status: true, roles: { select: { role: true } } },
+    select: { id: true, status: true },
   });
 
   if (users.length !== new Set(ids).size) {
     throw new AppError('NOT_FOUND', { message: 'courier not found' });
   }
 
+  // Роли читаются текстом одним запросом на всех кандидатов.
+  const assignments = await readRoleAssignments(
+    db,
+    users.map((user) => user.id),
+  );
+
   for (const user of users) {
-    const roles = user.roles.map((assignment) => assignment.role);
+    const assignment = assignments.get(user.id) ?? EMPTY_ASSIGNMENTS;
+    const roles = assignment.known;
 
     if (user.status !== 'ACTIVE' || !roles.includes('COURIER')) {
       throw new AppError('VALIDATION_FAILED', {
@@ -364,7 +372,10 @@ async function assertCouriersAssignable(
       });
     }
 
-    if (!actor.roles.includes('ADMIN') && !isPlainCourier(roles)) {
+    if (
+      !actor.roles.includes('ADMIN') &&
+      (assignment.hasUnsupportedRoles || !isPlainCourier(roles))
+    ) {
       throw new AppError('FORBIDDEN', {
         message: 'logistician cannot assign privileged courier',
         publicMessage: 'Этого курьера может поставить в расчёт только администратор.',

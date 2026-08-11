@@ -6,7 +6,20 @@
  * Наружу никогда не отдаются хеши PIN, кодов и токенов.
  */
 
-import { canManageUserWithRoles, PRIVILEGED_ROLES, type Role, type VehicleType } from '@fl/shared';
+import {
+  canManageUserWithRoles,
+  PRIVILEGED_ROLES,
+  ROLES,
+  type Role,
+  type VehicleType,
+} from '@fl/shared';
+import {
+  EMPTY_ASSIGNMENTS,
+  readRoleAssignment,
+  readRoleAssignments,
+  type RoleAssignments,
+  type RoleReader,
+} from '../../platform/role-assignments.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
@@ -44,7 +57,6 @@ const USER_SELECT = {
   createdAt: true,
   updatedAt: true,
   pinSetAt: true,
-  roles: { select: { role: true } },
   courierProfile: { select: { defaultVehicleType: true, comment: true } },
 } as const;
 
@@ -60,25 +72,54 @@ export interface UserView {
   updatedAt: Date;
   pinSetAt: Date | null;
   roles: Role[];
+  /**
+   * У записи есть роль, которой эта версия приложения не знает.
+   *
+   * Признак, а не значение: имя роли из более новой версии ничего не объясняет
+   * и наружу не выносится. Клиент по этому признаку отключает редактирование
+   * ролей, а сервер независимо отказывает в перезаписи.
+   */
+  hasUnsupportedRoles: boolean;
   courierProfile: { defaultVehicleType: VehicleType; comment: string | null } | null;
 }
 
 type RawUser = {
-  roles: { role: Role }[];
   courierProfile: { defaultVehicleType: VehicleType; comment: string | null } | null;
-} & Omit<UserView, 'roles' | 'courierProfile'>;
+} & Omit<UserView, 'roles' | 'hasUnsupportedRoles' | 'courierProfile'>;
 
-function toView(user: RawUser): UserView {
-  return { ...user, roles: user.roles.map((assignment) => assignment.role) };
+function toView(user: RawUser, assignments: RoleAssignments): UserView {
+  return {
+    ...user,
+    roles: assignments.known,
+    hasUnsupportedRoles: assignments.hasUnsupportedRoles,
+  };
+}
+
+/** Собирает представления пачкой: один запрос ролей на весь список. */
+async function toViews(client: RoleReader, users: readonly RawUser[]): Promise<UserView[]> {
+  const assignments = await readRoleAssignments(
+    client,
+    users.map((user) => user.id),
+  );
+  return users.map((user) => toView(user, assignments.get(user.id) ?? EMPTY_ASSIGNMENTS));
 }
 
 function forbidden(message: string): AppError {
   return new AppError('FORBIDDEN', { message });
 }
 
-/** Проверяет право актора управлять пользователем с такими ролями. */
-function assertCanManage(actor: Actor, targetRoles: readonly Role[]): void {
-  if (!canManageUserWithRoles(actor.roles, targetRoles)) {
+/**
+ * Проверяет право актора управлять пользователем с такими ролями.
+ *
+ * `targetHasUnsupportedRoles` обязателен там, где цель прочитана из базы:
+ * пользователь с ролью более новой версии защищён от логиста.
+ */
+function assertCanManage(
+  actor: Actor,
+  targetRoles: readonly Role[],
+  targetHasUnsupportedRoles = false,
+): void {
+  if (!canManageUserWithRoles(actor.roles, targetRoles, targetHasUnsupportedRoles)) {
     throw forbidden('actor cannot manage target user');
   }
 }
@@ -103,8 +144,10 @@ async function lockAndAuthorize(
     throw new AppError('NOT_FOUND', { message: 'user not found' });
   }
 
-  const view = toView(user);
-  assertCanManage(actor, view.roles);
+  // Роли читаются ТЕМ ЖЕ клиентом транзакции: снимок должен относиться к строке,
+  // уже заблокированной `FOR UPDATE`.
+  const view = toView(user, await readRoleAssignment(tx, user.id));
+  assertCanManage(actor, view.roles, view.hasUnsupportedRoles);
   return view;
 }
 
@@ -142,11 +185,11 @@ async function assertLastActiveAdminInvariant(
 ): Promise<void> {
   const target = await tx.user.findUnique({
     where: { id: userId },
-    select: { status: true, roles: { select: { role: true } } },
+    select: { status: true },
   });
 
   const isActiveAdmin =
-    target?.status === 'ACTIVE' && target.roles.some((assignment) => assignment.role === 'ADMIN');
+    target?.status === 'ACTIVE' && (await readRoleAssignment(tx, userId)).known.includes('ADMIN');
 
   if (!isActiveAdmin) {
     return;
@@ -211,7 +254,17 @@ export interface ListFilters {
   offset: number;
 }
 
-/** Ограничение выборки для логиста: только обычные курьеры, без привилегированных ролей. */
+/**
+ * Ограничение выборки для логиста: только обычные курьеры.
+ *
+ * Исключаются два случая, а не один:
+ *
+ *  - привилегированная роль — прежнее правило;
+ *  - роль, которой ЭТА версия приложения не знает. Раз версия не понимает часть
+ *    ролей аккаунта, она не вправе объявить его безопасным для логиста. Условие
+ *    остаётся сравнением на стороне PostgreSQL: значения перечисления
+ *    не разбираются клиентом и `P2023` возникнуть не может.
+ */
 function visibilityScope(actor: Actor): Prisma.UserWhereInput {
   if (actor.roles.includes('ADMIN')) {
     return {};
@@ -219,7 +272,13 @@ function visibilityScope(actor: Actor): Prisma.UserWhereInput {
   if (actor.roles.includes('LOGISTICIAN')) {
     return {
       roles: { some: { role: 'COURIER' } },
-      NOT: { roles: { some: { role: { in: [...PRIVILEGED_ROLES] } } } },
+      NOT: {
+        roles: {
+          some: {
+            OR: [{ role: { in: [...PRIVILEGED_ROLES] } }, { role: { notIn: [...ROLES] } }],
+          },
+        },
+      },
     };
   }
   throw forbidden('user management is not available for this role');
@@ -252,7 +311,7 @@ export async function listUsers(
     deps.db.user.count({ where }),
   ]);
 
-  return { items: items.map(toView), total };
+  return { items: await toViews(deps.db, items), total };
 }
 
 export async function getUser(deps: Deps, actor: Actor, userId: string): Promise<UserView> {
@@ -262,8 +321,8 @@ export async function getUser(deps: Deps, actor: Actor, userId: string): Promise
     throw new AppError('NOT_FOUND', { message: 'user not found' });
   }
 
-  const view = toView(user);
-  assertCanManage(actor, view.roles);
+  const view = toView(user, await readRoleAssignment(deps.db, user.id));
+  assertCanManage(actor, view.roles, view.hasUnsupportedRoles);
   return view;
 }
 
@@ -400,7 +459,11 @@ export async function createUser(
   // Открытый код показывается ровно один раз и больше нигде не хранится.
   // `expiresAt` возвращается так же, как в перевыпуске и сбросе PIN: интерфейс
   // сообщает пользователю, до какого момента код действует.
-  return { user: toView(created), activationCode: prepared.code, expiresAt: prepared.expiresAt };
+  return {
+    user: toView(created, await readRoleAssignment(deps.db, created.id)),
+    activationCode: prepared.code,
+    expiresAt: prepared.expiresAt,
+  };
 }
 
 export interface UpdateUserInput {
@@ -424,8 +487,8 @@ export async function updateUser(
     throw new AppError('NOT_FOUND', { message: 'user not found' });
   }
 
-  const currentView = toView(current);
-  assertCanManage(actor, currentView.roles);
+  const currentView = toView(current, await readRoleAssignment(deps.db, current.id));
+  assertCanManage(actor, currentView.roles, currentView.hasUnsupportedRoles);
 
   if (input.roles !== undefined) {
     if (!actor.roles.includes('ADMIN')) {
@@ -434,6 +497,19 @@ export async function updateUser(
     if (input.roles.length === 0) {
       throw new AppError('VALIDATION_FAILED', {
         publicMessage: 'Нужно указать хотя бы одну роль.',
+      });
+    }
+
+    // FAIL CLOSED: набор ролей записывается целиком — старые строки удаляются,
+    // новые создаются. Эта версия видит только известные ей роли, поэтому
+    // «сохранение» стёрло бы роль, о которой она не знает, и понизило бы
+    // сотрудника молча. Отказ стабильный, имя роли наружу не выносится.
+    if (currentView.hasUnsupportedRoles) {
+      throw new AppError('CONFLICT', {
+        message: 'target user has roles unknown to this application version',
+        publicMessage:
+          'Роли этого пользователя заданы в более новой версии приложения. ' +
+          'Изменить их здесь нельзя — обновите приложение.',
       });
     }
   }
@@ -578,7 +654,7 @@ export async function updateUser(
     }
 
     const updated = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: USER_SELECT });
-    return toView(updated);
+    return toView(updated, await readRoleAssignment(tx, userId));
   });
 }
 
@@ -644,7 +720,7 @@ export async function freezeUser(
     });
 
     const updated = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: USER_SELECT });
-    return toView(updated);
+    return toView(updated, await readRoleAssignment(tx, userId));
   });
 }
 
@@ -690,7 +766,7 @@ export async function unfreezeUser(
     });
 
     const updated = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: USER_SELECT });
-    return toView(updated);
+    return toView(updated, await readRoleAssignment(tx, userId));
   });
 }
 

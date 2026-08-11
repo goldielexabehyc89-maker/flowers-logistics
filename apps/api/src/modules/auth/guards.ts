@@ -14,6 +14,7 @@ import type { Role } from '@fl/shared';
 import { AppError } from '../../platform/errors.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
+import { readRoleAssignment } from '../../platform/role-assignments.js';
 import { extractBearerToken, verifyAccessToken } from './tokens.js';
 
 export interface AuthenticatedActor {
@@ -64,12 +65,22 @@ export async function authenticate(
       fullName: true,
       status: true,
       sessionVersion: true,
-      roles: { select: { role: true } },
     },
   });
 
   if (user === null || user.status !== 'ACTIVE') {
     throw unauthenticated('user is not active');
+  }
+
+  // Роли читаются текстом: строка с ролью более новой версии не должна ронять
+  // разбор перечисления и вместе с ним весь запрос.
+  const assignments = await readRoleAssignment(deps.db, user.id);
+
+  // Fail closed: аккаунт, у которого нет НИ ОДНОЙ известной этой версии роли,
+  // рабочей сессии не получает. Частично истолковать его права нельзя —
+  // это значило бы выдать доступ по роли, о которой версия ничего не знает.
+  if (assignments.known.length === 0) {
+    throw unauthenticated('user roles require a newer application version');
   }
 
   // Версия сессий увеличивается при заморозке, сбросе PIN, смене телефона и ролей
@@ -90,7 +101,7 @@ export async function authenticate(
     familyId: claims.familyId,
     phone: user.phone,
     fullName: user.fullName,
-    roles: user.roles.map((assignment) => assignment.role),
+    roles: assignments.known,
   };
 }
 

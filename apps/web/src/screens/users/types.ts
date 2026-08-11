@@ -14,6 +14,14 @@ export interface UserView {
   updatedAt: string;
   pinSetAt: string | null;
   roles: Role[];
+  /**
+   * У записи есть роль, которой эта версия приложения не знает.
+   *
+   * Имя роли сервер не присылает намеренно: оно ничего не объясняет и может
+   * быть внутренним. Клиент по этому признаку отключает редактирование ролей;
+   * запрет всё равно независимо повторяет сервер.
+   */
+  hasUnsupportedRoles: boolean;
   courierProfile: { defaultVehicleType: VehicleType; comment: string | null } | null;
 }
 

@@ -6,6 +6,7 @@
  */
 
 import type { Role } from '@fl/shared';
+import { readRoleAssignment, type RoleReader } from '../../platform/role-assignments.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
 import { AppError } from '../../platform/errors.js';
@@ -78,20 +79,44 @@ function rateLimited(retryAfterSeconds: number): AppError {
   });
 }
 
-function toAuthenticatedUser(user: {
-  id: string;
-  phone: string;
-  fullName: string;
-  status: string;
-  roles: { role: Role }[];
-}): AuthenticatedUser {
+function toAuthenticatedUser(
+  user: {
+    id: string;
+    phone: string;
+    fullName: string;
+    status: string;
+  },
+  roles: readonly Role[],
+): AuthenticatedUser {
   return {
     id: user.id,
     phone: user.phone,
     fullName: user.fullName,
     status: user.status as AuthenticatedUser['status'],
-    roles: user.roles.map((assignment) => assignment.role),
+    roles: [...roles],
   };
+}
+
+/**
+ * Роли для выдачи сессии.
+ *
+ * Читаются текстом через общий слой: строка с ролью более новой версии не должна
+ * ронять разбор перечисления. Аккаунт без единой ИЗВЕСТНОЙ роли сессию
+ * не получает — истолковать его права эта версия не может, а догадываться
+ * о них запрещено. Ответ не называет неизвестную роль.
+ */
+async function sessionRoles(client: RoleReader, userId: string): Promise<Role[]> {
+  const assignments = await readRoleAssignment(client, userId);
+
+  if (assignments.known.length === 0) {
+    // Публичный текст общий с остальными отказами входа: имя роли из более
+    // новой версии наружу не выносится.
+    throw new AppError('UNAUTHENTICATED', {
+      message: 'user roles require a newer application version',
+      publicMessage: 'Требуется вход в систему.',
+    });
+  }
+  return assignments.known;
 }
 
 /** Выдаёт access-токен для уже созданной сессии. */
@@ -135,7 +160,6 @@ export async function activate(
       fullName: true,
       status: true,
       sessionVersion: true,
-      roles: { select: { role: true } },
       activationCodes: {
         where: { activeKey: { not: null } },
         select: { id: true, codeHash: true, expiresAt: true },
@@ -271,10 +295,14 @@ export async function activate(
       },
     });
 
+    // Роли читаются тем же клиентом транзакции и тем же безопасным слоем:
+    // неизвестное значение не должно уронить активацию.
+    const activatedRoles = (await readRoleAssignment(tx, user.id)).known;
+
     await publishRealtimeEvent(tx, {
       topic: 'user.updated',
       payload: { userId: user.id, status: 'ACTIVE', reason: 'activated' },
-      audienceRoles: managementAudienceFor(user.roles.map((assignment) => assignment.role)),
+      audienceRoles: managementAudienceFor(activatedRoles),
     });
 
     await writeAudit(tx, {
@@ -282,7 +310,7 @@ export async function activate(
       entityType: 'User',
       entityId: user.id,
       actorUserId: user.id,
-      actorRoles: user.roles.map((assignment) => assignment.role),
+      actorRoles: activatedRoles,
       newValue: { status: 'ACTIVE' },
       ip: context.ip,
       userAgent: context.userAgent,
@@ -303,7 +331,7 @@ export async function activate(
   return {
     accessToken,
     refreshToken: result.session.refreshToken,
-    user: toAuthenticatedUser({ ...result.updated, roles: user.roles }),
+    user: toAuthenticatedUser(result.updated, await sessionRoles(db, result.updated.id)),
   };
 }
 
@@ -330,7 +358,6 @@ export async function login(
       status: true,
       pinHash: true,
       sessionVersion: true,
-      roles: { select: { role: true } },
     },
   });
 
@@ -381,7 +408,6 @@ export async function login(
         status: true,
         pinHash: true,
         sessionVersion: true,
-        roles: { select: { role: true } },
       },
     });
 
@@ -417,7 +443,7 @@ export async function login(
       entityType: 'User',
       entityId: fresh.id,
       actorUserId: fresh.id,
-      actorRoles: fresh.roles.map((assignment) => assignment.role),
+      actorRoles: (await readRoleAssignment(tx, fresh.id)).known,
       newValue: { deviceLabel: sessionContext.deviceLabel },
       ip: context.ip,
       userAgent: context.userAgent,
@@ -441,7 +467,7 @@ export async function login(
   return {
     accessToken,
     refreshToken: outcome.session.refreshToken,
-    user: toAuthenticatedUser(outcome.fresh),
+    user: toAuthenticatedUser(outcome.fresh, await sessionRoles(db, outcome.fresh.id)),
   };
 }
 
@@ -467,7 +493,7 @@ export async function refresh(
       // Пустой телефон в журнале сделал бы запись бесполезной при расследовании.
       const actor = await tx.user.findUniqueOrThrow({
         where: { id: rotation.userId },
-        select: { phone: true, roles: { select: { role: true } } },
+        select: { phone: true },
       });
 
       await writeAudit(tx, {
@@ -475,7 +501,7 @@ export async function refresh(
         entityType: 'RefreshSession',
         entityId: rotation.familyId,
         actorUserId: rotation.userId,
-        actorRoles: actor.roles.map((assignment) => assignment.role),
+        actorRoles: (await readRoleAssignment(tx, rotation.userId)).known,
         newValue: { familyRevoked: true },
         ip: context.ip,
         userAgent: context.userAgent,
@@ -514,7 +540,6 @@ export async function refresh(
       fullName: true,
       status: true,
       sessionVersion: true,
-      roles: { select: { role: true } },
     },
   });
 
@@ -528,7 +553,7 @@ export async function refresh(
   return {
     accessToken,
     refreshToken: outcome.refreshToken,
-    user: toAuthenticatedUser(user),
+    user: toAuthenticatedUser(user, await sessionRoles(db, user.id)),
   };
 }
 
