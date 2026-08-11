@@ -26,8 +26,8 @@ const IDS = MOYSKLAD_IDS;
 const href = (kind: string, id: string): string => `${MOYSKLAD_BASE_URL}/entity/${kind}/${id}`;
 const NOW = new Date('2026-08-12T09:00:00.000Z');
 /** Дни своего диапазона: база критических тестов общая. */
-const DAY = '2026-12-10';
-const OTHER_DAY = '2026-12-11';
+const DAY = '2027-01-10';
+const OTHER_DAY = '2027-01-11';
 
 beforeAll(async () => {
   ctx = await createTestContext();
