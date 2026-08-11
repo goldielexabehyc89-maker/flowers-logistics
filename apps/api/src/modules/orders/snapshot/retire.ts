@@ -25,11 +25,11 @@ import type { AppConfig } from '../../../platform/config.js';
 import type { Database } from '../../../platform/db.js';
 import { markSourceMissing } from '../../integrations/moysklad/import-service.js';
 import { assertSnapshotIsSafe, type OrdersSnapshot } from '../snapshot-export.js';
+import { resolveIdentities } from './identity.js';
 import {
   assertIntervalContract,
   assertNoRealData,
   assertStagingEnvironment,
-  pseudoUuid,
   SnapshotImportError,
 } from './import.js';
 
@@ -91,7 +91,10 @@ export async function retireSnapshotOrders(
     throw new SnapshotImportError('Снимок пуст: выводить из области нечего');
   }
 
-  const externalIds = [...new Set(snapshot.orders.map((order) => pseudoUuid(order.key)))];
+  // Те же ворота и тот же mapper, что у импорта. Выводить из области нужно
+  // ровно те заказы, которые импорт создал бы из этого файла; расхождение
+  // здесь означало бы, что команда выводит не тот набор, что показала.
+  const externalIds = resolveIdentities(snapshot).map((item) => item.externalId);
 
   const orders = await db.deliveryOrder.findMany({
     where: { externalId: { in: externalIds } },

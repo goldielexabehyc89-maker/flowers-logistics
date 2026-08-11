@@ -26,6 +26,7 @@ import {
   type OrdersSnapshot,
   type SnapshotOrder,
 } from '../snapshot-export.js';
+import { resolveIdentities } from './identity.js';
 import { pointForAlias } from './synthetic-points.js';
 
 /** Похоже ли значение на UUID МоегоСклада. Внешние идентификаторы не переносятся. */
@@ -212,6 +213,11 @@ export async function importOrdersSnapshot(
   assertSnapshotIsSafe(snapshot);
   assertNoRealData(snapshot);
   assertIntervalContract(snapshot);
+  // Идентичность всех заказов считается ЦЕЛИКОМ и до транзакции. Снимок,
+  // в котором два ключа сходятся в один идентификатор, отвергается до первой
+  // записи, до аудита и до события: слияние двух заказов в один не должно
+  // обнаруживаться по расхождению счётчиков в отчёте.
+  const identities = resolveIdentities(snapshot);
 
   const result: ImportResult = {
     created: 0,
@@ -222,8 +228,8 @@ export async function importOrdersSnapshot(
   };
 
   await db.$transaction(async (tx) => {
-    for (const order of snapshot.orders) {
-      const outcome = await upsertOrder(tx, order);
+    for (const { order, externalId } of identities) {
+      const outcome = await upsertOrder(tx, order, externalId);
       result[outcome.kind] += 1;
       if (!outcome.hasPoint) {
         result.withoutPoint += 1;
@@ -310,10 +316,14 @@ function sameAsStored(stored: Record<string, unknown>, desired: Record<string, u
   return COMPARED_FIELDS.every((field) => comparable(stored[field]) === comparable(desired[field]));
 }
 
-async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise<UpsertOutcome> {
-  // Ключ снимка — псевдоним идентификатора заказа. Он же служит внешним
-  // идентификатором на staging: настоящий UUID МоегоСклада сюда не попадает.
-  const externalId = pseudoUuid(order.key);
+async function upsertOrder(
+  tx: TransactionClient,
+  order: SnapshotOrder,
+  // Идентификатор посчитан воротами ДО транзакции и передан сюда готовым:
+  // считать его здесь заново значило бы завести второй путь к идентичности
+  // в обход проверки на столкновение ключей.
+  externalId: string,
+): Promise<UpsertOutcome> {
   const point = order.addressAlias === null ? null : pointForAlias(order.addressAlias);
   const hasPoint = point !== null;
 
@@ -429,24 +439,4 @@ async function upsertOrder(tx: TransactionClient, order: SnapshotOrder): Promise
   });
 
   return { kind: wasRetired ? 'restored' : 'updated', hasPoint };
-}
-
-/**
- * Детерминированный UUID из псевдонима.
- *
- * Колонка внешнего идентификатора имеет тип UUID, а ключ снимка им не является.
- * Значение выводится из псевдонима, поэтому повторный импорт того же снимка
- * находит тот же заказ и обновляет его, а не создаёт второй.
- */
-export function pseudoUuid(key: string): string {
-  const hex = Buffer.from(key.padEnd(16, '0').slice(0, 16), 'utf8').toString('hex').slice(0, 32);
-  const padded = hex.padEnd(32, '0');
-  return [
-    padded.slice(0, 8),
-    padded.slice(8, 12),
-    // Версия 8: UUID выведен из имени и случайным не является.
-    `8${padded.slice(13, 16)}`,
-    `8${padded.slice(17, 20)}`,
-    padded.slice(20, 32),
-  ].join('-');
 }

@@ -192,7 +192,15 @@ export type SnapshotSafetyCode =
   | 'SNAPSHOT_FORMAT_UNSUPPORTED'
   | 'SNAPSHOT_SECRET_TRACE'
   | 'SNAPSHOT_REAL_ADDRESS'
-  | 'SNAPSHOT_REAL_RECIPIENT';
+  | 'SNAPSHOT_REAL_RECIPIENT'
+  // Ключ пуст или не является строкой: идентичность из него не выводится.
+  | 'SNAPSHOT_KEY_INVALID'
+  // Один и тот же ключ встречается в снимке дважды.
+  | 'SNAPSHOT_DUPLICATE_KEY'
+  // Разные ключи дали одинаковый идентификатор. При UUIDv5 недостижимо
+  // практически, но проверяется всё равно: молчаливое слияние двух заказов —
+  // ровно тот отказ, ради которого схема идентичности и переделывалась.
+  | 'SNAPSHOT_IDENTITY_COLLISION';
 
 /**
  * Отказ проверки снимка.
