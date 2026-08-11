@@ -1,7 +1,7 @@
 /**
  * Проходы синхронизации заказов.
  *
- * Три режима: первоначальная загрузка, delta-проход и суточная контрольная сверка.
+ * Три режима: полная загрузка, delta-проход и суточная контрольная сверка.
  * Все три читают страницы строго последовательно через один и тот же клиент
  * с ограничением темпа — параллельных обращений к МоемуСкладу не бывает.
  *
@@ -27,7 +27,7 @@ import { writeAudit } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
 import { MoyskladError, type MoyskladClient } from './client.js';
 import type { MOYSKLAD_IDS } from './config.js';
-import { deltaFilter, initialLoadFilter } from './filters.js';
+import { approvedStoreFilter, deltaFilter } from './filters.js';
 import { applyOrderSnapshot, markSourceMissing } from './import-service.js';
 import { mapOrder } from './mapper.js';
 import { acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
@@ -88,6 +88,15 @@ interface CursorState {
   id: string;
   updatedCursor: Date | null;
   initialLoadCompleted: boolean;
+  /**
+   * Завершена ли загрузка ПРОИЗВОДСТВЕННОЙ области.
+   *
+   * На базе, где узкий логистический initial уже завершён, этот признак остаётся
+   * ложным, и первый же проход после обновления перечитывает всю выборку
+   * утверждённого склада. Delta ходит по окну `updated` и сама заказы, которых
+   * никогда не читала, не подберёт.
+   */
+  fulfillmentLoadCompleted: boolean;
   lastReconciliationAt: Date | null;
   consecutiveFailures: number;
 }
@@ -260,22 +269,33 @@ async function applyRows(deps: SyncDeps, rows: unknown[], result: PassResult): P
 }
 
 /**
- * Первоначальная загрузка.
+ * Полная загрузка выборки утверждённого склада.
  *
  * Курсор сдвигается только после успешной обработки ВСЕХ страниц: при ошибке
  * середины уже сохранённые карточки остаются, но загрузка не считается
  * завершённой, и повторный запуск перечитает страницы идемпотентно.
+ *
+ * Одна и та же функция закрывает два случая:
+ *  * чистая база — оба признака закрываются ОДНИМ проходом, второй полной
+ *    загрузки не бывает;
+ *  * база, где узкий логистический initial уже завершён, — проход дочитывает
+ *    заказы утверждённого склада с любым способом получения.
+ *
+ * Во втором случае `updatedCursor` намеренно НЕ сдвигается: он уже идёт по
+ * потоку изменений, и перестановка его вперёд пропустила бы всё, что менялось
+ * между прежним значением курсора и этим проходом.
  */
-export async function runInitialLoad(deps: SyncDeps): Promise<PassResult> {
+export async function runInitialLoad(deps: SyncDeps, cursor?: CursorState): Promise<PassResult> {
   const now = (deps.now ?? (() => new Date()))();
   const result = emptyResult('initial');
   // Срез фиксируется ДО чтения: изменения, случившиеся во время загрузки,
   // должен перечитать следующий delta-проход со своим перекрытием.
   const snapshotAt = now;
+  const firstEver = cursor === undefined || !cursor.initialLoadCompleted;
 
   result.pages = await readAllPages(
     deps,
-    { filter: initialLoadFilter(deps.ids, initialLoadSince(now)), order: 'updated,asc' },
+    { filter: approvedStoreFilter(deps.ids, initialLoadSince(now)), order: 'updated,asc' },
     (rows) => applyRows(deps, rows, result),
   );
 
@@ -283,8 +303,9 @@ export async function runInitialLoad(deps: SyncDeps): Promise<PassResult> {
     where: { provider: PROVIDER },
     data: {
       initialLoadCompleted: true,
-      initialLoadCompletedAt: now,
-      updatedCursor: snapshotAt,
+      fulfillmentLoadCompleted: true,
+      fulfillmentLoadCompletedAt: now,
+      ...(firstEver ? { initialLoadCompletedAt: now, updatedCursor: snapshotAt } : {}),
     },
   });
 
@@ -349,7 +370,7 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
 
   result.pages = await readAllPages(
     deps,
-    { filter: initialLoadFilter(deps.ids, since), order: 'updated,asc' },
+    { filter: approvedStoreFilter(deps.ids, since), order: 'updated,asc' },
     async (rows) => {
       for (const row of rows) {
         const id = (row as { id?: string }).id;
@@ -364,9 +385,12 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
   // Кандидаты — только активные заказы, реально попадающие в проверенное окно.
   // Заказ без распознанной даты серверный фильтр по дате не вернул бы никогда,
   // поэтому объявлять его удалённым нельзя.
+  // Кандидатами считаются заказы ЛЮБОЙ из двух областей: выборка сверки теперь
+  // широкая, поэтому самовывоз в ней присутствует и не может быть объявлен
+  // пропавшим только из-за прежнего логистического фильтра.
   const candidates = await deps.db.deliveryOrder.findMany({
     where: {
-      inScope: true,
+      OR: [{ inScope: true }, { fulfillmentInScope: true }],
       sourceMissing: false,
       deliveryDate: { not: null, gte: since },
     },
@@ -438,17 +462,23 @@ async function runClaimedPass(
   clock: () => Date,
 ): Promise<PassResult> {
   try {
+    // Расширенная загрузка обязана пройти раньше сверки: сверка по широкой
+    // выборке при непрочитанной производственной области сначала создала бы
+    // самовывозы и лишь потом сравнивала бы — это то же самое чтение, но без
+    // сохранённого признака завершения.
+    const needsFullLoad = !cursor.initialLoadCompleted || !cursor.fulfillmentLoadCompleted;
+
     const needsReconciliation =
       options.allowReconciliation === true &&
-      cursor.initialLoadCompleted &&
+      !needsFullLoad &&
       (cursor.lastReconciliationAt === null ||
         now.getTime() - cursor.lastReconciliationAt.getTime() >= 24 * 60 * 60 * 1000);
 
     const result = needsReconciliation
       ? await runReconciliation(deps)
-      : cursor.initialLoadCompleted
-        ? await runDeltaPass(deps, cursor)
-        : await runInitialLoad(deps);
+      : needsFullLoad
+        ? await runInitialLoad(deps, cursor)
+        : await runDeltaPass(deps, cursor);
 
     await setIntegrationStatus(deps, 'OK', { pass: result.kind, processed: result.processed });
     // Следующая попытка отсчитывается от ФАКТИЧЕСКОГО завершения: у долгого

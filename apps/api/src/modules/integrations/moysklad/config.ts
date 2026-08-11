@@ -54,6 +54,9 @@ export function loadMoyskladConfig(env: NodeJS.ProcessEnv = process.env): Moyskl
   const raw = env['MOYSKLAD_TOKEN'];
   const token = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
 
+  // Режима записи у клиента нет вовсе: политика `GET`/`HEAD` безусловна
+  // и в конфигурацию не выносится. `MOYSKLAD_READ_ONLY` остаётся условием
+  // ДОПУСКА окружения и проверяется в `platform/config.ts`.
   return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS };
 }
 

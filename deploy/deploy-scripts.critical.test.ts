@@ -170,6 +170,7 @@ interface EnvironmentValues {
   VALHALLA_IMAGE: string;
   VROOM_IMAGE: string;
   VROOM_VERSION: string;
+  MOYSKLAD_READ_ONLY: string;
 }
 
 const STAGING_DEFAULTS: EnvironmentValues = {
@@ -187,6 +188,7 @@ const STAGING_DEFAULTS: EnvironmentValues = {
   VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
   VROOM_IMAGE: 'ghcr.io/vroom-project/vroom-docker:v1.15.0@sha256:bbbb',
   VROOM_VERSION: '1.15.0',
+  MOYSKLAD_READ_ONLY: 'true',
 };
 
 const PRODUCTION_DEFAULTS: EnvironmentValues = {
@@ -204,6 +206,7 @@ const PRODUCTION_DEFAULTS: EnvironmentValues = {
   VALHALLA_IMAGE: 'ghcr.io/valhalla/valhalla:3.8.3@sha256:aaaa',
   VROOM_IMAGE: 'ghcr.io/vroom-project/vroom-docker:v1.15.0@sha256:bbbb',
   VROOM_VERSION: '1.15.0',
+  MOYSKLAD_READ_ONLY: 'true',
 };
 
 function configContent(values: EnvironmentValues, name: string): string {
@@ -227,6 +230,7 @@ function configContent(values: EnvironmentValues, name: string): string {
     `VALHALLA_IMAGE="${values.VALHALLA_IMAGE}"`,
     `VROOM_IMAGE="${values.VROOM_IMAGE}"`,
     `VROOM_VERSION="${values.VROOM_VERSION}"`,
+    `MOYSKLAD_READ_ONLY="${values.MOYSKLAD_READ_ONLY}"`,
     '',
   ].join('\n');
 }

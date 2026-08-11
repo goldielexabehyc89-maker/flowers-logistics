@@ -9,8 +9,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { MoyskladClient, MoyskladError } from './client.js';
-import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
+import { isReadOnlyMethod, MoyskladClient, MoyskladError } from './client.js';
+import { loadMoyskladConfig, MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
+import { loadConfig } from '../../../platform/config.js';
+import { TEST_SECRETS } from '../../../platform/testing/secrets.js';
 
 const TOKEN = 'test-token-value-should-never-leak';
 
@@ -88,6 +90,137 @@ describe('темп обращений', () => {
     }
     // Ожидание было инъецированным, а не настоящим.
     expect(clock.sleeps.every((ms) => ms > 0)).toBe(true);
+  });
+});
+
+describe('режим только чтения: HTTP-метод проверяется до сети', () => {
+  const FORBIDDEN = ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'get', 'post', ''];
+
+  /** Считающий fetch: любой вызов был бы уже нарушением. */
+  function countingFetch(): { calls: number; impl: typeof globalThis.fetch } {
+    const state = { calls: 0, impl: null as unknown as typeof globalThis.fetch };
+    state.impl = (async (_url: string, init?: RequestInit) => {
+      state.calls += 1;
+      return jsonResponse({ rows: [], meta: { size: 0 }, method: init?.method });
+    }) as unknown as typeof globalThis.fetch;
+    return state as { calls: number; impl: typeof globalThis.fetch };
+  }
+
+  it('каждый запрещённый метод отвергается с нулём сетевых вызовов', async () => {
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl);
+
+    for (const method of FORBIDDEN) {
+      await expect(instance.send(method, '/entity/customerorder')).rejects.toMatchObject({
+        code: 'METHOD_NOT_ALLOWED',
+      });
+    }
+
+    // Ни одного обращения: проверка выполнена ДО fetch, а не по ответу сервера.
+    expect(fetchState.calls).toBe(0);
+  });
+
+  it('запрещённый метод не занимает очередь и не расходует темп', async () => {
+    const clock = controlledClock();
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl, clock);
+
+    await expect(instance.send('POST', '/entity/customerorder')).rejects.toBeInstanceOf(
+      MoyskladError,
+    );
+
+    // Разрешённое обращение сразу после отказа идёт первым и без паузы.
+    await instance.send('GET', '/entity/customerorder');
+    expect(fetchState.calls).toBe(1);
+    expect(clock.sleeps).toEqual([]);
+  });
+
+  it('GET и HEAD проходят и доходят до fetch именно с этим методом', async () => {
+    const seen: (string | undefined)[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.method);
+      return jsonResponse({ rows: [], meta: { size: 0 } });
+    }) as unknown as typeof globalThis.fetch;
+    const { instance } = client(fetchImpl);
+
+    await instance.send('GET', '/entity/customerorder');
+    await instance.send('HEAD', '/entity/customerorder');
+
+    expect(seen).toEqual(['GET', 'HEAD']);
+  });
+
+  it('чтение заказов проходит через ту же границу и остаётся GET', async () => {
+    const seen: (string | undefined)[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.method);
+      return jsonResponse({ rows: [], meta: { size: 0 } });
+    }) as unknown as typeof globalThis.fetch;
+    const { instance } = client(fetchImpl);
+
+    await instance.listCustomerOrders({ limit: 1 });
+    expect(seen).toEqual(['GET']);
+  });
+
+  it('запись невозможна ни в одном серверном окружении и ни при какой конфигурации', async () => {
+    // Окружения перебираются целиком, включая попытку снять режим чтения
+    // конфигурацией: она обязана остановить запуск, а не открыть запись.
+    const environments = [
+      { APP_ENV: 'production', APP_ENVIRONMENT_MARKER: 'production' },
+      { APP_ENV: 'production', APP_ENVIRONMENT_MARKER: 'production', MOYSKLAD_READ_ONLY: 'true' },
+      { APP_ENV: 'staging', APP_ENVIRONMENT_MARKER: 'staging', MOYSKLAD_READ_ONLY: 'true' },
+    ];
+
+    for (const env of environments) {
+      const config = loadMoyskladConfig({ ...env, MOYSKLAD_TOKEN: TOKEN } as NodeJS.ProcessEnv);
+      const fetchState = countingFetch();
+      const instance = new MoyskladClient({ config, fetch: fetchState.impl, minIntervalMs: 0 });
+
+      for (const method of FORBIDDEN) {
+        await expect(
+          instance.send(method, '/entity/customerorder'),
+          `${env.APP_ENV}/${method}`,
+        ).rejects.toMatchObject({ code: 'METHOD_NOT_ALLOWED' });
+      }
+
+      expect(fetchState.calls, env.APP_ENV).toBe(0);
+    }
+
+    // Попытка объявить режим записи не доходит до клиента вовсе: конфигурация
+    // приложения останавливает запуск раньше, чем клиент будет создан.
+    expect(() =>
+      loadConfig({
+        DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+        ...TEST_SECRETS,
+        APP_ENV: 'production',
+        APP_ENVIRONMENT_MARKER: 'production',
+        MOYSKLAD_READ_ONLY: 'false',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
+  });
+
+  it('политику нельзя дополнить во время исполнения', () => {
+    // Список методов не экспортируется изменяемой структурой: политика —
+    // это функция с точным сравнением, и дописать в неё «POST» неоткуда.
+    expect(isReadOnlyMethod('GET')).toBe(true);
+    expect(isReadOnlyMethod('HEAD')).toBe(true);
+    for (const method of FORBIDDEN) {
+      expect(isReadOnlyMethod(method), method).toBe(false);
+    }
+  });
+
+  it('отказ по методу не раскрывает токен и адрес', async () => {
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl);
+
+    const error = await instance
+      .send('DELETE', '/entity/customerorder/secret-id')
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MoyskladError);
+    const message = (error as MoyskladError).message;
+    expect(message).not.toContain(TOKEN);
+    expect(message).not.toContain('secret-id');
+    expect(message).not.toContain('moysklad.ru');
   });
 });
 

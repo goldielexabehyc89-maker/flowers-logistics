@@ -507,8 +507,26 @@ model DeliveryOrder {
   /// payedSum > sum: переплата или ошибка данных, требует проверки.
   cashAnomaly        Boolean @default(false)
 
-  /// Относится ли заказ к нашей области прямо сейчас.
+  /// Относится ли заказ к ЛОГИСТИЧЕСКОЙ области прямо сейчас: утверждённый склад,
+  /// способ получения «Доставка» и не архивирован. Смысл поля не менялся —
+  /// на него по-прежнему опираются экраны логиста, маршрутизация, планирование,
+  /// конфликты и геокодирование.
   inScope         Boolean               @default(true)
+  /// Относится ли заказ к ПРОИЗВОДСТВЕННОЙ области: утверждённый склад и заказ
+  /// не архивирован, **независимо от способа получения**. Самовывоз, другое
+  /// значение и незаполненный способ сюда входят (`docs/OWNER_DECISIONS.md`,
+  /// `FUL-005`).
+  ///
+  /// Это второе представление ОДНОГО заказа, а не второй заказ: ключ
+  /// `externalId` и строка остаются едиными, второго прохода синхронизации
+  /// и второй таблицы не существует.
+  ///
+  /// Инвариант `inScope = true => fulfillmentInScope = true` держит база:
+  /// триггер `delivery_order_fulfillment_scope_covers_logistics` дополняет
+  /// строку, а ограничение с тем же именем фиксирует само правило. Это нужно
+  /// для отката: код прежней версии колонки не знает и записал бы `false`
+  /// рядом с `inScope = true`.
+  fulfillmentInScope Boolean            @default(false)
   scopeExitReason OrderScopeExitReason?
   scopeExitedAt   DateTime?
   sourceArchived  Boolean               @default(false)
@@ -552,6 +570,7 @@ model DeliveryOrder {
   geocodeJobs OrderGeocodeJob[]
 
   @@index([inScope, deliveryDate])
+  @@index([fulfillmentInScope, deliveryDate])
   @@index([needsAttention])
   @@index([externalUpdated])
   @@index([storeId, deliveryMethodId])
@@ -597,6 +616,18 @@ model IntegrationCursor {
   initialLoadCompleted   Boolean   @default(false)
   initialLoadCompletedAt DateTime?
   lastReconciliationAt   DateTime?
+
+  /// Завершена ли загрузка ПРОИЗВОДСТВЕННОЙ области.
+  ///
+  /// Отдельный признак нужен ровно для одного перехода: база, где узкий
+  /// логистический initial уже завершён, никогда не читала заказы утверждённого
+  /// склада с другим способом получения. Простая замена фильтра оставила бы их
+  /// непрочитанными навсегда, потому что delta ходит по окну `updated`.
+  ///
+  /// На чистой базе оба признака закрываются одним широким проходом: двух
+  /// одинаковых полных загрузок не бывает.
+  fulfillmentLoadCompleted   Boolean   @default(false)
+  fulfillmentLoadCompletedAt DateTime?
 
   /// Состояние восстановления после сбоя: переживает перезапуск процесса,
   /// поэтому backoff не обнуляется рестартом и не превращается в частый повтор.

@@ -5,9 +5,14 @@
  * он поставил бы проходы внахлёст. Следующий запуск планируется только после
  * завершения предыдущего.
  *
- * Автоматический запуск возможен ровно при трёх условиях сразу: маркер
- * production, наличие токена и явно включённая синхронизация. Во всех остальных
- * окружениях worker не стартует и ни одного сетевого обращения не делает.
+ * Автоматический запуск возможен ровно при трёх условиях сразу: разрешённое
+ * окружение (совпавшие маркеры production либо staging в режиме read-only),
+ * наличие токена и явно включённая синхронизация. Во всех остальных окружениях
+ * worker не стартует и ни одного сетевого обращения не делает.
+ *
+ * Проверка окружения одна и та же для worker и ручного `sync-once`
+ * (`isSyncAllowedEnvironment`): обойти политику ручной командой нельзя.
+ * Блокировка прохода тоже общая — сессионная advisory-lock в `sync-lock.ts`.
  */
 
 import type { AppConfig } from '../../../platform/config.js';
@@ -18,10 +23,20 @@ export interface SyncWorker {
   stop: () => Promise<void>;
 }
 
+/**
+ * Разрешает ли окружение обращаться к живому МоемуСкладу.
+ *
+ * Единственный источник правды для worker и ручной команды. Уровень допуска
+ * вычислен в конфигурации при старте, поэтому смешанные маркеры и staging
+ * без явного read-only сюда уже не доходят: они останавливают запуск.
+ */
+export function isSyncAllowedEnvironment(config: AppConfig): boolean {
+  return config.moyskladAccess !== 'denied';
+}
+
 export function shouldRunAutomatically(config: AppConfig): boolean {
   return (
-    config.APP_ENV === 'production' &&
-    config.APP_ENVIRONMENT_MARKER === 'production' &&
+    isSyncAllowedEnvironment(config) &&
     config.MOYSKLAD_TOKEN !== undefined &&
     config.MOYSKLAD_SYNC_ENABLED
   );

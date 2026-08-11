@@ -153,7 +153,10 @@ describe('область и ручной интервал', () => {
       ...snapshot,
       externalUpdated: '2026-08-06 12:00:00.000',
       storeId: '33333333-3333-4333-8333-333333333333',
+      // Чужой склад выводит заказ из ОБЕИХ областей: mapper иного снимка
+      // для другого склада не построит.
       inScope: false,
+      fulfillmentInScope: false,
       scopeExitReason: 'STORE_CHANGED',
     });
 
@@ -174,7 +177,10 @@ describe('область и ручной интервал', () => {
       ...snapshot,
       externalUpdated: '2026-08-06 12:00:00.000',
       storeId: '33333333-3333-4333-8333-333333333333',
+      // Чужой склад выводит заказ из ОБЕИХ областей: mapper иного снимка
+      // для другого склада не построит.
       inScope: false,
+      fulfillmentInScope: false,
       scopeExitReason: 'STORE_CHANGED' as const,
     };
     await apply(out);
@@ -199,7 +205,10 @@ describe('область и ручной интервал', () => {
       ...snapshot,
       externalUpdated: '2026-08-06 12:00:00.000',
       storeId: '33333333-3333-4333-8333-333333333333',
+      // Чужой склад выводит заказ из ОБЕИХ областей: mapper иного снимка
+      // для другого склада не построит.
       inScope: false,
+      fulfillmentInScope: false,
       scopeExitReason: 'STORE_CHANGED',
     });
 
@@ -368,6 +377,148 @@ describe('конфигурация fail closed', () => {
     expect(config.MOYSKLAD_SYNC_INTERVAL_SECONDS).toBe(30);
     expect(config.MOYSKLAD_SYNC_OVERLAP_SECONDS).toBe(300);
   });
+
+  it('staging принимает токен только вместе с явным режимом чтения', () => {
+    const staging = {
+      ...base,
+      APP_ENV: 'staging',
+      APP_ENVIRONMENT_MARKER: 'staging',
+      MOYSKLAD_TOKEN: 'x',
+    };
+
+    // Допуск даёт только ЯВНОЕ значение.
+    const config = loadConfig({ ...staging, MOYSKLAD_READ_ONLY: 'true' } as NodeJS.ProcessEnv);
+    expect(config.MOYSKLAD_READ_ONLY).toBe('true');
+    expect(config.moyskladAccess).toBe('staging-read-only');
+
+    // Без него токен на staging не принимается.
+    expect(() => loadConfig(staging as NodeJS.ProcessEnv)).toThrow(/MOYSKLAD_TOKEN/);
+
+    // Объявленный режим записи останавливает запуск отдельной причиной.
+    expect(() =>
+      loadConfig({ ...staging, MOYSKLAD_READ_ONLY: 'false' } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
+  });
+
+  it('токен в local и CI останавливает запуск даже с явным режимом чтения', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        MOYSKLAD_TOKEN: 'x',
+        MOYSKLAD_READ_ONLY: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_TOKEN/);
+  });
+
+  it('смешанные маркеры не спасает даже режим чтения', () => {
+    for (const [env, marker] of [
+      ['staging', 'production'],
+      ['production', 'staging'],
+      ['staging', 'local'],
+      ['local', 'staging'],
+    ] as const) {
+      expect(() =>
+        loadConfig({
+          ...base,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: marker,
+          MOYSKLAD_TOKEN: 'x',
+          MOYSKLAD_READ_ONLY: 'true',
+        } as NodeJS.ProcessEnv),
+      ).toThrow(/MOYSKLAD_TOKEN/);
+    }
+  });
+
+  it('включённая синхронизация без токена останавливает запуск и на staging', () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'staging',
+        APP_ENVIRONMENT_MARKER: 'staging',
+        MOYSKLAD_READ_ONLY: 'true',
+        MOYSKLAD_SYNC_ENABLED: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/требует MOYSKLAD_TOKEN/);
+  });
+
+  it('матрица окружений: где допущен живой контур, а где нет', async () => {
+    const { isSyncAllowedEnvironment } = await import('../integrations/moysklad/worker.js');
+    const { checkSyncOnceEnvironment } = await import('../integrations/moysklad/sync-once.js');
+
+    const matrix = [
+      { env: 'local', marker: 'local', allowed: false },
+      { env: 'staging', marker: 'staging', allowed: true },
+      { env: 'production', marker: 'production', allowed: true },
+    ];
+
+    for (const { env, marker, allowed } of matrix) {
+      const config = loadConfig({
+        ...base,
+        APP_ENV: env,
+        APP_ENVIRONMENT_MARKER: marker,
+        ...(env === 'staging' ? { MOYSKLAD_READ_ONLY: 'true' } : {}),
+        ...(allowed ? { MOYSKLAD_TOKEN: 'x', MOYSKLAD_SYNC_ENABLED: 'true' } : {}),
+      } as NodeJS.ProcessEnv);
+
+      expect(isSyncAllowedEnvironment(config), `${env}/${marker}`).toBe(allowed);
+      expect(shouldRunAutomatically(config), `${env}/${marker}`).toBe(allowed);
+      // Ручная команда и worker живут по ОДНОЙ проверке окружения: обойти
+      // политику ручным запуском нельзя.
+      expect(checkSyncOnceEnvironment(config) === null, `${env}/${marker}`).toBe(allowed);
+    }
+  });
+
+  it('staging без токена остаётся ненастроенным, а не запускает worker', async () => {
+    const { checkSyncOnceEnvironment } = await import('../integrations/moysklad/sync-once.js');
+    const config = loadConfig({
+      ...base,
+      APP_ENV: 'staging',
+      APP_ENVIRONMENT_MARKER: 'staging',
+      MOYSKLAD_READ_ONLY: 'true',
+    } as NodeJS.ProcessEnv);
+
+    expect(config.MOYSKLAD_TOKEN).toBeUndefined();
+    expect(shouldRunAutomatically(config)).toBe(false);
+    // Команда отказывает по отсутствию токена, а не по окружению.
+    expect(checkSyncOnceEnvironment(config)?.code).toBe(2);
+    expect(checkSyncOnceEnvironment(config)?.reason).toContain('MOYSKLAD_TOKEN');
+  });
+
+  it('объявленный режим записи останавливает запуск в любом окружении', () => {
+    for (const [env, marker] of [
+      ['local', 'local'],
+      ['staging', 'staging'],
+      ['production', 'production'],
+    ] as const) {
+      expect(() =>
+        loadConfig({
+          ...base,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: marker,
+          MOYSKLAD_READ_ONLY: 'false',
+        } as NodeJS.ProcessEnv),
+      ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
+    }
+  });
+
+  it('staging без явного режима чтения к живому контуру не допускается', () => {
+    const staging = { ...base, APP_ENV: 'staging', APP_ENVIRONMENT_MARKER: 'staging' };
+
+    // Молчание — это «контур не настраивают»: приложение стартует, но токен
+    // и синхронизация не разрешены.
+    const config = loadConfig(staging as NodeJS.ProcessEnv);
+    expect(config.MOYSKLAD_READ_ONLY).toBeUndefined();
+    expect(config.moyskladAccess).toBe('denied');
+
+    expect(() => loadConfig({ ...staging, MOYSKLAD_TOKEN: 'x' } as NodeJS.ProcessEnv)).toThrow(
+      /MOYSKLAD_TOKEN/,
+    );
+    expect(() =>
+      loadConfig({ ...staging, MOYSKLAD_SYNC_ENABLED: 'true' } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_SYNC_ENABLED/);
+  });
 });
 
 describe('API заказов', () => {
@@ -456,7 +607,10 @@ describe('API заказов', () => {
       ...snapshot,
       externalUpdated: '2026-08-06 12:00:00.000',
       storeId: '33333333-3333-4333-8333-333333333333',
+      // Чужой склад выводит заказ из ОБЕИХ областей: mapper иного снимка
+      // для другого склада не построит.
       inScope: false,
+      fulfillmentInScope: false,
       scopeExitReason: 'STORE_CHANGED',
     });
 
@@ -761,7 +915,10 @@ describe('ручной локальный интервал', () => {
     await apply({
       ...snapshot,
       storeId: '33333333-3333-4333-8333-333333333333',
+      // Чужой склад выводит заказ из ОБЕИХ областей: mapper иного снимка
+      // для другого склада не построит.
       inScope: false,
+      fulfillmentInScope: false,
       scopeExitReason: 'STORE_CHANGED',
       externalUpdated: '2026-08-06 13:00:00.000',
     });
@@ -882,6 +1039,97 @@ describe('поиск и дата по умолчанию', () => {
     expect(
       (await list(token, `?search=${encodeURIComponent('Получатель Тестовый')}`)).items.length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe('производственная область не расширяет логистические выборки', () => {
+  /** Заказ утверждённого склада с самовывозом: производственная область без логистической. */
+  function pickupSnapshot(): OrderSnapshot {
+    return snapshotOf({
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Самовывоз',
+            meta: { href: href('customentity', '76f4977e-d33e-11ef-0a80-03b6000e555e') },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+  }
+
+  async function tokenFor(roles: Parameters<typeof seedUser>[1]['roles']): Promise<string> {
+    const { hashSecretCode } = await import('../auth/crypto.js');
+    const { login } = await import('../auth/service.js');
+    const pin = '1234';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles, status: 'ACTIVE', pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  it('самовывоз сохраняется, но в списке логиста его нет', async () => {
+    const snapshot = pickupSnapshot();
+    const applied = await apply(snapshot);
+
+    // Заказ именно СОХРАНЁН: производственная область его принимает.
+    expect(applied.outcome).toBe('CREATED');
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(order.inScope).toBe(false);
+    expect(order.fulfillmentInScope).toBe(true);
+
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/orders?date=${order.deliveryDate?.toISOString().slice(0, 10) ?? ''}`,
+      headers: { authorization: `Bearer ${await tokenFor(['ADMIN'])}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { items: { id: string }[] };
+    expect(body.items.some((row) => row.id === order.id)).toBe(false);
+  });
+
+  it('маршрутизация и геокодирование по-прежнему смотрят только на inScope', async () => {
+    const { ineligibleReason } = await import('../routing/eligibility.js');
+    const { isGeocodable } = await import('./geocoding/queue.js');
+
+    const snapshot = pickupSnapshot();
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    const routeDate = order.deliveryDate?.toISOString().slice(0, 10) ?? '2026-08-07';
+    expect(
+      ineligibleReason(
+        {
+          inScope: order.inScope,
+          sourceArchived: order.sourceArchived,
+          sourceMissing: order.sourceMissing,
+          deliveryDate: order.deliveryDate,
+        },
+        routeDate,
+      ),
+    ).toBe('OUT_OF_SCOPE');
+
+    expect(
+      isGeocodable({
+        address: order.address,
+        inScope: order.inScope,
+        sourceArchived: order.sourceArchived,
+        sourceMissing: order.sourceMissing,
+        geoState: order.geoState,
+        geoSource: order.geoSource,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -1095,9 +1343,25 @@ describe('снимок заказов для staging', () => {
     const { exportOrdersSnapshot, assertSnapshotIsSafe, alias } =
       await import('./snapshot-export.js');
 
+    // Предел считается от фактического содержимого одноразовой базы, а не
+    // задан числом: соседние сценарии копят строки, и заказ без даты, который
+    // PostgreSQL сортирует последним, однажды выпал бы за `take` — проверка
+    // молча превратилась бы в проверку удачи.
+    const matching = await ctx.db.deliveryOrder.count({
+      where: {
+        inScope: true,
+        sourceMissing: false,
+        sourceArchived: false,
+        OR: [
+          { deliveryDate: { gte: new Date('2026-01-01T00:00:00.000Z') } },
+          { deliveryDate: null },
+        ],
+      },
+    });
+
     const exported = await exportOrdersSnapshot(ctx.db, {
       since: new Date('2026-01-01T00:00:00.000Z'),
-      limit: 500,
+      limit: matching + 10,
       aliasSalt: 'test-salt',
       now: NOW,
     });
@@ -1121,6 +1385,61 @@ describe('снимок заказов для staging', () => {
     // Соль в снимок не попадает — только её отпечаток.
     expect(serialized).not.toContain('test-salt');
     assertSnapshotIsSafe(exported);
+  });
+
+  it('самовывозы не попадают в снимок и не расходуют предел', async () => {
+    const { exportOrdersSnapshot } = await import('./snapshot-export.js');
+
+    // Самовывозы утверждённого склада: производственная область без логистической.
+    const pickupIds: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const pickup = snapshotOf({
+        deliveryPlannedMoment: '2026-09-01 12:00:00.000',
+        attributes: [
+          {
+            id: IDS.deliveryMethodAttribute,
+            value: {
+              name: 'Самовывоз',
+              meta: { href: href('customentity', '76f4977e-d33e-11ef-0a80-03b6000e555e') },
+            },
+          },
+          { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
+          { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+        ],
+      });
+      await apply(pickup);
+      pickupIds.push(pickup.externalId);
+    }
+
+    // Один активный логистический заказ — тот, ради которого снимок и нужен.
+    const delivery = snapshotOf({ deliveryPlannedMoment: '2026-09-02 12:00:00.000' });
+    await apply(delivery);
+
+    const pickupOrders = await ctx.db.deliveryOrder.findMany({
+      where: { externalId: { in: pickupIds } },
+      select: { externalName: true, fulfillmentInScope: true, inScope: true },
+    });
+    expect(pickupOrders).toHaveLength(6);
+    expect(pickupOrders.every((row) => row.fulfillmentInScope && !row.inScope)).toBe(true);
+
+    const deliveryOrder = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: delivery.externalId },
+    });
+
+    // Предел заведомо меньше числа самовывозов: если бы они попадали в выборку,
+    // логистический заказ был бы вытеснен.
+    const exported = await exportOrdersSnapshot(ctx.db, {
+      since: new Date('2026-09-01T00:00:00.000Z'),
+      limit: 3,
+      aliasSalt: 'test-salt',
+      now: NOW,
+    });
+
+    const numbers = exported.orders.map((row) => row.number);
+    expect(numbers).toContain(deliveryOrder.externalName);
+    for (const pickup of pickupOrders) {
+      expect(numbers).not.toContain(pickup.externalName);
+    }
   });
 
   it('импорт снимка чужого формата и снимка с настоящими данными отклоняется', async () => {

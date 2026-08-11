@@ -155,6 +155,120 @@ describe('принадлежность заказа нашей области', 
   });
 });
 
+describe('две области одного заказа', () => {
+  const PICKUP = {
+    name: 'Самовывоз',
+    meta: { href: href('customentity', '76f4977e-d33e-11ef-0a80-03b6000e555e') },
+  };
+
+  it('доставка утверждённого склада попадает в обе области', () => {
+    const { snapshot } = mapOrder(order(), IDS);
+
+    expect(snapshot.inScope).toBe(true);
+    expect(snapshot.fulfillmentInScope).toBe(true);
+    expect(snapshot.scopeExitReason).toBeNull();
+  });
+
+  it('самовывоз того же склада выходит только из логистической области', () => {
+    const { snapshot } = mapOrder(withAttribute(order(), IDS.deliveryMethodAttribute, PICKUP), IDS);
+
+    expect(snapshot.inScope).toBe(false);
+    // Букет собирают одинаково и для доставки, и для самовывоза.
+    expect(snapshot.fulfillmentInScope).toBe(true);
+    // Смысл причины выхода прежний, логистический: производственным статусом
+    // она не становится.
+    expect(snapshot.scopeExitReason).toBe('DELIVERY_METHOD_CHANGED');
+  });
+
+  it('другой и незаполненный способ получения ведут себя так же, как самовывоз', () => {
+    const another = withAttribute(order(), IDS.deliveryMethodAttribute, {
+      name: 'Курьерская служба',
+      meta: { href: href('customentity', '99999999-9999-4999-8999-999999999999') },
+    });
+    const base = order();
+    const missing = {
+      ...base,
+      attributes: (base.attributes ?? []).filter((a) => a.id !== IDS.deliveryMethodAttribute),
+    } as MoyskladOrderDto;
+
+    for (const source of [another, missing]) {
+      const { snapshot } = mapOrder(source, IDS);
+      expect(snapshot.inScope).toBe(false);
+      expect(snapshot.fulfillmentInScope).toBe(true);
+    }
+  });
+
+  it('чужой склад и архив выводят заказ из обеих областей', () => {
+    const foreign = mapOrder(
+      order({ store: { meta: { href: href('store', '33333333-3333-4333-8333-333333333333') } } }),
+      IDS,
+    ).snapshot;
+    const inArchive = mapOrder(order({ archived: true }), IDS).snapshot;
+
+    expect(foreign.inScope).toBe(false);
+    expect(foreign.fulfillmentInScope).toBe(false);
+    expect(inArchive.inScope).toBe(false);
+    expect(inArchive.fulfillmentInScope).toBe(false);
+  });
+
+  it('архив утверждённого склада важнее способа получения', () => {
+    const { snapshot } = mapOrder(
+      withAttribute(order({ archived: true }), IDS.deliveryMethodAttribute, PICKUP),
+      IDS,
+    );
+
+    expect(snapshot.fulfillmentInScope).toBe(false);
+  });
+
+  it('производственная область строго шире логистической', () => {
+    // Сочетание «в логистике, но не в производстве» невозможно по построению.
+    const variants = [
+      order(),
+      order({ archived: true }),
+      order({ store: { meta: { href: href('store', '33333333-3333-4333-8333-333333333333') } } }),
+      withAttribute(order(), IDS.deliveryMethodAttribute, PICKUP),
+    ];
+
+    for (const source of variants) {
+      const { snapshot } = mapOrder(source, IDS);
+      expect(snapshot.inScope && !snapshot.fulfillmentInScope).toBe(false);
+    }
+  });
+
+  it('признак производственной области входит в канонический снимок и хеш', () => {
+    const byDelivery = mapOrder(order(), IDS).snapshot;
+    const byPickup = mapOrder(
+      withAttribute(order(), IDS.deliveryMethodAttribute, PICKUP),
+      IDS,
+    ).snapshot;
+
+    expect(canonicalJson(byDelivery)).toContain('"fulfillmentInScope":true');
+    expect(diffSnapshots(byDelivery, byPickup)).toContain('inScope');
+    expect(snapshotHash(byDelivery)).not.toBe(snapshotHash(byPickup));
+
+    // Ключ стоит сразу после inScope: порядок ключей входит в хеш, и его
+    // перестановка обесценила бы все сохранённые ревизии разом.
+    const keys = Object.keys(JSON.parse(canonicalJson(byDelivery)) as Record<string, unknown>);
+    expect(keys.indexOf('fulfillmentInScope')).toBe(keys.indexOf('inScope') + 1);
+  });
+
+  it('расширение снимка даёт ровно одну объяснимую ревизию, а не чередование хешей', () => {
+    // Снимок прежнего формата: поля производственной области в нём ещё нет.
+    const stored = { ...mapOrder(order(), IDS).snapshot } as Record<string, unknown>;
+    delete stored['fulfillmentInScope'];
+
+    const fresh = mapOrder(order(), IDS).snapshot;
+
+    // Первый проход после обновления видит ровно одно изменившееся поле.
+    expect(diffSnapshots(stored as unknown as OrderSnapshot, fresh)).toEqual([
+      'fulfillmentInScope',
+    ]);
+    // Второй проход по тем же данным не видит ничего: чередования нет.
+    expect(diffSnapshots(fresh, mapOrder(order(), IDS).snapshot)).toEqual([]);
+    expect(snapshotHash(fresh)).toBe(snapshotHash(mapOrder(order(), IDS).snapshot));
+  });
+});
+
 describe('источники полей без резервных вариантов', () => {
   it('адрес, получатель и комментарий берутся только из утверждённых источников', () => {
     const { snapshot } = mapOrder(order(), IDS);

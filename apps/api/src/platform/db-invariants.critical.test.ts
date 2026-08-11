@@ -13,6 +13,7 @@
  * молчаливый пропуск создаёт ложное ощущение проверенной защиты.
  */
 
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
@@ -185,5 +186,106 @@ describe('инварианты базы данных', () => {
         data: { topic: 'test.ping', idempotencyKey, payload: { value: 2 } },
       }),
     ).rejects.toThrow();
+  });
+
+  describe('производственная область строго шире логистической', () => {
+    /**
+     * Вставка «как у прежней версии»: колонки `fulfillmentInScope` в списке нет
+     * вовсе. Именно так пишет код, развёрнутый до этой миграции, — и именно
+     * этот случай база обязана дополнить сама.
+     */
+    async function insertWithoutFulfillmentColumn(inScope: boolean): Promise<string> {
+      const externalId = randomUUID();
+      await db.$executeRaw`
+        INSERT INTO "DeliveryOrder" (
+          "id", "externalId", "externalName", "externalUpdated", "externalMoment",
+          "sumMinor", "payedSumMinor", "cashToCollectMinor",
+          "inScope", "sourceArchived", "sourceMissing", "createdAt", "updatedAt"
+        ) VALUES (
+          gen_random_uuid(), ${externalId}::uuid, 'INV', now(), now(),
+          0, 0, 0, ${inScope}, false, false, now(), now()
+        )
+      `;
+      return externalId;
+    }
+
+    async function scopesOf(
+      externalId: string,
+    ): Promise<{ inScope: boolean; fulfillment: boolean }> {
+      const order = await db.deliveryOrder.findUniqueOrThrow({
+        where: { externalId },
+        select: { inScope: true, fulfillmentInScope: true },
+      });
+      return { inScope: order.inScope, fulfillment: order.fulfillmentInScope };
+    }
+
+    it('вставка без новой колонки всё равно попадает в производственную область', async () => {
+      const externalId = await insertWithoutFulfillmentColumn(true);
+
+      expect(await scopesOf(externalId)).toEqual({ inScope: true, fulfillment: true });
+    });
+
+    it('заказ вне логистической области новую колонку не получает даром', async () => {
+      const externalId = await insertWithoutFulfillmentColumn(false);
+
+      // Значение по умолчанию не превращается в безусловное включение всех строк.
+      expect(await scopesOf(externalId)).toEqual({ inScope: false, fulfillment: false });
+    });
+
+    it('возврат в логистическую область через UPDATE тоже дополняется', async () => {
+      const externalId = await insertWithoutFulfillmentColumn(false);
+
+      await db.$executeRaw`
+        UPDATE "DeliveryOrder" SET "inScope" = true WHERE "externalId" = ${externalId}::uuid
+      `;
+
+      expect(await scopesOf(externalId)).toEqual({ inScope: true, fulfillment: true });
+    });
+
+    it('самовывоз и явный выход из обеих областей текущим кодом сохраняются как есть', async () => {
+      const pickup = randomUUID();
+      const foreign = randomUUID();
+
+      await db.deliveryOrder.create({
+        data: {
+          externalId: pickup,
+          externalName: 'PICKUP',
+          externalUpdated: new Date(),
+          externalMoment: new Date(),
+          sumMinor: 0n,
+          payedSumMinor: 0n,
+          cashToCollectMinor: 0n,
+          inScope: false,
+          fulfillmentInScope: true,
+        },
+      });
+      await db.deliveryOrder.create({
+        data: {
+          externalId: foreign,
+          externalName: 'FOREIGN',
+          externalUpdated: new Date(),
+          externalMoment: new Date(),
+          sumMinor: 0n,
+          payedSumMinor: 0n,
+          cashToCollectMinor: 0n,
+          inScope: false,
+          fulfillmentInScope: false,
+        },
+      });
+
+      expect(await scopesOf(pickup)).toEqual({ inScope: false, fulfillment: true });
+      expect(await scopesOf(foreign)).toEqual({ inScope: false, fulfillment: false });
+    });
+
+    it('инвариант записан ограничением, а не только триггером', async () => {
+      const constraint = await db.$queryRaw<{ definition: string }[]>`
+        SELECT pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+        WHERE conname = 'DeliveryOrder_fulfillment_scope_covers_logistics'
+      `;
+
+      expect(constraint).toHaveLength(1);
+      expect(constraint[0]?.definition).toContain('fulfillmentInScope');
+    });
   });
 });
