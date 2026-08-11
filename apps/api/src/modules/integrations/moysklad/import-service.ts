@@ -58,6 +58,7 @@ interface StoredOrder {
   id: string;
   version: number;
   inScope: boolean;
+  fulfillmentInScope: boolean;
   sourceMissing: boolean;
   /// Геоданные: смена адреса обесценивает прежнюю точку.
   geoState: $Enums.OrderGeoState;
@@ -69,6 +70,17 @@ interface StoredOrder {
   /// Ручной интервал логиста: синхронизация обязана его учитывать и не затирать.
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
+}
+
+/**
+ * Относится ли снимок хотя бы к одной из наших областей.
+ *
+ * Производственная область строго шире логистической, поэтому проверка
+ * сводится к ней. Написано через обе, чтобы правило читалось явно и не
+ * сломалось молча, если когда-нибудь области разойдутся.
+ */
+function inAnyScope(snapshot: OrderSnapshot): boolean {
+  return snapshot.inScope || snapshot.fulfillmentInScope;
 }
 
 /**
@@ -87,8 +99,11 @@ export async function applyOrderSnapshot(
   const existing = await lockByExternalId(tx, snapshot.externalId);
 
   if (existing === null) {
-    if (!snapshot.inScope) {
+    if (!inAnyScope(snapshot)) {
       // Пункт Б задания: чужой заказ не попадает в базу ни одним полем.
+      // Проверяются обе области сразу: самовывоз утверждённого склада к нам
+      // относится и сохраняется, а заказ чужого склада не оставляет ни адреса,
+      // ни получателя, ни суммы.
       return { outcome: 'SKIPPED_OUT_OF_SCOPE', changedFields: [] };
     }
     return createOrder(tx, snapshot, now, options);
@@ -107,7 +122,7 @@ async function lockByExternalId(
   externalId: string,
 ): Promise<StoredOrder | null> {
   const rows = await tx.$queryRaw<StoredOrder[]>`
-    SELECT "id", "version", "inScope", "sourceMissing",
+    SELECT "id", "version", "inScope", "fulfillmentInScope", "sourceMissing",
            "manualIntervalStartMinute", "manualIntervalEndMinute",
            "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration"
     FROM "DeliveryOrder"
@@ -158,6 +173,7 @@ function orderData(
     cashAnomaly: snapshot.cashAnomaly,
     sourceArchived: snapshot.sourceArchived,
     inScope: snapshot.inScope,
+    fulfillmentInScope: snapshot.fulfillmentInScope,
     needsAttention: reasons.length > 0,
     attentionReasons: reasons,
     scopeExitReason: snapshot.inScope ? null : snapshot.scopeExitReason,
@@ -231,7 +247,9 @@ async function updateOrder(
   // Заказ, найденный снова после контрольной сверки, обязан вернуться в работу
   // даже если внешний снимок не изменился ни одним полем: пропал он не из-за
   // изменения данных, а из-за отсутствия в выборке.
-  const restoring = existing.sourceMissing && snapshot.inScope;
+  // Восстановление считается по ОБЕИМ областям: самовывоз, ошибочно объявленный
+  // пропавшим, возвращается в работу так же, как доставка.
+  const restoring = existing.sourceMissing && inAnyScope(snapshot);
 
   if (changedFields.length === 0 && !restoring) {
     // Та же версия пришла повторно в overlap-окне: ни ревизии, ни аудита,
@@ -242,7 +260,9 @@ async function updateOrder(
   // Заказ, который был и остаётся вне нашей области. Обновляются только
   // технические поля, нужные для определения области: полная ревизия сохранила бы
   // адрес, получателя и суммы чужого склада, а хранить их мы не имеем оснований.
-  if (!snapshot.inScope && !existing.inScope) {
+  // Обе области сразу: заказ, оставшийся в производственной области (самовывоз),
+  // продолжает получать полное обновление общих импортируемых полей.
+  if (!inAnyScope(snapshot) && !existing.inScope && !existing.fulfillmentInScope) {
     await tx.deliveryOrder.update({
       where: { id: existing.id },
       data: scopeOnlyData(snapshot, now),
@@ -358,6 +378,7 @@ function scopeOnlyData(
     deliveryMethodId: snapshot.deliveryMethodId,
     sourceArchived: snapshot.sourceArchived,
     inScope: false,
+    fulfillmentInScope: false,
     updatedAt: now,
   };
 }
@@ -465,7 +486,10 @@ export async function markSourceMissing(
     where: { id: orderId, sourceMissing: false },
     data: {
       sourceMissing: true,
+      // Отсутствие исходного документа выводит заказ из обеих областей:
+      // собирать и везти нечего, пока документ не вернётся.
       inScope: false,
+      fulfillmentInScope: false,
       scopeExitReason: 'SOURCE_MISSING',
       scopeExitedAt: now,
       updatedAt: now,

@@ -69,7 +69,15 @@ CONFIG_KEYS=(
   IMAGE_REPOSITORY COMPOSE_PROJECT COMPOSE_FILE ENV_FILE DB_VOLUME
   MAP_ARTIFACTS_DIR VALHALLA_GRAPH_DIR VALHALLA_GRAPH_SHA256 VALHALLA_IMAGE
   VROOM_IMAGE VROOM_VERSION
+  MOYSKLAD_READ_ONLY
 )
+
+# Режим «только чтение» контура МоегоСклада: строго true или false.
+#
+# Значение несекретное и потому задаётся конфигурацией окружения, а не файлом
+# секретов на сервере. Пустое или произвольное значение — отказ до выкатки:
+# приложение обязано получить однозначный режим, а не догадываться о нём.
+MOYSKLAD_READ_ONLY_PATTERN='^(true|false)$'
 
 # Версия решателя из закреплённого образа: ровно три числа через точку.
 #
@@ -122,6 +130,18 @@ require_config_values() {
     value="${!name:-}"
     if [ -z "${value}" ] || [[ "${value}" == CHANGE_ME* ]]; then
       fail "конфигурация «${file}» не заполнена: ${key}. Серверы ещё не настроены."
+    fi
+
+    if [ "${key}" = 'MOYSKLAD_READ_ONLY' ]; then
+      if ! printf '%s' "${value}" | grep -Eq "${MOYSKLAD_READ_ONLY_PATTERN}"; then
+        fail "конфигурация «${file}» задаёт MOYSKLAD_READ_ONLY неверно: допустимы только true и false"
+      fi
+      # Staging допускается к живому МоемуСкладу ровно на условиях ENV-004.
+      # Значение false вместе с токеном остановило бы запуск приложения уже
+      # на сервере; отказать до выкатки честнее и дешевле.
+      if [ "${prefix}" = 'STAGING' ] && [ "${value}" != 'true' ]; then
+        fail "конфигурация «${file}»: staging допускается только с MOYSKLAD_READ_ONLY=true"
+      fi
     fi
   done
 }
@@ -731,11 +751,11 @@ require_ready() {
 # строку — и получается сервис без образа и bind mount из пустого пути,
 # то есть отказ на ровном месте или, хуже, монтирование не того каталога.
 compose_command() {
-  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_SHA256='%s' VALHALLA_IMAGE='%s' VROOM_IMAGE='%s' VROOM_VERSION='%s' docker compose -f '%s' -p '%s'" \
+  printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_SHA256='%s' VALHALLA_IMAGE='%s' VROOM_IMAGE='%s' VROOM_VERSION='%s' MOYSKLAD_READ_ONLY='%s' docker compose -f '%s' -p '%s'" \
     "${REMOTE_DIR}" "${IMAGE_REPOSITORY}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
     "${ENV_FILE}" "${DB_VOLUME}" "${COMPOSE_PROJECT}" \
     "${MAP_ARTIFACTS_DIR}" "${VALHALLA_GRAPH_DIR}" "${VALHALLA_GRAPH_SHA256}" "${VALHALLA_IMAGE}" \
-    "${VROOM_IMAGE}" "${VROOM_VERSION}" \
+    "${VROOM_IMAGE}" "${VROOM_VERSION}" "${MOYSKLAD_READ_ONLY}" \
     "${COMPOSE_FILE}" "${COMPOSE_PROJECT}"
 }
 

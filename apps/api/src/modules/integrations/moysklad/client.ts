@@ -1,9 +1,19 @@
 /**
  * Read-only клиент МоегоСклада.
  *
- * Универсального метода с произвольным HTTP-глаголом здесь нет намеренно:
- * на этом этапе интеграция ничего не изменяет в аккаунте, и возможность
- * отправить POST не должна существовать даже как случайно доступная функция.
+ * Единственная сетевая граница — `send`. Все обращения проходят через неё,
+ * и другого места, где вызывается `fetch`, в клиенте нет. Поэтому политика
+ * режима чтения проверяется ровно один раз и обойти её изнутри модуля нельзя.
+ *
+ * В режиме `readOnly` метод сверяется со списком разрешённых ДО обращения
+ * к сети: `POST`, `PUT`, `PATCH`, `DELETE` и любой неизвестный глагол
+ * отвергаются с кодом `METHOD_NOT_ALLOWED` и нулём сетевых вызовов. Отсутствие
+ * публичной операции записи защитой не считается: договорённость «мы не будем
+ * это вызывать» проверить нельзя, а проверку метода — можно (`ENV-004`).
+ *
+ * Операций записи в аккаунт клиент не предоставляет: `send` — это транспорт,
+ * а не бизнес-операция. Создание «Отгрузки» и смена статусов вводятся отдельным
+ * заданием с идемпотентностью и аудитом.
  *
  * Лимит аккаунта общий для всех приложений, поэтому темп консервативный:
  * одно обращение одновременно и не чаще одного запроса в секунду. Часы
@@ -19,6 +29,7 @@ import { moyskladOrderSchema, type MoyskladOrderDto } from './dto.js';
 
 export type MoyskladErrorCode =
   | 'NOT_CONFIGURED'
+  | 'METHOD_NOT_ALLOWED'
   | 'INVALID_QUERY'
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'
@@ -54,6 +65,7 @@ export class MoyskladError extends Error {
 
 const MESSAGES: Record<MoyskladErrorCode, string> = {
   NOT_CONFIGURED: 'Интеграция с МоимСкладом не настроена',
+  METHOD_NOT_ALLOWED: 'Контур МоегоСклада работает только на чтение',
   INVALID_QUERY: 'Некорректные параметры запроса к МоемуСкладу',
   UNAUTHORIZED: 'МойСклад отклонил авторизацию',
   FORBIDDEN: 'У пользователя интеграции нет прав на эту операцию',
@@ -105,6 +117,15 @@ export interface OrderPage {
  * на заведомо отвергаемый запрос.
  */
 export const MAX_EXPANDED_PAGE_SIZE = 100;
+
+/**
+ * Разрешённые в режиме чтения методы.
+ *
+ * `HEAD` включён намеренно: он отличается от `GET` только отсутствием тела
+ * и ничего не изменяет. Сравнение точное и регистрозависимое — «post»
+ * в нижнем регистре не является известным методом и отвергается.
+ */
+export const READ_ONLY_METHODS: readonly string[] = ['GET', 'HEAD'];
 
 const DEFAULT_MIN_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -165,7 +186,7 @@ export class MoyskladClient {
       params.set('filter', query.filter);
     }
 
-    const body = await this.request(`/entity/customerorder?${params.toString()}`);
+    const body = await this.send('GET', `/entity/customerorder?${params.toString()}`);
     const parsed = body as { rows?: unknown; meta?: { size?: unknown } };
 
     if (!Array.isArray(parsed.rows)) {
@@ -191,13 +212,26 @@ export class MoyskladClient {
   }
 
   /**
+   * Единственная сетевая граница клиента.
+   *
+   * Проверка метода выполняется ДО постановки в очередь и до любого обращения
+   * к сети: запрещённый глагол не тратит ни лимит аккаунта, ни место в очереди.
+   */
+  async send(method: string, path: string): Promise<unknown> {
+    if (this.config.readOnly && !READ_ONLY_METHODS.includes(method)) {
+      throw new MoyskladError('METHOD_NOT_ALLOWED');
+    }
+    return this.request(method, path);
+  }
+
+  /**
    * Ставит обращение в общую очередь и выдерживает минимальный интервал.
    * Параллельных обращений не бывает: следующий ждёт завершения предыдущего.
    */
-  private request(path: string): Promise<unknown> {
+  private request(method: string, path: string): Promise<unknown> {
     const run = this.queue.then(
-      () => this.execute(path),
-      () => this.execute(path),
+      () => this.execute(method, path),
+      () => this.execute(method, path),
     );
     // Очередь не должна падать целиком из-за одной неудачи.
     this.queue = run.then(
@@ -207,7 +241,7 @@ export class MoyskladClient {
     return run;
   }
 
-  private async execute(path: string): Promise<unknown> {
+  private async execute(method: string, path: string): Promise<unknown> {
     const token = this.config.token;
     if (token === null) {
       throw new MoyskladError('NOT_CONFIGURED');
@@ -224,7 +258,7 @@ export class MoyskladClient {
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.config.baseUrl}${path}`, {
-        method: 'GET',
+        method,
         headers: {
           Authorization: `Bearer ${token}`,
           Accept: 'application/json;charset=utf-8',

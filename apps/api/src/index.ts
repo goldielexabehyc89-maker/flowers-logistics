@@ -63,9 +63,10 @@ async function main(): Promise<void> {
   // Геокодирование включается ровно там, где есть кому обрабатывать очередь.
   const geocodingEnabled = shouldGeocodeAutomatically(config);
 
-  // Синхронизация МоегоСклада. Токен существует только в production, поэтому
-  // в остальных окружениях worker не создаётся и ни одного сетевого обращения
-  // не выполняется — интеграция честно остаётся ненастроенной.
+  // Синхронизация МоегоСклада. Токен допускается только в production и в
+  // staging-режиме read-only, поэтому в остальных окружениях worker не создаётся
+  // и ни одного сетевого обращения не выполняется — интеграция честно остаётся
+  // ненастроенной.
   const moysklad = {
     db,
     client: new MoyskladClient({
@@ -73,6 +74,7 @@ async function main(): Promise<void> {
         baseUrl: MOYSKLAD_BASE_URL,
         token: config.MOYSKLAD_TOKEN ?? null,
         ids: MOYSKLAD_IDS,
+        readOnly: config.MOYSKLAD_READ_ONLY,
       },
     }),
     logger,

@@ -50,10 +50,26 @@ const configSchema = z.object({
     .min(32, 'AUTH_ACCESS_TOKEN_SECRET должен быть не короче 32 символов'),
   AUTH_PIN_PEPPER: z.string().min(32, 'AUTH_PIN_PEPPER должен быть не короче 32 символов'),
   // --- МойСклад ---
-  // Рабочий токен существует ТОЛЬКО в production. Локальная разработка, CI и staging
-  // работают на фикстурах и поддельном HTTP: настоящие заказы туда не попадают,
-  // а случайно оставленный в чужом окружении токен — это доступ к живому аккаунту.
+  // Рабочий токен существует только в production и в staging-режиме read-only
+  // (решение владельца ENV-004). Локальная разработка и CI работают на фикстурах
+  // и поддельном HTTP: настоящие заказы туда не попадают, а случайно оставленный
+  // в чужом окружении токен — это доступ к живому аккаунту.
   MOYSKLAD_TOKEN: z.string().min(1).optional(),
+  /**
+   * Режим «только чтение» серверного контура МоегоСклада.
+   *
+   * Несекретный параметр: он не даёт доступа, а отнимает его. Значение `true`
+   * заставляет единственную сетевую границу клиента отвергать любой метод, кроме
+   * `GET` и `HEAD`, ДО обращения к сети.
+   *
+   * По умолчанию `true` — fail closed: забытый параметр запрещает запись,
+   * а не разрешает её. Для staging значение `true` обязательно и является
+   * условием допуска токена (`ENV-004`).
+   */
+  MOYSKLAD_READ_ONLY: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
   /** Автоматический фоновый опрос. По умолчанию выключен во всех окружениях. */
   MOYSKLAD_SYNC_ENABLED: z
     .enum(['true', 'false'])
@@ -183,6 +199,11 @@ export type AppConfig = Readonly<z.infer<typeof configSchema>> & {
   readonly isProduction: boolean;
   /** Локальная разработка: только здесь допустимы cookie без флага Secure. */
   readonly isLocal: boolean;
+  /**
+   * Уровень допуска к живому МоемуСкладу. `denied` означает, что контур
+   * выключен целиком: ни worker, ни ручная команда не стартуют.
+   */
+  readonly moyskladAccess: 'production' | 'staging-read-only' | 'denied';
   readonly trustProxy: TrustProxySetting;
   /** Ключ AES-256-GCM для кратковременного хранения преемника refresh-токена. */
   readonly refreshReplayKey: Buffer;
@@ -254,6 +275,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     ...parsed.data,
     isProduction: parsed.data.NODE_ENV === 'production',
     isLocal: parsed.data.APP_ENV === 'local',
+    /** Уровень допуска к живому МоемуСкладу; `denied` — контур выключен целиком. */
+    moyskladAccess: moyskladAccess(parsed.data),
     trustProxy: parseTrustProxy(parsed.data.TRUST_PROXY),
     refreshReplayKey: Buffer.from(parsed.data.AUTH_REFRESH_REPLAY_KEY, 'base64'),
   });
@@ -266,23 +289,44 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
  * Поэтому запуск останавливается, а не продолжается с предупреждением: приложение,
  * молча стартовавшее с production-токеном в staging, однажды сходит в чужие данные.
  */
-function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
+export function moyskladAccess(data: {
+  APP_ENV: 'local' | 'staging' | 'production';
+  APP_ENVIRONMENT_MARKER: string;
+  MOYSKLAD_READ_ONLY: boolean;
+}): 'production' | 'staging-read-only' | 'denied' {
   // Оба признака обязаны совпасть: смешанная конфигурация вроде
   // APP_ENV=staging с production-маркером означает ошибку развёртывания,
   // и продолжать с рабочим токеном в такой ситуации нельзя.
-  const isProductionMarker =
-    data.APP_ENVIRONMENT_MARKER === 'production' && data.APP_ENV === 'production';
+  if (data.APP_ENV === 'production' && data.APP_ENVIRONMENT_MARKER === 'production') {
+    return 'production';
+  }
+  // Staging допускается только вместе с явным несекретным режимом read-only:
+  // сам по себе совпавший маркер доступа не даёт.
+  if (
+    data.APP_ENV === 'staging' &&
+    data.APP_ENVIRONMENT_MARKER === 'staging' &&
+    data.MOYSKLAD_READ_ONLY
+  ) {
+    return 'staging-read-only';
+  }
+  return 'denied';
+}
 
-  if (data.MOYSKLAD_TOKEN !== undefined && !isProductionMarker) {
+function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
+  const access = moyskladAccess(data);
+
+  if (data.MOYSKLAD_TOKEN !== undefined && access === 'denied') {
     throw new Error(
-      'MOYSKLAD_TOKEN допустим только при APP_ENV=production и ' +
-        'APP_ENVIRONMENT_MARKER=production: рабочий токен не размещается в local, CI и staging',
+      'MOYSKLAD_TOKEN допустим только при APP_ENV=production с APP_ENVIRONMENT_MARKER=production ' +
+        'либо при APP_ENV=staging с APP_ENVIRONMENT_MARKER=staging и MOYSKLAD_READ_ONLY=true: ' +
+        'рабочий токен не размещается в local и CI, а на staging — только в режиме чтения',
     );
   }
 
-  if (data.MOYSKLAD_SYNC_ENABLED && !isProductionMarker) {
+  if (data.MOYSKLAD_SYNC_ENABLED && access === 'denied') {
     throw new Error(
-      'MOYSKLAD_SYNC_ENABLED=true допустим только при APP_ENV=production и APP_ENVIRONMENT_MARKER=production',
+      'MOYSKLAD_SYNC_ENABLED=true допустим только при совпавших маркерах production ' +
+        'либо staging с MOYSKLAD_READ_ONLY=true',
     );
   }
 

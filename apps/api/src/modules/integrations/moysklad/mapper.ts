@@ -61,7 +61,20 @@ export interface OrderSnapshot {
   cashToCollectMinor: string;
   cashAnomaly: boolean;
   sourceArchived: boolean;
+  /** Логистическая область: склад + «Доставка» + не архивирован. Смысл прежний. */
   inScope: boolean;
+  /**
+   * Производственная область: склад + не архивирован, способ получения не важен.
+   *
+   * Строго шире логистической: `inScope` истинно только вместе с этим полем.
+   * Самовывоз, другой способ и незаполненный способ сюда входят.
+   */
+  fulfillmentInScope: boolean;
+  /**
+   * Причина выхода из ЛОГИСТИЧЕСКОЙ области. Смысл поля не расширяется:
+   * `DELIVERY_METHOD_CHANGED` по-прежнему означает «больше не доставка»,
+   * а не производственный статус.
+   */
   scopeExitReason: ScopeExitReason | null;
   attentionReasons: AttentionReason[];
 }
@@ -95,6 +108,7 @@ const SNAPSHOT_KEYS: (keyof OrderSnapshot)[] = [
   'cashAnomaly',
   'sourceArchived',
   'inScope',
+  'fulfillmentInScope',
   'scopeExitReason',
   'attentionReasons',
 ];
@@ -171,6 +185,10 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
   const storeMatches = storeId === ids.store;
   const methodMatches = deliveryMethod.id === ids.deliveryMethodDelivery;
   const inScope = storeMatches && methodMatches && !sourceArchived;
+  // Производство не зависит от способа получения: букет собирают одинаково
+  // и для доставки, и для самовывоза. Отсюда вторая, более широкая область
+  // над тем же самым заказом — второго заказа и второй строки не появляется.
+  const fulfillmentInScope = storeMatches && !sourceArchived;
 
   // Причина выхода называется по первому несовпавшему условию: она объясняет
   // логисту, что именно изменилось, а не просто «заказ пропал».
@@ -218,6 +236,7 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
     cashAnomaly,
     sourceArchived,
     inScope,
+    fulfillmentInScope,
     scopeExitReason,
     attentionReasons: [],
   };

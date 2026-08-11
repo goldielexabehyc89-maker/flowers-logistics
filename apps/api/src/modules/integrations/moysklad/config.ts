@@ -42,6 +42,12 @@ export interface MoyskladConfig {
   /** `null`, если токен не задан: интеграция остаётся не настроенной. */
   token: string | null;
   ids: typeof MOYSKLAD_IDS;
+  /**
+   * Режим «только чтение». При `true` единственная сетевая граница клиента
+   * отвергает всё, кроме `GET` и `HEAD`, до обращения к сети (`ENV-004`).
+   * Значение по умолчанию — `true`: забытый параметр запрещает запись.
+   */
+  readOnly: boolean;
 }
 
 /**
@@ -53,8 +59,11 @@ export interface MoyskladConfig {
 export function loadMoyskladConfig(env: NodeJS.ProcessEnv = process.env): MoyskladConfig {
   const raw = env['MOYSKLAD_TOKEN'];
   const token = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
+  // Read-only снимается только явным `false`: любое другое значение,
+  // включая отсутствующее, оставляет запись запрещённой.
+  const readOnly = env['MOYSKLAD_READ_ONLY'] !== 'false';
 
-  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS };
+  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS, readOnly };
 }
 
 /** Интеграция считается настроенной только при наличии токена. */

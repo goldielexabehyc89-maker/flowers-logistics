@@ -5,13 +5,19 @@
  * остаётся тонкой обёрткой над этой функцией.
  *
  * Команда не требует `MOYSKLAD_SYNC_ENABLED=true` — она нужна для закрытого
- * production-пилота, когда автоматический worker ещё выключен. Но production
- * обязателен по обоим признакам, и токен обязателен: без них не создаются
- * ни соединение, ни блокировка, ни сетевой клиент.
+ * пилота, когда автоматический worker ещё выключен. Но окружение и токен
+ * обязательны: без них не создаются ни соединение, ни блокировка, ни сетевой
+ * клиент.
+ *
+ * Проверка окружения — та же самая функция, что у worker
+ * (`isSyncAllowedEnvironment`), и блокировка прохода та же самая сессионная
+ * advisory-lock. Ручная команда не является обходом политики: staging проходит
+ * только в режиме read-only, а local и CI не проходят вовсе.
  */
 
 import type { AppConfig } from '../../../platform/config.js';
 import { runSyncOnce, type PassResult, type SyncDeps } from './sync.js';
+import { isSyncAllowedEnvironment } from './worker.js';
 
 export type SyncOnceCode =
   | 0 // проход выполнен
@@ -27,10 +33,12 @@ export interface SyncOnceReport {
 
 /** Проверяет окружение до создания каких-либо ресурсов. */
 export function checkSyncOnceEnvironment(config: AppConfig): SyncOnceReport | null {
-  if (config.APP_ENV !== 'production' || config.APP_ENVIRONMENT_MARKER !== 'production') {
+  if (!isSyncAllowedEnvironment(config)) {
     return {
       code: 2,
-      reason: 'команда доступна только при APP_ENV=production и APP_ENVIRONMENT_MARKER=production',
+      reason:
+        'команда доступна только при совпавших маркерах production ' +
+        'либо staging с MOYSKLAD_READ_ONLY=true',
       result: null,
     };
   }

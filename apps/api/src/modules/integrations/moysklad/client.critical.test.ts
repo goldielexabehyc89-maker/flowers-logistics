@@ -43,10 +43,11 @@ function client(
   fetchImpl: typeof globalThis.fetch,
   clock = controlledClock(),
   token: string | null = TOKEN,
+  readOnly = true,
 ) {
   return {
     instance: new MoyskladClient({
-      config: { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS },
+      config: { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS, readOnly },
       fetch: fetchImpl,
       now: clock.now,
       sleep: clock.sleep,
@@ -88,6 +89,101 @@ describe('темп обращений', () => {
     }
     // Ожидание было инъецированным, а не настоящим.
     expect(clock.sleeps.every((ms) => ms > 0)).toBe(true);
+  });
+});
+
+describe('режим только чтения: HTTP-метод проверяется до сети', () => {
+  const FORBIDDEN = ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'get', 'post', ''];
+
+  /** Считающий fetch: любой вызов был бы уже нарушением. */
+  function countingFetch(): { calls: number; impl: typeof globalThis.fetch } {
+    const state = { calls: 0, impl: null as unknown as typeof globalThis.fetch };
+    state.impl = (async (_url: string, init?: RequestInit) => {
+      state.calls += 1;
+      return jsonResponse({ rows: [], meta: { size: 0 }, method: init?.method });
+    }) as unknown as typeof globalThis.fetch;
+    return state as { calls: number; impl: typeof globalThis.fetch };
+  }
+
+  it('каждый запрещённый метод отвергается с нулём сетевых вызовов', async () => {
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl);
+
+    for (const method of FORBIDDEN) {
+      await expect(instance.send(method, '/entity/customerorder')).rejects.toMatchObject({
+        code: 'METHOD_NOT_ALLOWED',
+      });
+    }
+
+    // Ни одного обращения: проверка выполнена ДО fetch, а не по ответу сервера.
+    expect(fetchState.calls).toBe(0);
+  });
+
+  it('запрещённый метод не занимает очередь и не расходует темп', async () => {
+    const clock = controlledClock();
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl, clock);
+
+    await expect(instance.send('POST', '/entity/customerorder')).rejects.toBeInstanceOf(
+      MoyskladError,
+    );
+
+    // Разрешённое обращение сразу после отказа идёт первым и без паузы.
+    await instance.send('GET', '/entity/customerorder');
+    expect(fetchState.calls).toBe(1);
+    expect(clock.sleeps).toEqual([]);
+  });
+
+  it('GET и HEAD проходят и доходят до fetch именно с этим методом', async () => {
+    const seen: (string | undefined)[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.method);
+      return jsonResponse({ rows: [], meta: { size: 0 } });
+    }) as unknown as typeof globalThis.fetch;
+    const { instance } = client(fetchImpl);
+
+    await instance.send('GET', '/entity/customerorder');
+    await instance.send('HEAD', '/entity/customerorder');
+
+    expect(seen).toEqual(['GET', 'HEAD']);
+  });
+
+  it('чтение заказов проходит через ту же границу и остаётся GET', async () => {
+    const seen: (string | undefined)[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen.push(init?.method);
+      return jsonResponse({ rows: [], meta: { size: 0 } });
+    }) as unknown as typeof globalThis.fetch;
+    const { instance } = client(fetchImpl);
+
+    await instance.listCustomerOrders({ limit: 1 });
+    expect(seen).toEqual(['GET']);
+  });
+
+  it('без режима чтения ограничение снимается только явным false', async () => {
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl, controlledClock(), TOKEN, false);
+
+    await instance.send('POST', '/entity/customerorder');
+
+    // Продуктовых операций записи это не создаёт: send — транспорт, а не
+    // бизнес-операция, и ни один вызывающий код записи не выполняет.
+    expect(fetchState.calls).toBe(1);
+  });
+
+  it('отказ по методу не раскрывает токен и адрес', async () => {
+    const fetchState = countingFetch();
+    const { instance } = client(fetchState.impl);
+
+    const error = await instance
+      .send('DELETE', '/entity/customerorder/secret-id')
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MoyskladError);
+    const message = (error as MoyskladError).message;
+    expect(message).not.toContain(TOKEN);
+    expect(message).not.toContain('secret-id');
+    expect(message).not.toContain('moysklad.ru');
   });
 });
 

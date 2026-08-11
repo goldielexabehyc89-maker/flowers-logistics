@@ -19,7 +19,7 @@ import type { AppConfig } from '../../../platform/config.js';
 import { ALLOWED_TEST_DATABASES } from '../../../platform/testing/test-database.js';
 import { MoyskladClient, MoyskladError } from './client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
-import { deltaFilter, formatMoment, initialLoadFilter } from './filters.js';
+import { approvedStoreFilter, deltaFilter, formatMoment } from './filters.js';
 import { formatMoscow, moscowDate, MoscowTimeParseError, parseMoscow } from './moscow-time.js';
 import {
   SYNC_LOCK_KEY,
@@ -239,6 +239,27 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/** Значение способа получения «Самовывоз» из справочника МоегоСклада. */
+const PICKUP_METHOD_ID = '76f4977e-d33e-11ef-0a80-03b6000e555e';
+
+/** Заказ утверждённого склада с самовывозом: производственная область без логистической. */
+function pickupRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const base = row(overrides);
+  const attributes = (base['attributes'] as Record<string, unknown>[]).filter(
+    (attribute) => attribute['id'] !== IDS.deliveryMethodAttribute,
+  );
+  return {
+    ...base,
+    attributes: [
+      ...attributes,
+      {
+        id: IDS.deliveryMethodAttribute,
+        value: { name: 'Самовывоз', meta: { href: href('customentity', PICKUP_METHOD_ID) } },
+      },
+    ],
+  };
+}
+
 interface FakeApi {
   calls: { url: string; filter: string; limit: string; offset: string; expand: string }[];
   fetch: typeof globalThis.fetch;
@@ -307,7 +328,7 @@ function deps(api: FakeApi, now = new Date('2026-08-06T09:00:00.000Z')): SyncDep
   return {
     db: ctx.db,
     client: new MoyskladClient({
-      config: { baseUrl: MOYSKLAD_BASE_URL, token: 'test-token', ids: IDS },
+      config: { baseUrl: MOYSKLAD_BASE_URL, token: 'test-token', ids: IDS, readOnly: true },
       fetch: api.fetch,
       now: () => 0,
       sleep: async () => undefined,
@@ -352,16 +373,16 @@ describe('нижняя граница первоначальной загруз�
 });
 
 describe('фильтры', () => {
-  it('начальный фильтр содержит склад, способ доставки и нижнюю дату', () => {
-    const filter = initialLoadFilter(IDS, new Date('2026-08-02T21:00:00.000Z'));
+  it('полный фильтр содержит склад и нижнюю дату, но НЕ способ получения', () => {
+    const filter = approvedStoreFilter(IDS, new Date('2026-08-02T21:00:00.000Z'));
 
     expect(filter).toContain(`store=${MOYSKLAD_BASE_URL}/entity/store/${IDS.store}`);
-    expect(filter).toContain(
-      `${MOYSKLAD_BASE_URL}/entity/customerorder/metadata/attributes/${IDS.deliveryMethodAttribute}=` +
-        `${MOYSKLAD_BASE_URL}/entity/customentity/${IDS.deliveryMethodDictionary}/${IDS.deliveryMethodDelivery}`,
-    );
     // Московское время, а не UTC: иначе окно уехало бы на три часа назад.
     expect(filter).toContain('deliveryPlannedMoment>=2026-08-03 00:00:00');
+    // Способ получения на сервере не фильтруется: иначе самовывоз утверждённого
+    // склада не попал бы ни в первоначальную загрузку, ни в контрольную сверку.
+    expect(filter).not.toContain(IDS.deliveryMethodAttribute);
+    expect(filter).not.toContain(IDS.deliveryMethodDelivery);
     expect(filter).not.toContain('state');
     expect(filter).not.toContain('updated<=');
   });
@@ -501,6 +522,154 @@ describe('область заказа', () => {
     const order = await importOne(cancelled);
     expect(order?.inScope).toBe(true);
     expect(order?.externalStateType).toBe('Unsuccessful');
+  });
+});
+
+describe('расширенная загрузка производственной области', () => {
+  /** База, где узкий логистический initial уже завершён, а широкий — ещё нет. */
+  async function cursorAfterOldInitialLoad(updatedCursor: Date): Promise<void> {
+    await ctx.db.integrationCursor.create({
+      data: {
+        provider: PROVIDER,
+        initialLoadCompleted: true,
+        initialLoadCompletedAt: new Date('2026-08-01T09:00:00.000Z'),
+        fulfillmentLoadCompleted: false,
+        updatedCursor,
+      },
+    });
+  }
+
+  /** Снимает аренду прохода, чтобы следующий проход начался в тех же часах. */
+  async function allowNextPass(): Promise<void> {
+    await ctx.db.integrationCursor.update({
+      where: { provider: PROVIDER },
+      data: { nextAttemptAt: null },
+    });
+  }
+
+  it('на чистой базе один широкий проход закрывает оба признака', async () => {
+    const delivery = row();
+    const pickup = pickupRow();
+    const api = fakeApi([[delivery, pickup]]);
+
+    const first = await runSyncOnce(deps(api));
+    expect(first.kind).toBe('initial');
+
+    const cursor = await ctx.db.integrationCursor.findUniqueOrThrow({
+      where: { provider: PROVIDER },
+    });
+    expect(cursor.initialLoadCompleted).toBe(true);
+    expect(cursor.fulfillmentLoadCompleted).toBe(true);
+    expect(cursor.updatedCursor).not.toBeNull();
+
+    // Второй полной загрузки не бывает: следующий проход — обычная delta.
+    await allowNextPass();
+    const second = await runSyncOnce(deps(fakeApi([[]]), new Date('2026-08-06T09:05:00.000Z')));
+    expect(second.kind).toBe('delta');
+  });
+
+  it('база со старым завершённым initial дочитывает самовывоз одним проходом', async () => {
+    const previousCursor = new Date('2026-08-05T09:00:00.000Z');
+    await cursorAfterOldInitialLoad(previousCursor);
+
+    const pickup = pickupRow();
+    const api = fakeApi([[pickup]]);
+    const result = await runSyncOnce(deps(api));
+
+    // Проход именно полный, а не delta: delta ходит по окну `updated`
+    // и заказы, которых никогда не читала, сама не подберёт.
+    expect(result.kind).toBe('initial');
+    expect(api.calls[0]?.filter).toContain(`store=${MOYSKLAD_BASE_URL}/entity/store/${IDS.store}`);
+    expect(api.calls[0]?.filter).not.toContain(IDS.deliveryMethodAttribute);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: pickup['id'] as string },
+    });
+    expect(order.inScope).toBe(false);
+    expect(order.fulfillmentInScope).toBe(true);
+    expect(order.scopeExitReason).toBe('DELIVERY_METHOD_CHANGED');
+
+    const cursor = await ctx.db.integrationCursor.findUniqueOrThrow({
+      where: { provider: PROVIDER },
+    });
+    expect(cursor.fulfillmentLoadCompleted).toBe(true);
+    // Курсор потока изменений НЕ сдвигается: перестановка его вперёд пропустила бы
+    // всё, что менялось между прежним значением и этим проходом.
+    expect(cursor.updatedCursor?.toISOString()).toBe(previousCursor.toISOString());
+  });
+
+  it('повтор расширенной загрузки идемпотентен: ни второго заказа, ни лишней ревизии', async () => {
+    await cursorAfterOldInitialLoad(new Date('2026-08-05T09:00:00.000Z'));
+    const pickup = pickupRow();
+
+    await runSyncOnce(deps(fakeApi([[pickup]])));
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: pickup['id'] as string },
+    });
+    const revisions = await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } });
+    const audits = await ctx.db.auditLog.count({ where: { entityId: order.id } });
+
+    // Признак уже закрыт, поэтому второй проход — delta по тем же данным.
+    await allowNextPass();
+    const second = await runSyncOnce(deps(fakeApi([[pickup]])));
+
+    expect(second.kind).toBe('delta');
+    expect(
+      await ctx.db.deliveryOrder.count({ where: { externalId: pickup['id'] as string } }),
+    ).toBe(1);
+    expect(await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } })).toBe(
+      revisions,
+    );
+    expect(await ctx.db.auditLog.count({ where: { entityId: order.id } })).toBe(audits);
+  });
+
+  it('один заказ и одна страница обслуживают обе области', async () => {
+    const delivery = row();
+    const pickup = pickupRow();
+    const api = fakeApi([[delivery, pickup]]);
+
+    const result = await runSyncOnce(deps(api));
+
+    // Одно обращение к списку на обе области: второго прохода, второго клиента
+    // и повторного скачивания того же заказа не существует.
+    expect(api.calls).toHaveLength(1);
+    expect(result.processed).toBe(2);
+
+    for (const source of [delivery, pickup]) {
+      const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+        where: { externalId: source['id'] as string },
+      });
+      expect(await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } })).toBe(1);
+    }
+  });
+
+  it('смена доставки на самовывоз не теряет заказ и не делает его пропавшим', async () => {
+    const source = row();
+    await runSyncOnce(deps(fakeApi([[source]])));
+
+    const before = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+    expect(before.inScope).toBe(true);
+
+    await allowNextPass();
+    const switched = pickupRow({
+      id: source['id'],
+      name: source['name'],
+      updated: '2026-08-06 11:00:00.000',
+      shipmentAddress: 'Москва, новый адрес',
+    });
+    await runSyncOnce(deps(fakeApi([[switched]]), new Date('2026-08-06T09:05:00.000Z')));
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: source['id'] as string },
+    });
+    expect(after.inScope).toBe(false);
+    expect(after.fulfillmentInScope).toBe(true);
+    expect(after.sourceMissing).toBe(false);
+    // Производственная область продолжает получать полное обновление полей.
+    expect(after.address).toBe('Москва, новый адрес');
+    expect(after.version).toBe(before.version + 1);
   });
 });
 
@@ -848,6 +1017,75 @@ describe('контрольная сверка', () => {
           where: { entityId: restored.id, action: 'ORDER_SOURCE_RESTORED' },
         }),
       ).toBe(1);
+    },
+    SLOW_RECONCILIATION_MS,
+  );
+
+  it(
+    'самовывоз не объявляется пропавшим: сверка читает широкую выборку',
+    async () => {
+      const pickup = pickupRow();
+      await importThenAllowReconciliation(pickup);
+
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+        where: { externalId: pickup['id'] as string },
+      });
+      expect(stored.inScope).toBe(false);
+      expect(stored.fulfillmentInScope).toBe(true);
+
+      // Выборка сверки содержит тот же самовывоз: серверный фильтр по способу
+      // получения снят, поэтому объявлять заказ исчезнувшим не за что.
+      const api = fakeApi([[pickup]]);
+      const result = await runSyncOnce(deps(api, new Date('2026-08-06T10:00:00.000Z')), {
+        allowReconciliation: true,
+      });
+
+      expect(result.kind).toBe('reconciliation');
+      expect(api.calls[0]?.filter).not.toContain(IDS.deliveryMethodAttribute);
+
+      const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: stored.id } });
+      expect(after.sourceMissing).toBe(false);
+      expect(after.fulfillmentInScope).toBe(true);
+    },
+    SLOW_RECONCILIATION_MS,
+  );
+
+  it(
+    'реально исчезнувший самовывоз помечается пропавшим и возвращается штатным импортом',
+    async () => {
+      const pickup = pickupRow();
+      await importThenAllowReconciliation(pickup);
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+        where: { externalId: pickup['id'] as string },
+      });
+
+      await runSyncOnce(deps(fakeApi([[]]), new Date('2026-08-06T10:00:00.000Z')), {
+        allowReconciliation: true,
+      });
+
+      const missing = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: stored.id } });
+      expect(missing.sourceMissing).toBe(true);
+      // Отсутствие документа выводит заказ из ОБЕИХ областей: собирать нечего.
+      expect(missing.inScope).toBe(false);
+      expect(missing.fulfillmentInScope).toBe(false);
+      expect(missing.scopeExitReason).toBe('SOURCE_MISSING');
+
+      await ctx.db.integrationCursor.update({
+        where: { provider: PROVIDER },
+        data: { nextAttemptAt: null, lastReconciliationAt: null },
+      });
+
+      // Документ вернулся: тот же заказ, ни одно поле не изменилось.
+      await runSyncOnce(deps(fakeApi([[pickup]]), new Date('2026-08-06T11:00:00.000Z')), {
+        allowReconciliation: true,
+      });
+
+      const restored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: stored.id } });
+      expect(restored.sourceMissing).toBe(false);
+      expect(restored.fulfillmentInScope).toBe(true);
+      // В логистическую область самовывоз не возвращается: способ получения прежний.
+      expect(restored.inScope).toBe(false);
+      expect(restored.scopeExitReason).toBe('DELIVERY_METHOD_CHANGED');
     },
     SLOW_RECONCILIATION_MS,
   );
