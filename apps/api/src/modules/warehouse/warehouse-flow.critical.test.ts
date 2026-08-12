@@ -65,7 +65,23 @@ async function actorFor(roles: Role[]): Promise<AuthenticatedActor> {
   return { userId: user.id, roles, familyId: randomUUID() } as AuthenticatedActor;
 }
 
+/**
+ * Токены кешируются по набору ролей.
+ *
+ * Каждый вход выполняет argon2-хеширование PIN — это десятки миллисекунд
+ * процессорного времени. Набор проверок прав перебирает роли в циклах, и без
+ * кеша один файл заметно замедлял бы ВЕСЬ прогон, выталкивая соседние тесты
+ * за их таймаут. Права от повторного входа тем же пользователем не меняются.
+ */
+const tokenCache = new Map<string, string>();
+
 async function tokenFor(roles: Role[]): Promise<string> {
+  const key = [...roles].sort().join(',');
+  const cached = tokenCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   const { hashSecretCode } = await import('../auth/crypto.js');
   const { login } = await import('../auth/service.js');
   const pin = '1234';
@@ -76,6 +92,8 @@ async function tokenFor(roles: Role[]): Promise<string> {
     { phone: user.phone, pin },
     { ip: null, userAgent: 'vitest', deviceLabel: null },
   );
+
+  tokenCache.set(key, session.accessToken);
   return session.accessToken;
 }
 
@@ -915,15 +933,25 @@ describe('московский день', () => {
     const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
     const route = await seedRoute([order.id], { courierId: courier.id });
 
-    // Процесс запускается под UTC, а колонка хранит календарную дату Москвы:
-    // сравнение моментов времени увело бы маршрут в соседний день.
-    expect(process.env['TZ'] ?? 'UTC').not.toBe('Europe/Moscow');
-
+    // Проверка не зависит от пояса процесса намеренно: она обязана проходить
+    // и под UTC локально, и под Europe/Moscow в CI. Утверждать конкретный
+    // пояс здесь было бы проверкой окружения, а не поведения.
     const listed = await listConfirmedRoutes(ctx.db, DAY);
     expect(listed.map((item) => item.routeId)).toContain(route.id);
     expect(listed.find((item) => item.routeId === route.id)?.deliveryDate).toBe(DAY);
 
-    const neighbours = await listConfirmedRoutes(ctx.db, '2027-05-03');
-    expect(neighbours.map((item) => item.routeId)).not.toContain(route.id);
+    // Соседние дни его не видят: сравнение идёт календарной датой, а не моментом
+    // времени — иначе маршрут уехал бы в соседний день при смене пояса.
+    for (const neighbour of ['2027-05-03', '2027-05-05']) {
+      const listed = await listConfirmedRoutes(ctx.db, neighbour);
+      expect(
+        listed.map((item) => item.routeId),
+        neighbour,
+      ).not.toContain(route.id);
+    }
+
+    // И карточка маршрутного листа отдаёт ту же календарную дату.
+    const card = await getRouteFlow(ctx.db, route.id);
+    expect(card?.deliveryDate).toBe(DAY);
   });
 });
