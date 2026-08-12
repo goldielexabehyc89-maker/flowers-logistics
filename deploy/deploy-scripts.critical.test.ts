@@ -1640,3 +1640,103 @@ describe('содержимое скриптов и Compose', () => {
     expect(makefile).not.toContain('ENV=');
   });
 });
+
+describe('часовые пояса окружения', () => {
+  /**
+   * У базы и у приложения РАЗНЫЕ пояса, и это не небрежность.
+   *
+   * База хранит абсолютную шкалу и потому работает в UTC: при московском поясе
+   * сервера значение, записанное самой базой, ложилось на три часа впереди
+   * соглашения «в колонке лежит UTC». Приложение остаётся московским, потому
+   * что московские у него «сегодня», интервалы и показ человеку (`TZ-001`).
+   *
+   * Выравнивание их в одну зону — самая вероятная будущая правка «для порядка»,
+   * и она молча вернула бы дефект. Поэтому проверяется именно различие.
+   */
+  const COMPOSE_FILES = ['docker-compose.yml', 'deploy/docker-compose.deploy.yml'];
+
+  /** Кусок YAML одного сервиса: от его имени до следующего на том же отступе. */
+  function serviceBlock(compose: string, name: string): string {
+    const pattern = new RegExp(
+      `\\n  ${name}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z0-9_-]*:\\n|\\nvolumes:|\\nnetworks:|$)`,
+    );
+    const match = pattern.exec(compose);
+    return match?.[1] ?? '';
+  }
+
+  it('база работает в UTC и задаёт его дважды: окружением и параметром запуска', async () => {
+    for (const file of COMPOSE_FILES) {
+      const compose = await readFile(path.join(REPO_ROOT, file), 'utf8');
+      const db = serviceBlock(compose, 'db');
+
+      expect(db, file).toContain('TZ: Etc/UTC');
+      expect(db, file).toContain('PGTZ: Etc/UTC');
+      // Переменных окружения мало: уже созданный том хранит собственный
+      // `timezone` в postgresql.conf, и его перекрывает только параметр запуска.
+      expect(db, file).toContain('timezone=UTC');
+      expect(db, file).toContain('log_timezone=UTC');
+      expect(db, file).not.toContain('Europe/Moscow');
+    }
+  });
+
+  it('приложение и вспомогательные сервисы остаются московскими', async () => {
+    for (const file of COMPOSE_FILES) {
+      const compose = await readFile(path.join(REPO_ROOT, file), 'utf8');
+
+      for (const service of ['app', 'valhalla', 'vroom']) {
+        const block = serviceBlock(compose, service);
+        if (block === '') {
+          continue;
+        }
+        expect(block, `${file}/${service}`).toContain('TZ: Europe/Moscow');
+      }
+    }
+  });
+
+  it('пояса базы и приложения не выравниваются в одну зону', async () => {
+    for (const file of COMPOSE_FILES) {
+      const compose = await readFile(path.join(REPO_ROOT, file), 'utf8');
+      const db = serviceBlock(compose, 'db');
+      const app = serviceBlock(compose, 'app');
+
+      const zoneOf = (block: string): string => /TZ: (\S+)/.exec(block)?.[1] ?? '';
+      expect(zoneOf(db), file).not.toBe('');
+      expect(zoneOf(app), file).not.toBe('');
+      expect(zoneOf(db), file).not.toBe(zoneOf(app));
+    }
+  });
+});
+
+describe('операторские команды', () => {
+  /**
+   * Команда ручного прохода запускается ВНУТРИ production-образа.
+   *
+   * Там нет ни TS-исходников, ни `tsx`, ни доступа к реестру npm. Прежняя
+   * формулировка ссылалась на исходник, падала с `tsx: not found`, и первый
+   * живой проход пришлось выполнять в обход документации.
+   */
+  it('ручной проход МоегоСклада не требует исходников и tsx', async () => {
+    const scripts = JSON.parse(await readFile(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    const command = scripts.scripts['moysklad:sync-once'] ?? '';
+
+    expect(command).toContain('apps/api/dist/scripts/moysklad-sync-once.js');
+    expect(command).not.toContain('tsx');
+    expect(command).not.toContain('apps/api/src/');
+
+    // Исходный вариант остаётся, но назван явно: скрытого выбора по окружению
+    // нет — оператор и разработчик запускают разные команды.
+    const dev = scripts.scripts['moysklad:sync-once:dev'] ?? '';
+    expect(dev).toContain('tsx');
+    expect(dev).toContain('apps/api/src/scripts/moysklad-sync-once.ts');
+  });
+
+  it('собираемый файл действительно существует в исходниках', async () => {
+    // Путь в команде не выдуман: у него есть исходник, из которого build
+    // положит файл ровно туда.
+    await expect(
+      readFile(path.join(REPO_ROOT, 'apps/api/src/scripts/moysklad-sync-once.ts'), 'utf8'),
+    ).resolves.toContain('performSyncOnce');
+  });
+});

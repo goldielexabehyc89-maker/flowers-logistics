@@ -19,8 +19,28 @@ services:
     restart: unless-stopped
     env_file: ['./${ENV_FILE}']
     environment:
-      TZ: Europe/Moscow
-      PGTZ: Europe/Moscow
+      TZ: Etc/UTC
+      PGTZ: Etc/UTC
+    # Абсолютная шкала базы — UTC, и она задана дважды намеренно.
+    #
+    # `TZ`/`PGTZ` влияют только на новый кластер и на клиентов внутри контейнера;
+    # уже созданный том сохранил бы прежний `timezone` в postgresql.conf. Поэтому
+    # пояс задаётся ещё и параметром запуска сервера: он действует независимо
+    # от того, когда и с какой конфигурацией том был создан.
+    #
+    # Колонки абсолютного времени объявлены `TIMESTAMP WITHOUT TIME ZONE`
+    # по соглашению «внутри UTC». При московском поясе сервера значение,
+    # записанное самой базой (`CURRENT_TIMESTAMP`, `now()`), ложилось на три
+    # часа впереди этого соглашения, а ручной SQL показывал ложный сдвиг.
+    #
+    # Бизнес-пояс приложения это не меняет: «сегодня», интервалы и показ
+    # человеку остаются московскими (`docs/OWNER_DECISIONS.md`, `TZ-001`).
+    command:
+      - postgres
+      - -c
+      - timezone=UTC
+      - -c
+      - log_timezone=UTC
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:

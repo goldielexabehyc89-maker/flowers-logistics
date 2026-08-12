@@ -164,6 +164,41 @@ jobs:
             "$IMAGE_LOCAL_TAG" \
             npx --no-install prisma migrate deploy
 
+      - name: Проверить операторскую команду ручного прохода МоегоСклада
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Команда из документации обязана работать ВНУТРИ образа: без
+          # TS-исходников, без tsx и без обращения к реестру npm. Токена и сети
+          # МоегоСклада здесь нет намеренно — проверяется, что команда доходит
+          # до штатной проверки окружения и отказывает по ней, а не падает
+          # с «tsx: not found» или MODULE_NOT_FOUND.
+          set +e
+          output="$(docker run --rm --network host \
+            -e DATABASE_URL="$IMAGE_DATABASE_URL" \
+            -e APP_ENV=local \
+            -e APP_ENVIRONMENT_MARKER=local \
+            -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
+            -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
+            -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
+            "$IMAGE_LOCAL_TAG" \
+            npm run --silent moysklad:sync-once 2>&1)"
+          code=$?
+          set -e
+
+          echo "$output"
+
+          if printf '%s' "$output" | grep -qiE 'tsx: not found|MODULE_NOT_FOUND|Cannot find module|no such file'; then
+            echo "команда не работает внутри образа: она всё ещё требует исходников или tsx" >&2
+            exit 1
+          fi
+
+          # Код 2 — штатный отказ по окружению: команда дошла до проверки.
+          if [ "$code" != "2" ]; then
+            echo "ожидался штатный отказ по окружению с кодом 2, получено: $code" >&2
+            exit 1
+          fi
+
       - name: Запустить приложение из образа и дождаться /ready
         shell: bash
         run: |
