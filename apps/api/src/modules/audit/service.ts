@@ -74,6 +74,13 @@ export const AUDIT_ACTIONS = [
   'DEPOT_DEFAULT_CHANGED',
   'DEPOT_DEACTIVATED',
   'DEPOT_ACTIVATED',
+  // Справочник складских ячеек (этап 6.4). Код ячейки — надпись на полке,
+  // а не персональные данные: он нужен администратору, чтобы понять, о какой
+  // ячейке речь. Заказов, адресов и людей в этих записях нет.
+  'STORAGE_CELL_CREATED',
+  'STORAGE_CELL_KIND_CHANGED',
+  'STORAGE_CELL_ACTIVATED',
+  'STORAGE_CELL_DEACTIVATED',
   // Общие настройки планирования: смена и время обслуживания.
   'SETTING_UPDATED',
   // Планирование маршрутов. Ни адресов, ни координат заказов: только

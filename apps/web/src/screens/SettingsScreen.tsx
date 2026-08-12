@@ -12,6 +12,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { OutboxFailures } from './OutboxFailures';
 import { PlanningSettings } from './settings/PlanningSettings';
+import { StorageCells } from './settings/StorageCells';
 import { useAuth } from '../auth/AuthContext';
 import { ErrorState, LoadingState, StatusBadge, type StatusTone } from '../ui/components';
 
@@ -108,6 +109,8 @@ export function SettingsScreen(): React.JSX.Element {
       </section>
 
       <PlanningSettings />
+
+      <StorageCells />
 
       <OutboxFailures />
 

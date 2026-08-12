@@ -42,6 +42,10 @@ export const REALTIME_TOPICS = [
   // ни координат там нет, клиент перезапрашивает карточку сам.
   'route_plan.updated',
   'depot.changed',
+  // Справочник складских ячеек (этап 6.4). Адресуется ADMIN и WAREHOUSE.
+  // В payload только идентификатор ячейки: код полки в событие не уходит,
+  // клиент перезапрашивает справочник сам.
+  'storage_cell.changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;
