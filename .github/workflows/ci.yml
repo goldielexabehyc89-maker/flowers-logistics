@@ -221,6 +221,8 @@ jobs:
           # Отказ проверки staging-окружения ДО чтения файла и обращения к БД.
           check 'snapshot:import' 2 ''
           check 'snapshot:retire' 2 ''
+          # Пилот без настроенных Valhalla/VROOM отказывает по окружению.
+          check 'logistics:pilot' 2 ''
 
       - name: Запустить приложение из образа и дождаться /ready
         shell: bash
