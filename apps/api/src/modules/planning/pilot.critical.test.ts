@@ -13,13 +13,17 @@
  * означала бы, что проверка зависит от чужого сервиса.
  */
 
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { VroomRequest, VroomSolution } from '../integrations/vroom/client.js';
 import type { MatrixResult } from '../geo/matrix/service.js';
 import {
   buildDayFromSnapshotShape,
   buildSyntheticDay,
   PILOT_MAX_POINTS,
+  readPilotSnapshot,
   runPilot,
   runPilotScenario,
   type PilotDeps,
@@ -64,7 +68,15 @@ function fakeMatrix(size: number, options: { unreachable?: boolean; wrongGraph?:
  * а не качество чужого решателя.
  */
 function fakeSolve(
-  options: { shuffleOnSecondCall?: boolean; dropOrder?: boolean; violateWindow?: boolean } = {},
+  options: {
+    shuffleOnSecondCall?: boolean;
+    dropOrder?: boolean;
+    violateWindow?: boolean;
+    /** Правдоподобный ответ, посчитанный НЕ по нашей матрице. */
+    ignoreOurMatrix?: boolean;
+    /** Правдоподобный ответ с нулевым временем обслуживания. */
+    ignoreServicePerType?: boolean;
+  } = {},
 ) {
   let call = 0;
 
@@ -77,9 +89,24 @@ function fakeSolve(
 
     const perVehicle = Math.ceil(placed.length / Math.max(1, request.vehicles.length));
 
+    const pointOf = new Map(request.jobs.map((job) => [job.id, job.location_index]));
+    const matrix = request.matrices['car'] ?? request.matrices['foot'];
+    const serviceOf = request.jobs[0]?.service_per_type ?? { CAR: 0, FOOT: 0 };
+
     const routes = request.vehicles.map((current, index) => {
       const slice = placed.slice(index * perVehicle, (index + 1) * perVehicle);
       let second = current.time_window[0];
+
+      // Исправный решатель считает по ПЕРЕДАННОЙ матрице: иначе поведенческая
+      // сверка обязана это заметить.
+      let distance = 0;
+      let previous = current.start_index;
+      for (const job of slice) {
+        const next = pointOf.get(job)!;
+        distance += matrix?.distances[previous]?.[next] ?? 0;
+        previous = next;
+      }
+      distance += matrix?.distances[previous]?.[current.end_index] ?? 0;
 
       const steps = [
         { type: 'start' as const, arrival: second },
@@ -100,8 +127,11 @@ function fakeSolve(
         vehicle: current.id,
         cost: slice.length * 100,
         duration: slice.length * 600,
-        service: slice.length * 480,
-        distance: slice.length * 1600,
+        service:
+          options.ignoreServicePerType === true
+            ? 0
+            : slice.length * serviceOf[current.type as 'CAR' | 'FOOT'],
+        distance: options.ignoreOurMatrix === true ? distance + 5000 : distance,
         steps,
       };
     });
@@ -322,6 +352,92 @@ describe('ворота пилота', () => {
     expect(JSON.stringify(request)).not.toContain('geometry');
   });
 
+  it('ответ, посчитанный не по нашей матрице, отвергается', async () => {
+    // Поля `matrices` в запросе присутствуют, но результат им не соответствует:
+    // ровно тот случай, от которого проверка исходящего JSON не защищает.
+    const report = await runPilotScenario(
+      depsWith((size) => fakeMatrix(size), fakeSolve({ ignoreOurMatrix: true })),
+      { label: 'чужая матрица', orderCount: 9, vehicleType: 'CAR' },
+    );
+
+    expect(report.failure).toBe('SOLVER_MATRIX_NOT_USED');
+  });
+
+  it('ответ с нулевым временем обслуживания отвергается', async () => {
+    const report = await runPilotScenario(
+      depsWith((size) => fakeMatrix(size), fakeSolve({ ignoreServicePerType: true })),
+      { label: 'без service_per_type', orderCount: 9, vehicleType: 'CAR' },
+    );
+
+    expect(report.failure).toBe('SOLVER_SERVICE_PER_TYPE_MISSING');
+  });
+
+  it('ответ без нужных агрегатов — отказ, а не пропущенная проверка', async () => {
+    const withoutAggregates = async (request: VroomRequest): Promise<VroomSolution> => {
+      const vehicle = request.vehicles[0]!;
+      return {
+        code: 0,
+        routes: [
+          {
+            vehicle: vehicle.id,
+            steps: [
+              { type: 'start', arrival: vehicle.time_window[0] },
+              ...request.jobs.map((job, index) => ({
+                type: 'job',
+                id: job.id,
+                arrival: vehicle.time_window[0] + (index + 1) * 600,
+              })),
+              { type: 'end', arrival: vehicle.time_window[1] },
+            ],
+          },
+        ],
+        unassigned: [],
+      } as unknown as VroomSolution;
+    };
+
+    const report = await runPilotScenario(
+      depsWith((size) => fakeMatrix(size), withoutAggregates),
+      { label: 'без агрегатов', orderCount: 6, vehicleType: 'CAR' },
+    );
+
+    expect(report.failure).toBe('SOLVER_MATRIX_NOT_USED');
+  });
+
+  it('недоступная матрица называется своим кодом, а не испорченной формой', async () => {
+    const report = await runPilotScenario(
+      {
+        matrix: async () => {
+          throw new Error('connect ECONNREFUSED 10.0.0.1:8002 /route?json=секрет');
+        },
+        solve: fakeSolve(),
+        clock: () => 0,
+      },
+      { label: 'нет Valhalla', orderCount: 9, vehicleType: 'CAR' },
+    );
+
+    expect(report.failure).toBe('MATRIX_UNAVAILABLE');
+    // Текст исходного исключения наружу не выходит.
+    expect(JSON.stringify(report)).not.toContain('ECONNREFUSED');
+    expect(JSON.stringify(report)).not.toContain('секрет');
+  });
+
+  it('недоступный решатель называется своим кодом', async () => {
+    const report = await runPilotScenario(
+      {
+        matrix: async (points) => fakeMatrix(points.length),
+        solve: async () => {
+          throw new Error('connect ECONNREFUSED 10.0.0.2:3000 /?json=секрет');
+        },
+        clock: () => 0,
+      },
+      { label: 'нет VROOM', orderCount: 9, vehicleType: 'CAR' },
+    );
+
+    expect(report.failure).toBe('SOLVER_UNAVAILABLE');
+    expect(JSON.stringify(report)).not.toContain('ECONNREFUSED');
+    expect(JSON.stringify(report)).not.toContain('секрет');
+  });
+
   it('оба профиля считаются отдельно и не смешиваются', async () => {
     const report = await runPilot(
       depsWith((size) => fakeMatrix(size)),
@@ -399,5 +515,104 @@ describe('отчёт пилота не содержит персональных
       // Подпись состоит из синтетических идентификаторов пилота и разделителей.
       expect(solve.placementSignature).toMatch(/^[-0-9a-z:>|#,]*$/);
     }
+  });
+});
+
+describe('снимок читается штатным безопасным слоем', () => {
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'pilot-snapshot-'));
+  });
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function write(name: string, content: unknown): Promise<string> {
+    const file = path.join(dir, name);
+    await writeFile(file, JSON.stringify(content), 'utf8');
+    return file;
+  }
+
+  const safeOrder = {
+    key: 'syn-1',
+    number: 'SYN-0001',
+    deliveryDate: '2026-08-20',
+    intervalKind: 'RANGE',
+    intervalStartMinute: 600,
+    intervalEndMinute: 840,
+    manualIntervalStartMinute: null,
+    manualIntervalEndMinute: null,
+    manualIntervalSetAt: null,
+    addressAlias: 'addr-0000000001',
+    recipientAlias: 'rcpt-0000000001',
+    hasComment: false,
+    externalStateName: 'Новый',
+    externalStateType: 'Regular',
+    sumMinor: '1000',
+    payedSumMinor: '0',
+    cashCollectable: false,
+    cashToCollectMinor: '0',
+    cashAnomaly: false,
+    inScope: true,
+    needsAttention: false,
+    attentionReasons: [],
+  };
+
+  it('снимок @2 принимается и отдаёт только форму дня', async () => {
+    const file = await write('ok.json', {
+      format: 'flowers-logistics/orders-snapshot@2',
+      takenAt: '2026-08-11T09:00:00.000Z',
+      aliasSaltId: 'a1b2c3d4e5f6',
+      orders: [safeOrder],
+    });
+
+    const orders = await readPilotSnapshot(file);
+    expect(orders).toHaveLength(1);
+    expect(orders[0]?.intervalStartMinute).toBe(600);
+  });
+
+  it('снимок @1 отвергается до матрицы, решателя и базы', async () => {
+    const file = await write('v1.json', {
+      format: 'flowers-logistics/orders-snapshot@1',
+      takenAt: '2026-08-11T09:00:00.000Z',
+      aliasSaltId: 'a1b2c3d4e5f6',
+      orders: [safeOrder],
+    });
+
+    await expect(readPilotSnapshot(file)).rejects.toThrow();
+  });
+
+  it('неизвестный формат отвергается', async () => {
+    const file = await write('alien.json', { format: 'что-то другое', orders: [] });
+
+    await expect(readPilotSnapshot(file)).rejects.toThrow();
+  });
+
+  it('настоящий адрес и получатель вместо псевдонимов отвергаются', async () => {
+    const file = await write('pii.json', {
+      format: 'flowers-logistics/orders-snapshot@2',
+      takenAt: '2026-08-11T09:00:00.000Z',
+      aliasSaltId: 'a1b2c3d4e5f6',
+      orders: [{ ...safeOrder, addressAlias: 'Москва, Тверская 1' }],
+    });
+
+    await expect(readPilotSnapshot(file)).rejects.toThrow();
+  });
+
+  it('ошибка разбора не цитирует содержимое файла', async () => {
+    const file = path.join(dir, 'broken.json');
+    await writeFile(file, '{ "orders": [ "Москва, Тверская 1" ', 'utf8');
+
+    const error = await readPilotSnapshot(file).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('Москва');
+    expect((error as Error).message).not.toContain('Тверская');
+  });
+
+  it('относительный путь и маска отвергаются', async () => {
+    await expect(readPilotSnapshot('relative/snapshot.json')).rejects.toThrow();
+    await expect(readPilotSnapshot('/tmp/*.json')).rejects.toThrow();
   });
 });

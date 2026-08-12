@@ -17,7 +17,6 @@
  * ни псевдонимов, ни тел ответов маршрутизатора и решателя.
  */
 
-import { readFile } from 'node:fs/promises';
 import { loadConfig } from '../platform/config.js';
 import { createLogger } from '../platform/logging/logger.js';
 import { createDatabase } from '../platform/db.js';
@@ -29,10 +28,12 @@ import {
   type MatrixDeps,
 } from '../modules/geo/matrix/service.js';
 import { createGraphGate } from '../modules/geo/routing-status.js';
+import { describeSnapshotFailure } from '../modules/orders/snapshot/file.js';
 import {
   buildDayFromSnapshotShape,
   buildSyntheticDay,
   PILOT_MAX_POINTS,
+  readPilotSnapshot,
   runPilotScenario,
   type PilotScenario,
   type PilotScenarioReport,
@@ -135,11 +136,12 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // Снимок читается ТЕМ ЖЕ безопасным слоем, что и штатные команды staging:
+  // один явный абсолютный файл, только формат `orders-snapshot@2`, отказ при
+  // настоящем адресе, получателе или следе соли. Проверка выполняется ДО базы,
+  // матрицы и решателя: снимок чужого формата не должен доехать до расчёта.
   const snapshotOrders =
-    args.snapshotPath === null
-      ? null
-      : ((JSON.parse(await readFile(args.snapshotPath, 'utf8')) as { orders: unknown[] })
-          .orders as never[]);
+    args.snapshotPath === null ? null : await readPilotSnapshot(args.snapshotPath);
 
   const db = createDatabase(config, logger);
   const valhalla = new ValhallaClient({ baseUrl: config.VALHALLA_URL });
@@ -239,6 +241,7 @@ main()
   .catch((error: unknown) => {
     // Наружу выходит только текст нашей ошибки: адреса, координаты и тела
     // ответов внешних сервисов в вывод не попадают.
-    process.stderr.write(`${error instanceof Error ? error.message : 'пилот не выполнен'}\n`);
+    // Текст очищается общим правилом: снимок не цитируется ни одной строкой.
+    process.stderr.write(`Пилот не выполнен: ${describeSnapshotFailure(error)}\n`);
     process.exit(2);
   });

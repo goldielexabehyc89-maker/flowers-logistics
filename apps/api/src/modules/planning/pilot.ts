@@ -5,13 +5,26 @@
  * «матрица Valhalla → решатель VROOM» рабочий день склада — и делает это
  * измеримо, воспроизводимо и без единой персональной строки в отчёте.
  *
- * ЧТО ЗДЕСЬ НЕ ПРОИСХОДИТ.
+ * ЧТО ПИЛОТ ДЕЛАЕТ И ЧЕГО НЕ ДЕЛАЕТ.
  *
- * Пилот ничего не планирует «по-настоящему»: он не пишет в базу, не создаёт
- * маршрутов, не трогает заказы и не заменяет модуль планирования. Он вызывает
- * ровно те же функции, что и боевой расчёт, и измеряет их поведение. Поэтому
- * он не может «случайно оказаться правым»: если бы он считал сам, его числа
- * ничего не говорили бы о продукте.
+ * Пилот не создаёт и не меняет заказы, маршруты, планы, настройки, аудит
+ * и realtime. Он вызывает ровно те же функции, что и боевой расчёт, и измеряет
+ * их поведение: если бы он считал сам, его числа не говорили бы о продукте
+ * ничего.
+ *
+ * Но «ничего не пишет в базу» было бы неправдой, и повторять это нельзя.
+ * Штатный путь расчёта намеренно проходит через продуктовый кэш матриц
+ * и технический статус маршрутизатора, поэтому операторский прогон
+ * ЗАКОНОМЕРНО записывает ровно две технические области:
+ *
+ *   * `RouteMatrixCache` — аренда и результат матрицы. Именно ради холодного
+ *     и тёплого пути пилот и существует: обойти кэш значило бы измерить
+ *     не тот продукт.
+ *   * `IntegrationStatus` — технический статус Valhalla, который обновляет
+ *     общая проверка графа перед первым расчётом.
+ *
+ * Других записей быть не должно, и это проверяется поведением, а не обещанием
+ * (`pilot-isolation.critical.test.ts`).
  *
  * ЧТО ТАКОЕ ВОРОТА.
  *
@@ -42,6 +55,8 @@ import {
 } from './solve.js';
 import type { PlanInputSnapshot, SnapshotOrder, SnapshotPoint } from './input.js';
 import { INPUT_SNAPSHOT_VERSION } from './input.js';
+import { readSnapshotFile } from '../orders/snapshot/file.js';
+import { assertSnapshotIsSafe } from '../orders/snapshot-export.js';
 
 /** Предел уникальных точек за один расчёт, включая склад. */
 export const PILOT_MAX_POINTS = 60;
@@ -49,6 +64,12 @@ export const PILOT_MAX_POINTS = 60;
 /** Коды отказов пилота. Наружу выходит код, а не текст внешней ошибки. */
 export type PilotFailureCode =
   | 'TOO_MANY_POINTS'
+  /** Матрицу получить не удалось: недоступна база, Valhalla или сам расчёт. */
+  | 'MATRIX_UNAVAILABLE'
+  /** Решатель не ответил: недоступен VROOM либо запрос отвергнут. */
+  | 'SOLVER_UNAVAILABLE'
+  /** Ошибка самого пилота. Наружу выходит код, а не текст исключения. */
+  | 'PILOT_INTERNAL'
   | 'MATRIX_SHAPE'
   | 'MATRIX_GRAPH_MISMATCH'
   | 'MATRIX_UNREACHABLE_PAIR'
@@ -65,6 +86,23 @@ export class PilotGateError extends Error {
   constructor(code: PilotFailureCode) {
     super(`нарушены ворота пилота: ${code}`);
     this.name = 'PilotGateError';
+    this.code = code;
+  }
+}
+
+/**
+ * Отказ внешнего участника расчёта.
+ *
+ * Отдельный класс нужен, чтобы недоступность базы, маршрутизатора или решателя
+ * не выглядела испорченной матрицей. Текст исходного исключения не переносится:
+ * он способен содержать адрес запроса, координаты и тело чужого ответа.
+ */
+export class PilotInfrastructureError extends Error {
+  readonly code: 'MATRIX_UNAVAILABLE' | 'SOLVER_UNAVAILABLE';
+
+  constructor(code: 'MATRIX_UNAVAILABLE' | 'SOLVER_UNAVAILABLE') {
+    super(`участник расчёта недоступен: ${code}`);
+    this.name = 'PilotInfrastructureError';
     this.code = code;
   }
 }
@@ -226,6 +264,23 @@ export function buildDayFromSnapshotShape(
   return day;
 }
 
+/**
+ * Читает снимок ТЕМ ЖЕ безопасным слоем, что и штатные команды staging.
+ *
+ * Собственного разбора здесь нет намеренно: он обошёл бы проверку формата
+ * и safety-ворота, ради которых слой и существует. Отвергается всё, что
+ * не является `orders-snapshot@2`, а также снимок с настоящим адресом,
+ * получателем или следом соли — и отвергается ДО матрицы, решателя и базы.
+ *
+ * Наружу возвращается только форма дня: интервалы. Псевдонимы, суммы
+ * и номера заказов пилоту не нужны и не читаются.
+ */
+export async function readPilotSnapshot(path: string): Promise<readonly SnapshotShapeOrder[]> {
+  const snapshot = await readSnapshotFile(path);
+  assertSnapshotIsSafe(snapshot);
+  return snapshot.orders;
+}
+
 /** Ровно те поля снимка, которые нужны пилоту. Псевдонимы и суммы не читаются. */
 export interface SnapshotShapeOrder {
   intervalStartMinute: number | null;
@@ -380,6 +435,91 @@ function assertMatrixShape(result: MatrixResult, size: number, graphSha256: stri
   return unreachable;
 }
 
+/**
+ * Ответ решателя обязан быть посчитан ПО НАШЕЙ матрице, а не по своей.
+ *
+ * Наличие полей `matrices` и `service_per_type` в отправленном JSON доказывает
+ * только то, что мы их отправили. Решатель мог их проигнорировать и вернуть
+ * правдоподобный ответ — от этого и защищает поведенческая проба при выкатке.
+ * Здесь то же самое делается на каждом решении пилота.
+ *
+ * Сверяются два агрегата, семантика которых в ответе VROOM однозначна:
+ *
+ *  * `distance` маршрута — сумма расстояний по фактическому порядку остановок,
+ *    от стартовой точки машины через все работы к конечной;
+ *  * `service` маршрута — число фактически размещённых работ, умноженное
+ *    на время обслуживания ДЛЯ ЭТОГО типа машины.
+ *
+ * `duration` намеренно не сверяется: её состав (входит ли ожидание) я фактом
+ * на живом решателе не устанавливал, а проверять по догадке — значит однажды
+ * объявить отказом исправный ответ.
+ *
+ * Отсутствие нужного агрегата — отказ, а не «проверка пропущена»: ответ без
+ * него ничего не подтверждает.
+ */
+function assertSolutionUsedOurInputs(
+  snapshot: PlanInputSnapshot,
+  matrix: SourceMatrix,
+  solution: VroomSolution,
+): void {
+  const slotByIndex = new Map(snapshot.slots.map((slot) => [slot.slotIndex, slot]));
+  const pointByJobId = new Map(
+    snapshot.orders.map((order, index) => [index + 1, order.pointIndex]),
+  );
+  const serviceSeconds: Record<$Enums.VehicleType, number> = {
+    CAR: snapshot.serviceTime.carMinutes * 60,
+    FOOT: snapshot.serviceTime.footMinutes * 60,
+  };
+
+  for (const route of solution.routes ?? []) {
+    const slot = slotByIndex.get(route.vehicle);
+    if (slot === undefined) {
+      throw new PilotGateError('SOLVER_UNKNOWN_VEHICLE');
+    }
+
+    const jobs = route.steps
+      .filter((step) => step.type === 'job' && step.id !== undefined)
+      .map((step) => step.id!);
+
+    // Порядок точек: старт машины → работы по факту ответа → её конец.
+    const path = [slot.startPointIndex];
+    for (const job of jobs) {
+      const point = pointByJobId.get(job);
+      if (point === undefined) {
+        throw new PilotGateError('SOLVER_UNKNOWN_ID');
+      }
+      path.push(point);
+    }
+    path.push(slot.endPointIndex);
+
+    let expectedDistance = 0;
+    for (let index = 1; index < path.length; index += 1) {
+      const leg = matrix.distancesM[path[index - 1]!]?.[path[index]!];
+      if (leg === null || leg === undefined) {
+        throw new PilotGateError('SOLVER_MATRIX_NOT_USED');
+      }
+      expectedDistance += leg;
+    }
+
+    if (route.distance === undefined) {
+      throw new PilotGateError('SOLVER_MATRIX_NOT_USED');
+    }
+    // Допуск в один метр на плечо: решатель округляет, но не пересчитывает.
+    if (Math.abs(route.distance - expectedDistance) > path.length) {
+      throw new PilotGateError('SOLVER_MATRIX_NOT_USED');
+    }
+
+    if (route.service === undefined) {
+      throw new PilotGateError('SOLVER_SERVICE_PER_TYPE_MISSING');
+    }
+    if (route.service !== jobs.length * serviceSeconds[slot.vehicleType]) {
+      // Решатель, не знающий `service_per_type`, взял бы общий `service`
+      // либо ноль. И то и другое здесь отличается от ожидаемого.
+      throw new PilotGateError('SOLVER_SERVICE_PER_TYPE_MISSING');
+    }
+  }
+}
+
 /** Решатель обязан получить нашу матрицу и время обслуживания по типу машины. */
 function assertSolverRequest(
   request: VroomRequest,
@@ -424,6 +564,33 @@ function assertWindowsRespected(snapshot: PlanInputSnapshot, plan: PlanResult): 
         throw new PilotGateError('WINDOW_VIOLATED');
       }
     }
+  }
+}
+
+/**
+ * Обращения к внешним участникам расчёта.
+ *
+ * Их отказ обязан называться своим именем: недоступная база, маршрутизатор
+ * или решатель — это не испорченная матрица. Текст исходного исключения
+ * не переносится: он способен содержать адрес запроса и тело чужого ответа.
+ */
+async function callMatrix(
+  deps: PilotDeps,
+  points: readonly { lat: number; lon: number }[],
+  vehicleType: $Enums.VehicleType,
+): Promise<MatrixResult> {
+  try {
+    return await deps.matrix(points, vehicleType);
+  } catch {
+    throw new PilotInfrastructureError('MATRIX_UNAVAILABLE');
+  }
+}
+
+async function callSolver(deps: PilotDeps, request: VroomRequest): Promise<VroomSolution> {
+  try {
+    return await deps.solve(request);
+  } catch {
+    throw new PilotInfrastructureError('SOLVER_UNAVAILABLE');
   }
 }
 
@@ -485,12 +652,12 @@ export async function runPilotScenario(
     }));
 
     const coldStart = clock();
-    const cold = await deps.matrix(points, scenario.vehicleType);
+    const cold = await callMatrix(deps, points, scenario.vehicleType);
     base.matrix.coldMs = clock() - coldStart;
     base.matrix.coldCached = cold.cached;
 
     const warmStart = clock();
-    const warm = await deps.matrix(points, scenario.vehicleType);
+    const warm = await callMatrix(deps, points, scenario.vehicleType);
     base.matrix.warmMs = clock() - warmStart;
     base.matrix.warmCached = warm.cached;
 
@@ -513,10 +680,12 @@ export async function runPilotScenario(
 
     for (let attempt = 1; attempt <= repeats; attempt += 1) {
       const solveStart = clock();
-      const solution = await deps.solve(request);
+      const solution = await callSolver(deps, request);
       const solveMs = clock() - solveStart;
       const plan = parseSolution(day, solution);
 
+      // Первая линия — что мы отправили, вторая — что решатель посчитал.
+      assertSolutionUsedOurInputs(day, source, solution);
       assertOrdersPreserved(day, plan);
       assertWindowsRespected(day, plan);
 
@@ -552,11 +721,14 @@ export async function runPilotScenario(
     return { ...base, gatesPassed: true, failure: null };
   } catch (error) {
     const code: PilotFailureCode =
-      error instanceof PilotGateError
+      error instanceof PilotGateError || error instanceof PilotInfrastructureError
         ? error.code
         : error instanceof PlanContractError
           ? error.code
-          : 'MATRIX_SHAPE';
+          : // Неизвестная ошибка на этом уровне уже не относится ни к матрице,
+            // ни к решателю: их отказы обёрнуты выше. Считать её испорченной
+            // матрицей значило бы соврать в отчёте.
+            'PILOT_INTERNAL';
     return { ...base, gatesPassed: false, failure: code };
   }
 }
