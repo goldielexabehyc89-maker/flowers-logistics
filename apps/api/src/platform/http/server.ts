@@ -24,6 +24,7 @@ import { registerOrderRoutes } from '../../modules/orders/routes.js';
 import { registerRoutingRoutes } from '../../modules/routing/routes.js';
 import { registerDepotRoutes } from '../../modules/depots/routes.js';
 import { registerWarehouseRoutes } from '../../modules/warehouse/routes.js';
+import { registerFloristRoutes } from '../../modules/fulfillment/routes.js';
 import { registerSettingsRoutes } from '../../modules/settings/routes.js';
 import { registerPlanningRoutes } from '../../modules/planning/routes.js';
 import { createPlanningDeps } from '../../modules/planning/deps.js';
@@ -138,6 +139,10 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerRoutingRoutes(app, { db, config });
   await registerDepotRoutes(app, { db, config });
   await registerWarehouseRoutes(app, { db, config });
+  // Раздел флориста. Клиент МоегоСклада собирается внутри и только при наличии
+  // токена: без него проксирование фотографий отвечает «Фото отсутствует»
+  // и ни одного сетевого обращения не выполняет.
+  await registerFloristRoutes(app, { db, config });
   await registerSettingsRoutes(app, { db, config });
   // HTTP-слой планирования аренд не берёт и в сеть не ходит: расчёт выполняет
   // фоновый исполнитель со своим владельцем аренды (см. index.ts).

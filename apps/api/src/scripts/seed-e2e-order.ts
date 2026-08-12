@@ -18,6 +18,7 @@ import { createLogger } from '../platform/logging/logger.js';
 import { createDatabase } from '../platform/db.js';
 import { toDateColumn } from '../modules/integrations/moysklad/delivery-date.js';
 import { moscowToday } from '../modules/orders/routes.js';
+import { snapshotHash, type FulfillmentSnapshot } from '../modules/fulfillment/composition.js';
 
 /** Базы, где допустимо создавать проверочные данные. */
 const ALLOWED_DATABASES = ['fl_e2e', 'fl_ci', 'fl_test'];
@@ -57,10 +58,50 @@ async function main(): Promise<number> {
   try {
     for (let index = 0; index < count; index += 1) {
       const number = `E2E-${String((Date.now() + index) % 1_000_000).padStart(6, '0')}`;
+      const externalId = crypto.randomUUID();
+
+      /**
+       * Производственный состав того же заказа.
+       *
+       * Он создаётся здесь, а не подгружается: токена МоегоСклада в проверках
+       * нет, а очередь флориста намеренно показывает только заказы с
+       * ПОДТВЕРЖДЁННЫМ составом — иначе пустой состав был бы неотличим от
+       * настоящего пустого. Без него браузерный сценарий сборки проверял бы
+       * не поведение, а отсутствие данных.
+       */
+      const composition: FulfillmentSnapshot = {
+        externalId,
+        description: 'Нижний комментарий заказа для проверки',
+        cardText: 'С праздником! Проверочная открытка',
+        positions: [
+          {
+            externalPositionId: crypto.randomUUID(),
+            ordinal: 0,
+            assortmentId: crypto.randomUUID(),
+            assortmentKind: 'BUNDLE',
+            assortmentKindRaw: 'bundle',
+            name: 'Букет проверочный',
+            quantity: '1',
+            characteristicLabel: null,
+            components: [
+              {
+                externalComponentId: crypto.randomUUID(),
+                ordinal: 0,
+                assortmentId: crypto.randomUUID(),
+                assortmentKind: 'PRODUCT',
+                assortmentKindRaw: 'product',
+                name: 'Роза проверочная',
+                quantity: '11',
+              },
+            ],
+          },
+        ],
+      };
+
       const order = await db.deliveryOrder.create({
         data: {
           // Внешние идентификаторы выдуманы намеренно: настоящих заказов здесь нет.
-          externalId: crypto.randomUUID(),
+          externalId,
           externalName: number,
           externalUpdated: new Date(),
           externalStateName: 'Новый',
@@ -81,6 +122,48 @@ async function main(): Promise<number> {
           needsAttention: true,
           attentionReasons: ['UNRECOGNIZED_INTERVAL'],
           version: 1,
+          // Производственная область: она шире логистической и включает этот
+          // заказ независимо от способа получения.
+          fulfillmentInScope: true,
+          fulfillmentDescription: composition.description,
+          fulfillmentCardText: composition.cardText,
+          fulfillmentSnapshotHash: snapshotHash(composition),
+          fulfillmentCompositionState: 'READY',
+          fulfillmentCompositionSyncedAt: new Date(),
+          fulfillmentPositions: {
+            create: composition.positions.map((position) => ({
+              externalPositionId: position.externalPositionId,
+              ordinal: position.ordinal,
+              assortmentId: position.assortmentId,
+              assortmentKind: position.assortmentKind,
+              assortmentKindRaw: position.assortmentKindRaw,
+              name: position.name,
+              quantity: position.quantity,
+              characteristicLabel: position.characteristicLabel,
+              components: {
+                create: position.components.map((component) => ({
+                  externalComponentId: component.externalComponentId,
+                  ordinal: component.ordinal,
+                  assortmentId: component.assortmentId,
+                  assortmentKind: component.assortmentKind,
+                  assortmentKindRaw: component.assortmentKindRaw,
+                  name: component.name,
+                  quantity: component.quantity,
+                })),
+              },
+            })),
+          },
+          // Ревизия обязательна: именно на неё ссылается собранный заказ,
+          // и по ней строится неизменяемый бланк.
+          fulfillmentRevisions: {
+            create: {
+              externalUpdated: new Date(),
+              snapshot: composition as never,
+              snapshotHash: snapshotHash(composition),
+              changedFields: ['externalId', 'description', 'cardText', 'positions'],
+              reason: 'INITIAL_IMPORT',
+            },
+          },
         },
         select: { id: true, externalName: true },
       });
