@@ -884,6 +884,132 @@ test('планирование: настройки, превью и примен
   await expect(settings.getByTestId('service-foot')).toHaveValue('15');
 });
 
+/**
+ * Флорист: смена → захват → карточка → «Собран» → бланк с QR → ручная отметка.
+ *
+ * Сценарий проходит весь путь браузером и БЕЗ живого МоегоСклада: состав
+ * заказа создан фикстурой, фотографии нет, и карточка обязана честно сказать
+ * «Фото отсутствует», а не сломаться.
+ *
+ * Сценарий выполняется собственным флористом, а не администратором: право
+ * на «Собран» есть только у того, за кем закреплён заказ, и проверять это
+ * администратором значило бы проверять не то.
+ */
+test('флорист: смена, захват, сборка, бланк и отметка печати', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
+  test.skip(orderNumber === '', 'не передан номер проверочного заказа (E2E_ORDER_NUMBER)');
+
+  const FLORIST_PIN = '8642';
+
+  // 1. Администратор заводит флориста.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const floristPhone = uniquePhone();
+  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Флорист проверки');
+  await page.getByLabel('Телефон').fill(floristPhone);
+  await page.getByRole('checkbox', { name: 'Флорист' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+
+  const codeText = await page.locator('.one-time-code').innerText();
+  const floristCode = codeText.trim();
+  expect(floristCode).toMatch(/^\d{4}$/);
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // 2. Флорист входит и попадает сразу в свой раздел.
+  const context = await browser.newContext({ acceptDownloads: true });
+  const floristPage = await context.newPage();
+  await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
+  await expect(floristPage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
+
+  // Чужих разделов у флориста нет.
+  for (const foreign of ['Настройки', 'Сотрудники и курьеры', 'Маршрутизация']) {
+    await expect(floristPage.getByRole('link', { name: foreign })).toHaveCount(0);
+  }
+
+  // 3. Без смены заказ взять нельзя: кнопка захвата выключена.
+  const row = floristPage.locator('.florist__row', { hasText: orderNumber });
+  await expect(row).toBeVisible();
+  const claimButton = row.getByTestId('row-claim');
+  await expect(claimButton).toBeDisabled();
+
+  // 4. Смена начинается явно.
+  await clickAndAwait(
+    floristPage,
+    floristPage.getByTestId('shift-start'),
+    'POST',
+    '/api/florist/shift/start',
+  );
+  await expect(floristPage.getByText(/Смена с /)).toBeVisible();
+
+  // 5. Захват заказа. Общая очередь по умолчанию показывает только свободные
+  //    заказы, поэтому взятый уходит из неё — и появляется в «Моих заказах».
+  await clickAndAwait(floristPage, claimButton, 'POST', '/claim');
+  await expect(floristPage.locator('.florist__row', { hasText: orderNumber })).toHaveCount(0);
+
+  await floristPage.getByTestId('florist-tab-mine').click();
+  const mineRow = floristPage.locator('.florist__row', { hasText: orderNumber });
+  await expect(mineRow).toBeVisible();
+  await expect(mineRow).toContainText('В сборке');
+
+  // 6. Карточка: состав, бандл с компонентом, текст открытки и комментарий.
+  //    Ни адреса, ни получателя, ни цены здесь быть не должно.
+  await mineRow.getByRole('button', { name: 'Открыть' }).click();
+  const card = floristPage.getByTestId('florist-card');
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Букет проверочный');
+  await expect(card).toContainText('Роза проверочная');
+  await expect(card.getByTestId('card-text')).toContainText('Проверочная открытка');
+  await expect(card.getByTestId('card-description')).toContainText('Нижний комментарий');
+  await expect(card).not.toContainText('проверочный адрес');
+  await expect(card).not.toContainText('Проверочный Получатель');
+
+  // Фотографии у проверочной номенклатуры нет, и карточка говорит об этом прямо.
+  await expect(card.getByTestId('position-photo-empty')).toContainText('Фото отсутствует');
+
+  // 7. «Собран»: одна операция, после которой появляется бланк.
+  await clickAndAwait(floristPage, card.getByTestId('card-assemble'), 'POST', '/assemble');
+  await expect(card).toContainText('Собран');
+  await expect(card.getByTestId('card-print-state')).toContainText('Ожидает печати');
+
+  // 8. Бланк скачивается настоящим файлом PDF.
+  const [download] = await Promise.all([
+    floristPage.waitForEvent('download'),
+    card.getByTestId('card-download').click(),
+  ]);
+  expect(download.suggestedFilename()).toBe(`order-${orderNumber}.pdf`);
+
+  // 9. Вкладка «Печать»: задание ждёт, ручная отметка его завершает.
+  await floristPage.getByTestId('florist-tab-print').click();
+  const printRow = floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber });
+  await expect(printRow).toBeVisible();
+  await expect(printRow).toContainText('Ожидает печати');
+
+  await clickAndAwait(floristPage, printRow.getByTestId('print-mark'), 'POST', '/printed');
+
+  // Задание ушло из очереди внимания и появилось в напечатанных.
+  await expect(
+    floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
+  ).toHaveCount(0);
+  await floristPage.getByTestId('print-filter-printed').click();
+  await expect(
+    floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
+  ).toContainText('Напечатано');
+
+  await context.close();
+});
+
 test('складские ячейки: администратор управляет справочником, кладовщик только смотрит', async ({
   page,
   browser,

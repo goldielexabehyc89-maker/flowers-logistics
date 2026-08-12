@@ -1,0 +1,313 @@
+/**
+ * API раздела флориста.
+ *
+ * ПРАВА. Читают и работают `ADMIN` и `FLORIST`; все остальные роли получают
+ * 403, аноним — 401. Административные действия — принудительное завершение
+ * смены, переназначение и возврат собранного заказа в работу — доступны только
+ * `ADMIN`. Скрытая кнопка защитой не считается: решение принимает сервер.
+ *
+ * ДЕНЬ СЧИТАЕТ СЕРВЕР. Клиент присылает `today`/`tomorrow`, а не дату: браузер
+ * к вычислению московского дня не допускается вовсе (`TZ-001`).
+ *
+ * ДОКУМЕНТЫ. PDF отдаётся с безопасными заголовками и без кэширования: бланк
+ * содержит состав заказа, и его копия в кэше прокси никому не нужна.
+ */
+
+import { z } from 'zod';
+import type { AppServer } from '../../platform/http/types.js';
+import type { Database } from '../../platform/db.js';
+import type { AppConfig } from '../../platform/config.js';
+import { authenticateWithRoles } from '../auth/guards.js';
+import { MoyskladClient } from '../integrations/moysklad/client.js';
+import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { readOrderCard } from './card.js';
+import { readQueue } from './queue-service.js';
+import { requirePhoto } from './photo.js';
+import {
+  listPrintJobs,
+  markPrinted,
+  renderJobDocument,
+  renderOrderDocument,
+  retryPrint,
+  MAX_PRINT_JOBS,
+} from './print.js';
+import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
+import {
+  FLORIST_ADMIN_ROLES,
+  FLORIST_ROLES,
+  MAX_REASON_LENGTH,
+  MIN_REASON_LENGTH,
+  closeOwnShift,
+  forceCloseShift,
+  listActiveShifts,
+  listAssignableFlorists,
+  ownShift,
+  startShift,
+  type RequestContext,
+} from './shifts.js';
+
+const uuid = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'Некорректный id');
+
+const idParamSchema = z.object({ id: uuid });
+
+const queueQuerySchema = z.object({
+  day: z.enum(['today', 'tomorrow']).default('today'),
+  scope: z.enum(['general', 'mine']).default('general'),
+  /** Галочка «Все»: добавить назначенные заказы к общей очереди. */
+  all: z.enum(['true', 'false']).default('false'),
+});
+
+const reasonSchema = z.string().trim().min(MIN_REASON_LENGTH).max(MAX_REASON_LENGTH);
+
+const forceCloseSchema = z.object({ reason: reasonSchema });
+const reopenSchema = z.object({ reason: reasonSchema });
+const assignSchema = z.object({
+  floristId: uuid,
+  reason: reasonSchema.optional(),
+});
+const assembleSchema = z.object({
+  /** Версия процесса, которую видел флорист: чужое изменение обязано отказать. */
+  expectedProcessVersion: z.number().int().min(0),
+});
+
+const printQuerySchema = z.object({
+  filter: z.enum(['attention', 'printed', 'all']).default('attention'),
+  limit: z.coerce.number().int().min(1).max(MAX_PRINT_JOBS).default(50),
+});
+
+export interface FloristRouteDeps {
+  db: Database;
+  config: AppConfig;
+  /**
+   * Клиент МоегоСклада для проксирования фотографий.
+   *
+   * `undefined` означает «собрать из конфигурации», `null` — «интеграции нет».
+   * Явный `null` нужен тестам: ни одного сетевого обращения оттуда быть не должно.
+   */
+  moysklad?: MoyskladClient | null;
+}
+
+interface IncomingRequest {
+  ip: string;
+  headers: { authorization?: string | undefined; 'user-agent'?: string | undefined };
+}
+
+function contextOf(request: IncomingRequest): RequestContext {
+  const userAgent = request.headers['user-agent'];
+  return {
+    ip: request.ip,
+    userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 255) : null,
+  };
+}
+
+/**
+ * Клиент интеграции.
+ *
+ * Без токена клиент не создаётся вовсе: так ни одно обращение к МоемуСкладу
+ * физически невозможно в окружении, где интеграция не настроена.
+ */
+function resolveClient(deps: FloristRouteDeps): MoyskladClient | null {
+  if (deps.moysklad !== undefined) {
+    return deps.moysklad;
+  }
+  if (deps.config.MOYSKLAD_TOKEN === undefined) {
+    return null;
+  }
+  return new MoyskladClient({
+    config: { baseUrl: MOYSKLAD_BASE_URL, token: deps.config.MOYSKLAD_TOKEN, ids: MOYSKLAD_IDS },
+  });
+}
+
+export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDeps): Promise<void> {
+  const client = resolveClient(deps);
+
+  // --- Смена ----------------------------------------------------------------
+
+  app.get('/api/florist/shift', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    return { shift: await ownShift(deps.db, actor.userId) };
+  });
+
+  app.post('/api/florist/shift/start', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    return startShift(deps.db, actor, contextOf(request));
+  });
+
+  app.post('/api/florist/shift/close', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    return { shift: await closeOwnShift(deps.db, actor, contextOf(request)) };
+  });
+
+  /** Кто сейчас работает. Нужен администратору, чтобы понять, кому назначать. */
+  app.get('/api/florist/shifts', async (request) => {
+    await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
+    return { items: await listActiveShifts(deps.db) };
+  });
+
+  app.get('/api/florist/florists', async (request) => {
+    await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
+    return { items: await listAssignableFlorists(deps.db) };
+  });
+
+  app.post('/api/florist/shifts/:id/force-close', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = forceCloseSchema.parse(request.body);
+
+    return forceCloseShift(
+      deps.db,
+      actor,
+      { shiftId: id, reason: body.reason },
+      contextOf(request),
+    );
+  });
+
+  // --- Очередь и карточка ---------------------------------------------------
+
+  app.get('/api/florist/queue', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const query = queueQuerySchema.parse(request.query);
+
+    return readQueue(
+      deps.db,
+      { userId: actor.userId },
+      {
+        day: query.day,
+        scope: query.scope,
+        includeAssigned: query.all === 'true',
+      },
+    );
+  });
+
+  app.get('/api/florist/orders/:id', async (request) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return { card: await readOrderCard(deps.db, id) };
+  });
+
+  app.post('/api/florist/orders/:id/claim', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return claimOrder(deps.db, actor, id, contextOf(request));
+  });
+
+  app.post('/api/florist/orders/:id/release', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return releaseOrder(deps.db, actor, id, contextOf(request));
+  });
+
+  app.post('/api/florist/orders/:id/assign', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = assignSchema.parse(request.body);
+
+    return reassignOrder(
+      deps.db,
+      actor,
+      { orderId: id, floristId: body.floristId, reason: body.reason ?? null },
+      contextOf(request),
+    );
+  });
+
+  app.post('/api/florist/orders/:id/assemble', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = assembleSchema.parse(request.body);
+
+    return assembleOrder(
+      deps.db,
+      actor,
+      { orderId: id, expectedProcessVersion: body.expectedProcessVersion },
+      contextOf(request),
+    );
+  });
+
+  app.post('/api/florist/orders/:id/reopen', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = reopenSchema.parse(request.body);
+
+    return reopenOrder(deps.db, actor, { orderId: id, reason: body.reason }, contextOf(request));
+  });
+
+  /**
+   * Фотография номенклатуры.
+   *
+   * Байты проходят насквозь и нигде не сохраняются. Ответ не кэшируется и не
+   * раскрывает источник; отсутствующее фото — обычный 404, который карточка
+   * показывает как «Фото отсутствует».
+   */
+  app.get('/api/florist/assortment/:id/photo', async (request, reply) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    const photo = await requirePhoto({ db: deps.db, client }, id);
+
+    return (
+      reply
+        .header('content-type', photo.contentType)
+        .header('cache-control', 'no-store')
+        .header('x-content-type-options', 'nosniff')
+        // Показ, а не загрузка файла: имя источника наружу не уходит.
+        .header('content-disposition', 'inline')
+        .send(Buffer.from(photo.bytes))
+    );
+  });
+
+  // --- Печать ---------------------------------------------------------------
+
+  app.get('/api/florist/print-jobs', async (request) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const query = printQuerySchema.parse(request.query);
+    return { items: await listPrintJobs(deps.db, { filter: query.filter, limit: query.limit }) };
+  });
+
+  app.post('/api/florist/print-jobs/:id/retry', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return { job: await retryPrint(deps.db, actor, id, contextOf(request)) };
+  });
+
+  app.post('/api/florist/print-jobs/:id/printed', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return { job: await markPrinted(deps.db, actor, id, contextOf(request)) };
+  });
+
+  app.get('/api/florist/print-jobs/:id/document.pdf', async (request, reply) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const document = await renderJobDocument(deps.db, id);
+    return sendPdf(reply, document);
+  });
+
+  app.get('/api/florist/orders/:id/print-form.pdf', async (request, reply) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const document = await renderOrderDocument(deps.db, id);
+    return sendPdf(reply, document);
+  });
+}
+
+/** Единственное место, где формируются заголовки печатного документа. */
+function sendPdf(
+  reply: {
+    header: (name: string, value: string) => typeof reply;
+    send: (payload: Buffer) => unknown;
+  },
+  document: { bytes: Uint8Array; fileName: string },
+): unknown {
+  return (
+    reply
+      .header('content-type', 'application/pdf')
+      // Имя файла — только номер заказа: ни адреса, ни получателя.
+      .header('content-disposition', `attachment; filename="${document.fileName}"`)
+      // Бланк содержит состав заказа: копии в кэше прокси быть не должно.
+      .header('cache-control', 'no-store')
+      .header('x-content-type-options', 'nosniff')
+      .send(Buffer.from(document.bytes))
+  );
+}

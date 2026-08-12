@@ -179,6 +179,28 @@ export class ApiClient {
   }
 
   /**
+   * Двоичный ответ: печатный бланк и проксированная фотография.
+   *
+   * Как и `getText`, существует потому, что документ нельзя открыть обычной
+   * ссылкой: токен живёт только в памяти и в заголовке, а `src`/`href` ушли бы
+   * без него и получили 401. Ответ отдаётся `Blob`: содержимое не попадает
+   * ни в состояние приложения, ни в хранилище.
+   */
+  async getBlob(path: string, accept: string): Promise<Blob> {
+    const response = await this.#requestWithRetry(
+      path,
+      { method: 'GET', headers: { accept } },
+      true,
+    );
+
+    if (!response.ok) {
+      throw await toApiError(response);
+    }
+
+    return response.blob();
+  }
+
+  /**
    * Открывает поток событий.
    *
    * Нативный EventSource не используется: он не позволяет передать заголовок

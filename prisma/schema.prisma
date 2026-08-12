@@ -116,6 +116,12 @@ model User {
   routeEditLeases    RouteEditLease[]
   geoChanges         OrderGeoHistory[]
 
+  floristShifts       FloristShift[]  @relation("FloristShiftUser")
+  closedFloristShifts FloristShift[]  @relation("FloristShiftClosedBy")
+  assignedFulfillment DeliveryOrder[] @relation("OrderFulfillmentAssignee")
+  assembledOrders     DeliveryOrder[] @relation("OrderFulfillmentAssembledBy")
+  completedPrintJobs  OrderPrintJob[] @relation("PrintJobCompletedBy")
+
   createdDepots     Depot[]                @relation("DepotCreatedBy")
   requestedPlanRuns RoutePlanRun[]         @relation("PlanRunRequestedBy")
   appliedPlanRuns   RoutePlanRun[]         @relation("PlanRunAppliedBy")
@@ -631,6 +637,33 @@ model DeliveryOrder {
   fulfillmentPendingCardText        String?
   fulfillmentPendingExternalUpdated DateTime?
 
+  /// Производственный процесс флориста: кто собирает и на каком шаге заказ.
+  ///
+  /// Отделён от импорта намеренно. Импорт владеет составом и снимком, процесс —
+  /// назначением и сборкой. Общая колонка `version` принадлежит синхронизации
+  /// и растёт при каждом внешнем изменении; конкурентный захват заказа обязан
+  /// опираться на собственный счётчик, иначе обычный delta-проход отменял бы
+  /// действие флориста как «устаревшую версию».
+  fulfillmentProcessState   OrderFulfillmentProcessState @default(NEW)
+  fulfillmentProcessVersion Int                          @default(0)
+
+  /// Единственный флорист, за которым закреплён заказ.
+  fulfillmentAssigneeId String? @db.Uuid
+  fulfillmentAssignee   User?   @relation("OrderFulfillmentAssignee", fields: [fulfillmentAssigneeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fulfillmentAssignedAt DateTime?
+  /// Смена, в которой заказ взят. Нужна принудительному завершению смены:
+  /// оно обязано найти незакрытые назначения, а не потерять их.
+  fulfillmentShiftId    String?       @db.Uuid
+  fulfillmentShift      FloristShift? @relation("OrderFulfillmentShift", fields: [fulfillmentShiftId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  fulfillmentAssembledAt   DateTime?
+  fulfillmentAssembledById String?   @db.Uuid
+  fulfillmentAssembledBy   User?     @relation("OrderFulfillmentAssembledBy", fields: [fulfillmentAssembledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Ревизия состава, по которой заказ фактически собран. По ней же построен
+  /// печатный бланк, и она же сравнивается при последующих изменениях.
+  fulfillmentAssembledRevisionId String?                   @db.Uuid
+  fulfillmentAssembledRevision   OrderFulfillmentRevision? @relation("OrderAssembledRevision", fields: [fulfillmentAssembledRevisionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   /// Оптимистическая блокировка для будущих конкурентных изменений.
   version   Int      @default(0)
   createdAt DateTime @default(now())
@@ -643,6 +676,8 @@ model DeliveryOrder {
   fulfillmentPositions DeliveryOrderPosition[]
   fulfillmentRevisions OrderFulfillmentRevision[]
   placements           OrderPlacement[]
+  printForms           OrderPrintForm[]
+  printJobs            OrderPrintJob[]
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
@@ -651,6 +686,10 @@ model DeliveryOrder {
   @@index([storeId, deliveryMethodId])
   /// Очередь дозагрузки состава: выбираются производственные заказы не в READY.
   @@index([fulfillmentInScope, fulfillmentCompositionState])
+  /// Очередь флориста: производственная область, день доставки, шаг процесса.
+  @@index([fulfillmentInScope, deliveryDate, fulfillmentProcessState], map: "DeliveryOrder_fulfillmentProcess_idx")
+  /// «Мои заказы» и поиск незавершённых назначений при завершении смены.
+  @@index([fulfillmentAssigneeId, fulfillmentProcessState], map: "DeliveryOrder_fulfillmentAssignee_idx")
 }
 
 /// Неизменяемая история внешних версий заказа.
@@ -809,8 +848,145 @@ model OrderFulfillmentRevision {
   changedFields String[]
   reason        OrderFulfillmentRevisionReason
 
+  printForms    OrderPrintForm[]
+  assembledFrom DeliveryOrder[] @relation("OrderAssembledRevision")
+
   @@index([orderId, receivedAt])
   @@index([orderId, snapshotHash])
+}
+
+// --- Смена, сборка и печать флориста -----------------------------------------
+
+/// Как закрылась смена флориста.
+enum FloristShiftCloseKind {
+  /// Флорист закрыл смену сам.
+  SELF
+  /// Администратор завершил смену принудительно, с обязательной причиной.
+  ADMIN_FORCED
+}
+
+/// Производственное состояние заказа у флориста.
+///
+/// Отдельного состояния «Назначен» нет намеренно: «Взять в работу» одной
+/// операцией закрепляет заказ и переводит его в сборку (`FUL-002`).
+enum OrderFulfillmentProcessState {
+  /// Заказ никто не взял.
+  NEW
+  /// Заказ закреплён за флористом и собирается.
+  IN_ASSEMBLY
+  /// Сборка завершена.
+  ASSEMBLED
+  /// Производственные данные изменились ПОСЛЕ завершения сборки.
+  ///
+  /// Складскую приёмку это состояние не блокирует: физически переданный заказ
+  /// обязан быть учтён (`FUL-002` §2.6).
+  NEEDS_REVIEW
+}
+
+/// Состояние задания печати бланка.
+enum PrintJobState {
+  PENDING
+  PRINTED
+  ERROR
+}
+
+/// Смена флориста.
+///
+/// Одновременно активная смена у пользователя ровно одна. Инвариант держит
+/// база: `activeKey` равен идентификатору пользователя, пока смена открыта,
+/// и обнуляется при закрытии. Уникальный индекс по нему даёт «не более одной
+/// активной смены» без частичных индексов — тот же приём, что у одноразового
+/// кода активации: NULL в PostgreSQL друг с другом не конфликтуют.
+model FloristShift {
+  id     String @id @default(uuid(7)) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation("FloristShiftUser", fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  startedAt DateTime  @default(now())
+  closedAt  DateTime?
+
+  /// Равен `userId`, пока смена активна. После закрытия — `null`.
+  activeKey String? @unique @db.Uuid
+
+  closeKind   FloristShiftCloseKind?
+  /// Кто закрыл. У принудительного закрытия это администратор.
+  closedById  String?                @db.Uuid
+  closedBy    User?                  @relation("FloristShiftClosedBy", fields: [closedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Причина администратора. Для `ADMIN_FORCED` обязательна (CHECK базы).
+  closeReason String?
+
+  assignments DeliveryOrder[] @relation("OrderFulfillmentShift")
+
+  @@index([userId, startedAt])
+  @@index([closedAt])
+}
+
+/// Неизменяемый снимок печатного бланка.
+///
+/// PDF собирается ИЗ НЕГО, а не из живого заказа. Иначе повторная печать после
+/// изменения заказа выдала бы другой бланк под тем же номером, и к букету
+/// оказался бы приложен документ, которого никто не собирал.
+///
+/// Адреса, телефона, цены и фотографий здесь нет: бланк их не показывает
+/// (`FUL-002` §2.5), а значит и хранить их в снимке незачем.
+model OrderPrintForm {
+  id      String        @id @default(uuid(7)) @db.Uuid
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Производственная ревизия, использованная при сборке.
+  revisionId String                   @db.Uuid
+  revision   OrderFulfillmentRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Версия шаблона бланка. Меняется вместе с формой, чтобы старый бланк
+  /// оставался воспроизводимым ровно таким, каким его печатали.
+  templateVersion Int
+
+  /// Данные бланка: номер, московские дата и интервал, состав, текст открытки
+  /// и нижний комментарий. Только перечисленное.
+  snapshot     Json
+  snapshotHash String
+
+  createdAt DateTime @default(now())
+
+  jobs OrderPrintJob[]
+
+  @@index([orderId, createdAt])
+}
+
+/// Задание печати бланка.
+///
+/// Повторная печать создаёт НОВОЕ задание по тому же снимку, а не переписывает
+/// прежнее: история попыток — часть доказательства того, что бланк вообще
+/// печатали. Состояние «Собран» от печати не зависит и ею не откатывается.
+model OrderPrintJob {
+  id      String        @id @default(uuid(7)) @db.Uuid
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  printFormId String         @db.Uuid
+  printForm   OrderPrintForm @relation(fields: [printFormId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  state PrintJobState @default(PENDING)
+  /// Номер попытки для заказа, начиная с 1.
+  attempt Int
+
+  /// Печать подтверждена человеком: в MVP это штатный путь, а не отказ.
+  /// Windows-службы бездиалоговой печати в этом срезе нет.
+  completedAt   DateTime?
+  completedById String?   @db.Uuid
+  completedBy   User?     @relation("PrintJobCompletedBy", fields: [completedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Безопасный короткий код последней ошибки. Ни состава, ни PII.
+  lastErrorCode String?
+  lastErrorAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orderId, attempt])
+  @@index([state, createdAt])
+  @@index([orderId, createdAt])
 }
 
 /// Курсор фоновой синхронизации. Отделён от `IntegrationStatus.details`:

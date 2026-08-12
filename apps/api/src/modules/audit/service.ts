@@ -109,6 +109,26 @@ export const AUDIT_ACTIONS = [
   'ORDER_FULFILLMENT_IMPORTED',
   'ORDER_FULFILLMENT_CHANGED',
   'ORDER_FULFILLMENT_UNAVAILABLE',
+  // Смена флориста (этап 6.3). В записи — идентификаторы смены и пользователя,
+  // способ закрытия и причина администратора. Причина пишется намеренно: она
+  // единственное, что объясняет флористу, почему смену закрыли за него.
+  'FLORIST_SHIFT_STARTED',
+  'FLORIST_SHIFT_CLOSED',
+  'FLORIST_SHIFT_FORCE_CLOSED',
+  // Производственный процесс заказа: автор — человек. Ни состава, ни текстов,
+  // ни номера заказа: только идентификаторы, состояния, версии и причина.
+  'ORDER_FULFILLMENT_CLAIMED',
+  'ORDER_FULFILLMENT_RELEASED',
+  'ORDER_FULFILLMENT_REASSIGNED',
+  'ORDER_FULFILLMENT_ASSEMBLED',
+  'ORDER_FULFILLMENT_REOPENED',
+  // Производственные данные изменились ПОСЛЕ сборки. Автор — синхронизация.
+  'ORDER_FULFILLMENT_REVIEW_REQUIRED',
+  // Печать бланка. Байты PDF и содержимое снимка в аудит не попадают:
+  // только идентификаторы задания и формы, номер попытки и состояние.
+  'ORDER_PRINT_JOB_CREATED',
+  'ORDER_PRINT_JOB_RETRIED',
+  'ORDER_PRINT_JOB_PRINTED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

@@ -1723,6 +1723,7 @@ describe('операторские команды', () => {
    */
   const OPERATOR_COMMANDS = [
     'bootstrap:admin',
+    'logistics:pilot',
     'moysklad:sync-once',
     'snapshot:import',
     'snapshot:retire',

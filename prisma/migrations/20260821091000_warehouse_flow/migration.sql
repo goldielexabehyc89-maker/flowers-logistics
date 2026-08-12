@@ -108,8 +108,10 @@ ALTER TABLE "RouteCellBinding" ADD CONSTRAINT "RouteCellBinding_releasedById_fke
 -- Обычный внешний ключ этого выразить не умеет, а проверка в коде обходится
 -- одним запросом. Тип продублирован колонкой и закреплён CHECK, поэтому
 -- «ячейка хранения назначена маршрутным листом» физически невозможна.
+-- Имя ключа — не вкусовщина: Prisma выводит его из колонок, и собственное
+-- название дало бы вечное расхождение схемы с миграциями на пустом месте.
 ALTER TABLE "RouteCellBinding"
-  ADD CONSTRAINT "RouteCellBinding_cell_fkey"
+  ADD CONSTRAINT "RouteCellBinding_cellId_cellKind_fkey"
   FOREIGN KEY ("cellId", "cellKind") REFERENCES "StorageCell"("id", "kind")
   ON DELETE RESTRICT ON UPDATE RESTRICT;
 
