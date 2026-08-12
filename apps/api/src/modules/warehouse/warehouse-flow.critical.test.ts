@@ -1076,6 +1076,14 @@ describe('частичная выдача и смена курьера', () => {
     });
     expect(await activeCellOf(orders[0]?.id ?? '')).toBeNull();
 
+    // Карточка между сессиями обязана помнить выданное: открытой сессии нет,
+    // но заказ у курьера, и экран не имеет права звать его к выдаче заново.
+    const between = await getRouteFlow(ctx.db, route.id);
+    expect(between?.issueSession).toBeNull();
+    expect(between?.orders.filter((row) => row.issued).map((row) => row.orderId)).toEqual([
+      orders[0]?.id,
+    ]);
+
     // 6. Курьер B подтверждён; повтор первого QR идемпотентен и даёт 1/3.
     await confirmCourier(flow, actor, route.id, { courierUserId: courierB.id }, CONTEXT);
     const repeat = await issueOrder(
@@ -1128,6 +1136,12 @@ describe('частичная выдача и смена курьера', () => {
     expect(
       await ctx.db.routeStateTransition.count({ where: { routeId: route.id, toState: 'ACTIVE' } }),
     ).toBe(1);
+
+    // Карточка завершённого маршрута считает выданными все три заказа, хотя
+    // открытой сессии больше нет: клиентский прогресс строится на этом поле.
+    const done = await getRouteFlow(ctx.db, route.id);
+    expect(done?.state).toBe('ACTIVE');
+    expect(done?.orders.every((row) => row.issued)).toBe(true);
 
     // 8. Логистическое чтение показывает ACTIVE и не теряет лист.
     const token = await tokenFor(['LOGISTICIAN']);

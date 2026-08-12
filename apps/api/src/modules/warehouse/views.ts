@@ -174,15 +174,22 @@ export async function getRouteFlow(db: Database, routeId: string): Promise<Route
   const routeCell = route.cellBindings[0]?.cell ?? null;
   const session = route.issueSessions[0] ?? null;
 
+  // Выданность считается по маршруту, а не по открытой сессии: коробка не
+  // возвращается на склад оттого, что сессию отменили, а после перехода в
+  // ACTIVE открытой сессии уже нет. Определение то же, что у прогресса в
+  // route-flow.ts, иначе экран и ответ на скан разошлись бы.
   const issuedIds = new Set<string>();
-  if (session !== null) {
-    const issued = await db.orderPlacement.findMany({
-      where: { issueSessionId: session.id, releaseReason: 'ISSUED_TO_COURIER' },
-      select: { orderId: true },
-    });
-    for (const row of issued) {
-      issuedIds.add(row.orderId);
-    }
+  const issued = await db.orderPlacement.findMany({
+    where: {
+      releaseReason: 'ISSUED_TO_COURIER',
+      issueSession: { routeId: route.id },
+      order: { routeOrders: { some: { routeId: route.id, removedAt: null } } },
+    },
+    select: { orderId: true },
+    distinct: ['orderId'],
+  });
+  for (const row of issued) {
+    issuedIds.add(row.orderId);
   }
 
   const orders: RouteFlowOrderView[] = route.orders.map((participation) => {
