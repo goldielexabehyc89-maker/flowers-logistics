@@ -1062,4 +1062,13 @@ test('склад: приёмка → комплектование → пауза
   );
   await expect(page.getByTestId('wh-route-active')).toBeVisible();
   await expect(page.getByTestId('wh-route-cell')).toHaveText('не привязана');
+
+  // 6. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
+  // что именно он повёз, — но уже без изменяющих действий.
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  const activeRow = page.locator('.routes__list-item', { hasText: routeNumber });
+  await expect(activeRow).toContainText('Передан курьеру');
+  await activeRow.getByRole('button', { name: 'Открыть лист' }).click();
+  await expect(page.locator('.sheet__footer')).toContainText('передан курьеру');
 });
