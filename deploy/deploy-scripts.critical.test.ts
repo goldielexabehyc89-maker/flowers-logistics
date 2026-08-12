@@ -1640,3 +1640,151 @@ describe('содержимое скриптов и Compose', () => {
     expect(makefile).not.toContain('ENV=');
   });
 });
+
+describe('часовые пояса окружения', () => {
+  /**
+   * У базы и у приложения РАЗНЫЕ пояса, и это не небрежность.
+   *
+   * База хранит абсолютную шкалу и потому работает в UTC: при московском поясе
+   * сервера значение, записанное самой базой, ложилось на три часа впереди
+   * соглашения «в колонке лежит UTC». Приложение остаётся московским, потому
+   * что московские у него «сегодня», интервалы и показ человеку (`TZ-001`).
+   *
+   * Выравнивание их в одну зону — самая вероятная будущая правка «для порядка»,
+   * и она молча вернула бы дефект. Поэтому проверяется именно различие.
+   */
+  const COMPOSE_FILES = ['docker-compose.yml', 'deploy/docker-compose.deploy.yml'];
+
+  /** Кусок YAML одного сервиса: от его имени до следующего на том же отступе. */
+  function serviceBlock(compose: string, name: string): string {
+    const pattern = new RegExp(
+      `\\n  ${name}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z0-9_-]*:\\n|\\nvolumes:|\\nnetworks:|$)`,
+    );
+    const match = pattern.exec(compose);
+    return match?.[1] ?? '';
+  }
+
+  it('база работает в UTC и задаёт его дважды: окружением и параметром запуска', async () => {
+    for (const file of COMPOSE_FILES) {
+      const compose = await readFile(path.join(REPO_ROOT, file), 'utf8');
+      const db = serviceBlock(compose, 'db');
+
+      expect(db, file).toContain('TZ: Etc/UTC');
+      expect(db, file).toContain('PGTZ: Etc/UTC');
+      // Переменных окружения мало: уже созданный том хранит собственный
+      // `timezone` в postgresql.conf, и его перекрывает только параметр запуска.
+      expect(db, file).toContain('timezone=UTC');
+      expect(db, file).toContain('log_timezone=UTC');
+      expect(db, file).not.toContain('Europe/Moscow');
+    }
+  });
+
+  it('приложение и вспомогательные сервисы остаются московскими', async () => {
+    for (const file of COMPOSE_FILES) {
+      const compose = await readFile(path.join(REPO_ROOT, file), 'utf8');
+
+      for (const service of ['app', 'valhalla', 'vroom']) {
+        const block = serviceBlock(compose, service);
+        if (block === '') {
+          continue;
+        }
+        expect(block, `${file}/${service}`).toContain('TZ: Europe/Moscow');
+      }
+    }
+  });
+
+  it('пояса базы и приложения не выравниваются в одну зону', async () => {
+    for (const file of COMPOSE_FILES) {
+      const compose = await readFile(path.join(REPO_ROOT, file), 'utf8');
+      const db = serviceBlock(compose, 'db');
+      const app = serviceBlock(compose, 'app');
+
+      const zoneOf = (block: string): string => /TZ: (\S+)/.exec(block)?.[1] ?? '';
+      expect(zoneOf(db), file).not.toBe('');
+      expect(zoneOf(app), file).not.toBe('');
+      expect(zoneOf(db), file).not.toBe(zoneOf(app));
+    }
+  });
+});
+
+describe('операторские команды', () => {
+  /**
+   * Команда ручного прохода запускается ВНУТРИ production-образа.
+   *
+   * Там нет ни TS-исходников, ни `tsx`, ни доступа к реестру npm. Прежняя
+   * формулировка ссылалась на исходник, падала с `tsx: not found`, и первый
+   * живой проход пришлось выполнять в обход документации.
+   */
+  /**
+   * Все операторские команды одного класса: оператор запускает их внутри
+   * production-образа, где нет ни исходников, ни `tsx`, ни devDependencies,
+   * ни сети npm. Проверяется весь класс сразу, иначе следующая команда
+   * повторит ту же историю.
+   */
+  const OPERATOR_COMMANDS = [
+    'bootstrap:admin',
+    'moysklad:sync-once',
+    'snapshot:import',
+    'snapshot:retire',
+  ];
+
+  async function packageScripts(): Promise<Record<string, string>> {
+    const parsed = JSON.parse(await readFile(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    return parsed.scripts;
+  }
+
+  it('каждая операторская команда запускает собранный файл, а не исходник', async () => {
+    const scripts = await packageScripts();
+
+    for (const name of OPERATOR_COMMANDS) {
+      const command = scripts[name] ?? '';
+      expect(command, name).toMatch(/^node apps\/api\/dist\/scripts\/[a-z-]+\.js$/);
+      expect(command, name).not.toContain('tsx');
+      expect(command, name).not.toContain('apps/api/src/');
+    }
+  });
+
+  it('исходный вариант каждой команды назван явным суффиксом :dev', async () => {
+    const scripts = await packageScripts();
+
+    for (const name of OPERATOR_COMMANDS) {
+      const dev = scripts[`${name}:dev`] ?? '';
+      expect(dev, name).toContain('tsx');
+      expect(dev, name).toContain('apps/api/src/scripts/');
+    }
+  });
+
+  it('у каждого dist-пути есть исходник, который туда собирается', async () => {
+    const scripts = await packageScripts();
+
+    for (const name of OPERATOR_COMMANDS) {
+      const distPath = (scripts[name] ?? '').replace('node ', '');
+      const sourcePath = distPath.replace('/dist/', '/src/').replace(/\.js$/, '.ts');
+
+      // Путь в команде не выдуман: у него есть исходник, из которого build
+      // положит файл ровно туда.
+      await expect(readFile(path.join(REPO_ROOT, sourcePath), 'utf8'), name).resolves.toContain(
+        'async function main',
+      );
+      // И именно этот исходник указан в `:dev`-варианте.
+      expect(scripts[`${name}:dev`], name).toContain(sourcePath);
+    }
+  });
+
+  it('проверка образа в CI запускает все четыре команды', async () => {
+    const workflow = await readFile(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+
+    // Команды запускаются одной общей функцией через `npm run --silent`,
+    // поэтому проверяется и она, и вызов для каждой из четырёх.
+    expect(workflow).toContain('npm run --silent "$1"');
+    for (const name of OPERATOR_COMMANDS) {
+      expect(workflow, name).toContain(`check '${name}'`);
+    }
+    // И запрещает именно те отказы, ради которых проверка существует.
+    for (const failure of ['tsx: not found', 'MODULE_NOT_FOUND', 'Cannot find module']) {
+      expect(workflow, failure).toContain(failure);
+    }
+  });
+});

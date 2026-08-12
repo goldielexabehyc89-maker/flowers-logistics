@@ -5,21 +5,18 @@
  * У такой колонки нет собственного часового пояса — есть только соглашение,
  * какое время в неё кладут. Соглашение проекта: там лежит UTC.
  *
- * Соглашение соблюдает приложение: Prisma отправляет `Date` как UTC-момент
- * и читает его обратно тем же моментом. Но сама база при записи `CURRENT_TIMESTAMP`
- * в такую колонку приводит значение к ЧАСОВОМУ ПОЯСУ СЕССИИ. Контейнер базы
- * инициализирован с `TZ=Europe/Moscow`, поэтому серверный пояс — московский,
- * и значение, записанное базой, оказывается на три часа впереди.
+ * Раньше соглашение держалось на одном лишь приложении. Сервер базы работал
+ * в московском поясе, и значение, записанное самой базой (`CURRENT_TIMESTAMP`,
+ * `now()`), ложилось на три часа впереди соглашения; ручной SQL при этом
+ * показывал ложный сдвиг у совершенно исправных строк.
  *
- * Отсюда правило, которое и охраняет этот тест: **время в колонки пишет
- * приложение, а не база**. `DEFAULT CURRENT_TIMESTAMP` в схеме остаётся, но
- * до него не доходит ни один продуктовый путь — Prisma подставляет значение
- * сама. Любая новая сырая вставка, забывшая колонку времени, промахнётся
- * на величину смещения сессии, и заметить это по данным почти невозможно.
+ * Теперь пояс сервера задан явно: `timezone=UTC` в параметрах запуска и
+ * `TZ`/`PGTZ=Etc/UTC` в окружении контейнера. Обе шкалы совпали, и тест это
+ * требует, а не описывает: ненулевое смещение сессии больше не легализуется.
  *
- * Тест сформулирован так, чтобы остаться верным и после возможного перевода
- * серверного пояса на UTC: он сравнивает промах не с «тремя часами», а
- * с фактическим смещением сессии.
+ * Бизнес-пояс приложения при этом остаётся московским — это другой уровень
+ * контракта (`docs/OWNER_DECISIONS.md`, `TZ-001`): база хранит абсолютную
+ * шкалу, а «сегодня» и показ человеку считает приложение.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -80,12 +77,10 @@ describe('шкала времени в базе', () => {
     expect(Math.abs(skew)).toBeLessThan(60_000);
   });
 
-  it('запись самой базой промахивается ровно на смещение сессии', async () => {
-    // Это и есть известный модельный дефект: naive-колонка получает местное
-    // время сессии, а приложение читает её как UTC. Тест не «проверяет
-    // дефект ради дефекта» — он не даёт незаметно начать полагаться на
-    // серверные значения времени и ломается, если смещение изменится.
-    const offset = await sessionOffsetMs();
+  it('запись самой базой попадает в ту же шкалу, что и запись приложением', async () => {
+    // Прежде здесь был промах в три часа: naive-колонка получала местное время
+    // сессии, а приложение читало её как UTC. После явного UTC у сервера обе
+    // записи обязаны лечь на одну шкалу.
     const key = `time.raw.${randomUUID()}`;
     const before = Date.now();
 
@@ -100,24 +95,55 @@ describe('шкала времени в базе', () => {
     });
 
     const skew = stored.createdAt.getTime() - before;
-    // Промах равен смещению сессии: при московском поясе это три часа,
-    // при UTC — ноль. Обе конфигурации описываются одним правилом.
-    expect(Math.abs(skew - offset)).toBeLessThan(60_000);
+    // Запас на сеть и планировщик, но заведомо меньше любого часового смещения.
+    expect(Math.abs(skew)).toBeLessThan(60_000);
   });
 
-  it('часовой пояс сессии приложения назван явно, а не подразумевается', async () => {
+  it('пояс сессии базы — UTC, а не «какой получился»', async () => {
     const rows = await db.$queryRaw<{ tz: string }[]>`SELECT current_setting('TimeZone') AS tz`;
     const timeZone = rows[0]?.tz ?? '';
 
-    // Значение не проверяется на равенство: оно задаётся окружением базы.
-    // Важно другое — оно известно тесту и участвует в проверке выше.
-    expect(timeZone).not.toBe('');
-    const offset = await sessionOffsetMs();
-    if (timeZone === 'UTC' || timeZone === 'Etc/UTC') {
-      expect(offset).toBe(0);
-    } else {
-      expect(offset).not.toBe(0);
-    }
+    // Допускаются оба написания одной и той же зоны: `UTC` приходит из параметра
+    // запуска сервера, `Etc/UTC` — из окружения контейнера. Разными зонами
+    // они не являются, и это подтверждает нулевое смещение ниже.
+    expect(['UTC', 'Etc/UTC', 'GMT']).toContain(timeZone);
+    expect(await sessionOffsetMs()).toBe(0);
+  });
+
+  it('три источника значения дают одну абсолютную шкалу', async () => {
+    // Один и тот же момент, записанный тремя разными путями, обязан совпасть
+    // с точностью до задержки запроса. Именно это свойство и ломалось раньше.
+    const explicitKey = `time.three.explicit.${randomUUID()}`;
+    const defaultKey = `time.three.default.${randomUUID()}`;
+    const rawKey = `time.three.raw.${randomUUID()}`;
+    const known = new Date('2026-08-12T09:00:00.000Z');
+
+    await db.outboxMessage.create({
+      data: { topic: 'test.ping', idempotencyKey: explicitKey, payload: {}, createdAt: known },
+    });
+    const byDefault = await db.outboxMessage.create({
+      data: { topic: 'test.ping', idempotencyKey: defaultKey, payload: {} },
+      select: { createdAt: true },
+    });
+    await db.$executeRaw`
+      INSERT INTO "OutboxMessage" ("id", "topic", "idempotencyKey", "payload", "updatedAt")
+      VALUES (gen_random_uuid(), 'test.ping', ${rawKey}, '{}'::jsonb, CURRENT_TIMESTAMP)
+    `;
+    const byRaw = await db.outboxMessage.findUniqueOrThrow({
+      where: { idempotencyKey: rawKey },
+      select: { createdAt: true },
+    });
+    const explicit = await db.outboxMessage.findUniqueOrThrow({
+      where: { idempotencyKey: explicitKey },
+      select: { createdAt: true },
+    });
+
+    // Явный инстант не сдвинулся ни на миллисекунду.
+    expect(explicit.createdAt.toISOString()).toBe(known.toISOString());
+    // Значение Prisma и значение базы отличаются только временем выполнения.
+    expect(Math.abs(byRaw.createdAt.getTime() - byDefault.createdAt.getTime())).toBeLessThan(
+      60_000,
+    );
   });
 
   it('календарная дата не зависит ни от пояса сессии, ни от пояса процесса', async () => {
