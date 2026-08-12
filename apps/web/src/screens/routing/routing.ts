@@ -7,6 +7,8 @@
  * остановки вверх или вниз.
  */
 
+import { formatCalendarDate, moscowToday } from '@fl/shared';
+
 export type RouteState = 'DRAFT' | 'CONFIRMED' | 'CANCELLED';
 export type VehicleType = 'CAR' | 'FOOT';
 
@@ -219,18 +221,18 @@ export function moveWithin(ids: readonly string[], id: string, direction: -1 | 1
   return next;
 }
 
-/** Текущая календарная дата Москвы: сервер по умолчанию работает с ней же. */
-export function moscowToday(now: Date = new Date()): string {
-  return new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
+/**
+ * Время экрана берётся из общего модуля.
+ *
+ * Прежде здесь лежала собственная копия «плюс три часа»; вторая такая же жила
+ * на экране сделок. Копии расходятся молча, поэтому остались только имена,
+ * привычные этому экрану.
+ */
+export { moscowToday };
 
 /** `2026-08-07` → `07.08.2026`. */
 export function formatDate(value: string | null): string {
-  if (value === null) {
-    return '—';
-  }
-  const parts = value.split('-');
-  return parts.length === 3 ? `${parts[2]}.${parts[1]}.${parts[0]}` : value;
+  return formatCalendarDate(value);
 }
 
 /** `600` → `10:00`. */

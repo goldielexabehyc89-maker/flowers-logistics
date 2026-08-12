@@ -9,6 +9,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import {
+  formatMoscowDateTime,
   ROLE_LABELS,
   USER_STATUS_LABELS,
   VEHICLE_TYPE_LABELS,
@@ -52,11 +53,7 @@ const STATUS_TONES: Record<UserStatus, StatusTone> = {
 };
 
 function formatDate(value: string): string {
-  return new Date(value).toLocaleString('ru-RU', {
-    timeZone: 'Europe/Moscow',
-    dateStyle: 'short',
-    timeStyle: 'short',
-  });
+  return formatMoscowDateTime(value);
 }
 
 type PendingConfirm =

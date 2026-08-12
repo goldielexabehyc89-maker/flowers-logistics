@@ -9,6 +9,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { formatMoscowDateTime } from '@fl/shared';
 import { useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
@@ -567,12 +568,7 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
             <ul className="routes__audit">
               {(history.data?.items ?? []).map((entry, index) => (
                 <li key={`${entry.occurredAt}-${index}`}>
-                  {new Date(entry.occurredAt).toLocaleString('ru-RU', {
-                    timeZone: 'Europe/Moscow',
-                    dateStyle: 'short',
-                    timeStyle: 'short',
-                  })}{' '}
-                  · {routeActionLabel(entry.action)}
+                  {formatMoscowDateTime(entry.occurredAt)} · {routeActionLabel(entry.action)}
                 </li>
               ))}
             </ul>
