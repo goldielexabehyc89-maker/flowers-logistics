@@ -46,8 +46,17 @@ export type FulfillmentOutcome =
   | 'IMPORTED'
   /** Снимок изменился: одна ревизия и замена проекции. */
   | 'CHANGED'
+  /**
+   * Тот же снимок подтверждён снова после временного отказа.
+   *
+   * Продуктовые данные не изменились, поэтому ни ревизии, ни аудита, ни события
+   * не создаётся: меняются только технические поля состояния.
+   */
+  | 'RESTORED'
   /** Состав подтвердить не удалось: проекция не тронута, заказ ждёт повтора. */
   | 'UNCONFIRMED'
+  /** Результат устарел: пока он готовился, пришла более новая версия заказа. */
+  | 'STALE'
   /** Заказа нет в базе: он не относится ни к одной области. */
   | 'SKIPPED';
 
@@ -61,18 +70,28 @@ export interface ApplyFulfillmentInput {
   /** `updated` заказа: контекст ревизии, но не признак изменения. */
   externalUpdated: Date;
   /**
-   * Тексты производственного снимка.
+   * Тексты внешней версии, к которой относится этот результат.
    *
-   * Сохраняются ВСЕГДА, в том числе когда состав подтвердить не удалось: они
-   * приходят вместе с карточкой заказа, уже проверены схемой и от позиций
-   * не зависят. Благодаря этому очередь дозагрузки читает только позиции
-   * и не тратит обращение на повторное чтение самого документа.
+   * При неподтверждённом составе они попадают в ОЖИДАЮЩИЕ поля, а не в
+   * подтверждённые: снимок — это тексты и состав вместе, и записать новые
+   * тексты рядом со старым составом значило бы собрать строку из двух версий.
    */
   texts: { description: string | null; cardText: string | null };
   /** Подтверждённый снимок либо `null`, если подтвердить состав не удалось. */
   snapshot: FulfillmentSnapshot | null;
   /** Безопасный код отказа. Данных заказа не содержит. */
   failure: string | null;
+  /**
+   * Версия, ожидавшая подтверждения на момент начала работы.
+   *
+   * Заполняется только очередью дозагрузки. Пока она ходила в сеть за позициями
+   * версии B, delta могла записать версию C — и результат B обязан быть
+   * отброшен, а не подтверждён как C и не затереть ожидающую C.
+   *
+   * `undefined` означает «проверка неприменима»: путь страницы сам держит
+   * блокировку строки всю транзакцию, и подменить версию под ним некому.
+   */
+  expectedPendingVersion?: Date | null;
 }
 
 interface StoredFulfillment {
@@ -80,6 +99,7 @@ interface StoredFulfillment {
   fulfillmentSnapshotHash: string | null;
   fulfillmentCompositionState: 'PENDING' | 'READY' | 'FAILED';
   fulfillmentCompositionAttempts: number;
+  fulfillmentPendingExternalUpdated: Date | null;
 }
 
 export async function applyFulfillmentSnapshot(
@@ -87,24 +107,43 @@ export async function applyFulfillmentSnapshot(
   input: ApplyFulfillmentInput,
   now: Date,
 ): Promise<ApplyFulfillmentResult> {
-  // Строка уже заблокирована `FOR UPDATE` применением логистического снимка
-  // в этой же транзакции, поэтому отдельная блокировка не берётся: тот же ключ
-  // из того же соединения не нужен, а лишний `FOR UPDATE` только удлинил бы
-  // удержание.
-  const order = (await tx.deliveryOrder.findUnique({
-    where: { externalId: input.externalId },
-    select: {
-      id: true,
-      fulfillmentSnapshotHash: true,
-      fulfillmentCompositionState: true,
-      fulfillmentCompositionAttempts: true,
-    },
-  })) as StoredFulfillment | null;
+  // Блокировка строки берётся здесь, а не подразумевается.
+  //
+  // На пути страницы строка уже заблокирована применением логистического
+  // снимка в этой же транзакции, и повторный `FOR UPDATE` того же ключа тем же
+  // соединением ничего не стоит. А вот очередь дозагрузки логистический снимок
+  // не применяет — без блокировки её проверка версии была бы чтением без
+  // защиты, то есть не проверкой вовсе.
+  const rows = await tx.$queryRaw<StoredFulfillment[]>`
+    SELECT "id",
+           "fulfillmentSnapshotHash",
+           "fulfillmentCompositionState",
+           "fulfillmentCompositionAttempts",
+           "fulfillmentPendingExternalUpdated"
+    FROM "DeliveryOrder"
+    WHERE "externalId" = ${input.externalId}::uuid
+    FOR UPDATE
+  `;
+  const order = rows[0] ?? null;
 
   if (order === null) {
     // Заказ чужого склада в базу не попадает вовсе — сохранять его состав
     // тем более незачем.
     return { outcome: 'SKIPPED', changedFields: [] };
+  }
+
+  // Защита от устаревшего результата. Сравниваются моменты версий, а не ссылки:
+  // `Date` из базы — новый объект при каждом чтении.
+  if (input.expectedPendingVersion !== undefined) {
+    const stored = order.fulfillmentPendingExternalUpdated;
+    const expected = input.expectedPendingVersion;
+    const same =
+      stored === null
+        ? expected === null
+        : expected !== null && stored.getTime() === expected.getTime();
+    if (!same) {
+      return { outcome: 'STALE', changedFields: [] };
+    }
   }
 
   if (input.snapshot === null) {
@@ -117,11 +156,17 @@ export async function applyFulfillmentSnapshot(
 /**
  * Состав подтвердить не удалось.
  *
- * Подтверждённая проекция НЕ затирается: последняя достоверная версия ценнее
- * свежей неполной. Но и состояние `READY` сохранить нельзя — заказ уже
- * пришёл delta-проходом, курсор уйдёт вперёд, и другого повода перечитать
- * его не будет. Поэтому состояние опускается до `PENDING`/`FAILED`, и
- * дозагрузка идёт по нему, а не по изменению `updated`.
+ * НИ ОДНО поле подтверждённой проекции не меняется: ни два текста, ни хеш,
+ * ни позиции, ни ревизия. Подтверждённый снимок — это тексты И состав вместе,
+ * поэтому записать сюда новые тексты значило бы собрать строку из двух внешних
+ * версий сразу и выдать её за целую.
+ *
+ * Новая версия сохраняется отдельно, в ожидающих полях: очереди дозагрузки
+ * этого достаточно, чтобы собрать снимок, не перечитывая документ заказа.
+ *
+ * Состояние `READY` при этом сохранить нельзя — заказ уже пришёл delta-проходом,
+ * курсор уйдёт вперёд, и другого повода перечитать его не будет. Дозагрузка
+ * идёт по состоянию, а не по изменению `updated`.
  */
 async function unconfirmed(
   tx: TransactionClient,
@@ -135,10 +180,11 @@ async function unconfirmed(
   await tx.deliveryOrder.update({
     where: { id: order.id },
     data: {
-      // Тексты сохраняются даже без состава: они не зависят от позиций, а их
-      // потеря означала бы, что дозагрузке пришлось бы перечитывать документ.
-      fulfillmentDescription: input.texts.description,
-      fulfillmentCardText: input.texts.cardText,
+      // Ожидающая версия целиком: два проверенных текста и её момент.
+      // Сырого ответа и JSON здесь нет.
+      fulfillmentPendingDescription: input.texts.description,
+      fulfillmentPendingCardText: input.texts.cardText,
+      fulfillmentPendingExternalUpdated: input.externalUpdated,
       fulfillmentCompositionState: state,
       fulfillmentCompositionAttempts: attempts,
       fulfillmentCompositionFailedAt: now,
@@ -158,6 +204,48 @@ async function unconfirmed(
   return { outcome: 'UNCONFIRMED', changedFields: [] };
 }
 
+/**
+ * Тот же снимок подтверждён снова.
+ *
+ * Ни ревизии, ни аудита, ни realtime: продуктовые данные не менялись, а
+ * уведомление «Заказ изменён» на неизменившемся заказе обесценивает само
+ * уведомление. Проекция не пересоздаётся — она уже равна снимку.
+ *
+ * Уже подтверждённое и целое состояние не переписывается вовсе: перекрытие
+ * delta-окна возвращает те же заказы каждые тридцать секунд, и «пустое»
+ * обновление шло бы потоком, трогая `updatedAt` без причины.
+ */
+async function restore(
+  tx: TransactionClient,
+  order: StoredFulfillment,
+  now: Date,
+): Promise<ApplyFulfillmentResult> {
+  const clean =
+    order.fulfillmentCompositionState === 'READY' &&
+    order.fulfillmentCompositionAttempts === 0 &&
+    order.fulfillmentPendingExternalUpdated === null;
+
+  if (clean) {
+    return { outcome: 'UNCHANGED', changedFields: [] };
+  }
+
+  await tx.deliveryOrder.update({
+    where: { id: order.id },
+    data: {
+      fulfillmentCompositionState: 'READY',
+      fulfillmentCompositionSyncedAt: now,
+      fulfillmentCompositionAttempts: 0,
+      fulfillmentCompositionFailedAt: null,
+      fulfillmentCompositionFailure: null,
+      fulfillmentPendingDescription: null,
+      fulfillmentPendingCardText: null,
+      fulfillmentPendingExternalUpdated: null,
+    },
+  });
+
+  return { outcome: 'RESTORED', changedFields: [] };
+}
+
 async function confirmed(
   tx: TransactionClient,
   order: StoredFulfillment,
@@ -168,12 +256,18 @@ async function confirmed(
   const hash = snapshotHash(snapshot);
   const first = order.fulfillmentSnapshotHash === null;
 
-  // Полная идемпотентность: тот же снимок при уже подтверждённом состоянии
-  // не пишет ничего — ни строки, ни ревизии, ни события. В том числе не трогает
-  // `updatedAt` заказа: перекрытие delta-окна возвращает те же заказы каждые
-  // тридцать секунд, и «пустое» обновление шло бы потоком.
-  if (hash === order.fulfillmentSnapshotHash && order.fulfillmentCompositionState === 'READY') {
-    return { outcome: 'UNCHANGED', changedFields: [] };
+  // СОВПАЛ ХЕШ — ПРОДУКТОВЫХ ИЗМЕНЕНИЙ НЕТ, И НЕВАЖНО, В КАКОМ МЫ СОСТОЯНИИ.
+  //
+  // Раньше здесь дополнительно требовалось состояние `READY`, и это было
+  // ошибкой. Последовательность «снимок A подтверждён → временный отказ
+  // позиций → повтор снова подтвердил A» давала вторую ревизию A с пустым
+  // списком изменений, запись `ORDER_FULFILLMENT_CHANGED` и realtime —
+  // то есть будущее уведомление «Заказ изменён» на заказе, который не менялся.
+  //
+  // Совпадение полного хеша означает, что тексты и состав те же самые.
+  // Восстановление — техническая запись, а не изменение.
+  if (hash === order.fulfillmentSnapshotHash) {
+    return restore(tx, order, now);
   }
 
   const previous = await previousSnapshot(tx, order.id);
@@ -184,6 +278,9 @@ async function confirmed(
   await tx.deliveryOrder.update({
     where: { id: order.id },
     data: {
+      // Подтверждённая версия становится целой одним движением: тексты, хеш
+      // и состав — в одной транзакции с очисткой ожидающих полей. Инвариант
+      // базы `READY_is_complete` не даст оставить их вместе.
       fulfillmentDescription: snapshot.description,
       fulfillmentCardText: snapshot.cardText,
       fulfillmentSnapshotHash: hash,
@@ -192,6 +289,9 @@ async function confirmed(
       fulfillmentCompositionAttempts: 0,
       fulfillmentCompositionFailedAt: null,
       fulfillmentCompositionFailure: null,
+      fulfillmentPendingDescription: null,
+      fulfillmentPendingCardText: null,
+      fulfillmentPendingExternalUpdated: null,
     },
   });
 

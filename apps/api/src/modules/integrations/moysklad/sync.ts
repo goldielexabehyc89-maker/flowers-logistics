@@ -351,7 +351,10 @@ async function applyRows(
     if (applied.fulfillment !== null) {
       if (applied.fulfillment.outcome === 'UNCONFIRMED') {
         result.compositionUnconfirmed += 1;
-      } else if (applied.fulfillment.outcome !== 'SKIPPED') {
+      } else if (
+        applied.fulfillment.outcome !== 'SKIPPED' &&
+        applied.fulfillment.outcome !== 'STALE'
+      ) {
         result.compositionConfirmed += 1;
       }
     }
@@ -437,6 +440,13 @@ export async function runCompositionBackfill(
       fulfillmentInScope: true,
       sourceMissing: false,
       fulfillmentCompositionState: { in: ['PENDING', 'FAILED'] },
+      // Тексты снимка приходят только вместе с документом заказа. Заказ,
+      // документа которого этот код ещё не видел, ожидающей версии не имеет,
+      // и брать его в очередь нельзя: она читает лишь позиции и подтвердила бы
+      // снимок с пустыми текстами, то есть записала бы в неизменяемую историю
+      // неправду. Такие строки дочитывает полная загрузка — признак её
+      // завершения сброшен миграцией `20260820090500`.
+      fulfillmentPendingExternalUpdated: { not: null },
     },
     orderBy: [
       { fulfillmentCompositionAttempts: 'asc' },
@@ -446,20 +456,21 @@ export async function runCompositionBackfill(
     take: limit,
     select: {
       externalId: true,
-      externalUpdated: true,
-      fulfillmentDescription: true,
-      fulfillmentCardText: true,
+      fulfillmentPendingDescription: true,
+      fulfillmentPendingCardText: true,
+      fulfillmentPendingExternalUpdated: true,
     },
   });
 
   for (const order of pending) {
-    // Тексты берутся из уже сохранённой карточки: они пришли вместе с заказом
-    // и проверены схемой. Повторное чтение документа стоило бы лишнего
-    // обращения ради данных, которые уже есть.
+    // Тексты берутся из ОЖИДАЮЩЕЙ версии, а не из подтверждённой: подтверждать
+    // надо ровно ту версию, ради которой заказ попал в очередь. Повторное
+    // чтение документа стоило бы лишнего обращения ради данных, которые есть.
+    const version = order.fulfillmentPendingExternalUpdated;
     const texts = {
       externalId: order.externalId,
-      description: order.fulfillmentDescription,
-      cardText: order.fulfillmentCardText,
+      description: order.fulfillmentPendingDescription,
+      cardText: order.fulfillmentPendingCardText,
     };
 
     let snapshot: FulfillmentSnapshot | null = null;
@@ -477,10 +488,14 @@ export async function runCompositionBackfill(
         tx,
         {
           externalId: order.externalId,
-          externalUpdated: order.externalUpdated,
+          externalUpdated: version ?? now,
           texts: { description: texts.description, cardText: texts.cardText },
           snapshot,
           failure,
+          // Пока шло чтение позиций, delta могла записать более новую версию.
+          // Тогда этот результат устарел: подтверждать его как новую версию
+          // и затирать её ожидающие поля нельзя.
+          expectedPendingVersion: version,
         },
         now,
       ),
@@ -488,7 +503,7 @@ export async function runCompositionBackfill(
 
     if (applied.outcome === 'UNCONFIRMED') {
       result.compositionUnconfirmed += 1;
-    } else if (applied.outcome !== 'SKIPPED') {
+    } else if (applied.outcome !== 'SKIPPED' && applied.outcome !== 'STALE') {
       result.compositionBackfilled += 1;
     }
   }

@@ -31,6 +31,7 @@ import {
   snapshotHash,
   type FulfillmentSnapshot,
 } from './composition.js';
+import { applyFulfillmentSnapshot } from './service.js';
 import { isVisibleToFlorist, visiblePositions } from './visibility.js';
 
 let ctx: TestContext;
@@ -319,6 +320,9 @@ async function storedOrder(externalId: string) {
       fulfillmentCompositionAttempts: true,
       fulfillmentCompositionFailure: true,
       fulfillmentCompositionSyncedAt: true,
+      fulfillmentPendingDescription: true,
+      fulfillmentPendingCardText: true,
+      fulfillmentPendingExternalUpdated: true,
     },
   });
 }
@@ -1022,9 +1026,12 @@ describe('очередь дозагрузки состава', () => {
     );
 
     const pending = await storedOrder(orderId);
-    // Тексты сохранены сразу, ещё до подтверждения состава.
-    expect(pending.fulfillmentDescription).toBe('низ');
-    expect(pending.fulfillmentCardText).toBe('открытка');
+    // Тексты сохранены в ОЖИДАЮЩИХ полях: подтверждённых у заказа ещё нет,
+    // и выдавать новые тексты за подтверждённый снимок нельзя.
+    expect(pending.fulfillmentPendingDescription).toBe('низ');
+    expect(pending.fulfillmentPendingCardText).toBe('открытка');
+    expect(pending.fulfillmentDescription).toBeNull();
+    expect(pending.fulfillmentCardText).toBeNull();
 
     const api = fakeApi({ pages: [[]], positions: { [orderId]: { rows: [positionRow()] } } });
     await runSyncOnce(
@@ -1114,6 +1121,356 @@ describe('очередь дозагрузки состава', () => {
 });
 
 // --- Область и запрос состава ----------------------------------------------
+
+// --- Согласованность подтверждённого снимка ---------------------------------
+
+describe('подтверждённый снимок не смешивается с ожидающей версией', () => {
+  /** Заказ с подтверждённым снимком A. */
+  async function confirmed(orderId: string, position: Record<string, unknown>) {
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [
+            [
+              orderRow({
+                id: orderId,
+                description: 'низ A',
+                cardText: 'открытка A',
+                positions: [position],
+              }),
+            ],
+          ],
+        }),
+      ),
+    );
+    return storedOrder(orderId);
+  }
+
+  it('новая версия с неполным составом не трогает подтверждённые тексты, хеш и позиции', async () => {
+    const orderId = randomUUID();
+    const position = stablePosition();
+    const before = await confirmed(orderId, position);
+    expect(before.fulfillmentCompositionState).toBe('READY');
+
+    const revisionsBefore = await ctx.db.orderFulfillmentRevision.count({
+      where: { orderId: before.id },
+    });
+
+    // Версия B: оба текста изменились, но состав пришёл усечённым.
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [
+            [
+              orderRow({
+                id: orderId,
+                updated: '2026-08-20 11:00:00.000',
+                description: 'низ B',
+                cardText: 'открытка B',
+                positions: [],
+                positionsSize: 2,
+              }),
+            ],
+          ],
+        }),
+        new Date('2026-08-20T10:00:00.000Z'),
+      ),
+    );
+
+    const after = await storedOrder(orderId);
+    // Подтверждённая версия A цела целиком: тексты, хеш, позиции и история.
+    expect(after.fulfillmentDescription).toBe('низ A');
+    expect(after.fulfillmentCardText).toBe('открытка A');
+    expect(after.fulfillmentSnapshotHash).toBe(before.fulfillmentSnapshotHash);
+    expect(await storedPositions(after.id)).toHaveLength(1);
+    expect(await ctx.db.orderFulfillmentRevision.count({ where: { orderId: after.id } })).toBe(
+      revisionsBefore,
+    );
+
+    // Новая версия existует только как ожидающая подтверждения.
+    expect(after.fulfillmentCompositionState).toBe('PENDING');
+    expect(after.fulfillmentPendingDescription).toBe('низ B');
+    expect(after.fulfillmentPendingCardText).toBe('открытка B');
+    expect(after.fulfillmentPendingExternalUpdated).not.toBeNull();
+  });
+
+  it('успешная дозагрузка делает версию подтверждённой целиком и очищает ожидающую', async () => {
+    const orderId = randomUUID();
+    const position = stablePosition();
+    const before = await confirmed(orderId, position);
+    const revisionsBefore = await ctx.db.orderFulfillmentRevision.count({
+      where: { orderId: before.id },
+    });
+
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [
+            [
+              orderRow({
+                id: orderId,
+                updated: '2026-08-20 11:00:00.000',
+                description: 'низ B',
+                cardText: 'открытка B',
+                positions: null,
+              }),
+            ],
+          ],
+        }),
+        new Date('2026-08-20T10:00:00.000Z'),
+      ),
+    );
+
+    const newPosition = stablePosition();
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [[]],
+          positions: { [orderId]: { rows: [newPosition, stablePosition()] } },
+        }),
+        new Date('2026-08-20T11:00:00.000Z'),
+        { compositionBackfillLimit: BACKFILL_ALL },
+      ),
+    );
+
+    const after = await storedOrder(orderId);
+    expect(after.fulfillmentCompositionState).toBe('READY');
+    expect(after.fulfillmentDescription).toBe('низ B');
+    expect(after.fulfillmentCardText).toBe('открытка B');
+    expect(after.fulfillmentSnapshotHash).not.toBe(before.fulfillmentSnapshotHash);
+    expect(await storedPositions(after.id)).toHaveLength(2);
+
+    // Ожидающие поля очищены в той же транзакции.
+    expect(after.fulfillmentPendingDescription).toBeNull();
+    expect(after.fulfillmentPendingCardText).toBeNull();
+    expect(after.fulfillmentPendingExternalUpdated).toBeNull();
+
+    // Ровно одна новая ревизия, и в ней изменились оба текста и состав.
+    const revisions = await ctx.db.orderFulfillmentRevision.findMany({
+      where: { orderId: after.id },
+      orderBy: { receivedAt: 'desc' },
+    });
+    expect(revisions).toHaveLength(revisionsBefore + 1);
+    expect(revisions[0]?.changedFields.sort()).toEqual(['cardText', 'description', 'positions']);
+  });
+
+  it('повторное подтверждение того же снимка не создаёт ревизию, аудит и событие', async () => {
+    const orderId = randomUUID();
+    const position = stablePosition();
+    const before = await confirmed(orderId, position);
+
+    const revisionsBefore = await ctx.db.orderFulfillmentRevision.count({
+      where: { orderId: before.id },
+    });
+    // Считаются только производственные записи: логистический `ORDER_SYNCED`
+    // здесь ожидаем — у заказа действительно изменился `updated`.
+    const fulfillmentAudit = {
+      entityId: before.id,
+      action: {
+        in: [
+          'ORDER_FULFILLMENT_IMPORTED',
+          'ORDER_FULFILLMENT_CHANGED',
+          'ORDER_FULFILLMENT_UNAVAILABLE',
+        ] as const,
+      },
+    };
+    const auditBefore = await ctx.db.auditLog.count({ where: fulfillmentAudit });
+    const eventsBefore = await ctx.db.realtimeEvent.count({
+      where: { topic: 'order.fulfillment_changed' },
+    });
+    const positionsBefore = await storedPositions(before.id);
+
+    // Временный отказ: та же версия, но состав не развернулся.
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [
+            [
+              orderRow({
+                id: orderId,
+                updated: '2026-08-20 11:00:00.000',
+                description: 'низ A',
+                cardText: 'открытка A',
+                positions: null,
+              }),
+            ],
+          ],
+        }),
+        new Date('2026-08-20T10:00:00.000Z'),
+      ),
+    );
+    expect((await storedOrder(orderId)).fulfillmentCompositionState).toBe('PENDING');
+
+    // Дозагрузка возвращает ТОТ ЖЕ состав — снимок совпадает с подтверждённым.
+    await runSyncOnce(
+      deps(
+        fakeApi({ pages: [[]], positions: { [orderId]: { rows: [position] } } }),
+        new Date('2026-08-20T11:00:00.000Z'),
+        { compositionBackfillLimit: BACKFILL_ALL },
+      ),
+    );
+
+    const after = await storedOrder(orderId);
+    expect(after.fulfillmentCompositionState).toBe('READY');
+    expect(after.fulfillmentSnapshotHash).toBe(before.fulfillmentSnapshotHash);
+
+    // Продуктовых изменений не было — значит, не было и следов изменения.
+    expect(await ctx.db.orderFulfillmentRevision.count({ where: { orderId: after.id } })).toBe(
+      revisionsBefore,
+    );
+    expect(await ctx.db.auditLog.count({ where: fulfillmentAudit })).toBe(auditBefore);
+    expect(
+      await ctx.db.realtimeEvent.count({ where: { topic: 'order.fulfillment_changed' } }),
+    ).toBe(eventsBefore);
+
+    // Проекция не пересоздавалась: строки те же самые.
+    const positionsAfter = await storedPositions(after.id);
+    expect(positionsAfter.map((p) => p.id)).toEqual(positionsBefore.map((p) => p.id));
+
+    // Изменились только технические поля состояния.
+    expect(after.fulfillmentCompositionAttempts).toBe(0);
+    expect(after.fulfillmentCompositionFailure).toBeNull();
+    expect(after.fulfillmentPendingExternalUpdated).toBeNull();
+  });
+
+  it('поздний результат версии B не подтверждается как пришедшая следом версия C', async () => {
+    const orderId = randomUUID();
+    const position = stablePosition();
+    await confirmed(orderId, position);
+
+    // Версия B встала в очередь.
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [
+            [
+              orderRow({
+                id: orderId,
+                updated: '2026-08-20 11:00:00.000',
+                description: 'низ B',
+                positions: null,
+              }),
+            ],
+          ],
+        }),
+        new Date('2026-08-20T10:00:00.000Z'),
+      ),
+    );
+
+    const pendingB = await storedOrder(orderId);
+    expect(pendingB.fulfillmentPendingDescription).toBe('низ B');
+
+    // Пока «шло чтение позиций B», delta записала версию C.
+    await runSyncOnce(
+      deps(
+        fakeApi({
+          pages: [
+            [
+              orderRow({
+                id: orderId,
+                updated: '2026-08-20 12:00:00.000',
+                description: 'низ C',
+                positions: null,
+              }),
+            ],
+          ],
+        }),
+        new Date('2026-08-20T11:00:00.000Z'),
+      ),
+    );
+    const pendingC = await storedOrder(orderId);
+    expect(pendingC.fulfillmentPendingDescription).toBe('низ C');
+
+    // Результат B приходит с уже устаревшей ожидаемой версией.
+    const applied = await ctx.db.$transaction((tx) =>
+      applyFulfillmentSnapshot(
+        tx,
+        {
+          externalId: orderId,
+          externalUpdated: pendingB.fulfillmentPendingExternalUpdated as Date,
+          texts: { description: 'низ B', cardText: null },
+          snapshot: {
+            externalId: orderId,
+            description: 'низ B',
+            cardText: null,
+            positions: [],
+          },
+          failure: null,
+          expectedPendingVersion: pendingB.fulfillmentPendingExternalUpdated,
+        },
+        new Date('2026-08-20T11:30:00.000Z'),
+      ),
+    );
+
+    expect(applied.outcome).toBe('STALE');
+
+    const after = await storedOrder(orderId);
+    // Ни подтверждения B, ни затирания ожидающей C.
+    expect(after.fulfillmentDescription).toBe('низ A');
+    expect(after.fulfillmentPendingDescription).toBe('низ C');
+    expect(after.fulfillmentCompositionState).not.toBe('READY');
+  });
+
+  it('прежняя версия приложения работает поверх расширенной схемы', async () => {
+    // Код версии `269ad6ef` о производственных колонках не знает вовсе:
+    // он вставляет и обновляет заказ только прежним набором полей. Расширяющая
+    // миграция и новый CHECK не должны этому мешать — иначе откат приложения
+    // остановил бы импорт заказов.
+    const externalId = randomUUID();
+    await ctx.db.$executeRaw`
+      INSERT INTO "DeliveryOrder" ("id", "externalId", "externalName", "externalUpdated", "updatedAt")
+      VALUES (${randomUUID()}::uuid, ${externalId}::uuid, 'F-ROLLBACK', ${NOW}, ${NOW})
+    `;
+
+    const inserted = await storedOrder(externalId);
+    // Умолчания честны: состав не подтверждён, а не «подтверждённо пуст».
+    expect(inserted.fulfillmentCompositionState).toBe('PENDING');
+    expect(inserted.fulfillmentSnapshotHash).toBeNull();
+    expect(inserted.fulfillmentPendingExternalUpdated).toBeNull();
+
+    // Обновление прежним набором полей проходит.
+    await ctx.db.$executeRaw`
+      UPDATE "DeliveryOrder"
+      SET "address" = 'Москва, другой адрес', "inScope" = true, "updatedAt" = ${NOW}
+      WHERE "externalId" = ${externalId}::uuid
+    `;
+
+    // Заказ без ожидающей версии очередь не берёт: текстов у неё взять неоткуда,
+    // и подтвердить снимок с пустыми текстами она не имеет права.
+    const api = fakeApi({ pages: [[]] });
+    await runSyncOnce(
+      deps(api, new Date('2026-08-20T10:00:00.000Z'), { compositionBackfillLimit: BACKFILL_ALL }),
+    );
+    expect(api.calls.some((call) => call.path.includes(externalId))).toBe(false);
+    expect((await storedOrder(externalId)).fulfillmentCompositionState).toBe('PENDING');
+  });
+
+  it('база не позволяет оставить READY вместе с ожидающей версией или кодом отказа', async () => {
+    const orderId = randomUUID();
+    const stored = await confirmed(orderId, stablePosition());
+    expect(stored.fulfillmentCompositionState).toBe('READY');
+
+    // Каждое из трёх ожидающих полей и код отказа несовместимы с READY.
+    for (const data of [
+      { fulfillmentPendingDescription: 'низ' },
+      { fulfillmentPendingCardText: 'открытка' },
+      { fulfillmentPendingExternalUpdated: new Date('2026-08-20T12:00:00.000Z') },
+      { fulfillmentCompositionFailure: 'POSITIONS_NOT_EXPANDED' },
+    ]) {
+      await expect(
+        ctx.db.deliveryOrder.update({ where: { id: stored.id }, data }),
+      ).rejects.toThrow();
+    }
+
+    // И наоборот: READY без хеша тоже невозможен — прежняя гарантия сохранена.
+    await expect(
+      ctx.db.deliveryOrder.update({
+        where: { id: stored.id },
+        data: { fulfillmentSnapshotHash: null },
+      }),
+    ).rejects.toThrow();
+  });
+});
 
 describe('область и запрос состава', () => {
   it('состав запрашивается на всех путях чтения заказов', async () => {
