@@ -24,6 +24,7 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  Select,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
@@ -367,8 +368,16 @@ function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Elem
 
 // --- Вкладки «Сборка» и «Выдача» ---------------------------------------------
 
+interface CourierOption {
+  id: string;
+  fullName: string;
+}
+
 function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
+  // Отмена выдачи — операция администратора (`FUL-003`). Кладовщик её не видит:
+  // скрытая кнопка не защита, но и предлагать заведомо запрещённое незачем.
+  const isAdmin = user?.roles.includes('ADMIN') === true;
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const reportError = useApiError();
@@ -377,6 +386,9 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
   const [routeId, setRouteId] = useState<string | null>(null);
   const [cellInput, setCellInput] = useState('');
   const [orderInput, setOrderInput] = useState('');
+  const [cancelReason, setCancelReason] = useState('');
+  const [nextCourier, setNextCourier] = useState('');
+  const [cancelOpen, setCancelOpen] = useState(false);
 
   const routes = useQuery({
     queryKey: ['warehouse-routes', date],
@@ -434,6 +446,29 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
       showToast('Курьер подтверждён', 'success');
     },
     onError: (error: unknown) => reportError(error, 'Не удалось подтвердить курьера.'),
+  });
+
+  const couriers = useQuery({
+    queryKey: ['couriers-active'],
+    queryFn: () =>
+      client.get<{ items: CourierOption[] }>('/api/users?role=COURIER&status=ACTIVE&limit=100'),
+    enabled: isAdmin && mode === 'issue',
+  });
+
+  const cancelIssue = useMutation({
+    mutationFn: () =>
+      client.post(`/api/warehouse/routes/${routeId ?? ''}/issue/cancel`, {
+        reason: cancelReason,
+        ...(nextCourier === '' ? {} : { nextCourierUserId: nextCourier }),
+      }),
+    onSuccess: async () => {
+      setCancelOpen(false);
+      setCancelReason('');
+      setNextCourier('');
+      await refresh();
+      showToast('Выдача отменена', 'success');
+    },
+    onError: (error: unknown) => reportError(error, 'Не удалось отменить выдачу.'),
   });
 
   const issue = useMutation({
@@ -625,6 +660,68 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
                   >
                     Выдать заказ
                   </Button>
+
+                  {isAdmin && !cancelOpen && (
+                    <Button
+                      variant="ghost"
+                      data-testid="wh-cancel-issue"
+                      onClick={() => setCancelOpen(true)}
+                    >
+                      Отменить выдачу
+                    </Button>
+                  )}
+
+                  {isAdmin && cancelOpen && (
+                    <div className="stack">
+                      <p className="muted text-sm">
+                        Уже выданные заказы остаются в истории и у прежнего курьера. Невыданные
+                        останутся лежать там, где лежат: система не переносит их сама.
+                      </p>
+                      <Field label="Причина отмены" hint="От 3 до 500 символов">
+                        {(fieldProps) => (
+                          <TextInput
+                            {...fieldProps}
+                            data-testid="wh-cancel-reason"
+                            value={cancelReason}
+                            onChange={(event) => setCancelReason(event.target.value)}
+                          />
+                        )}
+                      </Field>
+                      <Field
+                        label="Передать остаток курьеру"
+                        hint="Необязательно: без выбора назначение маршрута не меняется"
+                      >
+                        {(fieldProps) => (
+                          <Select
+                            {...fieldProps}
+                            data-testid="wh-cancel-courier"
+                            value={nextCourier}
+                            onChange={(event) => setNextCourier(event.target.value)}
+                          >
+                            <option value="">Оставить прежнего</option>
+                            {(couriers.data?.items ?? []).map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.fullName}
+                              </option>
+                            ))}
+                          </Select>
+                        )}
+                      </Field>
+                      <div className="row">
+                        <Button
+                          variant="primary"
+                          data-testid="wh-cancel-submit"
+                          disabled={cancelIssue.isPending || cancelReason.trim().length < 3}
+                          onClick={() => cancelIssue.mutate()}
+                        >
+                          Подтвердить отмену
+                        </Button>
+                        <Button variant="ghost" onClick={() => setCancelOpen(false)}>
+                          Не отменять
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </>

@@ -129,6 +129,11 @@ export const CONFLICT_KINDS = [
   'ISSUE_SESSION_OPEN',
   /** Выдача не начата: сначала подтвердите курьера. */
   'ISSUE_SESSION_REQUIRED',
+  /**
+   * По маршруту уже есть физически переданные курьеру заказы: обычное
+   * редактирование, возврат в черновик и отмена ему недоступны.
+   */
+  'ROUTE_ALREADY_ISSUED',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

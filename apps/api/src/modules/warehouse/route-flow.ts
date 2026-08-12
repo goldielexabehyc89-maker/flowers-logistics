@@ -18,6 +18,7 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import { FLOW_AUDIENCE, type FlowDeps, type RequestContext } from './placement.js';
+import { assertCourierAssignable } from '../routing/service.js';
 
 const ROUTE_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
 
@@ -498,14 +499,11 @@ async function sessionView(
   courierUserId: string,
   state: $Enums.IssueSessionState,
 ): Promise<IssueSessionView> {
-  const participations = await tx.routeOrder.findMany({
-    where: { routeId, removedAt: null },
-    select: { orderId: true },
-  });
-  const issued = await tx.orderPlacement.count({
-    where: { issueSessionId: sessionId, releaseReason: 'ISSUED_TO_COURIER' },
-  });
-  return { sessionId, routeId, courierUserId, state, issued, total: participations.length };
+  // Прогресс показывается по маршруту целиком: кладовщик, продолжающий выдачу
+  // после смены курьера, должен видеть, сколько осталось всего, а не сколько
+  // выдал текущий курьер.
+  const { issued, total } = await routeIssueProgress(tx, routeId);
+  return { sessionId, routeId, courierUserId, state, issued, total };
 }
 
 export interface IssueInput {
@@ -583,23 +581,19 @@ export async function issueOrder(
     const current = rows[0] ?? null;
 
     if (current === null) {
-      // Уже выдан именно в этой сессии — повтор скана; иначе выдавать нечего.
-      const alreadyIssued = await tx.orderPlacement.count({
-        where: {
-          orderId: order.id,
-          issueSessionId: session.id,
-          releaseReason: 'ISSUED_TO_COURIER',
-        },
-      });
-      if (alreadyIssued > 0) {
-        const progress = await issueProgress(tx, routeId, session.id);
+      // Повтор скана заказа, выданного по этому маршруту в ЛЮБОЙ его сессии,
+      // включая уже отменённую: физическая передача состоялась, и требовать
+      // от кладовщика помнить, при каком курьере это было, бессмысленно.
+      if (await issuedInRoute(tx, routeId, order.id)) {
+        const { issued, total } = await routeIssueProgress(tx, routeId);
         return {
           routeId,
           orderId: order.id,
           orderNumber: order.number,
           unchanged: true,
           routeActivated: false,
-          ...progress,
+          issued,
+          total,
         };
       }
       throw new AppError('CONFLICT', {
@@ -641,7 +635,7 @@ export async function issueOrder(
       userAgent: context.userAgent,
     });
 
-    const progress = await issueProgress(tx, routeId, session.id);
+    const progress = await routeIssueProgress(tx, routeId);
     const last = progress.issued >= progress.total;
 
     if (!last) {
@@ -656,7 +650,8 @@ export async function issueOrder(
         orderNumber: order.number,
         unchanged: false,
         routeActivated: false,
-        ...progress,
+        issued: progress.issued,
+        total: progress.total,
       };
     }
 
@@ -728,28 +723,84 @@ export async function issueOrder(
       orderNumber: order.number,
       unchanged: false,
       routeActivated: true,
-      ...progress,
+      issued: progress.issued,
+      total: progress.total,
     };
   });
 }
 
-async function issueProgress(
+/**
+ * Общий прогресс выдачи МАРШРУТА, а не текущей сессии.
+ *
+ * Считать выдачу внутри одной сессии нельзя: после административной отмены
+ * и передачи остатка другому курьеру новая сессия видела бы только свои заказы,
+ * и маршрут никогда не дошёл бы до `ACTIVE`. Физически состоявшаяся передача
+ * коробки курьеру не перестаёт быть фактом оттого, что сессию отменили.
+ *
+ * Поэтому `issued` считается по АКТИВНОМУ составу маршрута и всем фактам
+ * выдачи, принадлежащим сессиям этого маршрута. Один заказ учитывается один
+ * раз: считаются различные заказы, а не строки размещений.
+ *
+ * Отдельного счётчика в `DeliveryRoute` нет намеренно — это был бы второй
+ * источник истины, который база согласовать не может.
+ */
+async function routeIssueProgress(
   tx: TransactionClient,
   routeId: string,
-  sessionId: string,
-): Promise<{ issued: number; total: number }> {
+): Promise<{ issued: number; total: number; issuedOrderIds: Set<string> }> {
   const participations = await tx.routeOrder.findMany({
     where: { routeId, removedAt: null },
     select: { orderId: true },
   });
-  const issued = await tx.orderPlacement.count({
-    where: { issueSessionId: sessionId, releaseReason: 'ISSUED_TO_COURIER' },
+  const orderIds = participations.map((row) => row.orderId);
+
+  if (orderIds.length === 0) {
+    return { issued: 0, total: 0, issuedOrderIds: new Set() };
+  }
+
+  const issued = await tx.orderPlacement.findMany({
+    where: {
+      orderId: { in: orderIds },
+      releaseReason: 'ISSUED_TO_COURIER',
+      issueSession: { routeId },
+    },
+    select: { orderId: true },
+    distinct: ['orderId'],
   });
-  return { issued, total: participations.length };
+
+  const issuedOrderIds = new Set(issued.map((row) => row.orderId));
+  return { issued: issuedOrderIds.size, total: orderIds.length, issuedOrderIds };
+}
+
+/**
+ * Был ли заказ уже выдан по ЭТОМУ маршруту в любой из его сессий.
+ *
+ * Выдача того же заказа в другом маршруте идемпотентным успехом не считается:
+ * это другая коробка в другой машине, и молча согласиться означало бы потерять
+ * заказ.
+ */
+async function issuedInRoute(
+  tx: TransactionClient,
+  routeId: string,
+  orderId: string,
+): Promise<boolean> {
+  const found = await tx.orderPlacement.count({
+    where: { orderId, releaseReason: 'ISSUED_TO_COURIER', issueSession: { routeId } },
+  });
+  return found > 0;
 }
 
 export interface CancelIssueInput {
   reason: string;
+  /**
+   * Курьер, которому передаются оставшиеся заказы.
+   *
+   * Необязателен: без него назначение маршрута не меняется. Указанный
+   * применяется В ТОЙ ЖЕ транзакции — иначе между отменой и назначением
+   * существовало бы окно, в котором маршрут с уже выданными заказами стоит
+   * без курьера, и кладовщик не понимал бы, кого подтверждать.
+   */
+  nextCourierUserId?: string;
 }
 
 /**
@@ -765,7 +816,12 @@ export async function cancelIssueSession(
   routeId: string,
   input: CancelIssueInput,
   context: RequestContext,
-): Promise<{ routeId: string; cancelled: boolean; issued: number }> {
+): Promise<{
+  routeId: string;
+  cancelled: boolean;
+  issued: number;
+  courierUserId: string | null;
+}> {
   const reason = input.reason.trim();
   if (reason.length < 3 || reason.length > 500) {
     throw new AppError('VALIDATION_FAILED', {
@@ -789,9 +845,8 @@ export async function cancelIssueSession(
       });
     }
 
-    const issued = await tx.orderPlacement.count({
-      where: { issueSessionId: session.id, releaseReason: 'ISSUED_TO_COURIER' },
-    });
+    // Прогресс считается по маршруту: уже выданное отменой не отменяется.
+    const { issued } = await routeIssueProgress(tx, routeId);
 
     await tx.routeIssueSession.update({
       where: { id: session.id },
@@ -805,6 +860,33 @@ export async function cancelIssueSession(
       },
     });
 
+    // Смена курьера — часть ТОЙ ЖЕ транзакции. Проверка допустимости общая
+    // с обычным назначением: недопустимый кандидат откатывает и отмену тоже,
+    // поэтому частично отменённой выдачи без курьера не возникает.
+    let courierUserId = route.courierUserId;
+    if (input.nextCourierUserId !== undefined) {
+      await assertCourierAssignable(tx, actor, input.nextCourierUserId);
+
+      const updated = await tx.deliveryRoute.updateMany({
+        where: { id: routeId, version: route.version },
+        data: { courierUserId: input.nextCourierUserId, version: { increment: 1 } },
+      });
+      if (updated.count === 0) {
+        throw new AppError('CONFLICT', {
+          message: 'stale route version',
+          publicMessage: 'Маршрут изменён другим пользователем. Обновите экран и повторите.',
+          conflict: { kind: 'STALE_VERSION', routeNumber: route.number },
+        });
+      }
+      courierUserId = input.nextCourierUserId;
+
+      await publishRealtimeEvent(tx, {
+        topic: 'route.updated',
+        payload: { routeId, state: route.state },
+        audienceRoles: [...ROUTE_AUDIENCE],
+      });
+    }
+
     await writeAudit(tx, {
       action: 'WAREHOUSE_ISSUE_CANCELLED',
       entityType: 'RouteIssueSession',
@@ -812,7 +894,9 @@ export async function cancelIssueSession(
       actorUserId: actor.userId,
       actorRoles: actor.roles,
       source: 'api',
-      newValue: { routeId, issued },
+      // Причина живёт в защищённой строке сессии; в аудите — только факт,
+      // счётчик и признак смены курьера.
+      newValue: { routeId, issued, courierChanged: input.nextCourierUserId !== undefined },
       ip: context.ip,
       userAgent: context.userAgent,
     });
@@ -823,7 +907,7 @@ export async function cancelIssueSession(
       audienceRoles: [...FLOW_AUDIENCE],
     });
 
-    return { routeId, cancelled: true, issued };
+    return { routeId, cancelled: true, issued, courierUserId };
   });
 }
 

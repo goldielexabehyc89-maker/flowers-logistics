@@ -1,7 +1,8 @@
 /**
  * Жизненный цикл маршрута: подтверждение, возврат в черновик и отмена.
  *
- * Этап 4 знает три состояния и ровно четыре перехода:
+ * Этап 4 знал три состояния и четыре перехода; этап 6.5 добавил пятый —
+ * `CONFIRMED → ACTIVE`. Полный список переходов:
  *
  *   DRAFT ──подтверждение──▶ CONFIRMED
  *     ▲                          │
@@ -10,7 +11,9 @@
  *   DRAFT ─────отмена с причиной─────▶ CANCELLED
  *   CONFIRMED ─отмена с причиной─────▶ CANCELLED
  *
- * `ACTIVE` и `COMPLETED` появятся на этапе 6 вместе с отгрузкой. Отменённый маршрут
+ * `ACTIVE` наступает от факта выдачи последнего заказа курьеру и причины
+ * не требует; его записывает складской модуль. `COMPLETED` появится вместе
+ * с работой курьера. Отменённый маршрут
  * не открывается заново: он остаётся историей, а работа продолжается новым черновиком.
  *
  * Подтверждение — не формальность, а повторная проверка. Между добавлением заказа
@@ -35,6 +38,7 @@ import type { ConflictKind, Role } from '@fl/shared';
 import { calendarDate, ineligibleReason } from './eligibility.js';
 import { assertReason, grantLease, releaseLeaseRow, requireLease } from './lease.js';
 import { markRoutePlacementsForRelocation } from '../warehouse/route-flow.js';
+import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
 
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
 
@@ -333,6 +337,11 @@ export async function returnToDraft(
     requireState(route, 'CONFIRMED');
     requireVersion(route, input.expectedVersion);
 
+    // Выдача уже идёт или состоялась: превращать переданные курьеру коробки
+    // обратно в редактируемый черновик нельзя. Отменяет выдачу администратор
+    // отдельной операцией с обязательной причиной.
+    await assertIssueNotStarted(tx, routeId, route.number);
+
     // Блокировка заранее не нужна: подтверждённый маршрут никто не редактирует.
     await applyTransition(tx, route, 'DRAFT', actor, now, input.reason.trim());
 
@@ -381,6 +390,12 @@ export async function cancelRoute(
       });
     }
     requireVersion(route, input.expectedVersion);
+
+    // Тот же запрет, что и при возврате в черновик: отменить маршрут, часть
+    // которого уже уехала с курьером, обычным путём нельзя.
+    if (route.state === 'CONFIRMED') {
+      await assertIssueNotStarted(tx, routeId, route.number);
+    }
 
     // Черновик отменяет тот, кто держит его в работе; подтверждённый маршрут
     // никто не редактирует, поэтому блокировка для него не требуется.

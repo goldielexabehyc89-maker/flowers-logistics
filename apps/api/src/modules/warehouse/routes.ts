@@ -273,7 +273,11 @@ const bindSchema = z.object({ cellCode: cellCodeSchema });
 const pickSchema = z.object({ orderNumber: orderNumberSchema, cellCode: cellCodeSchema });
 const confirmCourierSchema = z.object({ courierUserId: uuid });
 const issueSchema = z.object({ orderNumber: orderNumberSchema });
-const cancelIssueSchema = z.object({ reason: reasonSchema });
+const cancelIssueSchema = z.object({
+  reason: reasonSchema,
+  /** Кому передать остаток. Без значения назначение маршрута не меняется. */
+  nextCourierUserId: uuid.optional(),
+});
 
 /**
  * Складской поток: приёмка, комплектование и выдача.
@@ -448,6 +452,17 @@ export async function registerWarehouseFlowRoutes(
     const { id } = idParamSchema.parse(request.params);
     const body = cancelIssueSchema.parse(request.body);
 
-    return cancelIssueSession(flowDeps, actor, id, body, contextOf(request));
+    return cancelIssueSession(
+      flowDeps,
+      actor,
+      id,
+      {
+        reason: body.reason,
+        ...(body.nextCourierUserId === undefined
+          ? {}
+          : { nextCourierUserId: body.nextCourierUserId }),
+      },
+      contextOf(request),
+    );
   });
 }
