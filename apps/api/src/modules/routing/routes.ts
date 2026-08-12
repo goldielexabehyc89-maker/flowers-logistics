@@ -66,7 +66,9 @@ const listQuerySchema = z.object({
   deliveryDate: dateSchema.optional(),
   courierUserId: uuid.optional(),
   vehicleType: z.enum(['CAR', 'FOOT']).optional(),
-  state: z.enum(['DRAFT', 'CONFIRMED', 'CANCELLED']).optional(),
+  // `ACTIVE` включён: маршрут, переданный курьеру, обязан оставаться видимым
+  // логисту, а не исчезать из выборки дня.
+  state: z.enum(['DRAFT', 'CONFIRMED', 'CANCELLED', 'ACTIVE']).optional(),
 });
 
 const createSchema = z.object({

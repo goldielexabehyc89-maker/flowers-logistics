@@ -11,6 +11,7 @@ import { useAuth } from './auth/AuthContext';
 import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
 import { NoSectionsScreen, PLACEHOLDERS, PlaceholderScreen } from './screens/PlaceholderScreen';
+import { WarehouseScreen } from './screens/warehouse/WarehouseScreen';
 import { DealsScreen } from './screens/deals/DealsScreen';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { RoutingScreen } from './screens/routing/RoutingScreen';
@@ -73,6 +74,14 @@ export function App(): React.JSX.Element {
   return (
     <Routes>
       <Route element={<AppShell />}>
+        <Route
+          path="/warehouse"
+          element={
+            <SectionRoute>
+              <WarehouseScreen />
+            </SectionRoute>
+          }
+        />
         {Object.entries(PLACEHOLDERS).map(([key, placeholder]) => (
           <Route
             key={key}

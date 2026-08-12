@@ -64,6 +64,11 @@ export const REALTIME_TOPICS = [
   // В payload только идентификатор ячейки: код полки в событие не уходит,
   // клиент перезапрашивает справочник сам.
   'storage_cell.changed',
+  // Фактическое движение заказов по складу (этап 6.5). Адресуется ADMIN
+  // и WAREHOUSE. В payload — только идентификаторы и вид действия: ни номера
+  // заказа, ни кода ячейки, ни адреса там нет.
+  'warehouse.placement_changed',
+  'warehouse.route_flow_changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

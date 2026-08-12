@@ -77,6 +77,11 @@ export function invalidationKeysFor(topic: string): string[][] {
   if (topic === 'session.revoked') {
     return [];
   }
+  if (topic.startsWith('warehouse.')) {
+    // Складские экраны и карточка маршрутного листа. Событие не несёт данных:
+    // клиент перезапрашивает нужный список сам.
+    return [['warehouse-placements'], ['warehouse-routes'], ['warehouse-route']];
+  }
   // Производственные события проверяются ДО общего правила `order.*`:
   // логистический список от изменения состава не зависит, а очередь флориста
   // обязана обновиться точечно, а не перезапросить всё подряд.

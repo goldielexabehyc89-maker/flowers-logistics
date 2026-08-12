@@ -158,18 +158,23 @@ describe('видимость разделов', () => {
     for (const key of placeholderKeys) {
       expect(sectionKeys).toContain(key);
     }
-    for (const key of ['warehouse', 'pickup']) {
+    // Разделы «Флорист» (6.2–6.3) и «Склад» (6.5) получили рабочие экраны
+    // и заглушками больше не являются: заглушка перехватывала бы тот же адрес
+    // и показывала «раздел не реализован» поверх работающего экрана. Остальные
+    // производственные разделы по-прежнему честно говорят о неготовности.
+    for (const key of ['pickup', 'active', 'history', 'reports']) {
       expect(placeholderKeys).toContain(key);
     }
-
-    // Реализованный раздел заглушкой быть не может: она перехватывала бы тот же
-    // адрес и показывала «раздел не реализован» поверх работающего экрана.
-    expect(placeholderKeys).not.toContain('florist');
-    expect(sectionKeys).toContain('florist');
+    for (const key of ['florist', 'warehouse']) {
+      expect(placeholderKeys).not.toContain(key);
+      expect(sectionKeys).toContain(key);
+    }
   });
 
   it('заглушки честно называют неготовность и не выдумывают данные', () => {
-    for (const key of ['warehouse', 'pickup']) {
+    // `pickup` — единственная оставшаяся заглушка с точным номером подэтапа;
+    // у остальных плановый этап назван целиком («6», «6–7», «7»).
+    for (const key of ['pickup']) {
       const placeholder = PLACEHOLDERS[key];
 
       expect(placeholder).toBeDefined();

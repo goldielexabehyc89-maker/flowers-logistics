@@ -9,7 +9,7 @@
 
 import { formatCalendarDate, moscowToday } from '@fl/shared';
 
-export type RouteState = 'DRAFT' | 'CONFIRMED' | 'CANCELLED';
+export type RouteState = 'DRAFT' | 'CONFIRMED' | 'CANCELLED' | 'ACTIVE';
 export type VehicleType = 'CAR' | 'FOOT';
 
 export interface RouteOrderView {
@@ -116,6 +116,8 @@ export const ROUTE_STATE_LABELS: Record<RouteState, string> = {
   DRAFT: 'Черновик',
   CONFIRMED: 'Подтверждён',
   CANCELLED: 'Отменён',
+  /// Заказы физически переданы курьеру: маршрут начался (этап 6.5).
+  ACTIVE: 'Передан курьеру',
 };
 
 /** Причины, по которым маршрут нельзя подтвердить, человеческим языком. */
@@ -178,6 +180,9 @@ export function canEdit(route: Pick<RouteCardView, 'state' | 'editLock'>): boole
 
 /** Почему редактирование недоступно. `null` означает «доступно». */
 export function editingHint(route: Pick<RouteCardView, 'state' | 'editLock'>): string | null {
+  if (route.state === 'ACTIVE') {
+    return 'Заказы переданы курьеру: маршрут доступен только для просмотра.';
+  }
   if (route.state === 'CANCELLED') {
     return 'Маршрут отменён и доступен только для просмотра.';
   }

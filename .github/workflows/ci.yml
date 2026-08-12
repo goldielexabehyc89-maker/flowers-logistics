@@ -407,12 +407,34 @@ jobs:
           # доказываются направленными проверками с подменёнными сервисами.
           npm run --silent seed:e2e-plan
 
+      - name: Создать складскую фикстуру
+        id: seed-warehouse
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ячейки, курьер и подтверждённый маршрутный лист: настоящий маршрут
+          # требует дорожного графа, которого в браузерной проверке нет.
+          output="$(npm run --silent seed:e2e-warehouse)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n "$2p"; }
+          {
+            echo "storage=$(get 'ячейка хранения' 1)"
+            echo "routecell=$(get 'маршрутная ячейка' 1)"
+            echo "route=$(get 'маршрут' 1)"
+            echo "order1=$(get 'заказ' 1)"
+            echo "order2=$(get 'заказ' 2)"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Браузерный smoke
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
           E2E_ADMIN_CODE: ${{ steps.bootstrap.outputs.code }}
           E2E_ORDER_NUMBER: ${{ steps.seed-order.outputs.number }}
           E2E_ORDER_NUMBER_2: ${{ steps.seed-order.outputs.second }}
+          E2E_WH_STORAGE_CELL: ${{ steps.seed-warehouse.outputs.storage }}
+          E2E_WH_ROUTE_CELL: ${{ steps.seed-warehouse.outputs.routecell }}
+          E2E_WH_ROUTE: ${{ steps.seed-warehouse.outputs.route }}
+          E2E_WH_ORDER_1: ${{ steps.seed-warehouse.outputs.order1 }}
+          E2E_WH_ORDER_2: ${{ steps.seed-warehouse.outputs.order2 }}
         run: npm run test:e2e
 
   secrets-scan:

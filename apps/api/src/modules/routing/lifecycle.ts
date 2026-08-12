@@ -1,7 +1,8 @@
 /**
  * Жизненный цикл маршрута: подтверждение, возврат в черновик и отмена.
  *
- * Этап 4 знает три состояния и ровно четыре перехода:
+ * Этап 4 знал три состояния и четыре перехода; этап 6.5 добавил пятый —
+ * `CONFIRMED → ACTIVE`. Полный список переходов:
  *
  *   DRAFT ──подтверждение──▶ CONFIRMED
  *     ▲                          │
@@ -10,7 +11,9 @@
  *   DRAFT ─────отмена с причиной─────▶ CANCELLED
  *   CONFIRMED ─отмена с причиной─────▶ CANCELLED
  *
- * `ACTIVE` и `COMPLETED` появятся на этапе 6 вместе с отгрузкой. Отменённый маршрут
+ * `ACTIVE` наступает от факта выдачи последнего заказа курьеру и причины
+ * не требует; его записывает складской модуль. `COMPLETED` появится вместе
+ * с работой курьера. Отменённый маршрут
  * не открывается заново: он остаётся историей, а работа продолжается новым черновиком.
  *
  * Подтверждение — не формальность, а повторная проверка. Между добавлением заказа
@@ -34,6 +37,8 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import type { ConflictKind, Role } from '@fl/shared';
 import { calendarDate, ineligibleReason } from './eligibility.js';
 import { assertReason, grantLease, releaseLeaseRow, requireLease } from './lease.js';
+import { markRoutePlacementsForRelocation } from '../warehouse/route-flow.js';
+import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
 
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
 
@@ -332,8 +337,18 @@ export async function returnToDraft(
     requireState(route, 'CONFIRMED');
     requireVersion(route, input.expectedVersion);
 
+    // Выдача уже идёт или состоялась: превращать переданные курьеру коробки
+    // обратно в редактируемый черновик нельзя. Отменяет выдачу администратор
+    // отдельной операцией с обязательной причиной.
+    await assertIssueNotStarted(tx, routeId, route.number);
+
     // Блокировка заранее не нужна: подтверждённый маршрут никто не редактирует.
     await applyTransition(tx, route, 'DRAFT', actor, now, input.reason.trim());
+
+    // Заказы, уже лежащие в маршрутной ячейке, физически никуда не переезжают:
+    // система лишь помечает, что их нужно вернуть в хранение штатным
+    // сканированием, и до этого блокирует выдачу (`FUL-003`).
+    await markRoutePlacementsForRelocation(tx, routeId);
     // Состав и порядок сохраняются полностью: возврат — это возможность править,
     // а не пересборка маршрута заново.
     // Маршрут сразу открывается инициатору, иначе между возвратом и захватом
@@ -370,11 +385,23 @@ export async function cancelRoute(
     if (route.state !== 'DRAFT' && route.state !== 'CONFIRMED') {
       throw new AppError('CONFLICT', {
         message: 'route cannot be cancelled',
-        publicMessage: 'Маршрут уже отменён.',
+        // Отменённый и уехавший маршруты одинаково нельзя отменить, но по
+        // разным причинам. Сказать логисту «уже отменён» про лист, который
+        // сейчас у курьера, — это соврать о том, где находятся коробки.
+        publicMessage:
+          route.state === 'ACTIVE'
+            ? 'Заказы переданы курьеру: маршрут больше не отменяется.'
+            : 'Маршрут уже отменён.',
         conflict: { kind: 'ROUTE_NOT_DRAFT' },
       });
     }
     requireVersion(route, input.expectedVersion);
+
+    // Тот же запрет, что и при возврате в черновик: отменить маршрут, часть
+    // которого уже уехала с курьером, обычным путём нельзя.
+    if (route.state === 'CONFIRMED') {
+      await assertIssueNotStarted(tx, routeId, route.number);
+    }
 
     // Черновик отменяет тот, кто держит его в работе; подтверждённый маршрут
     // никто не редактирует, поэтому блокировка для него не требуется.
@@ -394,6 +421,10 @@ export async function cancelRoute(
       const list = Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`));
       await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" IN (${list}) ORDER BY "id" FOR UPDATE`;
     }
+
+    // Пометка ставится ДО закрытия участий: после него активного состава
+    // маршрута уже нет, и найти лежащие в маршрутной ячейке заказы было бы нечем.
+    await markRoutePlacementsForRelocation(tx, routeId);
 
     for (const item of participations) {
       await tx.routeOrder.update({

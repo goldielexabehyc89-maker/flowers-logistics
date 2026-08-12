@@ -1076,11 +1076,15 @@ test('складские ячейки: администратор управля
   await activate(warehousePage, warehousePhone, warehouseCode, WAREHOUSE_PIN);
   await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
 
-  // Раздел честно говорит, что операций ещё нет.
-  await expect(warehousePage.getByText('Раздел ещё не реализован', { exact: false })).toBeVisible();
-  for (const fake of ['Принять заказ', 'Скомплектовать', 'Выдать курьеру', 'Сканировать']) {
-    await expect(warehousePage.getByRole('button', { name: fake })).toHaveCount(0);
+  // У кладовщика рабочий экран с тремя вкладками (этап 6.5), а не заглушка.
+  for (const tab of ['storage', 'picking', 'issue']) {
+    await expect(warehousePage.getByTestId(`wh-tab-${tab}`)).toBeVisible();
   }
+  await expect(warehousePage.getByTestId('wh-scan-order')).toBeVisible();
+
+  // Но управления справочником ячеек у него нет: это раздел настроек.
+  await expect(warehousePage.getByTestId('cell-create')).toHaveCount(0);
+  await expect(warehousePage.getByText('Складские ячейки')).toHaveCount(0);
 
   // 6. Управление ячейками кладовщику недоступно даже по прямому адресу.
   for (const foreign of ['Настройки', 'Сотрудники и курьеры']) {
@@ -1091,4 +1095,106 @@ test('складские ячейки: администратор управля
   await expect(warehousePage.getByText('Складские ячейки')).toHaveCount(0);
 
   await context.close();
+});
+
+test('склад: приёмка → комплектование → пауза → курьер → поштучная выдача → ACTIVE', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const storageCell = process.env['E2E_WH_STORAGE_CELL'] ?? '';
+  const routeCell = process.env['E2E_WH_ROUTE_CELL'] ?? '';
+  const routeNumber = process.env['E2E_WH_ROUTE'] ?? '';
+  const firstOrder = process.env['E2E_WH_ORDER_1'] ?? '';
+  const secondOrder = process.env['E2E_WH_ORDER_2'] ?? '';
+
+  test.skip(
+    storageCell === '' || routeCell === '' || routeNumber === '' || firstOrder === '',
+    'не передана складская фикстура (E2E_WH_*)',
+  );
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+  // 1. Приёмка: пара сканов «заказ + ячейка». До второго скана база не меняется.
+  for (const orderNumber of [firstOrder, secondOrder]) {
+    await page.getByTestId('wh-scan-order').fill(orderNumber);
+    await page.getByTestId('wh-scan-order').press('Enter');
+    await expect(page.getByTestId('wh-scanned-order')).toHaveText(orderNumber);
+
+    await page.getByTestId('wh-scan-cell').fill(storageCell);
+    await page.getByTestId('wh-place').click();
+    await expect(page.locator('.toast-region')).toContainText(orderNumber);
+    // Поле снова ждёт заказ: шаг завершён.
+    await expect(page.getByTestId('wh-scan-order')).toBeVisible();
+  }
+
+  const placed = page.locator('[data-testid="wh-placement-row"]', { hasText: firstOrder });
+  await expect(placed).toContainText(storageCell);
+
+  // 2. Комплектование: привязка маршрутной ячейки и перенос первого заказа.
+  await page.getByTestId('wh-tab-picking').click();
+  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
+  await expect(page.getByTestId('wh-route-cell')).toHaveText('не привязана');
+
+  await page.getByTestId('wh-bind-cell').fill(routeCell);
+  await page.getByTestId('wh-bind-submit').click();
+  await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
+
+  await page.getByTestId('wh-pick-order').fill(firstOrder);
+  await page.getByTestId('wh-pick-submit').click();
+  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
+
+  // 3. Пауза и продолжение: уходим на другую вкладку и возвращаемся.
+  await page.getByTestId('wh-tab-storage').click();
+  await expect(page.getByTestId('wh-scan-order')).toBeVisible();
+  await page.getByTestId('wh-tab-picking').click();
+  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
+  // Прогресс не потерян.
+  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
+
+  await page.getByTestId('wh-pick-order').fill(secondOrder);
+  await page.getByTestId('wh-pick-submit').click();
+  await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
+
+  // 4. Выдача: сначала подтверждение курьера, затем заказы по одному.
+  await page.getByTestId('wh-tab-issue').click();
+  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
+  await expect(page.getByTestId('wh-route-courier')).not.toHaveText('не назначен');
+
+  // Без подтверждения курьера поля выдачи не существует.
+  await expect(page.getByTestId('wh-issue-order')).toHaveCount(0);
+  await page.getByTestId('wh-confirm-courier').click();
+  await expect(page.getByTestId('wh-issue-order')).toBeVisible();
+
+  await page.getByTestId('wh-issue-order').fill(firstOrder);
+  await page.getByTestId('wh-issue-submit').click();
+  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
+  // Маршрут ещё подтверждён: выдан не весь лист.
+  await expect(page.locator('[data-testid="wh-route-card"]')).toHaveAttribute(
+    'data-route-state',
+    'CONFIRMED',
+  );
+
+  await page.getByTestId('wh-issue-order').fill(secondOrder);
+  await page.getByTestId('wh-issue-submit').click();
+
+  // 5. Последний заказ перевёл маршрут в ACTIVE и освободил маршрутную ячейку.
+  await expect(page.locator('[data-testid="wh-route-card"]')).toHaveAttribute(
+    'data-route-state',
+    'ACTIVE',
+  );
+  await expect(page.getByTestId('wh-route-active')).toBeVisible();
+  await expect(page.getByTestId('wh-route-cell')).toHaveText('не привязана');
+
+  // 6. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
+  // что именно он повёз, — но уже без изменяющих действий.
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  const activeRow = page.locator('.routes__list-item', { hasText: routeNumber });
+  await expect(activeRow).toContainText('Передан курьеру');
+  await activeRow.getByRole('button', { name: 'Открыть лист' }).click();
+  await expect(page.locator('.sheet__footer')).toContainText('передан курьеру');
 });

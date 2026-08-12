@@ -37,6 +37,7 @@ import { isCalendarDate, toDateColumn } from '../integrations/moysklad/delivery-
 import { calendarDate, ineligibleReason, INELIGIBLE_MESSAGES } from './eligibility.js';
 import { nextRouteNumber } from './numbering.js';
 import { grantLease, requireLease } from './lease.js';
+import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
 
 /** Кому адресованы события маршрутов. Курьеру глобальная картина не нужна. */
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
@@ -703,6 +704,11 @@ export async function setCourier(
     await requireLease(tx, routeId, actor, clockOf(deps)());
 
     if (input.courierUserId !== null) {
+      // После начала выдачи обычное переназначение курьера запрещено
+      // (`FUL-003`): нового курьера назначает администратор той же операцией,
+      // которой отменяет выдачу.
+      await assertIssueNotStarted(tx, routeId, route.number);
+
       await assertCourierAssignable(tx, actor, input.courierUserId);
     }
 
