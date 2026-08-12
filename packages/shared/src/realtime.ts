@@ -42,6 +42,11 @@ export const REALTIME_TOPICS = [
   // ни координат там нет, клиент перезапрашивает карточку сам.
   'route_plan.updated',
   'depot.changed',
+  // Производственный состав заказа (этап 6.2). Адресуется ADMIN и FLORIST:
+  // логисту состав не нужен, а лишняя подписка означала бы лишний перезапрос.
+  // В payload — идентификатор заказа и перечень изменившихся частей снимка:
+  // ни названий позиций, ни количеств, ни текста комментария и открытки.
+  'order.fulfillment_changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;
