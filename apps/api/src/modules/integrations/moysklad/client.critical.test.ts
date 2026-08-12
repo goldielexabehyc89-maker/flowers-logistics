@@ -78,9 +78,9 @@ describe('темп обращений', () => {
     const { instance } = client(fetchImpl, clock);
 
     await Promise.all([
-      instance.listCustomerOrders({ limit: 1 }),
-      instance.listCustomerOrders({ limit: 1 }),
-      instance.listCustomerOrders({ limit: 1 }),
+      instance.listCustomerOrders({ limit: 1, withPositions: false }),
+      instance.listCustomerOrders({ limit: 1, withPositions: false }),
+      instance.listCustomerOrders({ limit: 1, withPositions: false }),
     ]);
 
     expect(maxActive).toBe(1);
@@ -157,7 +157,7 @@ describe('режим только чтения: HTTP-метод проверяе
     }) as unknown as typeof globalThis.fetch;
     const { instance } = client(fetchImpl);
 
-    await instance.listCustomerOrders({ limit: 1 });
+    await instance.listCustomerOrders({ limit: 1, withPositions: false });
     expect(seen).toEqual(['GET']);
   });
 
@@ -237,7 +237,9 @@ describe('лимит и ошибки', () => {
 
     const { instance } = client(fetchImpl);
 
-    await expect(instance.listCustomerOrders({ limit: 1 })).rejects.toMatchObject({
+    await expect(
+      instance.listCustomerOrders({ limit: 1, withPositions: false }),
+    ).rejects.toMatchObject({
       code: 'RATE_LIMITED',
       status: 429,
       retryAfterMs: 3000,
@@ -259,7 +261,7 @@ describe('лимит и ошибки', () => {
       )) as unknown as typeof globalThis.fetch;
 
     const { instance } = client(fetchImpl);
-    const page = await instance.listCustomerOrders({ limit: 1 });
+    const page = await instance.listCustomerOrders({ limit: 1, withPositions: false });
 
     expect(page.rateLimit).toEqual({ remaining: 43, limit: 45 });
   });
@@ -273,7 +275,9 @@ describe('лимит и ошибки', () => {
 
     const { instance } = client(fetchImpl, controlledClock(), null);
 
-    await expect(instance.listCustomerOrders({ limit: 1 })).rejects.toMatchObject({
+    await expect(
+      instance.listCustomerOrders({ limit: 1, withPositions: false }),
+    ).rejects.toMatchObject({
       code: 'NOT_CONFIGURED',
     });
     expect(calls).toBe(0);
@@ -291,7 +295,11 @@ describe('безопасность ошибок', () => {
     const { instance } = client(fetchImpl);
 
     const error = await instance
-      .listCustomerOrders({ limit: 1, filter: 'shipmentAddress~Москва, Тестовая улица' })
+      .listCustomerOrders({
+        limit: 1,
+        filter: 'shipmentAddress~Москва, Тестовая улица',
+        withPositions: false,
+      })
       .catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(MoyskladError);
@@ -321,7 +329,7 @@ describe('безопасность ошибок', () => {
 
       const { instance } = client(fetchImpl);
       const error = (await instance
-        .listCustomerOrders({ limit: 1 })
+        .listCustomerOrders({ limit: 1, withPositions: false })
         .catch((e: unknown) => e)) as MoyskladError;
 
       expect(error.code, String(status)).toBe(code);
@@ -357,7 +365,7 @@ describe('загрузка заказов', () => {
     }) as unknown as typeof globalThis.fetch;
 
     const { instance } = client(fetchImpl);
-    await instance.listCustomerOrders({ limit: 100 });
+    await instance.listCustomerOrders({ limit: 100, withPositions: false });
 
     const params = new URL(requestedUrl).searchParams;
     expect(params.get('expand')).toBe('state');
@@ -369,7 +377,7 @@ describe('загрузка заказов', () => {
       jsonResponse({ rows: [validRow], meta: { size: 1 } })) as unknown as typeof globalThis.fetch;
 
     const { instance } = client(fetchImpl);
-    const page = await instance.listCustomerOrders({ limit: 1 });
+    const page = await instance.listCustomerOrders({ limit: 1, withPositions: false });
 
     expect(page.rows).toHaveLength(1);
     expect(page.rows[0]?.state?.stateType).toBe('Regular');
@@ -385,7 +393,7 @@ describe('загрузка заказов', () => {
 
     const { instance } = client(fetchImpl);
     const error = (await instance
-      .listCustomerOrders({ limit: 1 })
+      .listCustomerOrders({ limit: 1, withPositions: false })
       .catch((e: unknown) => e)) as MoyskladError;
 
     expect(error.code).toBe('BAD_RESPONSE');

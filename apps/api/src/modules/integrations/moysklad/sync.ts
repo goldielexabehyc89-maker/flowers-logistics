@@ -31,6 +31,15 @@ import { approvedStoreFilter, deltaFilter } from './filters.js';
 import { applyOrderSnapshot, markSourceMissing } from './import-service.js';
 import { mapOrder } from './mapper.js';
 import { acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
+import {
+  CompositionError,
+  CompositionSource,
+  type FulfillmentTexts,
+} from './composition-source.js';
+import type { MoyskladOrderDto } from './dto.js';
+import { parseMoscow } from './moscow-time.js';
+import { applyFulfillmentSnapshot } from '../../fulfillment/service.js';
+import type { FulfillmentSnapshot } from '../../fulfillment/composition.js';
 
 export const PROVIDER = 'moysklad';
 /** Размер страницы. Больше нельзя: `expand` разрешён для выборки не более 100. */
@@ -60,6 +69,14 @@ export interface SyncDeps {
    * Включается только там, где очередь кто-то обрабатывает, — в production.
    */
   geocodingEnabled?: boolean;
+  /**
+   * Сколько заказов дочитывает очередь состава за проход.
+   *
+   * Переопределяется только в проверках: сценарии логистического прохода
+   * не должны зависеть от чужих заказов, оставшихся в общей тестовой базе.
+   * В приложении значение не задаётся и берётся из `COMPOSITION_BACKFILL_LIMIT`.
+   */
+  compositionBackfillLimit?: number;
 }
 
 export interface PassResult {
@@ -70,6 +87,14 @@ export interface PassResult {
   updated: number;
   skippedOutOfScope: number;
   missing: number;
+  /** Заказов, у которых производственный состав подтверждён в этом проходе. */
+  compositionConfirmed: number;
+  /** Заказов, у которых состав подтвердить не удалось: проекция не тронута. */
+  compositionUnconfirmed: number;
+  /** Заказов, дочитанных очередью состава независимо от изменения `updated`. */
+  compositionBackfilled: number;
+  /** Сетевых обращений за компонентами бандлов: показывает работу кэша прохода. */
+  bundleRequests: number;
 }
 
 const emptyResult = (kind: PassResult['kind']): PassResult => ({
@@ -80,6 +105,10 @@ const emptyResult = (kind: PassResult['kind']): PassResult => ({
   updated: 0,
   skippedOutOfScope: 0,
   missing: 0,
+  compositionConfirmed: 0,
+  compositionUnconfirmed: 0,
+  compositionBackfilled: 0,
+  bundleRequests: 0,
 });
 
 // --- Аренда прохода --------------------------------------------------------
@@ -206,6 +235,11 @@ async function readAllPages(
       offset,
       filter: reader.filter,
       order: reader.order,
+      // Состав запрашивается на КАЖДОМ пути чтения заказов — полная загрузка,
+      // delta и контрольная сверка идут через эту функцию. Отключить его для
+      // одного из путей означало бы, что заказ, изменившийся именно там,
+      // сохранится без состава и никем не будет замечен.
+      withPositions: true,
     });
 
     total ??= page.size;
@@ -250,22 +284,231 @@ export function initialLoadSince(now: Date): Date {
   return new Date(startOfDayUtc - 3 * 60 * 60 * 1000);
 }
 
-async function applyRows(deps: SyncDeps, rows: unknown[], result: PassResult): Promise<void> {
+/**
+ * Применяет страницу заказов вместе с производственным составом.
+ *
+ * Порядок действий важен. Сеть выполняется ДО открытия транзакции: держать
+ * соединение с базой открытым на время HTTP нельзя, иначе медленный внешний
+ * ответ занимал бы соединение и блокировал строку заказа.
+ *
+ * Отказ состава одного заказа не роняет ни страницу, ни проход: заказ
+ * сохраняется, его подтверждённая проекция остаётся нетронутой, а состояние
+ * состава уходит в `PENDING`/`FAILED`, откуда его заберёт очередь дозагрузки.
+ */
+async function applyRows(
+  deps: SyncDeps,
+  rows: unknown[],
+  result: PassResult,
+  source: CompositionSource,
+): Promise<void> {
   const now = (deps.now ?? (() => new Date()))();
 
   for (const row of rows) {
     const { snapshot } = mapOrder(row as never, deps.ids);
+    const order = row as MoyskladOrderDto;
 
-    const applied = await deps.db.$transaction((tx: TransactionClient) =>
-      applyOrderSnapshot(tx, snapshot, now, { geocoding: deps.geocodingEnabled === true }),
-    );
+    // Состав нужен только производственной области. Заказ чужого склада
+    // не сохраняется вовсе, и разбирать его состав незачем.
+    //
+    // Сети здесь нет: используется только состав, пришедший вместе со
+    // страницей. Единственные возможные обращения — компоненты бандлов,
+    // и те с кэшем на проход.
+    const composition = snapshot.fulfillmentInScope ? await buildComposition(source, order) : null;
+
+    const applied = await deps.db.$transaction(async (tx: TransactionClient) => {
+      const orderResult = await applyOrderSnapshot(tx, snapshot, now, {
+        geocoding: deps.geocodingEnabled === true,
+      });
+
+      if (composition === null) {
+        return { orderResult, fulfillment: null };
+      }
+
+      const fulfillment = await applyFulfillmentSnapshot(
+        tx,
+        {
+          externalId: snapshot.externalId,
+          externalUpdated: parseMoscow(snapshot.externalUpdated),
+          texts: composition.texts,
+          snapshot: composition.snapshot,
+          failure: composition.failure,
+        },
+        now,
+      );
+      return { orderResult, fulfillment };
+    });
 
     result.processed += 1;
-    if (applied.outcome === 'CREATED') result.created += 1;
-    if (applied.outcome === 'UPDATED' || applied.outcome === 'SCOPE_ENTERED') result.updated += 1;
-    if (applied.outcome === 'SCOPE_EXITED') result.updated += 1;
-    if (applied.outcome === 'SKIPPED_OUT_OF_SCOPE') result.skippedOutOfScope += 1;
+    if (applied.orderResult.outcome === 'CREATED') result.created += 1;
+    if (
+      applied.orderResult.outcome === 'UPDATED' ||
+      applied.orderResult.outcome === 'SCOPE_ENTERED'
+    )
+      result.updated += 1;
+    if (applied.orderResult.outcome === 'SCOPE_EXITED') result.updated += 1;
+    if (applied.orderResult.outcome === 'SKIPPED_OUT_OF_SCOPE') result.skippedOutOfScope += 1;
+
+    if (applied.fulfillment !== null) {
+      if (applied.fulfillment.outcome === 'UNCONFIRMED') {
+        result.compositionUnconfirmed += 1;
+      } else if (
+        applied.fulfillment.outcome !== 'SKIPPED' &&
+        applied.fulfillment.outcome !== 'STALE'
+      ) {
+        result.compositionConfirmed += 1;
+      }
+    }
   }
+
+  result.bundleRequests = source.bundleRequests;
+}
+
+interface BuiltComposition {
+  texts: FulfillmentTexts;
+  snapshot: FulfillmentSnapshot | null;
+  failure: string | null;
+}
+
+/**
+ * Собирает состав из страницы, превращая отказ в данные, а не в исключение.
+ *
+ * Исключение здесь уронило бы всю страницу: один заказ с испорченным составом
+ * остановил бы импорт остальных девяноста девяти. Отказ обязан быть локальным
+ * и заметным, а не заразным.
+ */
+async function buildComposition(
+  source: CompositionSource,
+  order: MoyskladOrderDto,
+): Promise<BuiltComposition> {
+  const texts = source.texts(order);
+  try {
+    return { texts, snapshot: await source.fromEmbedded(order), failure: null };
+  } catch (error) {
+    if (error instanceof CompositionError) {
+      return { texts, snapshot: null, failure: error.reason };
+    }
+    // Неизвестная ошибка тоже не должна валить страницу, но и молчать о ней
+    // нельзя: безопасный код отказа остаётся в строке заказа.
+    return { texts, snapshot: null, failure: 'UNKNOWN' };
+  }
+}
+
+/**
+ * Сколько заказов дочитывается за один проход.
+ *
+ * Потолок нужен с двух сторон. Без него первый проход после миграции попытался
+ * бы дочитать тысячу заказов подряд при темпе один запрос в секунду и занял бы
+ * общий лимит аккаунта на двадцать минут. С другой стороны, очередь обязана
+ * рассасываться: после полной загрузки в ней остаются единицы, потому что
+ * состав приходит вместе со страницей заказов.
+ */
+export const COMPOSITION_BACKFILL_LIMIT = 25;
+
+/**
+ * Дозагрузка производственного состава.
+ *
+ * ЭТО ГЛАВНАЯ ГАРАНТИЯ СРЕЗА, и она существует ради одного конкретного отказа.
+ * Заказ пришёл delta-проходом, состав получить не удалось, курсор ушёл вперёд.
+ * Delta приносит только изменившиеся документы — а этот больше не изменится.
+ * Без очереди такой заказ навсегда остался бы без состава, причём выглядел бы
+ * как обычный заказ с пустым составом.
+ *
+ * Поэтому очередь живёт в базе, в колонке состояния самого заказа, и работает
+ * НЕЗАВИСИМО от `customerorder.updated`. Она не зависит ни от курсора, ни от
+ * окна перекрытия, ни от того, менялся ли заказ в МоемСкладе.
+ *
+ * Порядок выборки — по числу неудач, затем по дате доставки: один неисправимый
+ * заказ не должен занимать всю квоту прохода и задерживать свежие.
+ *
+ * Отказ дозагрузки не роняет проход: он уже сохранил заказы, и терять эту
+ * работу из-за недоступного состава нельзя.
+ */
+export async function runCompositionBackfill(
+  deps: SyncDeps,
+  source: CompositionSource,
+  result: PassResult,
+): Promise<void> {
+  const now = (deps.now ?? (() => new Date()))();
+
+  const limit = deps.compositionBackfillLimit ?? COMPOSITION_BACKFILL_LIMIT;
+  if (limit <= 0) {
+    return;
+  }
+
+  const pending = await deps.db.deliveryOrder.findMany({
+    where: {
+      fulfillmentInScope: true,
+      sourceMissing: false,
+      fulfillmentCompositionState: { in: ['PENDING', 'FAILED'] },
+      // Тексты снимка приходят только вместе с документом заказа. Заказ,
+      // документа которого этот код ещё не видел, ожидающей версии не имеет,
+      // и брать его в очередь нельзя: она читает лишь позиции и подтвердила бы
+      // снимок с пустыми текстами, то есть записала бы в неизменяемую историю
+      // неправду. Такие строки дочитывает полная загрузка — признак её
+      // завершения сброшен миграцией `20260820090500`.
+      fulfillmentPendingExternalUpdated: { not: null },
+    },
+    orderBy: [
+      { fulfillmentCompositionAttempts: 'asc' },
+      { deliveryDate: 'asc' },
+      { externalId: 'asc' },
+    ],
+    take: limit,
+    select: {
+      externalId: true,
+      fulfillmentPendingDescription: true,
+      fulfillmentPendingCardText: true,
+      fulfillmentPendingExternalUpdated: true,
+    },
+  });
+
+  for (const order of pending) {
+    // Тексты берутся из ОЖИДАЮЩЕЙ версии, а не из подтверждённой: подтверждать
+    // надо ровно ту версию, ради которой заказ попал в очередь. Повторное
+    // чтение документа стоило бы лишнего обращения ради данных, которые есть.
+    const version = order.fulfillmentPendingExternalUpdated;
+    const texts = {
+      externalId: order.externalId,
+      description: order.fulfillmentPendingDescription,
+      cardText: order.fulfillmentPendingCardText,
+    };
+
+    let snapshot: FulfillmentSnapshot | null = null;
+    let failure: string | null = null;
+    try {
+      snapshot = await source.fromApi(texts);
+    } catch (error) {
+      // Отказ одного заказа не прекращает очередь: следующий может читаться
+      // нормально, и терять из-за него остальную квоту прохода нельзя.
+      failure = error instanceof CompositionError ? error.reason : 'UNKNOWN';
+    }
+
+    const applied = await deps.db.$transaction((tx: TransactionClient) =>
+      applyFulfillmentSnapshot(
+        tx,
+        {
+          externalId: order.externalId,
+          externalUpdated: version ?? now,
+          texts: { description: texts.description, cardText: texts.cardText },
+          snapshot,
+          failure,
+          // Пока шло чтение позиций, delta могла записать более новую версию.
+          // Тогда этот результат устарел: подтверждать его как новую версию
+          // и затирать её ожидающие поля нельзя.
+          expectedPendingVersion: version,
+        },
+        now,
+      ),
+    );
+
+    if (applied.outcome === 'UNCONFIRMED') {
+      result.compositionUnconfirmed += 1;
+    } else if (applied.outcome !== 'SKIPPED' && applied.outcome !== 'STALE') {
+      result.compositionBackfilled += 1;
+    }
+  }
+
+  result.bundleRequests = source.bundleRequests;
 }
 
 /**
@@ -292,12 +535,21 @@ export async function runInitialLoad(deps: SyncDeps, cursor?: CursorState): Prom
   // должен перечитать следующий delta-проход со своим перекрытием.
   const snapshotAt = now;
   const firstEver = cursor === undefined || !cursor.initialLoadCompleted;
+  // Кэш бандлов живёт ровно проход: один различный бандл загружается один раз,
+  // даже если встретился в сотне заказов.
+  const source = new CompositionSource(deps.client, deps.ids);
 
   result.pages = await readAllPages(
     deps,
     { filter: approvedStoreFilter(deps.ids, initialLoadSince(now)), order: 'updated,asc' },
-    (rows) => applyRows(deps, rows, result),
+    (rows) => applyRows(deps, rows, result, source),
   );
+
+  // Дозагрузка выполняется ДО объявления загрузки завершённой. Заказы, состав
+  // которых не подтвердился на страницах, обязаны получить свою попытку в том же
+  // проходе — а те, что не получили, уже стоят в очереди состояния и придут
+  // следующим проходом независимо от изменения `updated`.
+  await runCompositionBackfill(deps, source, result);
 
   await deps.db.integrationCursor.update({
     where: { provider: PROVIDER },
@@ -325,6 +577,7 @@ export async function runDeltaPass(deps: SyncDeps, cursor: CursorState): Promise
   const overlapMs = (deps.overlapSeconds ?? 300) * 1000;
   const from = new Date((cursor.updatedCursor?.getTime() ?? now.getTime()) - overlapMs);
   const result = emptyResult('delta');
+  const source = new CompositionSource(deps.client, deps.ids);
 
   const seen = new Set<string>();
 
@@ -341,9 +594,18 @@ export async function runDeltaPass(deps: SyncDeps, cursor: CursorState): Promise
         seen.add(id);
         return true;
       });
-      await applyRows(deps, unique, result);
+      await applyRows(deps, unique, result, source);
     },
   );
+
+  // Дозагрузка состава выполняется ДО сдвига курсора.
+  //
+  // Это и есть защита от главного риска: заказ пришёл сюда один раз, состав
+  // получить не удалось, и после сдвига курсора delta его больше не принесёт —
+  // он просто не изменится. Очередь состояния в базе делает повтор
+  // гарантированным независимо от `updated`, а её работа до сдвига курсора
+  // означает, что подтверждение состава не откладывается на сутки вперёд.
+  await runCompositionBackfill(deps, source, result);
 
   // Курсор двигается только после полностью успешного окна.
   await deps.db.integrationCursor.update({
@@ -367,6 +629,7 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
   const since = initialLoadSince(now);
   const result = emptyResult('reconciliation');
   const present = new Set<string>();
+  const source = new CompositionSource(deps.client, deps.ids);
 
   result.pages = await readAllPages(
     deps,
@@ -378,9 +641,11 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
           present.add(id);
         }
       }
-      await applyRows(deps, rows, result);
+      await applyRows(deps, rows, result, source);
     },
   );
+
+  await runCompositionBackfill(deps, source, result);
 
   // Кандидаты — только активные заказы, реально попадающие в проверенное окно.
   // Заказ без распознанной даты серверный фильтр по дате не вернул бы никогда,
