@@ -100,6 +100,15 @@ interface StoredFulfillment {
   fulfillmentCompositionState: 'PENDING' | 'READY' | 'FAILED';
   fulfillmentCompositionAttempts: number;
   fulfillmentPendingExternalUpdated: Date | null;
+  /**
+   * Шаг производственного процесса на момент применения снимка.
+   *
+   * Читается здесь, а не отдельным запросом: изменение состава СОБРАННОГО заказа
+   * обязано перевести его в «Требует проверки» в той же транзакции, что и сам
+   * снимок. Иначе между записью нового состава и сменой состояния существовал бы
+   * промежуток, в котором заказ выглядит собранным по данным, которых уже нет.
+   */
+  fulfillmentProcessState: 'NEW' | 'IN_ASSEMBLY' | 'ASSEMBLED' | 'NEEDS_REVIEW';
 }
 
 export async function applyFulfillmentSnapshot(
@@ -119,7 +128,8 @@ export async function applyFulfillmentSnapshot(
            "fulfillmentSnapshotHash",
            "fulfillmentCompositionState",
            "fulfillmentCompositionAttempts",
-           "fulfillmentPendingExternalUpdated"
+           "fulfillmentPendingExternalUpdated",
+           "fulfillmentProcessState"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${input.externalId}::uuid
     FOR UPDATE
@@ -312,6 +322,39 @@ async function confirmed(
     positions: snapshot.positions.length,
     components: snapshot.positions.reduce((sum, p) => sum + p.components.length, 0),
   });
+
+  // ИЗМЕНЕНИЕ ПОСЛЕ СБОРКИ.
+  //
+  // Заказ уже собран, а данные приехали другие: продолжать считать его
+  // собранным нельзя — к букету приложен бланк прежнего состава. Процесс
+  // переводится в «Требует проверки» (`FUL-002` §2.6). Складскую приёмку это
+  // не блокирует: физически переданный заказ обязан быть учтён.
+  //
+  // Использованная ревизия НЕ стирается: именно она доказывает, по каким
+  // данным заказ собирали, и по ней же строится уже напечатанный бланк.
+  //
+  // Заказ В СБОРКЕ состояние не меняет: там достаточно уведомления «Заказ
+  // изменён», а флорист продолжает работу по обновившейся карточке.
+  if (order.fulfillmentProcessState === 'ASSEMBLED') {
+    await tx.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        fulfillmentProcessState: 'NEEDS_REVIEW',
+        fulfillmentProcessVersion: { increment: 1 },
+      },
+    });
+
+    await writeOrderAudit(tx, 'ORDER_FULFILLMENT_REVIEW_REQUIRED', order.id, {
+      changedFields,
+      previousState: 'ASSEMBLED',
+    });
+
+    await publishRealtimeEvent(tx, {
+      topic: 'order.fulfillment_process_changed',
+      payload: { orderId: order.id, processState: 'NEEDS_REVIEW', assigned: true },
+      audienceRoles: [...FULFILLMENT_AUDIENCE],
+    });
+  }
 
   await publishRealtimeEvent(tx, {
     topic: 'order.fulfillment_changed',
