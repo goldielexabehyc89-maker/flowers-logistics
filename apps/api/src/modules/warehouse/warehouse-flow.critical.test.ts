@@ -1120,6 +1120,39 @@ describe('частичная выдача и смена курьера', () => {
     const finished = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
     expect(finished.state).toBe('ACTIVE');
 
+    // Уехавший маршрут не редактируется ни одним обычным путём, и отказ
+    // называет причину честно: «переданы курьеру», а не «уже отменён».
+    await expect(
+      returnToDraft(
+        { db: ctx.db },
+        admin,
+        route.id,
+        { reason: 'передумали', expectedVersion: finished.version },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(
+      cancelRoute(
+        { db: ctx.db },
+        admin,
+        route.id,
+        { reason: 'передумали', expectedVersion: finished.version },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFLICT',
+      publicMessage: 'Заказы переданы курьеру: маршрут больше не отменяется.',
+    });
+    await expect(
+      setCourier(
+        { db: ctx.db },
+        admin,
+        route.id,
+        { courierUserId: courierA.id, expectedVersion: finished.version },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+
     const session = await ctx.db.routeIssueSession.findFirstOrThrow({
       where: { routeId: route.id, courierUserId: courierB.id },
       select: { state: true },

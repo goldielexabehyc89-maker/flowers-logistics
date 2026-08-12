@@ -385,7 +385,13 @@ export async function cancelRoute(
     if (route.state !== 'DRAFT' && route.state !== 'CONFIRMED') {
       throw new AppError('CONFLICT', {
         message: 'route cannot be cancelled',
-        publicMessage: 'Маршрут уже отменён.',
+        // Отменённый и уехавший маршруты одинаково нельзя отменить, но по
+        // разным причинам. Сказать логисту «уже отменён» про лист, который
+        // сейчас у курьера, — это соврать о том, где находятся коробки.
+        publicMessage:
+          route.state === 'ACTIVE'
+            ? 'Заказы переданы курьеру: маршрут больше не отменяется.'
+            : 'Маршрут уже отменён.',
         conflict: { kind: 'ROUTE_NOT_DRAFT' },
       });
     }
