@@ -21,10 +21,12 @@
     "jose": "^6.2.8",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
+    "qrcode-generator": "2.0.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/pg": "^8.20.3",
+    "jsqr": "1.4.0",
     "tsx": "^4.23.5"
   }
 }

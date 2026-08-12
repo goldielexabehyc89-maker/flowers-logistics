@@ -31,7 +31,8 @@ import {
   type CellDeps,
   type CellOccupancy,
 } from './service.js';
-import { encodeQrMatrix, dataModuleOrder, buildCodewords, renderCellLabelSvg } from './qr.js';
+import jsQR from 'jsqr';
+import { renderCellLabelSvg } from './qr.js';
 
 let ctx: TestContext;
 let deps: CellDeps;
@@ -664,84 +665,89 @@ describe('список', () => {
   });
 });
 
-// --- 7. Этикетка -------------------------------------------------------------
+// --- 7. Этикетка: независимое доказательство ---------------------------------
+
+/**
+ * Растеризация конечного SVG в пиксели.
+ *
+ * Разбираются только прямоугольники модулей, которые отрисовал сам документ:
+ * ничего о QR эта функция не знает и структуру символа не воспроизводит.
+ * Подпись под кодом остаётся белой — она вне области QR и декодированию
+ * не мешает.
+ */
+function rasterizeLabel(svg: string): { data: Uint8ClampedArray; width: number; height: number } {
+  const root = /<svg[^>]*width="(\d+)"[^>]*height="(\d+)"/.exec(svg);
+  if (root === null) {
+    throw new Error('в документе нет размеров');
+  }
+  const width = Number(root[1]);
+  const height = Number(root[2]);
+
+  const pixels = new Uint8ClampedArray(width * height * 4).fill(255);
+
+  // Прямоугольники модулей отличаются от фонового наличием координат.
+  const rect = /<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"\/>/g;
+  let match = rect.exec(svg);
+  let drawn = 0;
+  while (match !== null) {
+    const [x, y, w, h] = [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4])];
+    for (let row = y; row < y + h; row += 1) {
+      for (let col = x; col < x + w; col += 1) {
+        const offset = (row * width + col) * 4;
+        pixels[offset] = 0;
+        pixels[offset + 1] = 0;
+        pixels[offset + 2] = 0;
+      }
+    }
+    drawn += 1;
+    match = rect.exec(svg);
+  }
+
+  if (drawn === 0) {
+    throw new Error('в документе нет ни одного модуля');
+  }
+
+  return { data: pixels, width, height };
+}
 
 describe('QR-этикетка', () => {
-  it('таблица версий согласована со стандартом', () => {
-    // Общее число кодовых слов обязано быть суммой данных и коррекции:
-    // расхождение здесь дало бы правдоподобный, но нечитаемый код.
-    for (const text of ['A', 'A'.repeat(20), 'A'.repeat(48)]) {
-      const { spec } = buildCodewords(text);
-      const blocks = spec.blocks.reduce((sum, [count]) => sum + count, 0);
-      const data = spec.blocks.reduce((sum, [count, size]) => sum + count * size, 0);
-      expect(data + blocks * spec.eccPerBlock, text).toBe(spec.totalCodewords);
+  /**
+   * Классы кодов подобраны по тому, что реально ломается: короткий ASCII,
+   * рабочий код с разделителями, кириллица (двухбайтовый UTF-8) и предельная
+   * длина, на которой символ вырастает до старшей поддерживаемой версии.
+   */
+  const payloads = ['A-1', 'A-01-15', 'СКЛАД-ПОЛКА-12', 'X'.repeat(MAX_CODE_LENGTH)];
+
+  it('конечный документ читается НЕЗАВИСИМЫМ декодером и даёт ровно код ячейки', () => {
+    for (const payload of payloads) {
+      const svg = renderCellLabelSvg(payload);
+      const image = rasterizeLabel(svg);
+
+      // jsQR — самостоятельная реализация распознавания (порт ZXing), не имеющая
+      // отношения к генератору. Совпадение здесь означает, что этикетку прочтёт
+      // и чужой сканер, а не только наш собственный обратный алгоритм.
+      const decoded = jsQR(image.data, image.width, image.height);
+
+      expect(decoded, payload).not.toBeNull();
+      expect(decoded?.data, payload).toBe(payload);
     }
   });
 
-  it('матрица читается обратно: данные, маска и обход согласованы', () => {
-    const masks = [
-      (r: number, c: number) => (r + c) % 2 === 0,
-      (r: number) => r % 2 === 0,
-      (_r: number, c: number) => c % 3 === 0,
-      (r: number, c: number) => (r + c) % 3 === 0,
-      (r: number, c: number) => (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0,
-      (r: number, c: number) => ((r * c) % 2) + ((r * c) % 3) === 0,
-      (r: number, c: number) => (((r * c) % 2) + ((r * c) % 3)) % 2 === 0,
-      (r: number, c: number) => (((r + c) % 2) + ((r * c) % 3)) % 2 === 0,
-    ];
+  it('этикетка ячейки из API кодирует именно нормализованный код', async () => {
+    const token = await tokenFor(['ADMIN']);
+    // Код вводится в нижнем регистре: на этикетке обязан оказаться тот вариант,
+    // по которому потом произойдёт разрешение скана.
+    const cell = await seedCell('STORAGE', uniqueCode('qr').toLowerCase());
 
-    for (const text of ['A-01', 'СКЛАД-ПОЛКА-12', 'R-2026-08-12-003', 'X'.repeat(48)]) {
-      const matrix = encodeQrMatrix(text);
-      const size = matrix.length;
-      const { spec, codewords } = buildCodewords(text);
-      expect(size, text).toBe(17 + 4 * spec.version);
+    const response = await call('GET', `/api/storage-cells/${cell.id}/label.svg`, token);
+    expect(response.statusCode).toBe(200);
+    expect(String(response.headers['content-type'])).toContain('image/svg+xml');
 
-      const reserved = reservedModules(size);
-      const mask = readFormatMask(matrix);
-      const rule = masks[mask];
-      expect(rule, text).toBeDefined();
+    const image = rasterizeLabel(response.body);
+    const decoded = jsQR(image.data, image.width, image.height);
 
-      const bits: number[] = [];
-      for (const [row, col] of dataModuleOrder(size, reserved)) {
-        const raw = (matrix[row] ?? [])[col] === true;
-        bits.push((rule !== undefined && rule(row, col) ? !raw : raw) ? 1 : 0);
-      }
-
-      const read: number[] = [];
-      for (let i = 0; i + 8 <= bits.length; i += 8) {
-        let byte = 0;
-        for (let j = 0; j < 8; j += 1) {
-          byte = (byte << 1) | (bits[i + j] ?? 0);
-        }
-        read.push(byte);
-      }
-
-      expect(read.slice(0, codewords.length), text).toEqual(codewords);
-    }
-  });
-
-  it('служебные узоры стоят там, где их ищет сканер', () => {
-    const matrix = encodeQrMatrix('A-01');
-    const size = matrix.length;
-
-    for (const [row, col] of [
-      [0, 0],
-      [0, size - 7],
-      [size - 7, 0],
-    ] as const) {
-      expect((matrix[row] ?? [])[col]).toBe(true);
-      expect((matrix[row + 1] ?? [])[col + 1]).toBe(false);
-      expect((matrix[row + 3] ?? [])[col + 3]).toBe(true);
-    }
-
-    // Синхронизирующая дорожка чередуется.
-    for (let i = 8; i < size - 8; i += 1) {
-      expect((matrix[6] ?? [])[i], `строка ${i}`).toBe(i % 2 === 0);
-      expect((matrix[i] ?? [])[6], `столбец ${i}`).toBe(i % 2 === 0);
-    }
-
-    // Тёмный модуль обязателен и всегда в одном месте.
-    expect((matrix[size - 8] ?? [])[8]).toBe(true);
+    expect(decoded?.data).toBe(cell.normalizedCode);
+    expect(cell.normalizedCode).not.toBe(cell.code);
   });
 
   it('генерация детерминированная, разные коды дают разные этикетки', () => {
@@ -749,94 +755,21 @@ describe('QR-этикетка', () => {
     expect(renderCellLabelSvg('A-01')).not.toBe(renderCellLabelSvg('A-02'));
   });
 
-  it('этикетка несёт только код: ни UUID, ни ссылок, ни персональных данных', async () => {
+  it('этикетка несёт только код: ни UUID, ни ссылок, ни скриптов, ни PII', async () => {
     const token = await tokenFor(['ADMIN']);
-    const cell = await seedCell('STORAGE', uniqueCode('QR'));
+    const cell = await seedCell('STORAGE', uniqueCode('SAFE'));
 
     const response = await call('GET', `/api/storage-cells/${cell.id}/label.svg`, token);
     expect(response.statusCode).toBe(200);
-    expect(String(response.headers['content-type'])).toContain('image/svg+xml');
 
     // Внутреннего идентификатора строки в документе нет.
     expect(response.body).not.toContain(cell.id);
-    // Внешних адресов нет: единственный http-адрес — пространство имён SVG.
+    // Единственный http-адрес — пространство имён SVG.
     const urls = response.body.match(/https?:\/\/[^"'\s]+/g) ?? [];
     expect(urls).toEqual(['http://www.w3.org/2000/svg']);
-    expect(response.body).not.toMatch(/<script|xlink:href|<image/i);
+    // Ни скриптов, ни внешних ресурсов, ни шрифтов с чужого сервера.
+    expect(response.body).not.toMatch(/<script|xlink:href|<image|@import|<foreignObject/i);
     // Подпись под кодом — сам код, чтобы этикетку можно было прочитать глазами.
     expect(response.body).toContain(cell.normalizedCode);
   });
 });
-
-/** Функциональные модули: их положение задаётся стандартом, а не нашим кодом. */
-function reservedModules(size: number): boolean[][] {
-  const alignment: Record<number, number[]> = {
-    1: [],
-    2: [6, 18],
-    3: [6, 22],
-    4: [6, 26],
-    5: [6, 30],
-    6: [6, 34],
-  };
-  const version = (size - 17) / 4;
-  const res = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
-  const mark = (row: number, col: number): void => {
-    for (let r = -1; r <= 7; r += 1) {
-      for (let c = -1; c <= 7; c += 1) {
-        const y = row + r;
-        const x = col + c;
-        if (y >= 0 && y < size && x >= 0 && x < size) {
-          (res[y] ?? [])[x] = true;
-        }
-      }
-    }
-  };
-  mark(0, 0);
-  mark(0, size - 7);
-  mark(size - 7, 0);
-  for (let i = 0; i < size; i += 1) {
-    (res[6] ?? [])[i] = true;
-    (res[i] ?? [])[6] = true;
-  }
-  for (const row of alignment[version] ?? []) {
-    for (const col of alignment[version] ?? []) {
-      const near =
-        (row === 6 && col === 6) ||
-        (row === 6 && col === size - 7) ||
-        (row === size - 7 && col === 6);
-      if (near) {
-        continue;
-      }
-      for (let r = -2; r <= 2; r += 1) {
-        for (let c = -2; c <= 2; c += 1) {
-          (res[row + r] ?? [])[col + c] = true;
-        }
-      }
-    }
-  }
-  for (let i = 0; i <= 8; i += 1) {
-    (res[8] ?? [])[i] = true;
-    (res[i] ?? [])[8] = true;
-  }
-  for (let i = 0; i < 8; i += 1) {
-    (res[8] ?? [])[size - 1 - i] = true;
-    (res[size - 1 - i] ?? [])[8] = true;
-  }
-  return res;
-}
-
-/** Обратное чтение информации о формате: номер выбранной маски. */
-function readFormatMask(matrix: readonly boolean[][]): number {
-  const bit = (r: number, c: number): number => ((matrix[r] ?? [])[c] === true ? 1 : 0);
-  let bits = 0;
-  for (let i = 0; i <= 5; i += 1) {
-    bits |= bit(i, 8) << i;
-  }
-  bits |= bit(7, 8) << 6;
-  bits |= bit(8, 8) << 7;
-  bits |= bit(8, 7) << 8;
-  for (let i = 9; i < 15; i += 1) {
-    bits |= bit(8, 14 - i) << i;
-  }
-  return ((bits ^ 0b101010000010010) >> 10) & 0b111;
-}
