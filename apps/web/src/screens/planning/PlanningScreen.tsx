@@ -30,6 +30,7 @@ import {
   TextInput,
   type StatusTone,
 } from '../../ui/components';
+import { formatMoscowDateTime } from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import {
   assignedCount,
@@ -397,7 +398,7 @@ export function PlanningScreen(): React.JSX.Element {
                 aria-pressed={openRunId === item.id}
                 onClick={() => setOpenRunId(item.id)}
               >
-                {new Date(item.createdAt).toLocaleString('ru-RU')}
+                {formatMoscowDateTime(item.createdAt)}
               </button>{' '}
               <StatusBadge tone={toneOf(item.state)}>{PLAN_STATE_LABELS[item.state]}</StatusBadge>{' '}
               <span className="muted text-sm">машин: {item.slotCount}</span>
@@ -470,8 +471,7 @@ function PreviewPanel({
     <section className="routes__panel" data-plan-state={run.state}>
       <div className="routes__panel-header">
         <h3>
-          Расчёт от {new Date(run.createdAt).toLocaleString('ru-RU')} —{' '}
-          {PLAN_STATE_LABELS[run.state]}
+          Расчёт от {formatMoscowDateTime(run.createdAt)} — {PLAN_STATE_LABELS[run.state]}
         </h3>
       </div>
 

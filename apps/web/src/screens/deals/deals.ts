@@ -7,6 +7,8 @@
  * а не кодом перечисления.
  */
 
+import { formatCalendarDate, formatMinutesOfDay, moscowToday } from '@fl/shared';
+
 export interface OrderInterval {
   /** Исходный текст «Время доставки» из МоегоСклада, в том числе нераспознанный. */
   raw: string | null;
@@ -78,12 +80,7 @@ export const SCOPE_EXIT_LABELS: Record<string, string> = {
 
 /** `600` → `10:00`. */
 export function formatMinutes(minute: number | null): string {
-  if (minute === null) {
-    return EMPTY_VALUE;
-  }
-  const hours = Math.floor(minute / 60);
-  const minutes = minute % 60;
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  return formatMinutesOfDay(minute);
 }
 
 /** `10:00` → `600`; всё остальное → `null`. */
@@ -145,21 +142,15 @@ export function groupOrders(orders: readonly OrderView[]): DealGroups {
   };
 }
 
-/** Текущая календарная дата Москвы: сервер по умолчанию отдаёт именно её. */
-export function moscowToday(now: Date = new Date()): string {
-  return new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
+/**
+ * Время экрана берётся из общего модуля: собственная копия «плюс три часа»
+ * здесь больше не живёт.
+ */
+export { moscowToday };
 
 /** `2026-08-07` → `07.08.2026`. Пустая дата остаётся честным прочерком. */
 export function formatDate(value: string | null): string {
-  if (value === null) {
-    return EMPTY_VALUE;
-  }
-  const parts = value.split('-');
-  if (parts.length !== 3) {
-    return value;
-  }
-  return `${parts[2]}.${parts[1]}.${parts[0]}`;
+  return formatCalendarDate(value);
 }
 
 /** Деньги приходят десятичными строками и такими же показываются. */

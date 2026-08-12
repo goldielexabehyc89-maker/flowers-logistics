@@ -12,7 +12,9 @@
  * Москва — UTC+3 круглый год, перевода часов нет, поэтому достаточно константы.
  */
 
-/** Смещение Москвы относительно UTC. */
+import { moscowCalendarDate } from '@fl/shared';
+
+/** Смещение Москвы относительно UTC. Нужно разбору и печати формата МоегоСклада. */
 const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
 
 export class MoscowTimeParseError extends Error {
@@ -101,5 +103,8 @@ export function parseMoscow(value: string): Date {
 
 /** Календарная дата Москвы для момента времени. */
 export function moscowDate(date: Date): string {
-  return new Date(date.getTime() + MOSCOW_OFFSET_MS).toISOString().slice(0, 10);
+  // Календарный день считает общий модуль времени: смещение задаёт база
+  // часовых поясов, а не константа. Разбор и печать моментов МоегоСклада
+  // ниже остаются собственными — они работают с его форматом, а не с показом.
+  return moscowCalendarDate(date);
 }

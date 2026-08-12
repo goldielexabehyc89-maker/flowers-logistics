@@ -9,6 +9,7 @@
  * а `number` теряет точность на больших суммах.
  */
 
+import { moscowCalendarDate } from '@fl/shared';
 import { z } from 'zod';
 import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
@@ -88,9 +89,15 @@ interface OrdersDeps {
   basemap?: () => BasemapState;
 }
 
-/** Текущий календарный день Москвы. */
+/**
+ * Текущий календарный день Москвы.
+ *
+ * Имя и внешний контракт сохранены: на него ссылаются маршруты и сценарии
+ * наполнения. Собственная арифметика «плюс три часа» убрана — день считает
+ * общий модуль времени, тот же самый, что и в браузере.
+ */
 export function moscowToday(now: Date): string {
-  return new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return moscowCalendarDate(now);
 }
 
 function toListItem(order: {

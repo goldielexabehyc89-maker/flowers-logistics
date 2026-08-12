@@ -6,6 +6,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../auth/AuthContext';
 import { ApiError } from '../lib/api-client';
 import { useToast } from '../ui/ToastProvider';
@@ -23,11 +24,7 @@ interface OutboxFailure {
 }
 
 function formatDate(value: string): string {
-  return new Date(value).toLocaleString('ru-RU', {
-    timeZone: 'Europe/Moscow',
-    dateStyle: 'short',
-    timeStyle: 'short',
-  });
+  return formatMoscowDateTime(value);
 }
 
 export function OutboxFailures(): React.JSX.Element {
