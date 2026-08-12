@@ -17,6 +17,23 @@ import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
 import { MAX_CODE_LENGTH } from './cell-code.js';
 import { renderCellLabelSvg } from './qr.js';
+import { listConfirmedRoutes, getRouteFlow, listPlacedOrders } from './views.js';
+import {
+  FLOW_ADMIN_ROLES,
+  FLOW_ROLES,
+  countActivePlacements,
+  receiveOrder,
+  withdrawOrder,
+} from './placement.js';
+import {
+  bindRouteCell,
+  cancelIssueSession,
+  confirmCourier,
+  issueOrder,
+  pickOrderToRouteCell,
+} from './route-flow.js';
+import { resolveOrderByNumber } from './order-lookup.js';
+import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import {
   CELL_READ_ROLES,
   CELL_WRITE_ROLES,
@@ -27,7 +44,6 @@ import {
   listStorageCells,
   resolveStorageCell,
   setStorageCellActive,
-  unknownOccupancy,
   type CellDeps,
   type OccupancyProbe,
   type RequestContext,
@@ -80,9 +96,9 @@ interface WarehouseRouteDeps {
   config: AppConfig;
   /**
    * Как узнать, пуста ли ячейка. Обязательная зависимость: пока модуля
-   * размещений нет, сюда передаётся `unknownOccupancy`, и смена типа честно
-   * отказывает. Значения по умолчанию у параметра нет намеренно — иначе
-   * следующий модуль мог бы молча не подключить проверку.
+   * По умолчанию подставляется фактический подсчёт активных размещений
+   * (этап 6.5): смена типа снова стала возможной у пустой ячейки. Явная
+   * подмена оставлена для тестов и для будущих реализаций.
    */
   occupancy?: OccupancyProbe;
 }
@@ -122,7 +138,16 @@ export async function registerWarehouseRoutes(
   app: AppServer,
   deps: WarehouseRouteDeps,
 ): Promise<void> {
-  const cellDeps: CellDeps = { db: deps.db, occupancy: deps.occupancy ?? unknownOccupancy };
+  // Занятость ячейки теперь известна по-настоящему: это и есть та реализация,
+  // ради которой в срезе 6.4 был заведён порт. `unknownOccupancy` остаётся
+  // запасным поведением, если модуль подключат без неё.
+  const cellDeps: CellDeps = {
+    db: deps.db,
+    occupancy:
+      deps.occupancy ??
+      (async (client, cellId) =>
+        (await countActivePlacements(client, cellId)) === 0 ? 'EMPTY' : 'OCCUPIED'),
+  };
 
   app.get('/api/storage-cells', async (request) => {
     const actor = await authenticateWithRoles(request, deps, CELL_READ_ROLES);
@@ -213,5 +238,231 @@ export async function registerWarehouseRoutes(
       .header('content-type', 'image/svg+xml; charset=utf-8')
       .header('cache-control', 'no-store')
       .send(renderCellLabelSvg(cell.normalizedCode));
+  });
+}
+
+const orderNumberSchema = z.string().min(1).max(256);
+const cellCodeSchema = z
+  .string()
+  .min(1)
+  .max(MAX_CODE_LENGTH * 4);
+const reasonSchema = z.string().trim().min(3).max(500);
+
+const dateQuerySchema = z.object({
+  deliveryDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Ожидается дата в формате ГГГГ-ММ-ДД')
+    .refine(isCalendarDate, 'Ожидается существующая дата'),
+});
+
+const placedQuerySchema = z.object({
+  cellId: uuid.optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const receiveSchema = z.object({
+  orderNumber: orderNumberSchema,
+  cellCode: cellCodeSchema,
+  /** Явное согласие положить заказ сразу в маршрутную ячейку. */
+  allowRouteCell: z.boolean().optional(),
+});
+
+const withdrawSchema = z.object({ orderNumber: orderNumberSchema, reason: reasonSchema });
+const bindSchema = z.object({ cellCode: cellCodeSchema });
+const pickSchema = z.object({ orderNumber: orderNumberSchema, cellCode: cellCodeSchema });
+const confirmCourierSchema = z.object({ courierUserId: uuid });
+const issueSchema = z.object({ orderNumber: orderNumberSchema });
+const cancelIssueSchema = z.object({
+  reason: reasonSchema,
+  /** Кому передать остаток. Без значения назначение маршрута не меняется. */
+  nextCourierUserId: uuid.optional(),
+});
+
+/**
+ * Складской поток: приёмка, комплектование и выдача.
+ *
+ * Регистрируется отдельной функцией, чтобы справочник ячеек и движение заказов
+ * оставались читаемыми по отдельности. Права одинаковы у обеих групп, кроме
+ * отмены выдачи: её выполняет только администратор.
+ */
+export async function registerWarehouseFlowRoutes(
+  app: AppServer,
+  deps: WarehouseRouteDeps,
+): Promise<void> {
+  const flowDeps = { db: deps.db };
+
+  /** Что сейчас физически лежит на складе. */
+  app.get('/api/warehouse/placements', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const query = placedQuerySchema.parse(request.query);
+
+    return listPlacedOrders(deps.db, {
+      cellId: query.cellId ?? null,
+      limit: query.limit,
+      offset: query.offset,
+    });
+  });
+
+  /**
+   * Контекст отсканированного заказа до выбора ячейки.
+   *
+   * Нужен вкладке «Склад»: пока человек не отсканировал ячейку, база
+   * не меняется, но интерфейс уже обязан показать, входит ли заказ
+   * в подтверждённый маршрут и есть ли у листа маршрутная ячейка.
+   */
+  app.get('/api/warehouse/scan/order', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { number } = z.object({ number: orderNumberSchema }).parse(request.query);
+
+    const order = await resolveOrderByNumber(deps.db, number);
+    const placement = await deps.db.orderPlacement.findFirst({
+      where: { orderId: order.id, releasedAt: null },
+      select: { requiresRelocation: true, cell: { select: { id: true, code: true, kind: true } } },
+    });
+    const participation = await deps.db.routeOrder.findFirst({
+      where: { orderId: order.id, removedAt: null },
+      select: {
+        route: {
+          select: {
+            id: true,
+            number: true,
+            state: true,
+            cellBindings: {
+              where: { releasedAt: null },
+              select: { cell: { select: { id: true, code: true } } },
+            },
+          },
+        },
+      },
+    });
+
+    const route = participation?.route ?? null;
+    return {
+      orderId: order.id,
+      orderNumber: order.number,
+      blockedBy:
+        order.inScope === false || order.sourceArchived || order.sourceMissing
+          ? [
+              ...(order.inScope ? [] : ['OUT_OF_SCOPE']),
+              ...(order.sourceArchived ? ['SOURCE_ARCHIVED'] : []),
+              ...(order.sourceMissing ? ['SOURCE_MISSING'] : []),
+            ]
+          : [],
+      needsAttention: order.needsAttention,
+      currentCell:
+        placement === null
+          ? null
+          : {
+              id: placement.cell.id,
+              code: placement.cell.code,
+              kind: placement.cell.kind,
+              requiresRelocation: placement.requiresRelocation,
+            },
+      route:
+        route === null || route.state !== 'CONFIRMED'
+          ? null
+          : {
+              id: route.id,
+              number: route.number,
+              routeCell: route.cellBindings[0]?.cell ?? null,
+            },
+    };
+  });
+
+  /** Приёмка одной атомарной парой сканов. */
+  app.post('/api/warehouse/placements', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const body = receiveSchema.parse(request.body);
+
+    return receiveOrder(
+      flowDeps,
+      actor,
+      {
+        orderNumber: body.orderNumber,
+        cellCode: body.cellCode,
+        ...(body.allowRouteCell === undefined ? {} : { allowRouteCell: body.allowRouteCell }),
+      },
+      contextOf(request),
+    );
+  });
+
+  /** Изъятие со склада без выдачи: брак, отмена, возврат флористу. */
+  app.post('/api/warehouse/placements/withdraw', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const body = withdrawSchema.parse(request.body);
+
+    return withdrawOrder(flowDeps, actor, body, contextOf(request));
+  });
+
+  /** Подтверждённые маршрутные листы выбранного московского дня. */
+  app.get('/api/warehouse/routes', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { deliveryDate } = dateQuerySchema.parse(request.query);
+
+    return { items: await listConfirmedRoutes(deps.db, deliveryDate) };
+  });
+
+  app.get('/api/warehouse/routes/:id', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    const view = await getRouteFlow(deps.db, id);
+    if (view === null) {
+      throw new AppError('NOT_FOUND', { message: 'route not found' });
+    }
+    return view;
+  });
+
+  app.put('/api/warehouse/routes/:id/cell', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = bindSchema.parse(request.body);
+
+    return bindRouteCell(flowDeps, actor, id, body, contextOf(request));
+  });
+
+  app.post('/api/warehouse/routes/:id/pick', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = pickSchema.parse(request.body);
+
+    return pickOrderToRouteCell(flowDeps, actor, id, body, contextOf(request));
+  });
+
+  app.post('/api/warehouse/routes/:id/courier', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = confirmCourierSchema.parse(request.body);
+
+    return confirmCourier(flowDeps, actor, id, body, contextOf(request));
+  });
+
+  app.post('/api/warehouse/routes/:id/issue', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = issueSchema.parse(request.body);
+
+    return issueOrder(flowDeps, actor, id, body, contextOf(request));
+  });
+
+  /** Отмена выдачи. Только администратор: уже выданное остаётся в истории. */
+  app.post('/api/warehouse/routes/:id/issue/cancel', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ADMIN_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = cancelIssueSchema.parse(request.body);
+
+    return cancelIssueSession(
+      flowDeps,
+      actor,
+      id,
+      {
+        reason: body.reason,
+        ...(body.nextCourierUserId === undefined
+          ? {}
+          : { nextCourierUserId: body.nextCourierUserId }),
+      },
+      contextOf(request),
+    );
   });
 }

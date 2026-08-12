@@ -81,6 +81,18 @@ export const AUDIT_ACTIONS = [
   'STORAGE_CELL_KIND_CHANGED',
   'STORAGE_CELL_ACTIVATED',
   'STORAGE_CELL_DEACTIVATED',
+  // Фактическое движение заказов по складу (этап 6.5). В записях только
+  // идентификаторы, ячейки и вид действия: ни адресов, ни получателей, ни денег.
+  'WAREHOUSE_ORDER_RECEIVED',
+  'WAREHOUSE_ORDER_MOVED',
+  'WAREHOUSE_ORDER_WITHDRAWN',
+  'WAREHOUSE_ROUTE_CELL_BOUND',
+  'WAREHOUSE_ORDER_PICKED',
+  'WAREHOUSE_COURIER_CONFIRMED',
+  'WAREHOUSE_ORDER_ISSUED',
+  'WAREHOUSE_ISSUE_CANCELLED',
+  // Маршрут физически передан курьеру и стал активным.
+  'ROUTE_ISSUED_TO_COURIER',
   // Общие настройки планирования: смена и время обслуживания.
   'SETTING_UPDATED',
   // Планирование маршрутов. Ни адресов, ни координат заказов: только

@@ -25,6 +25,7 @@ import {
   conflictLabel,
   formatDate,
   moscowToday,
+  ROUTE_STATE_LABELS,
   stopInterval,
   VEHICLE_LABELS,
   type RouteCardView,
@@ -37,11 +38,28 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const [date, setDate] = useState(moscowToday());
   const [openId, setOpenId] = useState<string | null>(null);
 
-  const routes = useQuery({
+  // Лист нужен и после того, как заказы уехали: курьер в дороге, а логисту
+  // приходится смотреть, что именно он повёз. Поэтому день показывается двумя
+  // запросами — подтверждённые и уже переданные курьеру, — а не одним
+  // состоянием, при котором маршрут исчезал бы с экрана в момент выдачи.
+  const confirmed = useQuery({
     queryKey: ['routes', date, 'CONFIRMED'],
     queryFn: () =>
       client.get<RouteListResponse>(`/api/routes?deliveryDate=${date}&state=CONFIRMED&limit=100`),
   });
+  const active = useQuery({
+    queryKey: ['routes', date, 'ACTIVE'],
+    queryFn: () =>
+      client.get<RouteListResponse>(`/api/routes?deliveryDate=${date}&state=ACTIVE&limit=100`),
+  });
+  const routes = {
+    isPending: confirmed.isPending || active.isPending,
+    isError: confirmed.isError || active.isError,
+    refetch: () => {
+      void confirmed.refetch();
+      void active.refetch();
+    },
+  };
 
   const sheet = useQuery({
     queryKey: ['route', openId],
@@ -49,7 +67,9 @@ export function RouteSheetsScreen(): React.JSX.Element {
     enabled: openId !== null,
   });
 
-  const items = routes.data?.items ?? [];
+  const items = [...(confirmed.data?.items ?? []), ...(active.data?.items ?? [])].sort(
+    (left, right) => left.number.localeCompare(right.number, 'ru'),
+  );
 
   return (
     <section className="stack">
@@ -57,8 +77,8 @@ export function RouteSheetsScreen(): React.JSX.Element {
         <div>
           <h2>Маршрутные листы</h2>
           <p className="muted text-sm">
-            Подтверждённые маршруты выбранного дня. Лист печатается как есть, без карты и расчётного
-            времени.
+            Подтверждённые и переданные курьеру маршруты выбранного дня. Лист печатается как есть,
+            без карты и расчётного времени.
           </p>
         </div>
       </header>
@@ -86,7 +106,7 @@ export function RouteSheetsScreen(): React.JSX.Element {
           <ErrorState title="Не удалось загрузить маршруты" onRetry={() => void routes.refetch()} />
         ) : items.length === 0 ? (
           <EmptyState
-            title="Подтверждённых маршрутов на этот день нет"
+            title="Маршрутов на этот день нет"
             description="Подтвердите черновик в разделе «Маршрутизация», и он появится здесь."
           />
         ) : (
@@ -94,7 +114,8 @@ export function RouteSheetsScreen(): React.JSX.Element {
             {items.map((route) => (
               <li key={route.id} className="routes__list-item">
                 <div>
-                  <span className="routes__number">{route.number}</span>
+                  <span className="routes__number">{route.number}</span>{' '}
+                  <StatusBadge tone="info">{ROUTE_STATE_LABELS[route.state]}</StatusBadge>
                   <div className="muted text-sm">
                     {formatDate(route.deliveryDate)} · {VEHICLE_LABELS[route.vehicleType]} ·{' '}
                     заказов: {route.orderCount}
@@ -171,7 +192,9 @@ export function RouteSheetsScreen(): React.JSX.Element {
 
               <footer className="sheet__footer text-sm">
                 Итого остановок: {sheet.data.orders.length}. Состояние маршрута:{' '}
-                <StatusBadge tone="info">подтверждён</StatusBadge>
+                <StatusBadge tone="info">
+                  {ROUTE_STATE_LABELS[sheet.data.state].toLocaleLowerCase('ru')}
+                </StatusBadge>
               </footer>
             </article>
           )}
