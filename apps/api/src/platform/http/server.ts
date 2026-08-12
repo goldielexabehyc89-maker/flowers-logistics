@@ -23,7 +23,10 @@ import { registerOutboxRoutes } from '../../modules/outbox/routes.js';
 import { registerOrderRoutes } from '../../modules/orders/routes.js';
 import { registerRoutingRoutes } from '../../modules/routing/routes.js';
 import { registerDepotRoutes } from '../../modules/depots/routes.js';
-import { registerWarehouseRoutes } from '../../modules/warehouse/routes.js';
+import {
+  registerWarehouseRoutes,
+  registerWarehouseFlowRoutes,
+} from '../../modules/warehouse/routes.js';
 import { registerSettingsRoutes } from '../../modules/settings/routes.js';
 import { registerPlanningRoutes } from '../../modules/planning/routes.js';
 import { createPlanningDeps } from '../../modules/planning/deps.js';
@@ -138,6 +141,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerRoutingRoutes(app, { db, config });
   await registerDepotRoutes(app, { db, config });
   await registerWarehouseRoutes(app, { db, config });
+  await registerWarehouseFlowRoutes(app, { db, config });
   await registerSettingsRoutes(app, { db, config });
   // HTTP-слой планирования аренд не берёт и в сеть не ходит: расчёт выполняет
   // фоновый исполнитель со своим владельцем аренды (см. index.ts).

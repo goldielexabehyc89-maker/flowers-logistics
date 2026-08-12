@@ -34,6 +34,7 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import type { ConflictKind, Role } from '@fl/shared';
 import { calendarDate, ineligibleReason } from './eligibility.js';
 import { assertReason, grantLease, releaseLeaseRow, requireLease } from './lease.js';
+import { markRoutePlacementsForRelocation } from '../warehouse/route-flow.js';
 
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
 
@@ -334,6 +335,11 @@ export async function returnToDraft(
 
     // Блокировка заранее не нужна: подтверждённый маршрут никто не редактирует.
     await applyTransition(tx, route, 'DRAFT', actor, now, input.reason.trim());
+
+    // Заказы, уже лежащие в маршрутной ячейке, физически никуда не переезжают:
+    // система лишь помечает, что их нужно вернуть в хранение штатным
+    // сканированием, и до этого блокирует выдачу (`FUL-003`).
+    await markRoutePlacementsForRelocation(tx, routeId);
     // Состав и порядок сохраняются полностью: возврат — это возможность править,
     // а не пересборка маршрута заново.
     // Маршрут сразу открывается инициатору, иначе между возвратом и захватом
@@ -394,6 +400,10 @@ export async function cancelRoute(
       const list = Prisma.join(ids.map((id) => Prisma.sql`${id}::uuid`));
       await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" IN (${list}) ORDER BY "id" FOR UPDATE`;
     }
+
+    // Пометка ставится ДО закрытия участий: после него активного состава
+    // маршрута уже нет, и найти лежащие в маршрутной ячейке заказы было бы нечем.
+    await markRoutePlacementsForRelocation(tx, routeId);
 
     for (const item of participations) {
       await tx.routeOrder.update({

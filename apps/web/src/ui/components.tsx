@@ -79,7 +79,14 @@ export function Field({ label, hint, error, children }: FieldProps): React.JSX.E
   );
 }
 
-export type TextInputProps = React.InputHTMLAttributes<HTMLInputElement>;
+/**
+ * Пропсы поля ввода.
+ *
+ * `ComponentProps<'input'>` вместо `InputHTMLAttributes` намеренно: он включает
+ * `ref`, а складским полям нужен фокус после каждого успешного скана. В React 19
+ * `ref` передаётся обычным пропом, поэтому обёртка `forwardRef` не требуется.
+ */
+export type TextInputProps = React.ComponentProps<'input'>;
 
 export function TextInput(props: TextInputProps): React.JSX.Element {
   return <input {...props} className={['input', props.className].filter(Boolean).join(' ')} />;

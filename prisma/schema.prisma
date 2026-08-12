@@ -124,6 +124,14 @@ model User {
   createdStorageCells StorageCell[] @relation("StorageCellCreatedBy")
   changedStorageCells StorageCell[] @relation("StorageCellChangedBy")
 
+  placedOrders      OrderPlacement[]   @relation("PlacementPlacedBy")
+  releasedOrders    OrderPlacement[]   @relation("PlacementReleasedBy")
+  boundRouteCells   RouteCellBinding[] @relation("RouteCellBoundBy")
+  unboundRouteCells RouteCellBinding[] @relation("RouteCellReleasedBy")
+  issuedRoutes      RouteIssueSession[] @relation("IssueSessionCourier")
+  confirmedIssues   RouteIssueSession[] @relation("IssueSessionConfirmedBy")
+  cancelledIssues   RouteIssueSession[] @relation("IssueSessionCancelledBy")
+
   @@index([status])
   @@index([createdAt])
 }
@@ -634,6 +642,7 @@ model DeliveryOrder {
   geocodeJobs          OrderGeocodeJob[]
   fulfillmentPositions DeliveryOrderPosition[]
   fulfillmentRevisions OrderFulfillmentRevision[]
+  placements           OrderPlacement[]
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
@@ -853,6 +862,10 @@ enum RouteState {
   DRAFT
   CONFIRMED
   CANCELLED
+  /// Маршрут физически передан курьеру (этап 6.5). Значение добавлено в КОНЕЦ:
+  /// PostgreSQL хранит порядок объявления, и вставка в середину сдвинула бы
+  /// существующие значения. `COMPLETED` появится вместе с работой курьера.
+  ACTIVE
 }
 
 /// Почему заказ покинул состав маршрута.
@@ -939,6 +952,8 @@ model DeliveryRoute {
   movedInOrders RouteOrder[]           @relation("RouteOrderMovedTo")
   transitions   RouteStateTransition[]
   editLease     RouteEditLease?
+  cellBindings  RouteCellBinding[]
+  issueSessions RouteIssueSession[]
 
   @@index([deliveryDate, state])
   @@index([courierUserId])
@@ -1598,5 +1613,167 @@ model StorageCell {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  placements   OrderPlacement[]   @relation("PlacementCell")
+  movedInto    OrderPlacement[]   @relation("PlacementMovedToCell")
+  movedFrom    OrderPlacement[]   @relation("PlacementFromCell")
+  routeBindings RouteCellBinding[]
+
+  @@unique([id, kind])
   @@index([isActive, kind])
+}
+
+// --- Этап 6.5. Фактическое движение заказов по складу -------------------------
+
+/// Почему заказ покинул ячейку.
+enum PlacementReleaseReason {
+  /// Перенесён в маршрутную ячейку при комплектовании.
+  MOVED_TO_ROUTE_CELL
+  /// Возвращён в обычное хранение.
+  MOVED_TO_STORAGE
+  /// Выдан курьеру.
+  ISSUED_TO_COURIER
+  /// Изъят со склада без выдачи: брак, отмена, возврат флористу.
+  WITHDRAWN
+}
+
+/// Как заказ попал в ячейку.
+enum PlacementSource {
+  /// Первая приёмка собранного заказа на склад.
+  RECEIVED
+  /// Перемещение из другой ячейки.
+  MOVED
+}
+
+/// Фактическое местоположение заказа и вся история его движений.
+///
+/// Отдельной колонки «текущая ячейка» у заказа нет намеренно — это был бы второй
+/// источник истины, который база согласовать не может. Текущее местоположение —
+/// это строка с пустым `releasedAt`, и частичный уникальный индекс
+/// `OrderPlacement_active_order_unique` физически запрещает второе такое место.
+///
+/// Строка после освобождения неизменяема (триггер): повторное размещение создаёт
+/// НОВУЮ строку, и история движений получается сама, а не отдельной копией.
+/// Молча переписать `cellId` нельзя — это тоже запрещает триггер: перемещение
+/// обязано быть видимым действием с автором и временем.
+model OrderPlacement {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Куда положили.
+  cellId String      @db.Uuid
+  cell   StorageCell @relation("PlacementCell", fields: [cellId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Откуда пришёл заказ. Пусто при первой приёмке.
+  fromCellId String?      @db.Uuid
+  fromCell   StorageCell? @relation("PlacementFromCell", fields: [fromCellId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  source PlacementSource
+
+  /// UTC-инстант: база работает в UTC, московский день считается отдельно.
+  placedAt   DateTime @default(now())
+  placedById String   @db.Uuid
+  placedBy   User     @relation("PlacementPlacedBy", fields: [placedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Три поля освобождения заполняются вместе и после фиксации не изменяются.
+  releasedAt    DateTime?
+  releasedById  String?                 @db.Uuid
+  releasedBy    User?                   @relation("PlacementReleasedBy", fields: [releasedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  releaseReason PlacementReleaseReason?
+
+  /// Куда ушёл заказ при перемещении. Обязателен ровно при переносе.
+  movedToCellId String?      @db.Uuid
+  movedToCell   StorageCell? @relation("PlacementMovedToCell", fields: [movedToCellId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Сессия выдачи. Обязательна ровно при `ISSUED_TO_COURIER`.
+  issueSessionId String?            @db.Uuid
+  issueSession   RouteIssueSession? @relation(fields: [issueSessionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Заказ лежит в маршрутной ячейке маршрута, который вернули в черновик
+  /// или отменили. Система не переносит его молча: физическое место меняет
+  /// только человек штатным сканированием.
+  requiresRelocation Boolean @default(false)
+
+  @@index([orderId, placedAt])
+  @@index([cellId])
+  @@index([issueSessionId])
+}
+
+/// Привязка маршрутной ячейки к подтверждённому маршрутному листу.
+///
+/// Одна активная привязка на маршрут и одна на ячейку — частичные уникальные
+/// индексы. Тип ячейки продублирован колонкой и связан составным внешним ключом
+/// с `StorageCell(id, kind)`: обычный внешний ключ не умеет выразить «только
+/// ячейка типа ROUTE», а проверка в коде обходится одним запросом.
+model RouteCellBinding {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeId String        @db.Uuid
+  route   DeliveryRoute @relation(fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  cellId   String          @db.Uuid
+  cellKind StorageCellKind
+  cell     StorageCell     @relation(fields: [cellId, cellKind], references: [id, kind], onDelete: Restrict, onUpdate: Restrict)
+
+  boundAt   DateTime @default(now())
+  boundById String   @db.Uuid
+  boundBy   User     @relation("RouteCellBoundBy", fields: [boundById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  releasedAt   DateTime?
+  releasedById String?   @db.Uuid
+  releasedBy   User?     @relation("RouteCellReleasedBy", fields: [releasedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([routeId])
+  @@index([cellId])
+}
+
+/// Состояние сессии выдачи маршрутного листа курьеру.
+enum IssueSessionState {
+  /// Курьер подтверждён, заказы выдаются поштучно.
+  OPEN
+  /// Выдан последний заказ; маршрут переведён в `ACTIVE`.
+  COMPLETED
+  /// Отменена администратором с причиной. Уже выданное остаётся в истории.
+  CANCELLED
+}
+
+/// Сессия выдачи маршрутного листа назначенному курьеру.
+///
+/// Существует отдельно от маршрута, потому что выдача возобновляема: она
+/// начинается подтверждением курьера, продолжается поштучным сканированием
+/// и может быть прервана. Пока сессия открыта, маршрут остаётся `CONFIRMED`,
+/// а частичный прогресс виден по выданным размещениям.
+model RouteIssueSession {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeId String        @db.Uuid
+  route   DeliveryRoute @relation(fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Курьер, подтверждённый кладовщиком перед началом выдачи.
+  courierUserId String @db.Uuid
+  courier       User   @relation("IssueSessionCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  state IssueSessionState @default(OPEN)
+
+  /// Пока сессия открыта, поле равно `routeId`; иначе NULL. Уникальный индекс
+  /// по нему даёт «не более одной открытой сессии на маршрут» средствами базы.
+  openKey String? @unique @db.Uuid
+
+  confirmedAt   DateTime @default(now())
+  confirmedById String   @db.Uuid
+  confirmedBy   User     @relation("IssueSessionConfirmedBy", fields: [confirmedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  completedAt DateTime?
+
+  cancelledAt   DateTime?
+  cancelledById String?   @db.Uuid
+  cancelledBy   User?     @relation("IssueSessionCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  cancelReason  String?
+
+  version Int @default(1)
+
+  placements OrderPlacement[]
+
+  @@index([routeId, state])
 }

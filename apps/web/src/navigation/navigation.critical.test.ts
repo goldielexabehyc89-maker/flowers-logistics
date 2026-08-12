@@ -158,13 +158,18 @@ describe('видимость разделов', () => {
     for (const key of placeholderKeys) {
       expect(sectionKeys).toContain(key);
     }
-    for (const key of ['florist', 'warehouse', 'pickup']) {
+    // Раздел «Склад» получил рабочий экран (этап 6.5) и заглушкой больше
+    // не является — прежнее утверждение заменено осознанно. Остальные
+    // производственные разделы по-прежнему честно говорят о неготовности.
+    for (const key of ['florist', 'pickup']) {
       expect(placeholderKeys).toContain(key);
     }
+    expect(placeholderKeys).not.toContain('warehouse');
+    expect(sectionKeys).toContain('warehouse');
   });
 
   it('заглушки честно называют неготовность и не выдумывают данные', () => {
-    for (const key of ['florist', 'warehouse', 'pickup']) {
+    for (const key of ['florist', 'pickup']) {
       const placeholder = PLACEHOLDERS[key];
 
       expect(placeholder).toBeDefined();

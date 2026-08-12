@@ -77,6 +77,11 @@ export function invalidationKeysFor(topic: string): string[][] {
   if (topic === 'session.revoked') {
     return [];
   }
+  if (topic.startsWith('warehouse.')) {
+    // Складские экраны и карточка маршрутного листа. Событие не несёт данных:
+    // клиент перезапрашивает нужный список сам.
+    return [['warehouse-placements'], ['warehouse-routes'], ['warehouse-route']];
+  }
   if (topic.startsWith('order.')) {
     // Событие не несёт данных заказа: список перезапрашивается целиком.
     // Ни звука, ни всплывающего уведомления — обычный новый заказ рутина.
