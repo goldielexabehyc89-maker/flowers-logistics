@@ -157,6 +157,28 @@ export class ApiClient {
   }
 
   /**
+   * Ответ, который не является JSON: печатные документы и этикетки.
+   *
+   * Отдельный метод нужен, потому что такой документ нельзя открыть обычной
+   * ссылкой: токен живёт только в памяти и в заголовке, а `href` ушёл бы
+   * без него и получил 401. Обновление сессии и единственный повтор работают
+   * здесь так же, как для обычных запросов.
+   */
+  async getText(path: string, accept: string): Promise<string> {
+    const response = await this.#requestWithRetry(
+      path,
+      { method: 'GET', headers: { accept } },
+      true,
+    );
+
+    if (!response.ok) {
+      throw await toApiError(response);
+    }
+
+    return response.text();
+  }
+
+  /**
    * Открывает поток событий.
    *
    * Нативный EventSource не используется: он не позволяет передать заголовок

@@ -121,6 +121,9 @@ model User {
   appliedPlanRuns   RoutePlanRun[]         @relation("PlanRunAppliedBy")
   planVehicleSlots  RoutePlanVehicleSlot[] @relation("PlanSlotCourier")
 
+  createdStorageCells StorageCell[] @relation("StorageCellCreatedBy")
+  changedStorageCells StorageCell[] @relation("StorageCellChangedBy")
+
   @@index([status])
   @@index([createdAt])
 }
@@ -1539,4 +1542,61 @@ model RoutePlanResultSnapshot {
   plan     Json
 
   createdAt DateTime @default(now())
+}
+
+// --- Этап 6.4. Складские ячейки ----------------------------------------------
+
+/// Тип складской ячейки.
+///
+/// Значения ровно два (`FUL-003`). Отдельный тип «для отменённых» сознательно
+/// не вводится: отменённый заказ остаётся в обычной ячейке хранения с пометкой.
+enum StorageCellKind {
+  /// Обычная ячейка хранения собранного заказа.
+  STORAGE
+  /// Ячейка, в которую комплектуется подтверждённый маршрутный лист.
+  ROUTE
+}
+
+/// Складская ячейка — физическое место внутри склада.
+///
+/// Это НЕ логистический `Depot` (`FUL-004`): `Depot` — точка старта и конца
+/// маршрута с координатами, ячейка — полка внутри здания. Координат, вместимости
+/// и связи с маршрутом здесь нет: вместимость владельцем не моделируется, а
+/// привязка маршрутного листа появится вместе с размещениями отдельным срезом.
+///
+/// Записи не удаляются никогда (триггер `storage_cell_no_delete`): на ячейку
+/// будет ссылаться неизменяемая история перемещений, и удаление оставило бы
+/// историю без места. Недоступность выражается признаком `isActive`.
+model StorageCell {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Код в том виде, в котором его ввёл администратор: только этот вариант
+  /// печатается на этикетке и показывается человеку.
+  code           String
+  /// Тот же код, приведённый к сравнимому виду (NFKC + верхний регистр,
+  /// внешние пробелы убраны). Уникален: скан `a-01` не должен выбрать `A-01`
+  /// как другую ячейку.
+  ///
+  /// Оба поля неизменяемы после создания (триггер `storage_cell_code_immutable`):
+  /// напечатанная этикетка не должна молча начать указывать на переименованную
+  /// ячейку. Ошибочный код исправляется деактивацией и созданием новой ячейки.
+  normalizedCode String @unique
+
+  kind     StorageCellKind
+  isActive Boolean         @default(true)
+
+  /// Оптимистическая блокировка. Любое изменение называет ожидаемую версию.
+  version Int @default(1)
+
+  createdById String @db.Uuid
+  createdBy   User   @relation("StorageCellCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Кто изменил ячейку последним. Пусто, пока её только создали.
+  changedById String? @db.Uuid
+  changedBy   User?   @relation("StorageCellChangedBy", fields: [changedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, kind])
 }

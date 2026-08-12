@@ -90,6 +90,15 @@ export const CONFLICT_KINDS = [
   'PLAN_INPUT_STALE',
   /** В плане есть неразмещённые заказы: применение требует отдельного подтверждения. */
   'PLAN_HAS_UNASSIGNED',
+  /** Ячейка с таким кодом уже существует. */
+  'CELL_CODE_TAKEN',
+  /** В ячейке есть заказы: тип меняется только у пустой. */
+  'CELL_NOT_EMPTY',
+  /**
+   * Пустоту ячейки подтвердить нечем: учёта размещений ещё не существует.
+   * Считать неизвестное пустым нельзя — именно так заказы и уезжают не туда.
+   */
+  'CELL_OCCUPANCY_UNKNOWN',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

@@ -47,6 +47,10 @@ export const REALTIME_TOPICS = [
   // В payload — идентификатор заказа и перечень изменившихся частей снимка:
   // ни названий позиций, ни количеств, ни текста комментария и открытки.
   'order.fulfillment_changed',
+  // Справочник складских ячеек (этап 6.4). Адресуется ADMIN и WAREHOUSE.
+  // В payload только идентификатор ячейки: код полки в событие не уходит,
+  // клиент перезапрашивает справочник сам.
+  'storage_cell.changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

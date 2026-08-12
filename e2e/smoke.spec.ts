@@ -883,3 +883,86 @@ test('планирование: настройки, превью и примен
   await expect(settings.getByTestId('service-car')).toHaveValue('12');
   await expect(settings.getByTestId('service-foot')).toHaveValue('15');
 });
+
+test('складские ячейки: администратор управляет справочником, кладовщик только смотрит', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const WAREHOUSE_PIN = '9753';
+  const code = `E2E-${Date.now() % 100_000}`;
+
+  // 1. Администратор заводит ячейку в настройках.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+
+  const cells = page.locator('section', { hasText: 'Складские ячейки' }).first();
+  await expect(cells).toBeVisible();
+
+  // Код вводится в нижнем регистре: сохранён он будет в верхнем, и интерфейс
+  // обязан предупредить об этом ДО сохранения, а не после печати этикетки.
+  await cells.getByTestId('cell-code').fill(code.toLowerCase());
+  await expect(cells.getByText(code, { exact: false })).toBeVisible();
+  await cells.getByTestId('cell-kind').selectOption('STORAGE');
+  await cells.getByTestId('cell-create').click();
+
+  const row = cells.locator('[data-testid="cell-row"]', { hasText: code });
+  await expect(row).toBeVisible();
+  await expect(row.getByText('Активна')).toBeVisible();
+
+  // 2. Повторное создание того же кода в другом регистре отклоняется.
+  await cells.getByTestId('cell-code').fill(code.toUpperCase());
+  await cells.getByTestId('cell-create').click();
+  await expect(page.locator('.toast-region')).toContainText(/уже существует/i);
+
+  // 3. Выключение вместо удаления: кнопки «Удалить» не существует.
+  await expect(cells.getByRole('button', { name: /Удалить/ })).toHaveCount(0);
+  await row.getByTestId('cell-toggle').click();
+  await expect(row.getByText('Выключена')).toBeVisible();
+  await row.getByTestId('cell-toggle').click();
+  await expect(row.getByText('Активна')).toBeVisible();
+
+  // 4. Администратор заводит кладовщика.
+  const warehousePhone = uniquePhone();
+  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Кладовщик проверки');
+  await page.getByLabel('Телефон').fill(warehousePhone);
+  await page.getByRole('checkbox', { name: 'Кладовщик' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+
+  const codeText = await page.locator('.one-time-code').innerText();
+  const warehouseCode = codeText.trim();
+  expect(warehouseCode).toMatch(/^\d{4}$/);
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // 5. Кладовщик видит свой раздел и НЕ видит складских операций.
+  const context = await browser.newContext();
+  const warehousePage = await context.newPage();
+  await activate(warehousePage, warehousePhone, warehouseCode, WAREHOUSE_PIN);
+  await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+  // Раздел честно говорит, что операций ещё нет.
+  await expect(warehousePage.getByText('Раздел ещё не реализован', { exact: false })).toBeVisible();
+  for (const fake of ['Принять заказ', 'Скомплектовать', 'Выдать курьеру', 'Сканировать']) {
+    await expect(warehousePage.getByRole('button', { name: fake })).toHaveCount(0);
+  }
+
+  // 6. Управление ячейками кладовщику недоступно даже по прямому адресу.
+  for (const foreign of ['Настройки', 'Сотрудники и курьеры']) {
+    await expect(warehousePage.getByRole('link', { name: foreign })).toHaveCount(0);
+  }
+  await warehousePage.goto('/settings');
+  await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+  await expect(warehousePage.getByText('Складские ячейки')).toHaveCount(0);
+
+  await context.close();
+});
