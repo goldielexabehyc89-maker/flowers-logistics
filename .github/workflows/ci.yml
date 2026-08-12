@@ -164,40 +164,63 @@ jobs:
             "$IMAGE_LOCAL_TAG" \
             npx --no-install prisma migrate deploy
 
-      - name: Проверить операторскую команду ручного прохода МоегоСклада
+      - name: Проверить операторские команды внутри образа
         shell: bash
         run: |
           set -euo pipefail
-          # Команда из документации обязана работать ВНУТРИ образа: без
-          # TS-исходников, без tsx и без обращения к реестру npm. Токена и сети
-          # МоегоСклада здесь нет намеренно — проверяется, что команда доходит
-          # до штатной проверки окружения и отказывает по ней, а не падает
-          # с «tsx: not found» или MODULE_NOT_FOUND.
-          set +e
-          output="$(docker run --rm --network host \
-            -e DATABASE_URL="$IMAGE_DATABASE_URL" \
-            -e APP_ENV=local \
-            -e APP_ENVIRONMENT_MARKER=local \
-            -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
-            -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
-            -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
-            "$IMAGE_LOCAL_TAG" \
-            npm run --silent moysklad:sync-once 2>&1)"
-          code=$?
-          set -e
+          # Команды из документации обязаны работать ВНУТРИ образа: без
+          # TS-исходников, без tsx, без devDependencies и без обращения
+          # к реестру npm. Токена, реального телефона, файла снимка и живой
+          # внешней сети здесь нет намеренно — проверяется, что каждая команда
+          # доходит до СВОЕГО безопасного отказа, а не падает на отсутствующем
+          # файле среды выполнения.
+          run_in_image() {
+            docker run --rm --network host \
+              -e DATABASE_URL="$IMAGE_DATABASE_URL" \
+              -e APP_ENV=local \
+              -e APP_ENVIRONMENT_MARKER=local \
+              -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
+              -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
+              -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
+              "$IMAGE_LOCAL_TAG" \
+              npm run --silent "$1" 2>&1
+          }
 
-          echo "$output"
+          check() {
+            local command="$1" expected_code="$2" expected_text="$3"
 
-          if printf '%s' "$output" | grep -qiE 'tsx: not found|MODULE_NOT_FOUND|Cannot find module|no such file'; then
-            echo "команда не работает внутри образа: она всё ещё требует исходников или tsx" >&2
-            exit 1
-          fi
+            set +e
+            output="$(run_in_image "$command")"
+            code=$?
+            set -e
 
-          # Код 2 — штатный отказ по окружению: команда дошла до проверки.
-          if [ "$code" != "2" ]; then
-            echo "ожидался штатный отказ по окружению с кодом 2, получено: $code" >&2
-            exit 1
-          fi
+            echo "--- ${command} (код ${code}) ---"
+            echo "$output"
+
+            if printf '%s' "$output" | grep -qiE 'tsx: not found|MODULE_NOT_FOUND|Cannot find module|no such file'; then
+              echo "команда ${command} не работает внутри образа: нужен исходник или tsx" >&2
+              exit 1
+            fi
+
+            if [ -n "$expected_code" ] && [ "$code" != "$expected_code" ]; then
+              echo "команда ${command}: ожидался код ${expected_code}, получено ${code}" >&2
+              exit 1
+            fi
+
+            if [ -n "$expected_text" ] && ! printf '%s' "$output" | grep -qF "$expected_text"; then
+              echo "команда ${command}: в выводе нет ожидаемого текста «${expected_text}»" >&2
+              exit 1
+            fi
+          }
+
+          # Штатный отказ по окружению: команда дошла до проверки маркеров.
+          check 'moysklad:sync-once' 2 ''
+          # Собственная валидация аргументов: пользователь не создаётся,
+          # код активации не печатается.
+          check 'bootstrap:admin' 1 'Использование: npm run bootstrap:admin'
+          # Отказ проверки staging-окружения ДО чтения файла и обращения к БД.
+          check 'snapshot:import' 2 ''
+          check 'snapshot:retire' 2 ''
 
       - name: Запустить приложение из образа и дождаться /ready
         shell: bash

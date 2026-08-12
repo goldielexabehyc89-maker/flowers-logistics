@@ -1715,28 +1715,76 @@ describe('операторские команды', () => {
    * формулировка ссылалась на исходник, падала с `tsx: not found`, и первый
    * живой проход пришлось выполнять в обход документации.
    */
-  it('ручной проход МоегоСклада не требует исходников и tsx', async () => {
-    const scripts = JSON.parse(await readFile(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+  /**
+   * Все операторские команды одного класса: оператор запускает их внутри
+   * production-образа, где нет ни исходников, ни `tsx`, ни devDependencies,
+   * ни сети npm. Проверяется весь класс сразу, иначе следующая команда
+   * повторит ту же историю.
+   */
+  const OPERATOR_COMMANDS = [
+    'bootstrap:admin',
+    'moysklad:sync-once',
+    'snapshot:import',
+    'snapshot:retire',
+  ];
+
+  async function packageScripts(): Promise<Record<string, string>> {
+    const parsed = JSON.parse(await readFile(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
       scripts: Record<string, string>;
     };
-    const command = scripts.scripts['moysklad:sync-once'] ?? '';
+    return parsed.scripts;
+  }
 
-    expect(command).toContain('apps/api/dist/scripts/moysklad-sync-once.js');
-    expect(command).not.toContain('tsx');
-    expect(command).not.toContain('apps/api/src/');
+  it('каждая операторская команда запускает собранный файл, а не исходник', async () => {
+    const scripts = await packageScripts();
 
-    // Исходный вариант остаётся, но назван явно: скрытого выбора по окружению
-    // нет — оператор и разработчик запускают разные команды.
-    const dev = scripts.scripts['moysklad:sync-once:dev'] ?? '';
-    expect(dev).toContain('tsx');
-    expect(dev).toContain('apps/api/src/scripts/moysklad-sync-once.ts');
+    for (const name of OPERATOR_COMMANDS) {
+      const command = scripts[name] ?? '';
+      expect(command, name).toMatch(/^node apps\/api\/dist\/scripts\/[a-z-]+\.js$/);
+      expect(command, name).not.toContain('tsx');
+      expect(command, name).not.toContain('apps/api/src/');
+    }
   });
 
-  it('собираемый файл действительно существует в исходниках', async () => {
-    // Путь в команде не выдуман: у него есть исходник, из которого build
-    // положит файл ровно туда.
-    await expect(
-      readFile(path.join(REPO_ROOT, 'apps/api/src/scripts/moysklad-sync-once.ts'), 'utf8'),
-    ).resolves.toContain('performSyncOnce');
+  it('исходный вариант каждой команды назван явным суффиксом :dev', async () => {
+    const scripts = await packageScripts();
+
+    for (const name of OPERATOR_COMMANDS) {
+      const dev = scripts[`${name}:dev`] ?? '';
+      expect(dev, name).toContain('tsx');
+      expect(dev, name).toContain('apps/api/src/scripts/');
+    }
+  });
+
+  it('у каждого dist-пути есть исходник, который туда собирается', async () => {
+    const scripts = await packageScripts();
+
+    for (const name of OPERATOR_COMMANDS) {
+      const distPath = (scripts[name] ?? '').replace('node ', '');
+      const sourcePath = distPath.replace('/dist/', '/src/').replace(/\.js$/, '.ts');
+
+      // Путь в команде не выдуман: у него есть исходник, из которого build
+      // положит файл ровно туда.
+      await expect(readFile(path.join(REPO_ROOT, sourcePath), 'utf8'), name).resolves.toContain(
+        'async function main',
+      );
+      // И именно этот исходник указан в `:dev`-варианте.
+      expect(scripts[`${name}:dev`], name).toContain(sourcePath);
+    }
+  });
+
+  it('проверка образа в CI запускает все четыре команды', async () => {
+    const workflow = await readFile(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+
+    // Команды запускаются одной общей функцией через `npm run --silent`,
+    // поэтому проверяется и она, и вызов для каждой из четырёх.
+    expect(workflow).toContain('npm run --silent "$1"');
+    for (const name of OPERATOR_COMMANDS) {
+      expect(workflow, name).toContain(`check '${name}'`);
+    }
+    // И запрещает именно те отказы, ради которых проверка существует.
+    for (const failure of ['tsx: not found', 'MODULE_NOT_FOUND', 'Cannot find module']) {
+      expect(workflow, failure).toContain(failure);
+    }
   });
 });
