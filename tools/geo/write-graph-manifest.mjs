@@ -57,6 +57,28 @@ try {
   process.exit(1);
 }
 
+/**
+ * Конфигурация — такая же часть идентичности графа, как и тайлы.
+ *
+ * Раньше манифест защищал `tiles.tar` и молчал про `valhalla.json`. Значит,
+ * набор с неизменяемыми тайлами имел подменяемые пределы: те самые
+ * `max_matrix_location_pairs`, из-за которых пилот получил 400 на дне из
+ * 60 точек. Граф, у которого защищено содержимое и не защищена конфигурация,
+ * неизменяемым не является.
+ *
+ * Поле добавлено совместимо: прежний deploy-код его просто не читает, а новый
+ * verifier обязан его требовать.
+ */
+const configFile = path.join(args.root, 'valhalla.json');
+let configInfo = null;
+try {
+  const info = await stat(configFile);
+  configInfo = { bytes: info.size, sha256: await sha256(configFile) };
+} catch {
+  console.error('Файл valhalla.json не найден: граф собран не полностью');
+  process.exit(1);
+}
+
 await writeFile(
   path.join(args.root, 'manifest.json'),
   `${JSON.stringify(
@@ -66,6 +88,7 @@ await writeFile(
       sourceSha256: await sha256(args['source-file']),
       tools,
       extract: { path: 'tiles.tar', ...extractInfo },
+      config: { path: 'valhalla.json', ...configInfo },
     },
     null,
     2,

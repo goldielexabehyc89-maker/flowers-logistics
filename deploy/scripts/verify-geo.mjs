@@ -19,13 +19,15 @@
  * — и не меняются, если подменить содержимое, сохранив время. Ни в ту, ни
  * в другую сторону они ничего не доказывают.
  *
- * Четыре режима:
+ * Режимы:
  *   basemap  — манифест подложки и SHA-256 каждой её файла;
- *   graph    — фактический SHA-256 tiles.tar, его запись в манифесте
- *              и ожидаемое значение из конфигурации; все три обязаны совпасть;
+ *   graph    — фактический SHA-256 tiles.tar И valhalla.json, их записи
+ *              в манифесте и ожидаемое значение из конфигурации; плюс
+ *              бюджет матрицы обоих профилей;
  *   routing  — маршрутизатор ответил, набор загружен, сервис готов;
- *   matrix   — сервис действительно считает: маленькая матрица на
- *              синтетических точках обоими профилями.
+ *   matrix   — сервис действительно считает: ПРЕДЕЛЬНАЯ матрица на
+ *              утверждённом дорожном наборе обоими профилями;
+ *   solver   — решатель учитывает время обслуживания по типу машины.
  *
  * Fail closed: любое несовпадение — ненулевой код возврата с понятной причиной.
  */
@@ -143,19 +145,126 @@ export async function resolveArtifact(root, relative) {
 }
 
 /**
- * Синтетические точки для пробного расчёта.
+ * Предел одного расчёта матрицы.
  *
- * Общеизвестные городские координаты в пределах собираемого региона. Ни адресов
- * заказов, ни персональных данных здесь быть не может: проверка выполняется
- * при каждой выкатке и её аргументы попадают в журналы.
+ * Значение повторяет `tools/geo/graph-limits.json` — единственный именованный
+ * источник. Повторяет, а не читает: этот файл уезжает на сервер один и целиком,
+ * и там рядом с ним нет ни репозитория, ни пакетов. Разойтись копии не дают
+ * направленные проверки, которые сверяют её с источником.
  */
-const PROBE_POINTS = [
-  { lat: 55.751244, lon: 37.618423 },
-  { lat: 55.76024, lon: 37.61871 },
-];
+const MAX_MATRIX_POINTS = 60;
+const MAX_MATRIX_LOCATION_PAIRS = MAX_MATRIX_POINTS * MAX_MATRIX_POINTS;
 
 /** Профили, которыми пользуется приложение. Оба обязаны считаться. */
 const PROBE_COSTINGS = ['auto', 'pedestrian'];
+
+/**
+ * Утверждённый дорожный набор: те же точки, на которых считает пилот.
+ *
+ * Прежняя проверка брала две городские координаты и спрашивала, отвечает ли
+ * сервис вообще. Этого оказалось мало: первый настоящий пилот получил
+ * `400 Exceeded max locations` на 60 точках и внутреннюю ошибку пешеходного
+ * профиля на 11 — обе после того, как выкатка объявила маршрутизатор исправным.
+ * Поэтому проверяется предельный размер и ровно тот набор, которым потом
+ * пользуются.
+ *
+ * Копия набора из `apps/api/src/modules/planning/road-fixture.ts`. Сверяет
+ * их направленная проверка: этот файл обязан оставаться самодостаточным.
+ *
+ * --- НАЧАЛО ДОРОЖНОГО НАБОРА ---
+ */
+const ROAD_FIXTURE_POINTS = [
+  { latMicro: 55751224, lonMicro: 37618351 },
+  { latMicro: 55757476, lonMicro: 37629791 },
+  { latMicro: 55757369, lonMicro: 37618725 },
+  { latMicro: 55757490, lonMicro: 37607460 },
+  { latMicro: 55751142, lonMicro: 37607275 },
+  { latMicro: 55745338, lonMicro: 37607594 },
+  { latMicro: 55744884, lonMicro: 37618495 },
+  { latMicro: 55745056, lonMicro: 37629524 },
+  { latMicro: 55745003, lonMicro: 37640796 },
+  { latMicro: 55751321, lonMicro: 37640555 },
+  { latMicro: 55757766, lonMicro: 37640614 },
+  { latMicro: 55764051, lonMicro: 37640924 },
+  { latMicro: 55763901, lonMicro: 37629294 },
+  { latMicro: 55764069, lonMicro: 37618393 },
+  { latMicro: 55763835, lonMicro: 37607645 },
+  { latMicro: 55763868, lonMicro: 37596283 },
+  { latMicro: 55757623, lonMicro: 37596050 },
+  { latMicro: 55751290, lonMicro: 37596094 },
+  { latMicro: 55744948, lonMicro: 37596314 },
+  { latMicro: 55738596, lonMicro: 37596110 },
+  { latMicro: 55738645, lonMicro: 37607309 },
+  { latMicro: 55738751, lonMicro: 37618341 },
+  { latMicro: 55738675, lonMicro: 37629471 },
+  { latMicro: 55738920, lonMicro: 37640828 },
+  { latMicro: 55738593, lonMicro: 37651585 },
+  { latMicro: 55744969, lonMicro: 37651665 },
+  { latMicro: 55751044, lonMicro: 37651577 },
+  { latMicro: 55757468, lonMicro: 37651820 },
+  { latMicro: 55763878, lonMicro: 37651806 },
+  { latMicro: 55770024, lonMicro: 37651629 },
+  { latMicro: 55770129, lonMicro: 37640600 },
+  { latMicro: 55770110, lonMicro: 37629451 },
+  { latMicro: 55770145, lonMicro: 37618280 },
+  { latMicro: 55769979, lonMicro: 37606893 },
+  { latMicro: 55770069, lonMicro: 37596059 },
+  { latMicro: 55770180, lonMicro: 37585151 },
+  { latMicro: 55763937, lonMicro: 37585992 },
+  { latMicro: 55757529, lonMicro: 37585340 },
+  { latMicro: 55751239, lonMicro: 37585301 },
+  { latMicro: 55744943, lonMicro: 37585068 },
+  { latMicro: 55738749, lonMicro: 37585101 },
+  { latMicro: 55732341, lonMicro: 37585157 },
+  { latMicro: 55732335, lonMicro: 37596009 },
+  { latMicro: 55731771, lonMicro: 37606735 },
+  { latMicro: 55732395, lonMicro: 37618389 },
+  { latMicro: 55732353, lonMicro: 37629492 },
+  { latMicro: 55732270, lonMicro: 37640752 },
+  { latMicro: 55732188, lonMicro: 37651255 },
+  { latMicro: 55732277, lonMicro: 37662861 },
+  { latMicro: 55738632, lonMicro: 37662798 },
+  { latMicro: 55744956, lonMicro: 37662818 },
+  { latMicro: 55751345, lonMicro: 37662738 },
+  { latMicro: 55757632, lonMicro: 37664379 },
+  { latMicro: 55763909, lonMicro: 37662755 },
+  { latMicro: 55770106, lonMicro: 37663137 },
+  { latMicro: 55776452, lonMicro: 37662811 },
+  { latMicro: 55776485, lonMicro: 37640804 },
+  { latMicro: 55776445, lonMicro: 37629291 },
+  { latMicro: 55776454, lonMicro: 37618510 },
+  { latMicro: 55776435, lonMicro: 37607270 },
+];
+/* --- КОНЕЦ ДОРОЖНОГО НАБОРА --- */
+
+/**
+ * Минимальный набор, воспроизводивший внутренний отказ пешеходного профиля.
+ *
+ * На графе 20260806 эти шесть точек давали `500 GetTags: offset exceeds size
+ * of text list`, а любая пара из них — нет: отказ проявлялся только на широком
+ * поиске. Набор проверяется отдельно от дорожного, потому что дорожный
+ * компактен, а этот намеренно разбросан — именно так дефект и всплыл.
+ *
+ * Копия `tools/geo/foot-regression.json`; расхождение ловит направленная
+ * проверка.
+ */
+const FOOT_REGRESSION_POINTS = [
+  { latMicro: 55669440, lonMicro: 37459107 },
+  { latMicro: 55731554, lonMicro: 37694973 },
+  { latMicro: 55685722, lonMicro: 37543596 },
+  { latMicro: 55805223, lonMicro: 37734689 },
+  { latMicro: 55771461, lonMicro: 37430783 },
+  { latMicro: 55700989, lonMicro: 37523157 },
+];
+
+/** Микроградусы набора — в градусы запроса. */
+function toDegrees(points) {
+  return points.map((point) => ({ lat: point.latMicro / 1e6, lon: point.lonMicro / 1e6 }));
+}
+
+function fixturePoints(count) {
+  return toDegrees(ROAD_FIXTURE_POINTS.slice(0, count));
+}
 
 /**
  * Коды возврата.
@@ -292,7 +401,80 @@ async function verifyGraph(root, expectedSha) {
     fail(`содержимое набора тайлов не совпало с манифестом: ${extract.path}`);
   }
 
+  await verifyGraphConfig(root, manifest);
+
   console.error(`граф проверен по содержимому: ${extract.path}, SHA-256 ${actual}`);
+}
+
+/**
+ * Проверяет конфигурацию графа как полноправный артефакт набора.
+ *
+ * Прежде манифест защищал только `tiles.tar`. Это означало неизменяемое
+ * содержимое при подменяемых пределах: тот же набор тайлов с уменьшенным
+ * `max_matrix_location_pairs` отвергал бы рабочий день целиком, и ни одна
+ * проверка выкатки этого бы не заметила.
+ *
+ * Поле обязательно. Набор без него собран прежним pipeline и в этой проверке
+ * не проходит: «старый формат» здесь означал бы ровно ту дыру, ради которой
+ * поле и добавлено.
+ */
+async function verifyGraphConfig(root, manifest) {
+  const config = manifest.config;
+  if (config === undefined || config === null || typeof config.path !== 'string') {
+    fail('манифест графа не описывает конфигурацию valhalla.json');
+  }
+
+  const declared = config.sha256;
+  if (typeof declared !== 'string' || !SHA256_PATTERN.test(declared)) {
+    fail('манифест графа не содержит корректного SHA-256 конфигурации');
+  }
+
+  // Путь приходит из манифеста и превращается в чтение с диска — та же
+  // проверка, что и для файлов подложки.
+  const resolved = await resolveArtifact(root, config.path);
+  if (!resolved.ok) {
+    fail(`недопустимый путь конфигурации в манифесте графа: ${resolved.problem}`);
+  }
+  if (resolved.missing) {
+    fail(`конфигурация графа отсутствует: ${config.path}`);
+  }
+
+  const size = (await stat(resolved.file)).size;
+  if (typeof config.bytes === 'number' && size !== config.bytes) {
+    fail(`размер конфигурации графа не совпал: ${config.path}`);
+  }
+
+  const actual = await sha256(resolved.file);
+  if (actual !== declared) {
+    fail(`содержимое конфигурации графа не совпало с манифестом: ${config.path}`);
+  }
+
+  // Файл сверен по содержимому — только теперь его значениям можно верить.
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(resolved.file, 'utf8'));
+  } catch {
+    fail(`конфигурация графа не разбирается: ${config.path}`);
+  }
+
+  const limits = parsed?.service_limits;
+  if (limits === undefined || limits === null || typeof limits !== 'object') {
+    fail('конфигурация графа не содержит service_limits');
+  }
+
+  for (const profile of PROBE_COSTINGS) {
+    const budget = limits[profile]?.max_matrix_location_pairs;
+    if (typeof budget !== 'number' || budget < MAX_MATRIX_LOCATION_PAIRS) {
+      fail(
+        `бюджет матрицы профиля «${profile}» равен ${String(budget)}, ` +
+          `а расчёту на ${MAX_MATRIX_POINTS} точках нужно не меньше ${MAX_MATRIX_LOCATION_PAIRS}`,
+      );
+    }
+  }
+
+  console.error(
+    `конфигурация графа проверена: ${config.path}, бюджет обоих профилей >= ${MAX_MATRIX_LOCATION_PAIRS}`,
+  );
 }
 
 async function fetchStatus(url) {
@@ -352,71 +534,101 @@ async function verifyRouting(url) {
 }
 
 /**
- * Проверяет, что маршрутизатор действительно считает.
+ * Проверяет, что маршрутизатор действительно считает рабочий день целиком.
  *
  * Загруженный набор ещё не означает работоспособный расчёт: тайлы могут быть
- * прочитаны, а нужного профиля в них не оказаться. Матрица на двух известных
- * точках стоит доли секунды и отвечает на вопрос, ради которого весь стек
- * и существует.
+ * прочитаны, нужного профиля в них не оказаться, а бюджет пар — не хватить.
+ * Прежняя проверка спрашивала матрицу на двух точках и отвечала «сервис жив».
+ * Первый настоящий пилот прошёл её и тут же получил отказ на 60 точках и
+ * внутреннюю ошибку пешеходного профиля на 11.
+ *
+ * Поэтому здесь считается ПРЕДЕЛЬНАЯ матрица на утверждённом дорожном наборе
+ * обоими профилями. Пустой элемент, 4xx и 5xx — отказ выкатки до миграций
+ * и до запуска нового приложения.
  */
 async function verifyMatrix(url) {
   const base = url.replace(/\/+$/, '');
+  const points = fixturePoints(MAX_MATRIX_POINTS);
+
+  if (points.length !== MAX_MATRIX_POINTS) {
+    fail(
+      `дорожный набор содержит ${points.length} точек вместо ${MAX_MATRIX_POINTS}: ` +
+        'проверка предельного размера невозможна',
+    );
+  }
 
   for (const costing of PROBE_COSTINGS) {
-    let response;
-    try {
-      response = await fetch(`${base}/sources_to_targets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          sources: PROBE_POINTS,
-          targets: PROBE_POINTS,
-          costing,
-          units: 'km',
-        }),
-        signal: AbortSignal.timeout(30_000),
-      });
-    } catch {
-      fail(`пробный расчёт «${costing}» не выполнен: сервис не ответил`);
-    }
-
-    if (!response.ok) {
-      fail(`пробный расчёт «${costing}» отклонён кодом ${response.status}`);
-    }
-
-    let body;
-    try {
-      body = await response.json();
-    } catch {
-      fail(`ответ пробного расчёта «${costing}» не разобран`);
-    }
-
-    const rows = body.sources_to_targets;
-    if (!Array.isArray(rows)) {
-      fail(`ответ пробного расчёта «${costing}» не содержит матрицы`);
-    }
-
-    const elements = rows.flat();
-    const expected = PROBE_POINTS.length * PROBE_POINTS.length;
-    if (elements.length !== expected) {
-      fail(`пробный расчёт «${costing}» вернул ${elements.length} элементов вместо ${expected}`);
-    }
-
-    // Хотя бы одна пара разных точек обязана быть достижимой. Матрица, целиком
-    // состоящая из недостижимостей, означает, что дороги для профиля не нашлось.
-    const reachable = elements.some(
-      (element) =>
-        element !== null &&
-        typeof element === 'object' &&
-        element.from_index !== element.to_index &&
-        typeof element.time === 'number',
-    );
-    if (!reachable) {
-      fail(`пробный расчёт «${costing}» не нашёл ни одного пути между точками`);
-    }
-
-    console.error(`пробный расчёт «${costing}» выполнен: ${elements.length} элементов`);
+    await requireSquareMatrix(base, points, costing, 'предельный расчёт');
   }
+
+  // Известный дефект проверяется отдельно и явно. Компактный дорожный набор
+  // его не ловит: отказ проявлялся на разбросанных точках и широком поиске.
+  await requireSquareMatrix(
+    base,
+    toDegrees(FOOT_REGRESSION_POINTS),
+    'pedestrian',
+    'регрессия пешеходного профиля',
+  );
+}
+
+/**
+ * Считает квадратную матрицу и требует, чтобы она была полной.
+ *
+ * Fail closed по всем трём исходам: сервис не ответил, ответил не 2xx, ответил
+ * матрицей с пустыми элементами. Каждый из них однажды уже случился на
+ * настоящем графе, и каждый обязан остановить выкатку до миграций.
+ */
+async function requireSquareMatrix(base, points, costing, label) {
+  const started = Date.now();
+  let response;
+  try {
+    response = await fetch(`${base}/sources_to_targets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ sources: points, targets: points, costing, units: 'km' }),
+      // Предельная матрица считается дольше пробной пары, особенно пешком.
+      signal: AbortSignal.timeout(300_000),
+    });
+  } catch {
+    fail(`${label} «${costing}» не выполнен: сервис не ответил`);
+  }
+
+  if (!response.ok) {
+    fail(`${label} «${costing}» отклонён кодом ${response.status}`);
+  }
+
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    fail(`ответ «${label} ${costing}» не разобран`);
+  }
+
+  const rows = body.sources_to_targets;
+  if (!Array.isArray(rows)) {
+    fail(`ответ «${label} ${costing}» не содержит матрицы`);
+  }
+
+  const elements = rows.flat();
+  const expected = points.length * points.length;
+  if (elements.length !== expected) {
+    fail(`${label} «${costing}» вернул ${elements.length} элементов вместо ${expected}`);
+  }
+
+  // Ни одного пустого элемента. Недостижимая пара в утверждённом наборе
+  // означает, что либо граф не тот, либо набор перестал лежать на дорогах,
+  // — и то и другое обязано остановить выкатку, а не всплыть в пилоте.
+  const empty = elements.filter(
+    (element) =>
+      element === null || typeof element !== 'object' || typeof element.time !== 'number',
+  ).length;
+  if (empty > 0) {
+    fail(`${label} «${costing}»: ${empty} недостижимых элементов из ${expected}`);
+  }
+
+  console.error(
+    `${label} «${costing}» выполнен: ${elements.length} элементов за ${Date.now() - started} мс, пустых нет`,
+  );
 }
 
 /** Время обслуживания пробной задачи решателя. Любое ненулевое подходит. */

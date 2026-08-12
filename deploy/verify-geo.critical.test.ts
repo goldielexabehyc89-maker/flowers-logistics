@@ -70,6 +70,32 @@ describe('идентичность дорожного графа определ�
   let tilesPath: string;
   let tilesSha: string;
   let tilesBytes: Buffer;
+  let configPath: string;
+  let configBytes: Buffer;
+
+  /** Конфигурация с достаточным бюджетом обоих профилей. */
+  function configWithBudget(pairs: number, pedestrianPairs = pairs): Buffer {
+    return Buffer.from(
+      `${JSON.stringify(
+        {
+          mjolnir: { tile_extract: '/custom_files/tiles.tar' },
+          service_limits: {
+            auto: { max_matrix_location_pairs: pairs },
+            pedestrian: { max_matrix_location_pairs: pedestrianPairs },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+  }
+
+  async function writeConfig(bytes: Buffer): Promise<void> {
+    configBytes = bytes;
+    await writeFile(configPath, configBytes);
+    await utimes(configPath, BUILD_TIME, BUILD_TIME);
+  }
 
   async function writeManifest(overrides: Record<string, unknown> = {}): Promise<void> {
     const manifest = {
@@ -79,6 +105,11 @@ describe('идентичность дорожного графа определ�
         bytes: tilesBytes.length,
         sha256: tilesSha,
       },
+      config: {
+        path: 'valhalla.json',
+        bytes: configBytes.length,
+        sha256: sha256(configBytes),
+      },
       ...overrides,
     };
     await writeFile(path.join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -87,12 +118,14 @@ describe('идентичность дорожного графа определ�
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'graph-set-'));
     tilesPath = path.join(root, 'tiles.tar');
+    configPath = path.join(root, 'valhalla.json');
     // Содержимое произвольное: проверяется способ установления идентичности,
     // а не формат тайлов Valhalla.
     tilesBytes = Buffer.from('дорожный граф: набор тайлов', 'utf8');
     tilesSha = sha256(tilesBytes);
     await writeFile(tilesPath, tilesBytes);
     await utimes(tilesPath, BUILD_TIME, BUILD_TIME);
+    await writeConfig(configWithBudget(3600));
     await writeManifest();
   });
 
@@ -184,6 +217,76 @@ describe('идентичность дорожного графа определ�
     expect(result.code).toBe(EXIT_INTERNAL);
     expect(result.code).not.toBe(EXIT_MISMATCH);
     expect(result.stderr).toContain('ВНУТРЕННЯЯ ОШИБКА ПРОВЕРКИ');
+  });
+
+  it('отклоняет набор, чей манифест не описывает конфигурацию', async () => {
+    // Набор прежнего формата: тайлы защищены, конфигурация — нет. Именно так
+    // выглядел граф, на котором пилот получил 400 по бюджету пар. «Старый
+    // формат» здесь означал бы ровно ту дыру, ради которой поле и добавлено.
+    await writeManifest({ config: undefined });
+
+    const result = await runVerifier(['graph', root, tilesSha]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('не описывает конфигурацию');
+  });
+
+  it('отклоняет подменённую конфигурацию при неизменных тайлах', async () => {
+    // Тайлы те же, а пределы другие: расчёт того же дня стал бы отказом
+    // маршрутизатора. Идентичность набора обязана это ловить.
+    await writeFile(configPath, configWithBudget(2500));
+    await utimes(configPath, BUILD_TIME, BUILD_TIME);
+
+    const result = await runVerifier(['graph', root, tilesSha]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('содержимое конфигурации графа не совпало');
+  });
+
+  it('отклоняет отсутствующую конфигурацию', async () => {
+    await rm(configPath);
+
+    const result = await runVerifier(['graph', root, tilesSha]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('конфигурация графа отсутствует');
+  });
+
+  it('отклоняет конфигурацию, уводящую за пределы каталога набора', async () => {
+    await writeManifest({
+      config: { path: '../снаружи.json', bytes: configBytes.length, sha256: sha256(configBytes) },
+    });
+
+    const result = await runVerifier(['graph', root, tilesSha]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('недопустимый путь конфигурации');
+  });
+
+  it('отклоняет недостаточный бюджет матрицы у любого из профилей', async () => {
+    for (const [auto, pedestrian] of [
+      [2500, 3600],
+      [3600, 2500],
+    ] as const) {
+      await writeConfig(configWithBudget(auto, pedestrian));
+      await writeManifest();
+
+      const result = await runVerifier(['graph', root, tilesSha]);
+
+      expect(result.code, `бюджет ${auto}/${pedestrian}`).toBe(EXIT_MISMATCH);
+      expect(result.stderr).toContain('бюджет матрицы профиля');
+      expect(result.stderr).toContain('3600');
+    }
+  });
+
+  it('принимает бюджет больше необходимого', async () => {
+    // Требование — «не меньше»: запас не является ошибкой.
+    await writeConfig(configWithBudget(10_000));
+    await writeManifest();
+
+    const result = await runVerifier(['graph', root, tilesSha]);
+
+    expect(result.code, result.stderr).toBe(0);
   });
 
   it('не трогает проверяемый набор', async () => {
@@ -313,25 +416,28 @@ describe('готовность маршрутизатора проверяетс
   let server: Server;
   let url: string;
   let statusBody: unknown;
-  let matrixHandler: (costing: string) => { code: number; body: unknown };
+  let matrixHandler: (costing: string, size: number) => { code: number; body: unknown };
+  /** Размеры матриц, которые проверка фактически запросила. */
+  let asked: { costing: string; size: number }[];
+
+  /** Полная матрица запрошенного размера: все элементы заполнены. */
+  function fullMatrix(size: number): unknown {
+    return {
+      sources_to_targets: Array.from({ length: size }, (_, from) =>
+        Array.from({ length: size }, (_, to) => ({
+          from_index: from,
+          to_index: to,
+          time: from === to ? 0 : 60 + Math.abs(from - to),
+          distance: from === to ? 0 : 0.5 * Math.abs(from - to),
+        })),
+      ),
+    };
+  }
 
   beforeEach(async () => {
+    asked = [];
     statusBody = { version: '3.8.3', tileset_last_modified: 1786365674 };
-    matrixHandler = () => ({
-      code: 200,
-      body: {
-        sources_to_targets: [
-          [
-            { from_index: 0, to_index: 0, time: 0, distance: 0 },
-            { from_index: 0, to_index: 1, time: 120, distance: 1.2 },
-          ],
-          [
-            { from_index: 1, to_index: 0, time: 130, distance: 1.3 },
-            { from_index: 1, to_index: 1, time: 0, distance: 0 },
-          ],
-        ],
-      },
-    });
+    matrixHandler = (_costing, size) => ({ code: 200, body: fullMatrix(size) });
 
     server = createServer((request, response) => {
       if (request.url === '/status') {
@@ -345,8 +451,9 @@ describe('готовность маршрутизатора проверяетс
         raw += chunk.toString('utf8');
       });
       request.on('end', () => {
-        const costing = (JSON.parse(raw) as { costing: string }).costing;
-        const answer = matrixHandler(costing);
+        const parsed = JSON.parse(raw) as { costing: string; sources: unknown[] };
+        asked.push({ costing: parsed.costing, size: parsed.sources.length });
+        const answer = matrixHandler(parsed.costing, parsed.sources.length);
         response.writeHead(answer.code, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify(answer.body));
       });
@@ -392,47 +499,93 @@ describe('готовность маршрутизатора проверяетс
     expect(result.stderr).toContain('набор тайлов недоступен');
   });
 
-  it('считает пробную матрицу обоими профилями', async () => {
-    const asked: string[] = [];
-    const original = matrixHandler;
-    matrixHandler = (costing) => {
-      asked.push(costing);
-      return original(costing);
-    };
-
+  it('считает ПРЕДЕЛЬНУЮ матрицу обоими профилями и отдельно регрессию FOOT', async () => {
     const result = await runVerifier(['matrix', url]);
 
     expect(result.code, result.stderr).toBe(0);
-    expect(asked).toEqual(['auto', 'pedestrian']);
+    // Прежняя проверка спрашивала две точки и объявляла маршрутизатор
+    // исправным. Именно её прошёл граф, на котором пилот тут же получил
+    // отказ на 60 точках. Теперь спрашивается предельный размер.
+    expect(asked).toEqual([
+      { costing: 'auto', size: 60 },
+      { costing: 'pedestrian', size: 60 },
+      { costing: 'pedestrian', size: 6 },
+    ]);
   });
 
   it('отказывает, если пеший профиль не находит пути', async () => {
     // Набор загружен, автомобильный профиль считает — а пешего в тайлах нет.
-    // Загруженность набора этот случай не ловит, потому и нужен пробный расчёт.
-    const original = matrixHandler;
-    matrixHandler = (costing) =>
+    // Загруженность набора этот случай не ловит, потому и нужен расчёт.
+    matrixHandler = (costing, size) =>
       costing === 'pedestrian'
         ? {
             code: 200,
             body: {
-              sources_to_targets: [
-                [
-                  { from_index: 0, to_index: 0, time: 0, distance: 0 },
-                  { from_index: 0, to_index: 1, time: null, distance: null },
-                ],
-                [
-                  { from_index: 1, to_index: 0, time: null, distance: null },
-                  { from_index: 1, to_index: 1, time: 0, distance: 0 },
-                ],
-              ],
+              sources_to_targets: Array.from({ length: size }, (_, from) =>
+                Array.from({ length: size }, (_, to) => ({
+                  from_index: from,
+                  to_index: to,
+                  time: from === to ? 0 : null,
+                  distance: from === to ? 0 : null,
+                })),
+              ),
             },
           }
-        : original(costing);
+        : { code: 200, body: fullMatrix(size) };
 
     const result = await runVerifier(['matrix', url]);
 
     expect(result.code).toBe(EXIT_MISMATCH);
-    expect(result.stderr).toContain('не нашёл ни одного пути');
+    expect(result.stderr).toContain('недостижимых элементов');
+  });
+
+  it('отказывает на единственной недостижимой паре', async () => {
+    // Одна пустая пара — это уже не «почти полная матрица»: пилот на ней
+    // закрывает ворота, и выкатка обязана останавливаться раньше.
+    matrixHandler = (_costing, size) => {
+      const body = fullMatrix(size) as {
+        sources_to_targets: { time: number | null }[][];
+      };
+      body.sources_to_targets[0]![1]!.time = null;
+      return { code: 200, body };
+    };
+
+    const result = await runVerifier(['matrix', url]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('недостижимых элементов');
+  });
+
+  it('отказывает на 4xx: именно так выглядел недостаточный бюджет пар', async () => {
+    matrixHandler = () => ({ code: 400, body: { error: 'Exceeded max locations' } });
+
+    const result = await runVerifier(['matrix', url]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('отклонён кодом 400');
+  });
+
+  it('отказывает на 5xx: именно так выглядел внутренний отказ FOOT', async () => {
+    matrixHandler = (costing, size) =>
+      costing === 'pedestrian'
+        ? { code: 500, body: { error: 'GetTags: offset exceeds size of text list' } }
+        : { code: 200, body: fullMatrix(size) };
+
+    const result = await runVerifier(['matrix', url]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('отклонён кодом 500');
+    // Текст чужой ошибки наружу не переносится: наружу идёт код.
+    expect(result.stderr).not.toContain('GetTags');
+  });
+
+  it('отказывает, если матрица вернулась не того размера', async () => {
+    matrixHandler = (_costing, size) => ({ code: 200, body: fullMatrix(size - 1) });
+
+    const result = await runVerifier(['matrix', url]);
+
+    expect(result.code).toBe(EXIT_MISMATCH);
+    expect(result.stderr).toContain('элементов вместо');
   });
 
   it('не принимает ревизию как аргумент проверки готовности', async () => {
