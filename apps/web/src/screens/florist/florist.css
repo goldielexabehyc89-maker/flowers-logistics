@@ -1,0 +1,198 @@
+/*
+ * Раздел флориста.
+ *
+ * Экран рабочий и плотный: флорист смотрит на него весь день, часто стоя и
+ * с планшета. Поэтому крупные цели нажатия, минимум украшений и ровно одно
+ * визуальное выделение — просроченный заказ.
+ *
+ * Разметка адаптивная без отдельной мобильной версии: строка сворачивается
+ * в столбец, а действия остаются доступными без горизонтальной прокрутки.
+ */
+
+.florist__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.florist__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.florist__tab,
+.florist__day {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  /* Цель нажатия пальцем: рука в перчатке промахивается по мелкой кнопке. */
+  min-height: 40px;
+}
+
+.florist__tab[aria-pressed='true'],
+.florist__day[aria-pressed='true'] {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.florist__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.florist__checkbox {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  font-size: var(--font-size-md);
+}
+
+.florist__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.florist__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+/* Единственное выделение на экране: просроченный заказ. */
+.florist__row--overdue {
+  border-color: var(--color-error);
+  box-shadow: inset 4px 0 0 0 var(--color-error);
+}
+
+.florist__row-main,
+.florist__row-side {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.florist__number {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.florist__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.florist__card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.florist__alert {
+  padding: var(--space-3);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.florist__positions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.florist__position {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.florist__position-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.florist__position-qty {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.florist__position-name {
+  font-size: var(--font-size-lg);
+}
+
+.florist__components {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.florist__photo {
+  display: block;
+  max-width: 200px;
+  max-height: 200px;
+  margin-top: var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+.florist__photo--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 200px;
+  height: 80px;
+  border: 1px dashed var(--color-border);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.florist__actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .florist__row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .florist__row-side {
+    justify-content: flex-start;
+  }
+}

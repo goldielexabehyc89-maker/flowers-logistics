@@ -77,6 +77,18 @@ export function invalidationKeysFor(topic: string): string[][] {
   if (topic === 'session.revoked') {
     return [];
   }
+  // Производственные события проверяются ДО общего правила `order.*`:
+  // логистический список от изменения состава не зависит, а очередь флориста
+  // обязана обновиться точечно, а не перезапросить всё подряд.
+  if (topic.startsWith('order.fulfillment')) {
+    return [['florist-queue'], ['florist-card'], ['florist-print-jobs']];
+  }
+  if (topic === 'florist.shift_changed') {
+    return [['florist-shift'], ['florist-shifts'], ['florist-queue']];
+  }
+  if (topic.startsWith('print_job.')) {
+    return [['florist-print-jobs'], ['florist-card']];
+  }
   if (topic.startsWith('order.')) {
     // Событие не несёт данных заказа: список перезапрашивается целиком.
     // Ни звука, ни всплывающего уведомления — обычный новый заказ рутина.

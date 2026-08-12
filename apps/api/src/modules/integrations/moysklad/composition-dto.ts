@@ -106,6 +106,30 @@ export const orderPositionsPageSchema = collectionSchema(orderPositionSchema);
 export const bundleComponentsPageSchema = collectionSchema(bundleComponentSchema);
 
 /**
+ * Изображение номенклатуры.
+ *
+ * Читается ровно то, что нужно проксированию: адрес загрузки, размер и тип.
+ * Ни `title`, ни `updated`, ни миниатюры: карточка показывает одно фото,
+ * и лишний адрес — это лишний способ увести сервер не туда.
+ *
+ * Размер и тип объявлены необязательными, потому что доверять им нельзя:
+ * фактический ответ проверяется по заголовкам и по числу прочитанных байт.
+ * Значение отсюда используется только как ранний отказ до загрузки.
+ */
+export const assortmentImageSchema = z.object({
+  filename: z.string().optional(),
+  size: z.number().int().min(0).optional(),
+  meta: z.object({
+    downloadHref: z.string().min(1),
+    mediaType: z.string().optional(),
+  }),
+});
+
+export type MoyskladAssortmentImage = z.infer<typeof assortmentImageSchema>;
+
+export const assortmentImagesPageSchema = collectionSchema(assortmentImageSchema);
+
+/**
  * Позиции, вложенные в заказ при `expand=positions.assortment`.
  *
  * `rows` объявлен необязательным намеренно: именно его отсутствие — наблюдённый

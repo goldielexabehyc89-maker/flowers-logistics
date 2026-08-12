@@ -29,8 +29,10 @@
 import type { MoyskladConfig } from './config.js';
 import { moyskladOrderSchema, type MoyskladOrderDto } from './dto.js';
 import {
+  assortmentImagesPageSchema,
   bundleComponentsPageSchema,
   orderPositionsPageSchema,
+  type MoyskladAssortmentImage,
   type MoyskladBundleComponentDto,
   type MoyskladOrderPositionDto,
 } from './composition-dto.js';
@@ -45,7 +47,11 @@ export type MoyskladErrorCode =
   | 'RATE_LIMITED'
   | 'SERVER_ERROR'
   | 'TRANSPORT_ERROR'
-  | 'BAD_RESPONSE';
+  | 'BAD_RESPONSE'
+  /** Файл больше разрешённого предела: чтение прекращено, а не «почти влезло». */
+  | 'FILE_TOO_LARGE'
+  /** Тип содержимого не входит в разрешённый список изображений. */
+  | 'FILE_TYPE_NOT_ALLOWED';
 
 /**
  * Ошибка интеграции без подробностей запроса.
@@ -82,6 +88,8 @@ const MESSAGES: Record<MoyskladErrorCode, string> = {
   SERVER_ERROR: 'МойСклад ответил ошибкой',
   TRANSPORT_ERROR: 'Не удалось связаться с МоимСкладом',
   BAD_RESPONSE: 'Ответ МоегоСклада не удалось разобрать',
+  FILE_TOO_LARGE: 'Файл больше допустимого размера',
+  FILE_TYPE_NOT_ALLOWED: 'Недопустимый тип файла',
 };
 
 export interface RateLimitSnapshot {
@@ -331,6 +339,78 @@ export class MoyskladClient {
   }
 
   /**
+   * Изображения номенклатуры.
+   *
+   * Источником фотографии считаются ТОЛЬКО изображения, прикреплённые к товару
+   * или комплекту (`FUL-002` §2.7.3). Другого внешнего источника нет, и пустой
+   * список — не ошибка, а честное «фото отсутствует».
+   *
+   * Тип сущности не собирается из пользовательского ввода: он приходит нашим
+   * перечислением, и произвольный путь в API отсюда не построить.
+   */
+  async listAssortmentImages(
+    kind: 'product' | 'bundle' | 'variant',
+    assortmentId: string,
+  ): Promise<MoyskladAssortmentImage[]> {
+    if (!UUID_LIKE.test(assortmentId)) {
+      throw new MoyskladError('INVALID_QUERY');
+    }
+
+    const body = await this.send(
+      'GET',
+      `/entity/${kind}/${assortmentId}/images?limit=${MAX_EXPANDED_PAGE_SIZE}`,
+    );
+    const parsed = assortmentImagesPageSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new MoyskladError('BAD_RESPONSE');
+    }
+    return parsed.data.rows;
+  }
+
+  /**
+   * Загрузка файла изображения.
+   *
+   * Адрес НЕ берётся на веру. Он обязан принадлежать тому же базовому адресу
+   * API: иначе изменившийся или подменённый ответ увёл бы наш сервер с нашим
+   * токеном на произвольный хост — это классический SSRF, и одной надежды
+   * на добросовестность внешнего сервиса здесь недостаточно.
+   *
+   * Размер и тип проверяются fail closed: сначала по заголовкам, затем по
+   * фактически прочитанным байтам. Заголовку `content-length` доверять нельзя —
+   * он не обязателен и не обязан быть правдой.
+   */
+  async downloadFile(
+    href: string,
+    limits: { maxBytes: number; allowedTypes: readonly string[] },
+  ): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const prefix = `${this.config.baseUrl}/`;
+    if (!href.startsWith(prefix)) {
+      throw new MoyskladError('INVALID_QUERY');
+    }
+    const path = href.slice(this.config.baseUrl.length);
+
+    return this.request('GET', path, async (response) => {
+      const contentType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? '';
+      if (!limits.allowedTypes.includes(contentType)) {
+        throw new MoyskladError('FILE_TYPE_NOT_ALLOWED');
+      }
+
+      const declared = Number(response.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > limits.maxBytes) {
+        throw new MoyskladError('FILE_TOO_LARGE');
+      }
+
+      const buffer = await response.arrayBuffer();
+      // Фактический размер, а не обещанный: заголовок мог отсутствовать или лгать.
+      if (buffer.byteLength > limits.maxBytes) {
+        throw new MoyskladError('FILE_TOO_LARGE');
+      }
+
+      return { bytes: new Uint8Array(buffer), contentType };
+    });
+  }
+
+  /**
    * Единственная сетевая граница клиента.
    *
    * Проверка метода выполняется ДО постановки в очередь и до любого обращения
@@ -340,17 +420,20 @@ export class MoyskladClient {
     if (!isReadOnlyMethod(method)) {
       throw new MoyskladError('METHOD_NOT_ALLOWED');
     }
-    return this.request(method, path);
+    return this.request(method, path, readJson);
   }
 
   /**
    * Ставит обращение в общую очередь и выдерживает минимальный интервал.
    * Параллельных обращений не бывает: следующий ждёт завершения предыдущего.
    */
-  private request(method: string, path: string): Promise<unknown> {
+  private request<T>(method: string, path: string, read: ResponseReader<T>): Promise<T> {
+    if (!isReadOnlyMethod(method)) {
+      throw new MoyskladError('METHOD_NOT_ALLOWED');
+    }
     const run = this.queue.then(
-      () => this.execute(method, path),
-      () => this.execute(method, path),
+      () => this.execute(method, path, read),
+      () => this.execute(method, path, read),
     );
     // Очередь не должна падать целиком из-за одной неудачи.
     this.queue = run.then(
@@ -360,7 +443,7 @@ export class MoyskladClient {
     return run;
   }
 
-  private async execute(method: string, path: string): Promise<unknown> {
+  private async execute<T>(method: string, path: string, read: ResponseReader<T>): Promise<T> {
     const token = this.config.token;
     if (token === null) {
       throw new MoyskladError('NOT_CONFIGURED');
@@ -405,13 +488,24 @@ export class MoyskladClient {
       throw new MoyskladError(statusToCode(response.status), response.status);
     }
 
-    try {
-      return await response.json();
-    } catch {
-      throw new MoyskladError('BAD_RESPONSE', response.status);
-    }
+    return read(response);
   }
 }
+
+/** Как прочитать успешный ответ. Разбор отделён от транспорта. */
+type ResponseReader<T> = (response: Response) => Promise<T>;
+
+/** Обычный ответ API — JSON. Непригодное тело наружу не выходит. */
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new MoyskladError('BAD_RESPONSE', response.status);
+  }
+}
+
+/** Форма идентификатора МоегоСклада: вариант `0`, а не строгий RFC 4122. */
+const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function numberHeader(response: Response, name: string): number | null {
   const raw = response.headers.get(name);

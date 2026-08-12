@@ -69,6 +69,7 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
   'apps/api/src/modules/planning/planning.critical.test.ts': Object.freeze(['2026-12']),
   'apps/api/src/modules/routing/lifecycle.critical.test.ts': Object.freeze(['2027-01']),
   'apps/api/src/modules/orders/geo.critical.test.ts': Object.freeze(['2027-02']),
+  'apps/api/src/modules/fulfillment/florist.critical.test.ts': Object.freeze(['2027-03']),
 });
 
 /** Месяц даты `ГГГГ-ММ-ДД`. */
