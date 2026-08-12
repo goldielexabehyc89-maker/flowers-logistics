@@ -61,6 +61,8 @@ export function FloristScreen(): React.JSX.Element {
   const [includeAssigned, setIncludeAssigned] = useState(false);
   const [openOrderId, setOpenOrderId] = useState<string | null>(null);
   const [printFilter, setPrintFilter] = useState<'attention' | 'printed'>('attention');
+  /** Причина принудительного завершения — своя у каждой смены в списке. */
+  const [forceReason, setForceReason] = useState<Record<string, string>>({});
 
   const scope = tab === 'mine' ? 'mine' : 'general';
 
@@ -97,6 +99,13 @@ export function FloristScreen(): React.JSX.Element {
     enabled: isAdmin,
   });
 
+  /** Кто сейчас на смене. Только администратору: это управление людьми. */
+  const shiftsQuery = useQuery({
+    queryKey: ['florist-shifts'],
+    queryFn: () => client.get<{ items: ShiftView[] }>('/api/florist/shifts'),
+    enabled: isAdmin,
+  });
+
   const shift = shiftQuery.data?.shift ?? null;
   const hasActiveShift = shift !== null;
 
@@ -113,6 +122,7 @@ export function FloristScreen(): React.JSX.Element {
       queryClient.invalidateQueries({ queryKey: ['florist-card'] }),
       queryClient.invalidateQueries({ queryKey: ['florist-print-jobs'] }),
       queryClient.invalidateQueries({ queryKey: ['florist-shift'] }),
+      queryClient.invalidateQueries({ queryKey: ['florist-shifts'] }),
       queryClient.invalidateQueries({ queryKey: ['florist-florists'] }),
     ]);
   }
@@ -162,7 +172,9 @@ export function FloristScreen(): React.JSX.Element {
     <section className="stack florist">
       <header className="florist__header card">
         <div>
-          <h1>Флорист</h1>
+          {/* Заголовок раздела рисует оболочка приложения: второй <h1> здесь
+              создал бы два одинаковых заголовка первого уровня на одной странице. */}
+          <h2>Рабочее место флориста</h2>
           <p className="muted text-sm">
             {hasActiveShift
               ? `Смена с ${formatMoscowDateTime(shift.startedAt)} · в сборке: ${shift.openAssignments}`
@@ -195,6 +207,59 @@ export function FloristScreen(): React.JSX.Element {
           )}
         </div>
       </header>
+
+      {/*
+       * Активные смены и принудительное завершение — только администратору.
+       *
+       * Незавершённые назначения при этом НЕ снимаются: наполовину собранный
+       * заказ не должен молча вернуться в общую очередь. Их число показано
+       * рядом с кнопкой, чтобы решение принималось осознанно.
+       */}
+      {isAdmin && shiftsQuery.isSuccess && shiftsQuery.data.items.length > 0 && (
+        <section className="card stack" data-testid="florist-shifts">
+          <h3>Смены на сегодня</h3>
+          <ul className="florist__list">
+            {shiftsQuery.data.items.map((item) => (
+              <li key={item.id} className="florist__row" data-testid="shift-row">
+                <div className="florist__row-main">
+                  <strong>{item.userFullName}</strong>
+                  <span className="muted text-sm">с {formatMoscowDateTime(item.startedAt)}</span>
+                  <span className="muted text-sm">в сборке: {item.openAssignments}</span>
+                </div>
+                <div className="florist__row-side">
+                  <input
+                    className="input"
+                    aria-label={`Причина завершения смены ${item.userFullName}`}
+                    placeholder="Причина завершения"
+                    value={forceReason[item.id] ?? ''}
+                    onChange={(event) =>
+                      setForceReason((current) => ({ ...current, [item.id]: event.target.value }))
+                    }
+                  />
+                  <Button
+                    variant="secondary"
+                    data-testid="shift-force-close"
+                    disabled={action.isPending || (forceReason[item.id] ?? '').trim().length < 3}
+                    onClick={() =>
+                      action.mutate({
+                        path: `/api/florist/shifts/${item.id}/force-close`,
+                        body: { reason: (forceReason[item.id] ?? '').trim() },
+                        success: 'Смена завершена принудительно',
+                      })
+                    }
+                  >
+                    Завершить смену
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <p className="muted text-sm">
+            Незавершённые заказы остаются за флористом и требуют решения: переназначьте их или
+            верните в очередь из карточки.
+          </p>
+        </section>
+      )}
 
       <nav className="florist__tabs" aria-label="Разделы флориста">
         {TABS.map((item) => (

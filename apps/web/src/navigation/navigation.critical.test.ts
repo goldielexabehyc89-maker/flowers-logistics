@@ -158,13 +158,18 @@ describe('видимость разделов', () => {
     for (const key of placeholderKeys) {
       expect(sectionKeys).toContain(key);
     }
-    for (const key of ['florist', 'warehouse', 'pickup']) {
+    for (const key of ['warehouse', 'pickup']) {
       expect(placeholderKeys).toContain(key);
     }
+
+    // Реализованный раздел заглушкой быть не может: она перехватывала бы тот же
+    // адрес и показывала «раздел не реализован» поверх работающего экрана.
+    expect(placeholderKeys).not.toContain('florist');
+    expect(sectionKeys).toContain('florist');
   });
 
   it('заглушки честно называют неготовность и не выдумывают данные', () => {
-    for (const key of ['florist', 'warehouse', 'pickup']) {
+    for (const key of ['warehouse', 'pickup']) {
       const placeholder = PLACEHOLDERS[key];
 
       expect(placeholder).toBeDefined();
