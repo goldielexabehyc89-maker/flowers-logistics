@@ -90,6 +90,13 @@ export const AUDIT_ACTIONS = [
   'ROUTE_PLAN_FAILED',
   'ROUTE_PLAN_APPLIED',
   'ROUTE_PLAN_EXPIRED',
+  // Производственный состав заказа. Автор — синхронизация, не человек.
+  // Ни названий позиций, ни количеств, ни текста комментария и открытки:
+  // только идентификатор заказа, перечень изменившихся частей снимка
+  // (`description` / `cardText` / `positions`), счётчики и безопасный код отказа.
+  'ORDER_FULFILLMENT_IMPORTED',
+  'ORDER_FULFILLMENT_CHANGED',
+  'ORDER_FULFILLMENT_UNAVAILABLE',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

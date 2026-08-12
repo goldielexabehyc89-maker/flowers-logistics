@@ -116,7 +116,7 @@ const SNAPSHOT_KEYS: (keyof OrderSnapshot)[] = [
 type Ids = typeof MOYSKLAD_IDS;
 
 /** Пустая строка и пробелы — то же самое, что отсутствие значения. */
-function text(value: unknown): string | null {
+export function text(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
   }
@@ -124,14 +124,20 @@ function text(value: unknown): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
-interface AttributeValue {
+export interface AttributeValue {
   id: string | null;
   name: string | null;
   text: string | null;
 }
 
-/** Достаёт атрибут по UUID: и скалярное значение, и ссылку на элемент справочника. */
-function attribute(order: MoyskladOrderDto, attributeId: string): AttributeValue {
+/**
+ * Достаёт атрибут по UUID: и скалярное значение, и ссылку на элемент справочника.
+ *
+ * Экспортируется, чтобы производственный снимок читал атрибуты тем же кодом.
+ * Вторая реализация того же разбора однажды разошлась бы с этой — и разошлась бы
+ * молча, дав двум областям разное значение одного и того же поля.
+ */
+export function attribute(order: MoyskladOrderDto, attributeId: string): AttributeValue {
   const found = (order.attributes ?? []).find((item) => item.id === attributeId);
   if (found === undefined) {
     return { id: null, name: null, text: null };

@@ -562,21 +562,86 @@ model DeliveryOrder {
   /// вернувшийся после смены адреса, распознаётся как устаревший и отбрасывается.
   geoGeneration Int @default(0)
 
+  /// Нижний комментарий заказа — стандартное поле `customerorder.description`.
+  ///
+  /// Это ТРЕТИЙ независимый источник текста, а не копия логистического
+  /// `comment` («Комментарий по доставке») и не «Текст открытки». Совпадение
+  /// их содержимого не предполагается, подмена одного другим запрещена
+  /// (`docs/OWNER_DECISIONS.md`, `FUL-002` п.6). Логистическая область
+  /// `description` намеренно не сохраняет, и её контракт не меняется.
+  fulfillmentDescription String?
+  /// Атрибут «Текст открытки»: показывается флористу в карточке сборки.
+  fulfillmentCardText    String?
+
+  /// Хеш подтверждённого производственного снимка: `description`, «Текст
+  /// открытки», позиции и компоненты вместе.
+  ///
+  /// Имя намеренно не «composition»: в хеш входят и два текста, и состав.
+  /// Именно по нему решается, нужна ли новая производственная ревизия;
+  /// `externalUpdated` для этого не годится — он меняется и от чужих
+  /// логистических полей.
+  ///
+  /// `null` означает «подтверждённого снимка ещё нет», а не «снимок пуст».
+  fulfillmentSnapshotHash String?
+
+  /// Состояние загрузки производственного состава.
+  ///
+  /// Существует ради одного риска: заказ пришёл delta-проходом, состав получить
+  /// не удалось, а курсор ушёл вперёд — и заказ больше никогда не изменится,
+  /// то есть delta его не принесёт. Состояние живёт в базе и не зависит от
+  /// `customerorder.updated`, поэтому дозагрузка гарантирована независимо
+  /// от того, менялся ли заказ.
+  ///
+  /// `PENDING` — состав ещё не подтверждён; пустая проекция при `PENDING`
+  /// НЕ означает «в заказе ничего нет».
+  fulfillmentCompositionState    FulfillmentCompositionState @default(PENDING)
+  /// Когда состав был подтверждён в последний раз.
+  fulfillmentCompositionSyncedAt DateTime?
+  /// Сколько раз подряд подтвердить состав не удалось. Двигает порядок дозагрузки,
+  /// чтобы один неисправимый заказ не занимал всю квоту прохода.
+  fulfillmentCompositionAttempts Int                         @default(0)
+  fulfillmentCompositionFailedAt DateTime?
+  /// Безопасная причина последнего отказа: короткий код без данных заказа.
+  fulfillmentCompositionFailure  String?
+
+  /// Ожидающая подтверждения внешняя версия: тексты и её момент.
+  ///
+  /// Существуют потому, что подтверждённый снимок — это тексты И состав ВМЕСТЕ.
+  /// Записать новый `description` прямо в подтверждённое поле, оставив прежние
+  /// хеш и позиции, значит собрать строку из двух разных внешних версий: поля
+  /// от новой, состав и хеш от старой. Такая строка выглядит достоверной
+  /// и потому опаснее честно неподтверждённой.
+  ///
+  /// Здесь лежат только два проверенных текста и момент версии — ни сырого
+  /// ответа, ни JSON. Очереди дозагрузки этого достаточно, чтобы собрать снимок
+  /// без повторного чтения документа заказа.
+  ///
+  /// Момент версии служит и защитой от устаревшего результата: пока очередь
+  /// ходила в сеть за позициями версии B, delta могла записать сюда версию C,
+  /// и ответ B обязан быть отброшен, а не подтверждён как C.
+  fulfillmentPendingDescription     String?
+  fulfillmentPendingCardText        String?
+  fulfillmentPendingExternalUpdated DateTime?
+
   /// Оптимистическая блокировка для будущих конкурентных изменений.
   version   Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  revisions   DeliveryOrderRevision[]
-  routeOrders RouteOrder[]
-  geoHistory  OrderGeoHistory[]
-  geocodeJobs OrderGeocodeJob[]
+  revisions            DeliveryOrderRevision[]
+  routeOrders          RouteOrder[]
+  geoHistory           OrderGeoHistory[]
+  geocodeJobs          OrderGeocodeJob[]
+  fulfillmentPositions DeliveryOrderPosition[]
+  fulfillmentRevisions OrderFulfillmentRevision[]
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
   @@index([needsAttention])
   @@index([externalUpdated])
   @@index([storeId, deliveryMethodId])
+  /// Очередь дозагрузки состава: выбираются производственные заказы не в READY.
+  @@index([fulfillmentInScope, fulfillmentCompositionState])
 }
 
 /// Неизменяемая история внешних версий заказа.
@@ -604,6 +669,139 @@ model DeliveryOrderRevision {
 
   @@index([orderId, receivedAt])
   @@index([orderId, externalUpdated])
+}
+
+// --- Производственный состав заказа ------------------------------------------
+
+/// Подтверждён ли производственный состав заказа.
+///
+/// `PENDING` и пустая проекция — это «ещё не знаем», а не «в заказе ничего нет».
+/// Различать их обязательно: подтверждённо пустой состав — нормальный факт,
+/// а неподтверждённый пустой — незаконченная работа.
+enum FulfillmentCompositionState {
+  PENDING
+  READY
+  FAILED
+}
+
+/// Тип номенклатуры позиции состава.
+///
+/// `VARIANT` объявлен, но фактически поддержанным не считается: модификаций
+/// в аккаунте нет ни одной, живой контракт характеристики проверить было не на
+/// чем (`FUL-005` п.5). `OTHER` существует, чтобы незнакомый тип не ронял импорт
+/// и не исчезал молча; исходное значение сохраняется рядом строкой.
+enum FulfillmentAssortmentKind {
+  PRODUCT
+  SERVICE
+  BUNDLE
+  VARIANT
+  OTHER
+}
+
+/// Причина создания производственной ревизии.
+enum OrderFulfillmentRevisionReason {
+  INITIAL_IMPORT
+  EXTERNAL_UPDATE
+}
+
+/// Текущая проекция производственного состава заказа.
+///
+/// ЭТО ПРОЕКЦИЯ, А НЕ ИСТОРИЯ. Изменившийся состав заменяет строки целиком,
+/// поэтому запретительных триггеров на удаление здесь нет намеренно: они
+/// сделали бы замену состава невозможной. История живёт в
+/// `OrderFulfillmentRevision`, которая от UPDATE и DELETE защищена, а сам заказ
+/// удалить нельзя (`delivery_order_no_delete`). Поэтому исчезновение строки
+/// проекции не уничтожает исторический снимок.
+model DeliveryOrderPosition {
+  id      String        @id @default(uuid(7)) @db.Uuid
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// UUID позиции в МоемСкладе. Уникален В ПРЕДЕЛАХ ЗАКАЗА: глобальную
+  /// уникальность исследование не доказывало, и объявлять её нельзя.
+  externalPositionId String @db.Uuid
+  /// Порядковый номер позиции в заказе: даёт воспроизводимый порядок показа
+  /// и печати без зависимости от порядка выдачи строк базой.
+  ordinal            Int
+
+  assortmentId      String?                   @db.Uuid
+  assortmentKind    FulfillmentAssortmentKind
+  /// Исходный `meta.type` — чтобы незнакомый тип остался различимым.
+  assortmentKindRaw String?
+  name              String?
+
+  /// Количество. `DECIMAL`, а не число с плавающей точкой: дробное количество
+  /// в букете — обычное дело, а `float` теряет его молча.
+  quantity Decimal @db.Decimal(20, 6)
+
+  /// Отображаемая характеристика модификации. Всегда пусто до подтверждения
+  /// живого контракта: сырой JSON МоегоСклада здесь хранить запрещено.
+  characteristicLabel String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  components DeliveryOrderPositionComponent[]
+
+  @@unique([orderId, externalPositionId])
+  @@index([orderId, ordinal])
+}
+
+/// Компонент позиции-комплекта.
+///
+/// Компоненты принадлежат КАТАЛОЖНОМУ бандлу, а не заказу, и каталог может
+/// измениться задним числом. Поэтому идентичность компонента считается в
+/// пределах позиции заказа, а состав, использованный при сборке, замораживается
+/// ревизией: иначе вчерашний букет завтра выглядел бы собранным из другого.
+model DeliveryOrderPositionComponent {
+  id         String                @id @default(uuid(7)) @db.Uuid
+  positionId String                @db.Uuid
+  position   DeliveryOrderPosition @relation(fields: [positionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+
+  externalComponentId String @db.Uuid
+  ordinal             Int
+
+  assortmentId      String?                   @db.Uuid
+  assortmentKind    FulfillmentAssortmentKind
+  assortmentKindRaw String?
+  name              String?
+  quantity          Decimal                   @db.Decimal(20, 6)
+
+  createdAt DateTime @default(now())
+
+  @@unique([positionId, externalComponentId])
+  @@index([positionId, ordinal])
+}
+
+/// Неизменяемая история производственного снимка заказа.
+///
+/// Отдельно от `DeliveryOrderRevision` намеренно: подмешивание состава в
+/// логистический снимок изменило бы хеш КАЖДОЙ уже сохранённой ревизии, и
+/// первый же проход объявил бы изменившимися все заказы.
+///
+/// Снимок содержит `description`, «Текст открытки», позиции и компоненты.
+/// `externalUpdated` хранится как источник и контекст, но в хеш не входит:
+/// он меняется и от чужих логистических полей.
+model OrderFulfillmentRevision {
+  id      String        @id @default(uuid(7)) @db.Uuid
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Значение `updated` МоегоСклада на момент снимка — контекст, не признак.
+  externalUpdated DateTime
+  receivedAt      DateTime @default(now())
+
+  /// Канонический производственный снимок: только перечисленные поля.
+  /// Сырой ответ API целиком не сохраняется никогда.
+  snapshot      Json
+  snapshotHash  String
+  /// Что именно изменилось: `description`, `cardText`, `positions`.
+  /// Названий позиций и текста комментариев здесь нет.
+  changedFields String[]
+  reason        OrderFulfillmentRevisionReason
+
+  @@index([orderId, receivedAt])
+  @@index([orderId, snapshotHash])
 }
 
 /// Курсор фоновой синхронизации. Отделён от `IntegrationStatus.details`:

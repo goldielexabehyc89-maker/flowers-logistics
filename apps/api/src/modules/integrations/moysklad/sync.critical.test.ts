@@ -235,6 +235,13 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       { id: IDS.intervalAttribute, value: 'с 16:00 по 19:00' },
       { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
     ],
+    // Подтверждённо пустой состав.
+    //
+    // Пустой список и `size = 0` — это НЕ то же самое, что отсутствие поля:
+    // отсутствие означает «состав не пришёл» и уводит заказ в очередь
+    // дозагрузки. Сценарии этого файла проверяют логистический проход, поэтому
+    // их заказы обязаны иметь подтверждённый состав и не создавать очереди.
+    positions: { meta: { size: 0 }, rows: [] },
     ...overrides,
   };
 }
@@ -340,6 +347,18 @@ function deps(api: FakeApi, now = new Date('2026-08-06T09:00:00.000Z')): SyncDep
     sleep: async () => undefined,
     overlapSeconds: 300,
     lock: fakeLock(),
+    /**
+     * Очередь дозагрузки состава здесь выключена намеренно.
+     *
+     * Тестовая база общая и заказы из неё физически не удаляются (запрещено
+     * триггером), поэтому в ней накапливаются заказы, созданные соседними
+     * файлами. Очередь подобрала бы их и сделала число обращений к поддельному
+     * API зависящим от порядка запуска файлов — то есть недоказуемым.
+     *
+     * Сама очередь проверяется отдельно, в `fulfillment-composition`, где
+     * заказы создаются и контролируются сценарием целиком.
+     */
+    compositionBackfillLimit: 0,
   };
 }
 
@@ -404,7 +423,10 @@ describe('фильтры', () => {
     await runSyncOnce(deps(api));
 
     const call = api.calls[0];
-    expect(call?.expand).toBe('state');
+    // Статус и состав разворачиваются вместе: без `positions.assortment` заказ
+    // сохранился бы без состава, а без `state` навсегда остался бы пустой
+    // `stateType`.
+    expect(call?.expand).toBe('state,positions.assortment');
     expect(call?.limit).toBe(String(PAGE_SIZE));
     // URLSearchParams декодирует значение обратно: href остаётся href.
     expect(call?.filter).toContain('https://api.moysklad.ru/api/remap/1.2/entity/store/');

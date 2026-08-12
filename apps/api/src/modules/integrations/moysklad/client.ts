@@ -28,6 +28,12 @@
 
 import type { MoyskladConfig } from './config.js';
 import { moyskladOrderSchema, type MoyskladOrderDto } from './dto.js';
+import {
+  bundleComponentsPageSchema,
+  orderPositionsPageSchema,
+  type MoyskladBundleComponentDto,
+  type MoyskladOrderPositionDto,
+} from './composition-dto.js';
 
 export type MoyskladErrorCode =
   | 'NOT_CONFIGURED'
@@ -101,6 +107,15 @@ export interface OrderPageQuery {
   /** Готовое выражение фильтра. Пользовательский ввод сюда не попадает. */
   filter?: string;
   order?: string;
+  /**
+   * Запрашивать ли состав заказа вместе со страницей (`expand=positions.assortment`).
+   *
+   * Поле ОБЯЗАТЕЛЬНОЕ, а не необязательное с умолчанием. Умолчание позволило бы
+   * новому вызывающему коду молча импортировать заказы без состава: заказ
+   * сохранился бы, состав остался бы неподтверждённым, и заметить это было бы
+   * некому. Обязательное поле заставляет каждый путь ответить на вопрос явно.
+   */
+  withPositions: boolean;
 }
 
 export interface OrderPage {
@@ -110,13 +125,26 @@ export interface OrderPage {
   rateLimit: RateLimitSnapshot;
 }
 
+/** Полностью прочитанная коллекция: число строк доказанно равно `meta.size`. */
+export interface CollectionPage<T> {
+  rows: T[];
+  size: number;
+  rateLimit: RateLimitSnapshot;
+}
+
 /**
  * Предел размера страницы при развёрнутых полях.
  *
- * Официальное ограничение МоегоСклада: `expand` разрешён для выборки не более 100.
- * Клиент всегда запрашивает `expand=state`, поэтому больший `limit` невозможен.
- * Проверка выполняется ДО сетевого обращения: незачем тратить общий лимит аккаунта
- * на заведомо отвергаемый запрос.
+ * Клиент всегда запрашивает как минимум `expand=state`, поэтому больший `limit`
+ * недопустим. Проверка выполняется ДО сетевого обращения.
+ *
+ * Важно, ПОЧЕМУ именно так. Раньше здесь было написано, что API отвергает
+ * больший `limit`. Живое наблюдение (`docs/MOYSKLAD_MAPPING.md` §13б) показало
+ * обратное и худшее: при `limit` больше 100 МойСклад отвечает `200`, но молча
+ * перестаёт разворачивать связанные данные — состав приходит пустым и выглядит
+ * как настоящий пустой состав. Отказ был бы безопаснее молчания, поэтому
+ * границу держит наша проверка, а импорт состава дополнительно доказывает
+ * его полноту по `meta.size`.
  */
 export const MAX_EXPANDED_PAGE_SIZE = 100;
 
@@ -183,7 +211,10 @@ export class MoyskladClient {
     // перестал бы совпадать с идентификатором на стороне МоегоСклада.
     const params = new URLSearchParams();
     params.set('limit', String(query.limit));
-    params.set('expand', 'state');
+    // Состав запрашивается вложенным: отдельный GET на каждый заказ стоил бы
+    // тысячу лишних обращений на полной загрузке при темпе один запрос в секунду.
+    // Полноту вложенного состава доказывает потребитель по `positions.meta.size`.
+    params.set('expand', query.withPositions ? 'state,positions.assortment' : 'state');
     if (query.offset !== undefined) {
       params.set('offset', String(query.offset));
     }
@@ -217,6 +248,86 @@ export class MoyskladClient {
       size: typeof parsed.meta?.size === 'number' ? parsed.meta.size : rows.length,
       rateLimit: this.lastRateLimit,
     };
+  }
+
+  /**
+   * Позиции одного заказа — резервный путь.
+   *
+   * Основной путь — состав, развёрнутый вместе со страницей заказов. Этот метод
+   * нужен там, где вложенный состав не пришёл или пришёл неполным, и для заказов
+   * с числом позиций больше вложенного предела.
+   *
+   * Страницы читаются последовательно до `meta.size`. Пустая страница раньше
+   * этого — ошибка, а не повод остановиться: молчаливо принятая половина состава
+   * неотличима от полного состава.
+   */
+  async listOrderPositions(orderId: string): Promise<CollectionPage<MoyskladOrderPositionDto>> {
+    return this.readCollection(
+      `/entity/customerorder/${orderId}/positions`,
+      orderPositionsPageSchema,
+    );
+  }
+
+  /**
+   * Компоненты комплекта.
+   *
+   * Правило полноты то же самое: неполный список компонентов превратил бы букет
+   * в неверную инструкцию по сборке, причём выглядящую достоверно.
+   */
+  async listBundleComponents(
+    bundleId: string,
+  ): Promise<CollectionPage<MoyskladBundleComponentDto>> {
+    return this.readCollection(`/entity/bundle/${bundleId}/components`, bundleComponentsPageSchema);
+  }
+
+  /**
+   * Последовательное чтение коллекции с доказательством полноты.
+   *
+   * Один ответ полным не считается: `meta.size` сравнивается с фактически
+   * собранным числом строк, и расхождение — ошибка.
+   */
+  private async readCollection<T>(
+    path: string,
+    schema: { safeParse: (value: unknown) => { success: boolean; data?: unknown } },
+  ): Promise<CollectionPage<T>> {
+    const rows: T[] = [];
+    let offset = 0;
+    let size: number | null = null;
+
+    for (;;) {
+      const params = new URLSearchParams();
+      params.set('limit', String(MAX_EXPANDED_PAGE_SIZE));
+      params.set('offset', String(offset));
+      params.set('expand', 'assortment');
+
+      const body = await this.send('GET', `${path}?${params.toString()}`);
+      const parsed = schema.safeParse(body);
+      if (!parsed.success || parsed.data === undefined) {
+        // Текст ошибки zod содержит фактические значения полей, то есть данные
+        // заказа. Наружу уходит только безопасный код.
+        throw new MoyskladError('BAD_RESPONSE');
+      }
+
+      const page = parsed.data as { rows: T[]; meta: { size: number } };
+      size ??= page.meta.size;
+      rows.push(...page.rows);
+
+      if (rows.length >= size) {
+        break;
+      }
+      if (page.rows.length === 0) {
+        // Строк меньше обещанного, но новых больше не дают: продолжать —
+        // бесконечный цикл, принять — молча потерять часть состава.
+        throw new MoyskladError('BAD_RESPONSE');
+      }
+      offset += page.rows.length;
+    }
+
+    if (rows.length !== size) {
+      throw new MoyskladError('BAD_RESPONSE');
+    }
+
+    return { rows, size, rateLimit: this.lastRateLimit };
   }
 
   /**
