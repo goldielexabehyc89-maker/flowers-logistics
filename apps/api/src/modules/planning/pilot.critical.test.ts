@@ -175,11 +175,15 @@ describe('синтетический день пилота', () => {
     expect(first.depots[0]?.pointIndex).toBe(0);
   });
 
-  it('разные зёрна дают разные дни', () => {
+  it('зерно больше не управляет координатами', () => {
     const first = buildSyntheticDay({ orderCount: 10, seed: 1 });
     const second = buildSyntheticDay({ orderCount: 10, seed: 2 });
 
-    expect(JSON.stringify(first.points)).not.toBe(JSON.stringify(second.points));
+    // Раньше зерно задавало и точки: они брались случайно из прямоугольника
+    // вокруг Москвы и попадали в парки, в воду и в отрезанные куски сети.
+    // Теперь точки приходят из дорожного набора, и это осознанная потеря
+    // разнообразия: набор, меняющийся от прогона к прогону, не с чем сравнить.
+    expect(JSON.stringify(first.points)).toBe(JSON.stringify(second.points));
   });
 
   it('из снимка берётся форма дня, а не его содержимое', () => {

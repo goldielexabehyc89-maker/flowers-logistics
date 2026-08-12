@@ -44,6 +44,8 @@
 import type { $Enums } from '../../generated/prisma/client.js';
 import type { VroomRequest, VroomSolution } from '../integrations/vroom/client.js';
 import type { MatrixResult } from '../geo/matrix/service.js';
+import { MAX_MATRIX_POINTS } from '../geo/limits.js';
+import { ROAD_FIXTURE_POINTS } from './road-fixture.js';
 import {
   buildSolverRequest,
   parseSolution,
@@ -58,8 +60,14 @@ import { INPUT_SNAPSHOT_VERSION } from './input.js';
 import { readSnapshotFile } from '../orders/snapshot/file.js';
 import { assertSnapshotIsSafe } from '../orders/snapshot-export.js';
 
-/** Предел уникальных точек за один расчёт, включая склад. */
-export const PILOT_MAX_POINTS = 60;
+/**
+ * Предел уникальных точек за один расчёт, включая склад.
+ *
+ * Своего числа у пилота нет намеренно: он измеряет продукт, а не собственное
+ * представление о нём. Источник один — `tools/geo/graph-limits.json`, и он же
+ * задаёт бюджет маршрутизатора при сборке графа.
+ */
+export const PILOT_MAX_POINTS = MAX_MATRIX_POINTS;
 
 /** Коды отказов пилота. Наружу выходит код, а не текст внешней ошибки. */
 export type PilotFailureCode =
@@ -124,9 +132,6 @@ function seeded(seed: number): () => number {
   };
 }
 
-/** Границы синтетической Москвы. Настоящих адресов здесь нет по построению. */
-const MOSCOW_BBOX = { minLat: 55.6, maxLat: 55.87, minLon: 37.4, maxLon: 37.75 };
-
 export interface SyntheticDayOptions {
   orderCount: number;
   /** Зерно: один и тот же день при одном и том же значении. */
@@ -143,8 +148,25 @@ export interface SyntheticDayOptions {
 /**
  * Собирает синтетический день ровно в том формате, который читает планирование.
  *
- * Координаты синтетические, идентификаторы — порядковые. Это не «похожие
- * на настоящие» данные, а заведомо выдуманные: пилот измеряет стек, а не город.
+ * Координаты берутся из утверждённого дорожного набора, идентификаторы —
+ * порядковые. Это не «похожие на настоящие» данные, а заведомо выдуманные:
+ * пилот измеряет стек, а не город.
+ *
+ * ПОЧЕМУ КООРДИНАТЫ БОЛЬШЕ НЕ СЛУЧАЙНЫ.
+ *
+ * Раньше точки брались равномерно случайно из прямоугольника вокруг Москвы.
+ * Такой набор регулярно попадает в парки, в воду и в изолированные куски сети:
+ * первый настоящий прогон дал 20 недостижимых пар на 11 точках и 60 на 31,
+ * то есть измерял генератор, а не маршрутизацию. Теперь координаты приходят
+ * из `road-fixture.ts` — набора, каждая точка которого примагничена к дороге
+ * обоими профилями и проверена полной матрицей без единого пустого элемента.
+ *
+ * ЧТО ТЕПЕРЬ ДЕЛАЕТ ЗЕРНО.
+ *
+ * Зерно определяет форму дня — какие заказы получают жёсткое окно, — но
+ * координатами больше не управляет. Это честная потеря: разные зёрна теперь
+ * дают ОДНИ И ТЕ ЖЕ точки. Именно этого мы и хотим: набор, меняющийся
+ * от прогона к прогону, сравнивать не с чем.
  */
 export function buildSyntheticDay(options: SyntheticDayOptions): PlanInputSnapshot {
   const {
@@ -157,25 +179,44 @@ export function buildSyntheticDay(options: SyntheticDayOptions): PlanInputSnapsh
     deliveryDate = '2026-08-20',
   } = options;
 
-  const random = seeded(seed);
   const slotCount = options.slotCount ?? Math.max(1, Math.ceil(orderCount / 10));
+
+  // Дню нужно orderCount точек плюс склад. Набор фиксирован, поэтому больший
+  // день собрать не из чего — и это отказ, а не молчаливое повторение точек:
+  // повтор превратил бы разные заказы в один адрес и сломал бы смысл замера.
+  if (orderCount + 1 > ROAD_FIXTURE_POINTS.length) {
+    throw new PilotGateError('TOO_MANY_POINTS');
+  }
+
+  // Зерно раздаёт окна, а не координаты.
+  //
+  // Раскладка окон перемешивается, а не берётся по остатку от деления: иначе
+  // «жёсткое окно» всегда доставалось бы одним и тем же позициям маршрута,
+  // и разные зёрна давали бы буквально один и тот же день. Состав раскладки
+  // при этом сохраняется — треть с утренним окном, треть с дневным, треть
+  // без окна, — поэтому дни разных зёрен остаются сравнимыми по сложности.
+  const random = seeded(seed);
+  const kinds = Array.from({ length: orderCount }, (_, index) => index % 3);
+  for (let index = kinds.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [kinds[index], kinds[swap]] = [kinds[swap]!, kinds[index]!];
+  }
 
   // Нулевая точка — склад: маршрут начинается и заканчивается на нём.
   const points: SnapshotPoint[] = [
-    { latMicro: Math.round(55.751244 * 1e6), lonMicro: Math.round(37.618423 * 1e6) },
+    { latMicro: ROAD_FIXTURE_POINTS[0]!.latMicro, lonMicro: ROAD_FIXTURE_POINTS[0]!.lonMicro },
   ];
 
   const orders: SnapshotOrder[] = [];
   for (let index = 0; index < orderCount; index += 1) {
-    const lat = MOSCOW_BBOX.minLat + random() * (MOSCOW_BBOX.maxLat - MOSCOW_BBOX.minLat);
-    const lon = MOSCOW_BBOX.minLon + random() * (MOSCOW_BBOX.maxLon - MOSCOW_BBOX.minLon);
-    const latMicro = Math.round(lat * 1e6);
-    const lonMicro = Math.round(lon * 1e6);
+    const fixture = ROAD_FIXTURE_POINTS[index + 1]!;
+    const latMicro = fixture.latMicro;
+    const lonMicro = fixture.lonMicro;
     points.push({ latMicro, lonMicro });
 
     // Треть заказов получает жёсткое окно, один — точное время: именно они
     // проверяют, что решатель обещания не нарушает.
-    const kind = index % 3;
+    const kind = kinds[index]!;
     const windowStart = kind === 0 ? 10 * 60 : kind === 1 ? 14 * 60 : null;
     const windowEnd = kind === 0 ? 14 * 60 : kind === 1 ? 18 * 60 : null;
     const exact = index === 0;
@@ -607,13 +648,27 @@ export async function runPilotScenario(
   snapshot?: PlanInputSnapshot,
 ): Promise<PilotScenarioReport> {
   const clock = deps.clock ?? (() => Date.now());
-  const day =
-    snapshot ??
-    buildSyntheticDay({
-      orderCount: scenario.orderCount,
-      vehicleType: scenario.vehicleType,
-      ...(scenario.seed === undefined ? {} : { seed: scenario.seed }),
-    });
+
+  // День строится до отчёта, и на предельном размере он не строится вовсе:
+  // дорожный набор конечен, и собрать день больше него не из чего. Отказ
+  // здесь — тот же самый TOO_MANY_POINTS, что и ниже по размеру матрицы,
+  // просто выясняется он раньше и без единого внешнего вызова.
+  let day: PlanInputSnapshot;
+  try {
+    day =
+      snapshot ??
+      buildSyntheticDay({
+        orderCount: scenario.orderCount,
+        vehicleType: scenario.vehicleType,
+        ...(scenario.seed === undefined ? {} : { seed: scenario.seed }),
+      });
+  } catch (error) {
+    if (error instanceof PilotGateError) {
+      return tooManyPointsReport(scenario);
+    }
+    throw error;
+  }
+
   const size = day.points.length;
 
   const base: Omit<PilotScenarioReport, 'gatesPassed' | 'failure'> = {
@@ -731,6 +786,41 @@ export async function runPilotScenario(
             'PILOT_INTERNAL';
     return { ...base, gatesPassed: false, failure: code };
   }
+}
+
+/**
+ * Отчёт об отказе, когда день такого размера собрать не из чего.
+ *
+ * Отдельная функция нужна потому, что обычный отчёт строится вокруг уже
+ * собранного дня, а здесь дня нет. Наружу выходят только заявленные числа:
+ * ни матрицы, ни решений, ни агрегатов не было.
+ */
+function tooManyPointsReport(scenario: PilotScenario): PilotScenarioReport {
+  return {
+    label: scenario.label,
+    orderCount: scenario.orderCount,
+    pointCount: scenario.orderCount + 1,
+    profile: profileOf(scenario.vehicleType),
+    vehicleType: scenario.vehicleType,
+    matrix: {
+      coldMs: 0,
+      warmMs: 0,
+      coldCached: false,
+      warmCached: false,
+      size: scenario.orderCount + 1,
+      unreachablePairs: 0,
+      graphSha256Short: '—',
+      trafficMode: 'STATIC',
+    },
+    solves: [],
+    deterministic: true,
+    routes: 0,
+    unassigned: 0,
+    totals: { travelSeconds: 0, serviceSeconds: 0, distanceMeters: 0 },
+    baseline: { travelSeconds: 0, distanceMeters: 0 },
+    gatesPassed: false,
+    failure: 'TOO_MANY_POINTS',
+  };
 }
 
 /** Полный пилот: несколько размеров и профилей подряд. */

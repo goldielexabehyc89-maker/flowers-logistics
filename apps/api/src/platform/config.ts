@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import { MAX_MATRIX_POINTS } from '../modules/geo/limits.js';
 
 const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -161,8 +162,15 @@ const configSchema = z.object({
     .regex(/^\d+\.\d+\.\d+$/, 'VROOM_VERSION должен иметь вид 1.15.0')
     .optional(),
 
-  /** Верхняя граница числа точек матрицы: она растёт квадратично. */
-  MATRIX_MAX_POINTS: z.coerce.number().int().min(2).max(200).default(60),
+  /**
+   * Верхняя граница числа точек матрицы: она растёт квадратично.
+   *
+   * Значение по умолчанию берётся из общего источника, а не пишется числом:
+   * ровно на этот предел собирается бюджет `max_matrix_location_pairs`
+   * дорожного графа. Разошедшись, эти два числа дают отказ маршрутизатора
+   * на сервере, а не на проверке.
+   */
+  MATRIX_MAX_POINTS: z.coerce.number().int().min(2).max(200).default(MAX_MATRIX_POINTS),
   /** Срок жизни готовой матрицы. Граф между сборками не меняется. */
   MATRIX_CACHE_TTL_SECONDS: z.coerce
     .number()

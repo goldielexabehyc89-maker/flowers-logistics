@@ -37,6 +37,27 @@ done
 
 mkdir -p "${output}/tiles"
 
+# Бюджет матрицы читается из единственного именованного источника.
+#
+# `valhalla_build_config` выдаёт 2500 пар обоим профилям — это 50×50. День
+# из 60 точек стоит 3600 маршрутов, и первый настоящий пилот получил
+# «400 Exceeded max locations: 2500» ещё до расчёта. Приложение при этом
+# разрешало 60: два числа жили порознь и разъехались молча.
+#
+# Поэтому здесь не «поднять лимит», а связать его с тем же файлом, из которого
+# приложение берёт свой предел. Считается число ПАР: матрица квадратная.
+max_points="$(node -e '
+  const limits = require("'"${here}"'/graph-limits.json");
+  const points = limits.maxMatrixPoints;
+  if (!Number.isInteger(points) || points < 2) {
+    console.error("graph-limits.json не задаёт корректный maxMatrixPoints");
+    process.exit(1);
+  }
+  process.stdout.write(String(points));
+')"
+required_pairs=$(( max_points * max_points ))
+echo "Бюджет матрицы: ${max_points} точек, ${required_pairs} пар на профиль" >&2
+
 echo "Сборка графа Valhalla ${VALHALLA_IMAGE}" >&2
 # Сеть отключена: сборка обязана обойтись переданным файлом.
 #
@@ -44,9 +65,14 @@ echo "Сборка графа Valhalla ${VALHALLA_IMAGE}" >&2
 # монтируется в рабочем контейнере. Записать сюда /output значило бы собрать
 # конфигурацию, которая работает только на машине сборки: сервис искал бы
 # тайлы по несуществующему пути и молча поднялся бы без графа.
+# Конфигурация генерируется первой и отдельным шагом.
+#
+# Раньше здесь была одна команда на всё. Разделение нужно, чтобы бюджет матрицы
+# правился и перечитывался ПРОВЕРЯЕМЫМ кодом на хосте, а не строкой внутри
+# `docker run`: строку нельзя прогнать тестом, а сорок минут сборки графа —
+# слишком дорогая цена за опечатку в пределах.
 docker run --rm \
   --network none \
-  -v "$(cd "$(dirname "$input")" && pwd):/input:ro" \
   -v "${output}:/custom_files" \
   --entrypoint /bin/bash \
   "${VALHALLA_IMAGE}@${VALHALLA_DIGEST}" \
@@ -57,6 +83,27 @@ docker run --rm \
       --mjolnir-tile-extract /custom_files/tiles.tar \
       --mjolnir-timezone /custom_files/timezones.sqlite \
       --mjolnir-admin /custom_files/admins.sqlite > /custom_files/valhalla.json
+  '
+
+# Бюджет проставляется ЗДЕСЬ, а не правкой файла на сервере: правка на сервере
+# не воспроизводится следующей сборкой и живёт ровно до первого пересоздания
+# каталога.
+node "${here}/set-graph-limits.mjs" --config "${output}/valhalla.json" --pairs "${required_pairs}"
+
+# Перечитывание — отдельный процесс и отдельный отказ. Проверять переменную,
+# которую только что записал сам, бессмысленно: доказательством служит то, что
+# фактически лежит на диске. Отказ здесь останавливает сборку ДО тайлов
+# и до публикации артефакта.
+node "${here}/set-graph-limits.mjs" --config "${output}/valhalla.json" --pairs "${required_pairs}" --verify
+
+docker run --rm \
+  --network none \
+  -v "$(cd "$(dirname "$input")" && pwd):/input:ro" \
+  -v "${output}:/custom_files" \
+  --entrypoint /bin/bash \
+  "${VALHALLA_IMAGE}@${VALHALLA_DIGEST}" \
+  -lc '
+    set -euo pipefail
     valhalla_build_tiles -c /custom_files/valhalla.json "/input/'"$(basename "$input")"'"
     valhalla_build_extract -c /custom_files/valhalla.json -v
   '
