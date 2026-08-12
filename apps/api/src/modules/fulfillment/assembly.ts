@@ -43,7 +43,8 @@ import {
 import {
   FULFILLMENT_AUDIENCE,
   MIN_REASON_LENGTH,
-  findActiveShift,
+  lockActiveShift,
+  shiftRequired,
   type RequestContext,
 } from './shifts.js';
 
@@ -77,6 +78,7 @@ interface StoredOrder {
   fulfillmentProcessState: string;
   fulfillmentProcessVersion: number;
   fulfillmentAssigneeId: string | null;
+  fulfillmentShiftId: string | null;
   fulfillmentInScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
@@ -92,6 +94,7 @@ async function readOrder(db: Database | TransactionClient, id: string): Promise<
       fulfillmentProcessState: true,
       fulfillmentProcessVersion: true,
       fulfillmentAssigneeId: true,
+      fulfillmentShiftId: true,
       fulfillmentInScope: true,
       sourceArchived: true,
       sourceMissing: true,
@@ -102,6 +105,85 @@ async function readOrder(db: Database | TransactionClient, id: string): Promise<
     throw new AppError('NOT_FOUND', { message: 'order not found' });
   }
   return order;
+}
+
+/**
+ * Следующий номер попытки печати заказа.
+ *
+ * Общий счётчик для ВСЕХ путей: первоначального задания сборки, ручного повтора
+ * и каждой последующей пересборки. Номер монотонен в пределах заказа — 1, 2,
+ * 3… — и никогда не возвращается к единице: иначе уникальный индекс
+ * `(orderId, attempt)` закономерно отклонил бы вторую сборку, и аварийный путь
+ * пересборки просто не работал бы.
+ *
+ * Второго счётчика в `DeliveryOrder` не заводится: он был бы вторым источником
+ * истины о том, что и так записано в самих заданиях.
+ *
+ * КОНКУРЕНТНОСТЬ. Строка заказа блокируется ДО чтения максимума: без этого два
+ * одновременных повтора прочитали бы один и тот же максимум, выбрали бы один
+ * номер, и один из них упал бы сырой ошибкой уникальности. Блокировка ставит
+ * их в очередь, и номера получаются последовательными.
+ *
+ * Порядок блокировок соблюдён: `DeliveryOrder` берётся после `FloristShift`
+ * и раньше строк печати (`shifts.ts`).
+ */
+export async function nextPrintAttempt(tx: TransactionClient, orderId: string): Promise<number> {
+  await tx.$queryRaw`
+    SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE
+  `;
+
+  const last = await tx.orderPrintJob.findFirst({
+    where: { orderId },
+    orderBy: { attempt: 'desc' },
+    select: { attempt: true },
+  });
+
+  return (last?.attempt ?? 0) + 1;
+}
+
+/**
+ * Смена, под которой действует исполнитель.
+ *
+ * Берётся ПЕРВОЙ в транзакции — до строки заказа: порядок блокировок
+ * `FloristShift → DeliveryOrder` зафиксирован в `shifts.ts`, и нарушать его
+ * нельзя ни в одной операции.
+ *
+ * Закрытие смены обязано иметь последствия, а не только выключать кнопку:
+ * иначе ушедший домой флорист мог бы прямым запросом завершить заказ, который
+ * администратор уже собирался переназначить. Администратор от проверки
+ * освобождён: разбор оставшихся назначений — его прямая обязанность.
+ */
+async function lockOwnShift(tx: TransactionClient, actor: Actor): Promise<string | null> {
+  if (isAdmin(actor)) {
+    return null;
+  }
+
+  const shift = await lockActiveShift(tx, actor.userId);
+  if (shift === null) {
+    throw shiftRequired();
+  }
+  return shift.id;
+}
+
+/**
+ * Назначение относится к текущей смене исполнителя.
+ *
+ * Заказ, оставшийся от закрытой смены, не теряется и не возвращается в очередь
+ * сам: его разбирает администратор — переназначением активному флористу либо
+ * возвратом в общую очередь.
+ */
+function assertAssignmentShift(order: StoredOrder, shiftId: string | null): void {
+  if (shiftId === null) {
+    return;
+  }
+  if (order.fulfillmentShiftId !== shiftId) {
+    throw new AppError('CONFLICT', {
+      message: 'assignment belongs to a closed shift',
+      publicMessage:
+        'Заказ закреплён в другой, уже закрытой смене. Его должен переназначить администратор.',
+      conflict: { kind: 'ORDER_ASSIGNMENT_SHIFT_CLOSED' },
+    });
+  }
 }
 
 /**
@@ -143,16 +225,15 @@ export async function claimOrder(
   orderId: string,
   context: RequestContext,
 ): Promise<ProcessResult> {
-  const shift = await findActiveShift(db, actor.userId);
-  if (shift === null) {
-    throw new AppError('CONFLICT', {
-      message: 'active shift required',
-      publicMessage: 'Сначала начните смену: без неё новый заказ взять нельзя.',
-      conflict: { kind: 'FLORIST_SHIFT_REQUIRED' },
-    });
-  }
-
   return db.$transaction(async (tx) => {
+    // Смена блокируется ДО заказа и внутри той же транзакции: иначе между
+    // проверкой «смена активна» и записью назначения администратор успевал бы
+    // закрыть смену, и заказ оказался бы закреплён за ушедшим человеком.
+    const shift = await lockActiveShift(tx, actor.userId);
+    if (shift === null) {
+      throw shiftRequired();
+    }
+
     const updated = await tx.deliveryOrder.updateMany({
       // Всё условие целиком лежит в WHERE. Ни одной проверки «до» здесь нет
       // и быть не может: именно между проверкой и записью и происходит гонка.
@@ -194,11 +275,19 @@ export async function releaseOrder(
   context: RequestContext,
 ): Promise<ProcessResult> {
   return db.$transaction(async (tx) => {
+    // Порядок блокировок: сначала смена, потом заказ.
+    const shiftId = await lockOwnShift(tx, actor);
+
     const updated = await tx.deliveryOrder.updateMany({
       where: {
         id: orderId,
         fulfillmentProcessState: 'IN_ASSEMBLY',
-        ...(isAdmin(actor) ? {} : { fulfillmentAssigneeId: actor.userId }),
+        ...(isAdmin(actor)
+          ? {}
+          : // Отпустить можно только СВОЙ заказ и только в той смене, в которой
+            // он взят: назначение, оставшееся от закрытой смены, разбирает
+            // администратор.
+            { fulfillmentAssigneeId: actor.userId, fulfillmentShiftId: shiftId }),
       },
       data: {
         fulfillmentProcessState: 'NEW',
@@ -211,6 +300,9 @@ export async function releaseOrder(
 
     if (updated.count === 0) {
       const order = await readOrder(tx, orderId);
+      if (order.fulfillmentProcessState === 'IN_ASSEMBLY') {
+        assertAssignmentShift(order, order.fulfillmentAssigneeId === actor.userId ? shiftId : null);
+      }
       if (order.fulfillmentProcessState !== 'IN_ASSEMBLY') {
         throw new AppError('CONFLICT', {
           message: 'order is not in assembly',
@@ -264,16 +356,19 @@ export async function reassignOrder(
     });
   }
 
-  const shift = await findActiveShift(db, input.floristId);
-  if (shift === null) {
-    throw new AppError('CONFLICT', {
-      message: 'target florist has no active shift',
-      publicMessage: 'У выбранного флориста нет активной смены.',
-      conflict: { kind: 'FLORIST_NOT_ON_SHIFT' },
-    });
-  }
-
   return db.$transaction(async (tx) => {
+    // Смена целевого флориста блокируется ДО заказа и внутри транзакции:
+    // назначение обязано относиться к смене, которая в этот момент точно
+    // открыта, иначе заказ достался бы человеку, уже закончившему день.
+    const shift = await lockActiveShift(tx, input.floristId);
+    if (shift === null) {
+      throw new AppError('CONFLICT', {
+        message: 'target florist has no active shift',
+        publicMessage: 'У выбранного флориста нет активной смены.',
+        conflict: { kind: 'FLORIST_NOT_ON_SHIFT' },
+      });
+    }
+
     const before = await readOrder(tx, input.orderId);
     const updated = await tx.deliveryOrder.updateMany({
       where: {
@@ -333,6 +428,10 @@ export async function assembleOrder(
   context: RequestContext,
 ): Promise<AssembleResult> {
   return db.$transaction(async (tx) => {
+    // Смена — первой: собрать заказ после подтверждённого закрытия смены нельзя,
+    // и решает это блокировка, а не порядок нажатий.
+    const shiftId = await lockOwnShift(tx, actor);
+
     // Блокировка строки на всю транзакцию: между проверкой и записью не должен
     // вклиниться ни повторный «Собран», ни переназначение.
     const locked = await tx.$queryRaw<
@@ -341,12 +440,14 @@ export async function assembleOrder(
         fulfillmentProcessState: string;
         fulfillmentProcessVersion: number;
         fulfillmentAssigneeId: string | null;
+        fulfillmentShiftId: string | null;
       }[]
     >`
       SELECT "id",
              "fulfillmentProcessState",
              "fulfillmentProcessVersion",
-             "fulfillmentAssigneeId"
+             "fulfillmentAssigneeId",
+             "fulfillmentShiftId"
       FROM "DeliveryOrder"
       WHERE "id" = ${input.orderId}::uuid
       FOR UPDATE
@@ -374,6 +475,11 @@ export async function assembleOrder(
         conflict: { kind: 'ORDER_NOT_ASSIGNED_TO_YOU' },
       });
     }
+
+    // Назначение обязано относиться к ТЕКУЩЕЙ смене исполнителя: заказ,
+    // оставшийся от закрытой смены, завершает не он, а администратор — после
+    // переназначения.
+    assertAssignmentShift(current as StoredOrder, shiftId);
 
     if (current.fulfillmentProcessVersion !== input.expectedProcessVersion) {
       throw new AppError('CONFLICT', {
@@ -472,11 +578,20 @@ export async function assembleOrder(
       select: { id: true, snapshotHash: true },
     });
 
-    // Ровно ОДНО первоначальное задание печати. Уникальность пары
-    // «заказ + номер попытки» не даст создать второе с тем же номером.
+    // Ровно ОДНО первоначальное задание печати на эту сборку.
+    //
+    // Номер попытки берётся общим счётчиком, а не единицей: после возврата
+    // заказа в работу и повторной сборки единица уже занята прежним заданием,
+    // и уникальный индекс `(orderId, attempt)` закономерно отклонил бы всю
+    // транзакцию — аварийный путь пересборки просто не работал бы.
     const job = await tx.orderPrintJob.create({
-      data: { orderId: order.id, printFormId: printForm.id, attempt: 1, state: 'PENDING' },
-      select: { id: true },
+      data: {
+        orderId: order.id,
+        printFormId: printForm.id,
+        attempt: await nextPrintAttempt(tx, order.id),
+        state: 'PENDING',
+      },
+      select: { id: true, attempt: true },
     });
 
     await tx.deliveryOrder.update({
@@ -503,7 +618,7 @@ export async function assembleOrder(
       entityId: job.id,
       actorUserId: actor.userId,
       actorRoles: actor.roles,
-      newValue: { orderId: order.id, printFormId: printForm.id, attempt: 1 },
+      newValue: { orderId: order.id, printFormId: printForm.id, attempt: job.attempt },
       ip: context.ip,
       userAgent: context.userAgent,
     });

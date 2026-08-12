@@ -188,11 +188,13 @@ export function availableActions(context: ActionContext): {
   const mine = card.process.assignee?.id === viewerId;
 
   return {
-    // Взять новый заказ можно только в смене: это условие сервера, и кнопка
-    // не должна обещать того, что заведомо получит отказ.
+    // Смена — условие СЕРВЕРА, а не украшение: после её закрытия ни взять,
+    // ни отпустить, ни завершить заказ нельзя, и кнопка не должна обещать
+    // того, что заведомо получит отказ. Администратор разбирает оставшиеся
+    // назначения и в смене не нуждается.
     canClaim: state === 'NEW' && hasActiveShift,
-    canRelease: state === 'IN_ASSEMBLY' && (mine || isAdmin),
-    canAssemble: state === 'IN_ASSEMBLY' && mine,
+    canRelease: state === 'IN_ASSEMBLY' && (isAdmin || (mine && hasActiveShift)),
+    canAssemble: state === 'IN_ASSEMBLY' && mine && hasActiveShift,
     canReopen: (state === 'ASSEMBLED' || state === 'NEEDS_REVIEW') && isAdmin,
     canReassign: (state === 'NEW' || state === 'IN_ASSEMBLY') && isAdmin,
     // Бланк существует с момента завершения сборки и остаётся доступным даже

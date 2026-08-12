@@ -84,6 +84,51 @@ function toView(shift: ShiftRow, openAssignments: number): ShiftView {
 export const OPEN_PROCESS_STATES = ['IN_ASSEMBLY'] as const;
 
 /**
+ * ЕДИНЫЙ ПОРЯДОК БЛОКИРОВОК ПРОИЗВОДСТВЕННОГО КОНТУРА.
+ *
+ *   FloristShift → DeliveryOrder → OrderPrintForm/OrderPrintJob
+ *
+ * Порядок зафиксирован здесь, а не подразумевается: смена и заказ блокируются
+ * в разных операциях (захват, отказ, «Собран», закрытие смены, повтор печати),
+ * и стоит одной из них взять их в обратном порядке — появляется взаимная
+ * блокировка, которая воспроизводится раз в неделю и выглядит как «зависло».
+ */
+
+/**
+ * Активная смена пользователя ПОД БЛОКИРОВКОЙ строки.
+ *
+ * Обычного чтения здесь недостаточно. Между «смена активна» и записью
+ * назначения администратор успевает закрыть смену, и заказ оказался бы
+ * закреплён за уже закрытой сменой — то есть за человеком, который ушёл домой.
+ * Блокировка строки делает исход однозначным: либо закрытие ждёт завершения
+ * действия, либо действие видит закрытую смену и честно отказывает.
+ *
+ * Вызывается ПЕРВОЙ в транзакции: `FloristShift` стоит в порядке блокировок
+ * раньше `DeliveryOrder`.
+ */
+export async function lockActiveShift(
+  tx: TransactionClient,
+  userId: string,
+): Promise<{ id: string } | null> {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT "id"
+    FROM "FloristShift"
+    WHERE "activeKey" = ${userId}::uuid
+    FOR UPDATE
+  `;
+  return rows[0] ?? null;
+}
+
+/** Отказ действия, требующего активной смены. */
+export function shiftRequired(): AppError {
+  return new AppError('CONFLICT', {
+    message: 'active shift required',
+    publicMessage: 'Действие требует активной смены. Начните смену и повторите.',
+    conflict: { kind: 'FLORIST_SHIFT_REQUIRED' },
+  });
+}
+
+/**
  * Текущая активная смена пользователя.
  *
  * Читается по `activeKey`, а не по «последней незакрытой»: ключ и есть

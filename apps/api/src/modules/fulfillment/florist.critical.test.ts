@@ -1299,7 +1299,493 @@ function stubbedClient(options: {
   });
 }
 
-// --- 8. Права ----------------------------------------------------------------
+// --- 8. Пересборка, нумерация печати и смена как инвариант --------------------
+
+/** Версия процесса заказа прямо сейчас: её требует «Собран». */
+async function processVersionOf(orderId: string): Promise<number> {
+  const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { fulfillmentProcessVersion: true },
+  });
+  return order.fulfillmentProcessVersion;
+}
+
+describe('аварийный путь пересборки', () => {
+  /**
+   * Полный сценарий восстановления.
+   *
+   * Именно он раньше не работал: вторая сборка снова пыталась занять
+   * `attempt = 1`, и уникальный индекс закономерно отклонял всю транзакцию.
+   * Заказ оставался в состоянии, из которого нет выхода без правки базы руками.
+   */
+  it('сборка → изменение → возврат в работу → пересборка: формы и попытки не конфликтуют', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const florist = await floristOnShift();
+    const order = await seedOrder({ number: uniqueNumber('RB') });
+
+    // 1. Первая сборка: форма A и первоначальное задание печати.
+    const first = await claimAndAssemble(florist, order.id);
+    const jobA = await ctx.db.orderPrintJob.findUniqueOrThrow({
+      where: { id: first.printJobId },
+      select: { attempt: true, printFormId: true },
+    });
+    expect(jobA.attempt).toBe(1);
+
+    // 2. Документ A и его QR проверены независимо.
+    const documentA = await renderJobDocument(ctx.db, first.printJobId);
+    const decodedA = jsQR(
+      rasterizeQrFromPdf(documentA.bytes).data,
+      rasterizeQrFromPdf(documentA.bytes).width,
+      rasterizeQrFromPdf(documentA.bytes).height,
+    );
+    expect(decodedA?.data).toBe(order.number);
+
+    // 3. Внешнее изменение переводит собранный заказ в «Требует проверки».
+    await applyChangedSnapshot(order.id);
+    expect(await processStateOf(order.id)).toBe('NEEDS_REVIEW');
+
+    // 4. Администратор возвращает заказ в работу с причиной.
+    await reopenOrder(
+      ctx.db,
+      admin,
+      { orderId: order.id, reason: 'Состав изменился, собираем заново' },
+      CONTEXT,
+    );
+
+    // 5. Повторная сборка: новая форма по НОВОЙ ревизии и новое задание.
+    const second = await assembleOrder(
+      ctx.db,
+      florist,
+      { orderId: order.id, expectedProcessVersion: await processVersionOf(order.id) },
+      CONTEXT,
+    );
+
+    const jobB = await ctx.db.orderPrintJob.findUniqueOrThrow({
+      where: { id: second.printJobId },
+      select: { attempt: true, printFormId: true },
+    });
+
+    // Номер попытки продолжает общий ряд, а не возвращается к единице.
+    expect(jobB.attempt).toBe(2);
+    expect(second.printFormId).not.toBe(first.printFormId);
+
+    // 6. Прежняя форма не тронута: те же байты, тот же хеш, то же имя файла.
+    const documentAAgain = await renderJobDocument(ctx.db, first.printJobId);
+    expect(Buffer.from(documentAAgain.bytes).equals(Buffer.from(documentA.bytes))).toBe(true);
+    expect(documentAAgain.snapshotHash).toBe(documentA.snapshotHash);
+    expect(documentAAgain.fileName).toBe(documentA.fileName);
+
+    const documentB = await renderJobDocument(ctx.db, second.printJobId);
+    expect(Buffer.from(documentB.bytes).equals(Buffer.from(documentA.bytes))).toBe(false);
+    expect(documentB.snapshotHash).not.toBe(documentA.snapshotHash);
+
+    // Новый бланк построен по новому составу, старый — по прежнему.
+    const forms = await ctx.db.orderPrintForm.findMany({
+      where: { orderId: order.id },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, snapshot: true, revisionId: true },
+    });
+    expect(forms).toHaveLength(2);
+    expect(JSON.stringify(forms[0]?.snapshot)).toContain('Букет «Весна»');
+    expect(JSON.stringify(forms[1]?.snapshot)).toContain('Другой букет');
+    expect(forms[0]?.revisionId).not.toBe(forms[1]?.revisionId);
+
+    // Оба QR несут один и тот же номер заказа: физический ключ не меняется.
+    const rasterB = rasterizeQrFromPdf(documentB.bytes);
+    expect(jsQR(rasterB.data, rasterB.width, rasterB.height)?.data).toBe(order.number);
+
+    // 7. Повтор каждой попытки использует ЕЁ форму, а не последнюю форму заказа.
+    const retryA = await retryPrint(ctx.db, florist, first.printJobId, CONTEXT);
+    const retryB = await retryPrint(ctx.db, florist, second.printJobId, CONTEXT);
+
+    expect(retryA.attempt).toBe(3);
+    expect(retryA.printFormId).toBe(jobA.printFormId);
+    expect(retryB.attempt).toBe(4);
+    expect(retryB.printFormId).toBe(jobB.printFormId);
+
+    // 8. Каждая строка отдаёт СВОЙ документ.
+    const retriedA = await renderJobDocument(ctx.db, retryA.id);
+    const retriedB = await renderJobDocument(ctx.db, retryB.id);
+    expect(Buffer.from(retriedA.bytes).equals(Buffer.from(documentA.bytes))).toBe(true);
+    expect(Buffer.from(retriedB.bytes).equals(Buffer.from(documentB.bytes))).toBe(true);
+
+    // 9. Карточка показывает последнюю форму — ту, по которой собран заказ сейчас.
+    const card = await readOrderCard(ctx.db, order.id);
+    expect(card.print.formId).toBe(second.printFormId);
+    expect(card.process.state).toBe('ASSEMBLED');
+
+    // Прежние задания и их авторы не изменились и не исчезли.
+    const jobs = await ctx.db.orderPrintJob.findMany({
+      where: { orderId: order.id },
+      orderBy: { attempt: 'asc' },
+      select: { attempt: true, printFormId: true },
+    });
+    expect(jobs.map((job) => job.attempt)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('два одновременных повтора получают разные последовательные номера', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder({ number: uniqueNumber('PAR') });
+    const { printJobId } = await claimAndAssemble(florist, order.id);
+
+    const results = await Promise.allSettled([
+      retryPrint(ctx.db, florist, printJobId, CONTEXT),
+      retryPrint(ctx.db, florist, printJobId, CONTEXT),
+    ]);
+
+    // Оба повтора завершились штатно: сырой ошибки уникальности здесь быть
+    // не должно — она пришла бы человеку как 500 без объяснимого смысла.
+    for (const result of results) {
+      expect(result.status, JSON.stringify(result)).toBe('fulfilled');
+    }
+
+    const attempts = await ctx.db.orderPrintJob.findMany({
+      where: { orderId: order.id },
+      orderBy: { attempt: 'asc' },
+      select: { attempt: true },
+    });
+    expect(attempts.map((job) => job.attempt)).toEqual([1, 2, 3]);
+  });
+});
+
+/** Текущее состояние процесса заказа. */
+async function processStateOf(orderId: string): Promise<string> {
+  const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { fulfillmentProcessState: true },
+  });
+  return order.fulfillmentProcessState;
+}
+
+describe('смена как серверный инвариант действия', () => {
+  it('после закрытия смены прежний исполнитель не завершает и не отпускает заказ', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    const claimed = await claimOrder(ctx.db, florist, order.id, CONTEXT);
+
+    await closeOwnShift(ctx.db, florist, CONTEXT);
+
+    await expect(
+      assembleOrder(
+        ctx.db,
+        florist,
+        { orderId: order.id, expectedProcessVersion: claimed.processVersion },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ conflict: { kind: 'FLORIST_SHIFT_REQUIRED' } });
+
+    await expect(releaseOrder(ctx.db, florist, order.id, CONTEXT)).rejects.toMatchObject({
+      conflict: { kind: 'FLORIST_SHIFT_REQUIRED' },
+    });
+
+    // Назначение не потеряно: оно ждёт решения администратора.
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { fulfillmentProcessState: true, fulfillmentAssigneeId: true },
+    });
+    expect(stored.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+    expect(stored.fulfillmentAssigneeId).toBe(florist.userId);
+  });
+
+  it('новая смена не оживляет назначение прежней: его разбирает администратор', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    const claimed = await claimOrder(ctx.db, florist, order.id, CONTEXT);
+
+    await closeOwnShift(ctx.db, florist, CONTEXT);
+    // Тот же человек вышел в новую смену — но заказ закреплён за прежней.
+    await startShift(ctx.db, florist, CONTEXT);
+
+    await expect(
+      assembleOrder(
+        ctx.db,
+        florist,
+        { orderId: order.id, expectedProcessVersion: claimed.processVersion },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_ASSIGNMENT_SHIFT_CLOSED' } });
+  });
+
+  it('после принудительного закрытия администратор переназначает или освобождает заказ', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const florist = await floristOnShift();
+    const other = await floristOnShift();
+
+    const reassigned = await seedOrder();
+    const released = await seedOrder();
+    await claimOrder(ctx.db, florist, reassigned.id, CONTEXT);
+    await claimOrder(ctx.db, florist, released.id, CONTEXT);
+
+    const shift = await ctx.db.floristShift.findUniqueOrThrow({
+      where: { activeKey: florist.userId },
+      select: { id: true },
+    });
+    const forced = await forceCloseShift(
+      ctx.db,
+      admin,
+      { shiftId: shift.id, reason: 'Флорист ушёл, смена осталась открытой' },
+      CONTEXT,
+    );
+    expect(forced.orphanedOrderIds).toHaveLength(2);
+
+    // Первый путь: переназначение активному флористу — заказ снова в работе.
+    const moved = await reassignOrder(
+      ctx.db,
+      admin,
+      { orderId: reassigned.id, floristId: other.userId, reason: 'Смена закрыта' },
+      CONTEXT,
+    );
+    expect(moved.assigneeId).toBe(other.userId);
+
+    // Новый исполнитель работает под СВОЕЙ сменой и завершает сборку.
+    const assembled = await assembleOrder(
+      ctx.db,
+      other,
+      { orderId: reassigned.id, expectedProcessVersion: moved.processVersion },
+      CONTEXT,
+    );
+    expect(assembled.processState).toBe('ASSEMBLED');
+
+    // Второй путь: возврат в общую очередь.
+    const back = await releaseOrder(ctx.db, admin, released.id, CONTEXT);
+    expect(back.processState).toBe('NEW');
+    expect(back.assigneeId).toBeNull();
+  });
+
+  it('гонка захвата с закрытием смены даёт один согласованный результат', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+
+    const [claim, close] = await Promise.allSettled([
+      claimOrder(ctx.db, florist, order.id, CONTEXT),
+      closeOwnShift(ctx.db, florist, CONTEXT),
+    ]);
+
+    // Закрытие смены выполняется всегда: человек уходит независимо от гонки.
+    expect(close.status).toBe('fulfilled');
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { fulfillmentProcessState: true, fulfillmentShiftId: true },
+    });
+
+    if (claim.status === 'fulfilled') {
+      // Захват успел раньше: заказ закреплён и виден администратору как
+      // требующий решения — но собрать его прежний исполнитель уже не может.
+      expect(stored.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+      expect(stored.fulfillmentShiftId).not.toBeNull();
+      await expect(
+        assembleOrder(
+          ctx.db,
+          florist,
+          { orderId: order.id, expectedProcessVersion: claim.value.processVersion },
+          CONTEXT,
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+    } else {
+      // Закрытие успело раньше: заказ остался свободным, следов нет.
+      expect(stored.fulfillmentProcessState).toBe('NEW');
+      expect(stored.fulfillmentShiftId).toBeNull();
+    }
+  });
+});
+
+// --- 9. Ограниченная загрузка фотографии -------------------------------------
+
+/**
+ * Клиент с потоковым телом ответа.
+ *
+ * Отдельная заглушка нужна именно потому, что проверяется ТРАНСПОРТ: сколько
+ * байт фактически прочитано, был ли отменён поток и сколько раз вызван `fetch`.
+ * На готовом буфере ничего этого доказать нельзя.
+ */
+function streamingClient(options: {
+  chunks: Buffer[];
+  type: string;
+  /** Что объявить в заголовке. `null` — не объявлять вовсе. */
+  declaredLength: number | null;
+  /** Ответ переадресации вместо файла. */
+  redirectTo?: string;
+  calls: { fetches: string[]; sent: number; cancelled: boolean; redirect: string | undefined };
+}): MoyskladClient {
+  const { calls } = options;
+
+  return new MoyskladClient({
+    config: { baseUrl: BASE, token: 'test-token', ids: MOYSKLAD_IDS },
+    minIntervalMs: 0,
+    sleep: async () => undefined,
+    fetch: (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.fetches.push(url);
+
+      if (url.includes('/images')) {
+        return new Response(
+          JSON.stringify({
+            rows: [{ meta: { downloadHref: `${BASE}/download/file` } }],
+            meta: { size: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      // Политика переадресации — часть контракта, а не деталь реализации.
+      calls.redirect = init?.redirect;
+
+      if (options.redirectTo !== undefined) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: options.redirectTo },
+        });
+      }
+
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = options.chunks[calls.sent];
+          if (chunk === undefined) {
+            controller.close();
+            return;
+          }
+          calls.sent += 1;
+          controller.enqueue(new Uint8Array(chunk));
+        },
+        cancel() {
+          calls.cancelled = true;
+        },
+      });
+
+      const headers: Record<string, string> = { 'content-type': options.type };
+      if (options.declaredLength !== null) {
+        headers['content-length'] = String(options.declaredLength);
+      }
+
+      return new Response(stream, { status: 200, headers });
+    }) as unknown as typeof globalThis.fetch,
+  });
+}
+
+describe('загрузка фотографии ограничена по-настоящему', () => {
+  async function seedPhotoOrder(): Promise<string> {
+    const assortmentId = crypto.randomUUID();
+    await seedOrder({
+      positions: [{ name: 'Букет с фото', quantity: '1', kind: 'BUNDLE', assortmentId }],
+    });
+    return assortmentId;
+  }
+
+  it('поток без Content-Length читается и ограничивается фактическими байтами', async () => {
+    const assortmentId = await seedPhotoOrder();
+    const calls = {
+      fetches: [],
+      sent: 0,
+      cancelled: false,
+      redirect: undefined as string | undefined,
+    };
+
+    const client = streamingClient({
+      chunks: [Buffer.alloc(1024, 1), Buffer.alloc(1024, 2)],
+      type: 'image/png',
+      declaredLength: null,
+      calls,
+    });
+
+    const photo = await requirePhoto({ db: ctx.db, client }, assortmentId);
+    expect(photo.bytes.byteLength).toBe(2048);
+    expect(calls.cancelled).toBe(false);
+    // Переадресации не следуем ни при каких обстоятельствах.
+    expect(calls.redirect).toBe('manual');
+  });
+
+  it('заниженный Content-Length не обманывает: чтение прекращается у границы', async () => {
+    const assortmentId = await seedPhotoOrder();
+    const calls = {
+      fetches: [],
+      sent: 0,
+      cancelled: false,
+      redirect: undefined as string | undefined,
+    };
+
+    // Кусок в мегабайт: превышение наступает на шестом, а не на последнем.
+    const chunk = () => Buffer.alloc(1024 * 1024, 7);
+    const client = streamingClient({
+      chunks: Array.from({ length: 20 }, chunk),
+      type: 'image/png',
+      // Ложное обещание «файл крошечный».
+      declaredLength: 10,
+      calls,
+    });
+
+    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+      statusCode: 404,
+    });
+
+    // Главное: прочитано НЕ всё. Чтение остановлено у предела, поток отменён.
+    //
+    // Допуск в два куска — не небрежность: поток читается с опережением,
+    // и один-два куска успевают быть подготовлены до того, как сумма
+    // перевалит за границу. Существенно другое: двадцать мегабайт в память
+    // не попали, а отправитель получил отмену.
+    expect(calls.cancelled).toBe(true);
+    expect(calls.sent).toBeLessThanOrEqual(Math.ceil(MAX_PHOTO_BYTES / (1024 * 1024)) + 2);
+    expect(calls.sent).toBeLessThan(20);
+  });
+
+  it('честный слишком большой Content-Length отвергается до чтения тела', async () => {
+    const assortmentId = await seedPhotoOrder();
+    const calls = {
+      fetches: [],
+      sent: 0,
+      cancelled: false,
+      redirect: undefined as string | undefined,
+    };
+
+    const client = streamingClient({
+      chunks: Array.from({ length: 20 }, () => Buffer.alloc(1024 * 1024, 3)),
+      type: 'image/png',
+      declaredLength: MAX_PHOTO_BYTES + 1,
+      calls,
+    });
+
+    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+      statusCode: 404,
+    });
+
+    // Тело не читалось: отказ произошёл по заголовку. Единственный возможный
+    // кусок — опережающее чтение самого потока, наш код к нему не обращался.
+    expect(calls.sent).toBeLessThanOrEqual(1);
+  });
+
+  it('переадресация на чужой хост не вызывает второго запроса', async () => {
+    const assortmentId = await seedPhotoOrder();
+    const calls = {
+      fetches: [],
+      sent: 0,
+      cancelled: false,
+      redirect: undefined as string | undefined,
+    };
+
+    const client = streamingClient({
+      chunks: [],
+      type: 'image/png',
+      declaredLength: null,
+      redirectTo: 'https://evil.example.test/steal',
+      calls,
+    });
+
+    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+      statusCode: 404,
+    });
+
+    // Ровно два обращения: список изображений и сам файл. Ни одного к чужому
+    // хосту — токен туда не уходит.
+    expect(calls.fetches).toHaveLength(2);
+    for (const url of calls.fetches) {
+      expect(url.startsWith(BASE)).toBe(true);
+    }
+    expect(calls.redirect).toBe('manual');
+  });
+});
+
+// --- 10. Права ---------------------------------------------------------------
 
 describe('права раздела', () => {
   const FOREIGN: Role[] = ['LOGISTICIAN', 'WAREHOUSE', 'MANAGER', 'COURIER'];

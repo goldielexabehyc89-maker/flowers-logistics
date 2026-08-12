@@ -148,22 +148,39 @@ export function FloristScreen(): React.JSX.Element {
     },
   });
 
-  /** Скачивание бланка: токен живёт в памяти, поэтому обычная ссылка не годится. */
-  async function downloadPdf(orderId: string, number: string): Promise<void> {
+  /** Скачивание документа: токен живёт в памяти, поэтому обычная ссылка не годится. */
+  async function download(path: string, fileName: string): Promise<void> {
     try {
-      const blob = await client.getBlob(
-        `/api/florist/orders/${orderId}/print-form.pdf`,
-        'application/pdf',
-      );
+      const blob = await client.getBlob(path, 'application/pdf');
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `order-${number}.pdf`;
+      link.download = fileName;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
       reportError(error, 'Не удалось получить бланк.');
     }
+  }
+
+  /** Из карточки открывается ПОСЛЕДНИЙ бланк заказа: он относится к текущей сборке. */
+  async function downloadOrderPdf(orderId: string, number: string): Promise<void> {
+    await download(`/api/florist/orders/${orderId}/print-form.pdf`, `order-${number}.pdf`);
+  }
+
+  /**
+   * Из вкладки «Печать» открывается документ КОНКРЕТНОГО задания.
+   *
+   * Это не то же самое, что последний бланк заказа: после пересборки у заказа
+   * появляется новая форма, а старая попытка обязана отдавать ровно тот
+   * документ, ради которого её создавали, — иначе к букету приложат бумагу
+   * от другой сборки.
+   */
+  async function downloadJobPdf(job: PrintJobView): Promise<void> {
+    await download(
+      `/api/florist/print-jobs/${job.id}/document.pdf`,
+      `order-${job.orderNumber}-attempt-${job.attempt}.pdf`,
+    );
   }
 
   const card = cardQuery.data?.card ?? null;
@@ -457,7 +474,7 @@ export function FloristScreen(): React.JSX.Element {
                 <Button
                   variant="secondary"
                   data-testid="print-download"
-                  onClick={() => void downloadPdf(job.orderId, job.orderNumber)}
+                  onClick={() => void downloadJobPdf(job)}
                 >
                   Скачать PDF
                 </Button>
@@ -546,7 +563,7 @@ export function FloristScreen(): React.JSX.Element {
               success: 'Заказ переназначен',
             })
           }
-          onDownload={() => void downloadPdf(card.id, card.number)}
+          onDownload={() => void downloadOrderPdf(card.id, card.number)}
           onRetry={() => {
             const job = latestJob(card);
             if (job !== null) {

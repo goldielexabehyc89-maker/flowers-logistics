@@ -106,6 +106,39 @@ describe('доступные действия', () => {
     ).toBe(true);
   });
 
+  it('после закрытия смены «Собран» и отказ исчезают, а у администратора остаются', () => {
+    const mine = card({
+      process: {
+        state: 'IN_ASSEMBLY',
+        version: 1,
+        assignee: { id: VIEWER, fullName: 'Я' },
+        assignedAt: null,
+        assembledAt: null,
+        assembledById: null,
+      },
+    });
+
+    // Смена закрыта: сервер откажет, и кнопка не должна этого обещать.
+    const closed = availableActions({
+      card: mine,
+      viewerId: VIEWER,
+      isAdmin: false,
+      hasActiveShift: false,
+    });
+    expect(closed.canAssemble).toBe(false);
+    expect(closed.canRelease).toBe(false);
+
+    // Администратор разбирает оставшиеся назначения и в смене не нуждается.
+    const admin = availableActions({
+      card: mine,
+      viewerId: OTHER,
+      isAdmin: true,
+      hasActiveShift: false,
+    });
+    expect(admin.canRelease).toBe(true);
+    expect(admin.canAssemble).toBe(false);
+  });
+
   it('возврат в работу — только администратору и только для собранного', () => {
     const assembled = card({
       process: {

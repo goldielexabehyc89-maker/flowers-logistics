@@ -18,7 +18,7 @@ import type { Role } from '@fl/shared';
 import { AppError } from '../../platform/errors.js';
 import type { Database } from '../../platform/db.js';
 import { writeAudit } from '../audit/service.js';
-import { publishPrintEvent } from './assembly.js';
+import { nextPrintAttempt, publishPrintEvent } from './assembly.js';
 import { renderPrintFormPdf, printFormFileName } from './pdf.js';
 import type { PrintFormSnapshot } from './print-form.js';
 import type { RequestContext } from './shifts.js';
@@ -136,10 +136,14 @@ async function readJob(db: Database, jobId: string): Promise<JobRow> {
 /**
  * Повторная печать.
  *
- * Создаётся новое задание с тем же `printFormId`: история попыток и есть
- * доказательство того, что бланк вообще печатали. Номер попытки берётся
- * максимальным для заказа и защищён уникальным индексом — два одновременных
- * повтора не займут один номер.
+ * Создаётся новое задание с ТЕМ ЖЕ `printFormId`, что у исходного, — даже если
+ * у заказа успела появиться более новая форма после пересборки: повторяют
+ * конкретный документ, а не «последний бланк заказа».
+ *
+ * Номер попытки выдаёт общий счётчик под блокировкой строки заказа. Прежняя
+ * версия читала максимум без блокировки, и два одновременных повтора выбирали
+ * один номер: один из них падал сырой ошибкой уникальности, то есть 500 вместо
+ * понятного результата.
  */
 export async function retryPrint(
   db: Database,
@@ -150,18 +154,14 @@ export async function retryPrint(
   const source = await readJob(db, jobId);
 
   const created = await db.$transaction(async (tx) => {
-    const last = await tx.orderPrintJob.findFirst({
-      where: { orderId: source.orderId },
-      orderBy: { attempt: 'desc' },
-      select: { attempt: true },
-    });
+    const attempt = await nextPrintAttempt(tx, source.orderId);
 
     const job = await tx.orderPrintJob.create({
       data: {
         orderId: source.orderId,
         // Тот же снимок и та же версия шаблона: документ обязан быть тем же.
         printFormId: source.printFormId,
-        attempt: (last?.attempt ?? 0) + 1,
+        attempt,
         state: 'PENDING',
       },
       select: JOB_SELECT,

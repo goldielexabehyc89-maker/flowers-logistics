@@ -368,16 +368,27 @@ export class MoyskladClient {
   }
 
   /**
-   * Загрузка файла изображения.
+   * Загрузка файла изображения — ОГРАНИЧЕННАЯ ПО-НАСТОЯЩЕМУ.
    *
-   * Адрес НЕ берётся на веру. Он обязан принадлежать тому же базовому адресу
-   * API: иначе изменившийся или подменённый ответ увёл бы наш сервер с нашим
-   * токеном на произвольный хост — это классический SSRF, и одной надежды
-   * на добросовестность внешнего сервиса здесь недостаточно.
+   * Адрес не берётся на веру: он обязан принадлежать тому же базовому адресу
+   * API. Иначе изменившийся или подменённый ответ увёл бы наш сервер вместе
+   * с нашим токеном на произвольный хост — это классический SSRF, и одной
+   * надежды на добросовестность внешнего сервиса здесь недостаточно.
    *
-   * Размер и тип проверяются fail closed: сначала по заголовкам, затем по
-   * фактически прочитанным байтам. Заголовку `content-length` доверять нельзя —
-   * он не обязателен и не обязан быть правдой.
+   * РЕДИРЕКТ НЕ СЛЕДУЕТСЯ. `redirect: 'manual'` означает, что `302` на чужой
+   * домен остаётся ответом `302`, а не превращается во второй запрос
+   * с заголовком `Authorization`. Проверка «адрес наш» без этого бессмысленна:
+   * разрешённый URL мог бы одним заголовком `Location` стать любым другим.
+   *
+   * ЧТЕНИЕ ПОТОКОВОЕ И С ОСТАНОВКОЙ. `arrayBuffer()` для непроверенного тела
+   * не вызывается вовсе: он сначала принял бы в память сколько угодно байт и
+   * только потом сравнил бы с лимитом — то есть предел существовал бы лишь
+   * на бумаге. Чтение прекращается и поток отменяется на первом же куске,
+   * который переводит сумму за границу.
+   *
+   * Заголовку `content-length` доверия нет ни в какую сторону: честный слишком
+   * большой размер отвергается до чтения тела, а отсутствующий или заниженный
+   * ограничивается фактическими байтами.
    */
   async downloadFile(
     href: string,
@@ -389,25 +400,32 @@ export class MoyskladClient {
     }
     const path = href.slice(this.config.baseUrl.length);
 
-    return this.request('GET', path, async (response) => {
-      const contentType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? '';
-      if (!limits.allowedTypes.includes(contentType)) {
-        throw new MoyskladError('FILE_TYPE_NOT_ALLOWED');
-      }
+    return this.request(
+      'GET',
+      path,
+      async (response) => {
+        // Конечный адрес обязан остаться нашим и после ответа: переадресация,
+        // прошедшая мимо `redirect: 'manual'`, не должна быть принята молча.
+        if (!response.url.startsWith(prefix) && response.url !== '') {
+          throw new MoyskladError('INVALID_QUERY');
+        }
 
-      const declared = Number(response.headers.get('content-length'));
-      if (Number.isFinite(declared) && declared > limits.maxBytes) {
-        throw new MoyskladError('FILE_TOO_LARGE');
-      }
+        const contentType =
+          (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? '';
+        if (!limits.allowedTypes.includes(contentType)) {
+          throw new MoyskladError('FILE_TYPE_NOT_ALLOWED');
+        }
 
-      const buffer = await response.arrayBuffer();
-      // Фактический размер, а не обещанный: заголовок мог отсутствовать или лгать.
-      if (buffer.byteLength > limits.maxBytes) {
-        throw new MoyskladError('FILE_TOO_LARGE');
-      }
+        const declared = Number(response.headers.get('content-length'));
+        if (Number.isFinite(declared) && declared > limits.maxBytes) {
+          throw new MoyskladError('FILE_TOO_LARGE');
+        }
 
-      return { bytes: new Uint8Array(buffer), contentType };
-    });
+        return { bytes: await readLimited(response, limits.maxBytes), contentType };
+      },
+      // Переадресация — это уже другой адрес, а значит другое решение о доверии.
+      { redirect: 'manual' },
+    );
   }
 
   /**
@@ -427,13 +445,18 @@ export class MoyskladClient {
    * Ставит обращение в общую очередь и выдерживает минимальный интервал.
    * Параллельных обращений не бывает: следующий ждёт завершения предыдущего.
    */
-  private request<T>(method: string, path: string, read: ResponseReader<T>): Promise<T> {
+  private request<T>(
+    method: string,
+    path: string,
+    read: ResponseReader<T>,
+    extra: TransportOptions = {},
+  ): Promise<T> {
     if (!isReadOnlyMethod(method)) {
       throw new MoyskladError('METHOD_NOT_ALLOWED');
     }
     const run = this.queue.then(
-      () => this.execute(method, path, read),
-      () => this.execute(method, path, read),
+      () => this.execute(method, path, read, extra),
+      () => this.execute(method, path, read, extra),
     );
     // Очередь не должна падать целиком из-за одной неудачи.
     this.queue = run.then(
@@ -443,7 +466,12 @@ export class MoyskladClient {
     return run;
   }
 
-  private async execute<T>(method: string, path: string, read: ResponseReader<T>): Promise<T> {
+  private async execute<T>(
+    method: string,
+    path: string,
+    read: ResponseReader<T>,
+    extra: TransportOptions = {},
+  ): Promise<T> {
     const token = this.config.token;
     if (token === null) {
       throw new MoyskladError('NOT_CONFIGURED');
@@ -467,6 +495,9 @@ export class MoyskladClient {
           'Accept-Encoding': 'gzip',
         },
         signal: AbortSignal.timeout(this.timeoutMs),
+        // Политика переадресации задаётся вызывающей стороной: для JSON она
+        // не важна, а для файла означает разницу между «наш адрес» и «любой».
+        ...(extra.redirect === undefined ? {} : { redirect: extra.redirect }),
       });
     } catch {
       // Текст сетевой ошибки может содержать адрес запроса с фильтрами.
@@ -494,6 +525,69 @@ export class MoyskladClient {
 
 /** Как прочитать успешный ответ. Разбор отделён от транспорта. */
 type ResponseReader<T> = (response: Response) => Promise<T>;
+
+/** Транспортные особенности одного обращения. Метод сюда не входит намеренно. */
+interface TransportOptions {
+  redirect?: 'manual' | 'error' | 'follow';
+}
+
+/**
+ * Чтение тела с жёстким пределом.
+ *
+ * Куски складываются по мере поступления, и как только сумма превышает предел,
+ * поток ОТМЕНЯЕТСЯ: сервер перестаёт отправлять данные, а память не растёт.
+ * Именно этим ограниченная загрузка отличается от «скачали всё и проверили
+ * размер» — при последнем варианте предел не защищает ни от чего.
+ *
+ * Отсутствующее тело считается отказом, а не пустым файлом: пустая картинка
+ * ничем не лучше её отсутствия, а различать эти случаи наружу всё равно нельзя.
+ */
+async function readLimited(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const body = response.body;
+  if (body === null) {
+    throw new MoyskladError('BAD_RESPONSE', response.status);
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value === undefined) {
+        continue;
+      }
+
+      total += value.byteLength;
+      if (total > maxBytes) {
+        // Отмена, а не молчаливое дочитывание: остаток нам не нужен и платить
+        // за него трафиком и памятью незачем.
+        await reader.cancel().catch(() => undefined);
+        throw new MoyskladError('FILE_TOO_LARGE');
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof MoyskladError) {
+      throw error;
+    }
+    // Обрыв соединения посреди файла — транспортная неудача, а не «файл такой».
+    await reader.cancel().catch(() => undefined);
+    throw new MoyskladError('TRANSPORT_ERROR');
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
 
 /** Обычный ответ API — JSON. Непригодное тело наружу не выходит. */
 async function readJson(response: Response): Promise<unknown> {
