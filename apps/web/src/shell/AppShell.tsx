@@ -18,6 +18,18 @@ import { useRealtime } from '../realtime/useRealtime';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import './shell.css';
 
+/**
+ * Перекрывает ли меню содержимое.
+ *
+ * Порог совпадает с точкой в `shell.css`: одно правило в двух местах разошлось
+ * бы, и меню закрывалось бы там, где оно ничего не перекрывает.
+ */
+const OVERLAY_QUERY = '(max-width: 900px)';
+
+function isOverlayViewport(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia(OVERLAY_QUERY).matches;
+}
+
 export function AppShell(): React.JSX.Element {
   const { user, client, logout, logoutEverywhere } = useAuth();
   const location = useLocation();
@@ -50,8 +62,15 @@ export function AppShell(): React.JSX.Element {
   // На телефоне меню — overlay поверх страницы: после перехода в раздел оно
   // закрывается само, иначе пользователь остаётся смотреть на меню вместо
   // экрана, который только что выбрал.
+  //
+  // На широком экране меню НЕ закрывается: там оно занимает свою колонку и
+  // ничего не перекрывает, а самопроизвольное схлопывание после каждого
+  // перехода означало бы, что до соседнего раздела нужно два действия вместо
+  // одного.
   useEffect(() => {
-    setSidebarOpen(false);
+    if (isOverlayViewport()) {
+      setSidebarOpen(false);
+    }
   }, [location.pathname]);
 
   // Escape закрывает overlay. Это доступность, а не новый смысл: без клавиатуры
