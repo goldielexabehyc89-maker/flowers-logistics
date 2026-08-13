@@ -357,30 +357,58 @@ function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
 }
 
 /**
+ * Окружение, которому разрешён живой DaData.
+ *
+ * Владелец разрешил серверную DaData на staging с настоящими адресами и принял
+ * расход квоты (`docs/OWNER_DECISIONS.md`, `GEO-004`). Прежний абсолютный запрет
+ * вне production этим решением заменён, но правило осталось прежним по форме:
+ * ОБА признака окружения обязаны совпасть. Смешанная конфигурация —
+ * `APP_ENV=staging` с production-маркером или наоборот — это ошибка
+ * развёртывания, и продолжать с платным ключом в такой ситуации нельзя.
+ *
+ * Функция отвечает только за окружение. Наличие ключей и явного включения
+ * проверяется отдельно: их отсутствие — это «не настраивали», а несовпавший
+ * маркер — «настроили неправильно», и путать эти два случая не нужно.
+ */
+export function dadataEnvironment(data: {
+  APP_ENV: 'local' | 'staging' | 'production';
+  APP_ENVIRONMENT_MARKER: string;
+}): 'production' | 'staging' | 'denied' {
+  if (data.APP_ENV === 'production' && data.APP_ENVIRONMENT_MARKER === 'production') {
+    return 'production';
+  }
+  if (data.APP_ENV === 'staging' && data.APP_ENVIRONMENT_MARKER === 'staging') {
+    return 'staging';
+  }
+  return 'denied';
+}
+
+/**
  * Fail closed для геокодирования.
  *
  * Ключ DaData — это платный баланс организации, а каждый запрос несёт адрес
- * клиента. Приложение, молча стартовавшее с рабочим ключом в staging, однажды
- * отправит наружу настоящие адреса и потратит чужие деньги. Поэтому запуск
- * останавливается, а не продолжается с предупреждением.
+ * клиента. Приложение, молча стартовавшее с рабочим ключом в local или в
+ * смешанной конфигурации, однажды отправит наружу настоящие адреса и потратит
+ * чужие деньги. Поэтому запуск останавливается, а не продолжается с
+ * предупреждением.
  */
 function assertDadataEnvironment(data: z.infer<typeof configSchema>): void {
-  const isProductionMarker =
-    data.APP_ENVIRONMENT_MARKER === 'production' && data.APP_ENV === 'production';
+  const environment = dadataEnvironment(data);
 
   const hasKey = data.DADATA_API_KEY !== undefined || data.DADATA_SECRET_KEY !== undefined;
 
-  if (hasKey && !isProductionMarker) {
+  if (hasKey && environment === 'denied') {
     throw new Error(
-      'DADATA_API_KEY и DADATA_SECRET_KEY допустимы только при APP_ENV=production и ' +
-        'APP_ENVIRONMENT_MARKER=production: рабочие ключи не размещаются в local, CI и staging',
+      'DADATA_API_KEY и DADATA_SECRET_KEY допустимы только при совпавших маркерах ' +
+        'production либо staging: рабочие ключи не размещаются в local, CI и в смешанной ' +
+        'конфигурации, где APP_ENV и APP_ENVIRONMENT_MARKER расходятся',
     );
   }
 
-  if (data.DADATA_GEOCODING_ENABLED && !isProductionMarker) {
+  if (data.DADATA_GEOCODING_ENABLED && environment === 'denied') {
     throw new Error(
-      'DADATA_GEOCODING_ENABLED=true допустим только при APP_ENV=production и ' +
-        'APP_ENVIRONMENT_MARKER=production',
+      'DADATA_GEOCODING_ENABLED=true допустим только при совпавших маркерах ' +
+        'production либо staging',
     );
   }
 
