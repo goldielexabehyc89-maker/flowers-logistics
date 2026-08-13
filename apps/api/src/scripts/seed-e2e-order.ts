@@ -82,6 +82,9 @@ async function main(): Promise<number> {
             assortmentKindRaw: 'bundle',
             name: 'Букет проверочный',
             quantity: '1',
+            // У верхнеуровневой позиции единицы намеренно нет: браузерный
+            // сценарий обязан увидеть и число с единицей, и число без неё
+            // в одной карточке.
             uomId: null,
             uomName: null,
             characteristicLabel: null,
@@ -94,8 +97,8 @@ async function main(): Promise<number> {
                 assortmentKindRaw: 'product',
                 name: 'Роза проверочная',
                 quantity: '11',
-                uomId: null,
-                uomName: null,
+                uomId: crypto.randomUUID(),
+                uomName: 'шт',
               },
             ],
           },
@@ -143,6 +146,8 @@ async function main(): Promise<number> {
               assortmentKindRaw: position.assortmentKindRaw,
               name: position.name,
               quantity: position.quantity,
+              uomId: position.uomId,
+              uomName: position.uomName,
               characteristicLabel: position.characteristicLabel,
               components: {
                 create: position.components.map((component) => ({
@@ -153,6 +158,8 @@ async function main(): Promise<number> {
                   assortmentKindRaw: component.assortmentKindRaw,
                   name: component.name,
                   quantity: component.quantity,
+                  uomId: component.uomId,
+                  uomName: component.uomName,
                 })),
               },
             })),

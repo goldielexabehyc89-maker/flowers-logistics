@@ -15,6 +15,7 @@ import {
   QUEUE_PAGE_SIZE,
   availableActions,
   formatInterval,
+  formatQuantity,
   latestJob,
   mergePages,
   nextPageOffset,
@@ -215,6 +216,27 @@ describe('показ значений', () => {
 
     expect(routeLabel(item)).toBe('Маршрут R-2027-03-10-001, остановка 2');
     expect(routeLabel({ ...item, route: null })).toBeNull();
+  });
+
+  /**
+   * Количество с единицей.
+   *
+   * Правило повторяет серверное (`apps/api/.../pdf.ts`) намеренно: экран и
+   * бумага обязаны показывать одно число одинаково. «0.5 м» на экране и
+   * «0,5 м» на бланке читались бы как два разных документа об одном заказе.
+   */
+  it('количество показывается с запятой и подтверждённой единицей', () => {
+    expect(formatQuantity('2', 'шт')).toBe('2 шт');
+    expect(formatQuantity('0.5', 'м')).toBe('0,5 м');
+    expect(formatQuantity('11', 'шт')).toBe('11 шт');
+  });
+
+  it('без подтверждённой единицы показывается одно число', () => {
+    // Ни «ед. не указана», ни подставленного «шт»: догадка выглядит как факт
+    // и уводит сборку — 2 метра ленты и 2 штуки лент это разные заказы.
+    expect(formatQuantity('2', null)).toBe('2');
+    expect(formatQuantity('0.5', null)).toBe('0,5');
+    expect(formatQuantity('2', '   ')).toBe('2');
   });
 
   it('счётчик показывает и показанное, и общее', () => {

@@ -545,15 +545,19 @@ export async function assembleOrder(
         ordinal: true,
         name: true,
         quantity: true,
+        // Единица замораживается в бланке ВМЕСТЕ с количеством: без неё
+        // «2» и «2 м» на бумаге неразличимы, а переименование единицы
+        // в каталоге меняло бы уже напечатанный документ.
+        uomName: true,
         characteristicLabel: true,
         assortmentKind: true,
         assortmentId: true,
         components: {
           orderBy: { ordinal: 'asc' },
-          select: { ordinal: true, name: true, quantity: true },
+          select: { ordinal: true, name: true, quantity: true, uomName: true },
         },
       },
-    })) as unknown as StoredPosition[];
+    })) as StoredPosition[];
 
     const minutes = effectiveMinutes(order);
     const snapshot = buildPrintFormSnapshot({
