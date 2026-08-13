@@ -24,6 +24,21 @@ import {
 import { toDecimalString } from '../integrations/moysklad/money.js';
 import { MAX_MINUTE, MIN_MINUTE, setManualInterval } from './service.js';
 import { fromMicro, setManualPoint } from './geo.js';
+import {
+  ADDRESS_ROLES,
+  clearLocalAddress,
+  listAddressHistory,
+  MAX_ADDRESS_LENGTH,
+  resolveAddressConflict,
+  setLocalAddress,
+} from './address-service.js';
+import { isDadataAllowed } from './geocoding/enabled.js';
+import {
+  MAX_QUERY_LENGTH,
+  MIN_QUERY_LENGTH,
+  suggestAddresses,
+  type AddressSuggestion,
+} from '../integrations/dadata/suggest.js';
 import { BASEMAP_PREFIX } from '../geo/basemap/routes.js';
 import type { BasemapState } from '../geo/basemap/manifest.js';
 import { CURRENT_TRAFFIC_MODE } from '../geo/matrix/service.js';
@@ -76,6 +91,26 @@ const setIntervalBodySchema = z.object({
   version: z.number().int().min(0),
 });
 
+const suggestQuerySchema = z.object({
+  query: z.string().min(MIN_QUERY_LENGTH).max(MAX_QUERY_LENGTH),
+});
+
+/** Точка принимается только вместе с адресом и только целыми микроградусами. */
+const localAddressSchema = z.object({
+  address: z.string().trim().min(1).max(MAX_ADDRESS_LENGTH),
+  point: z
+    .object({
+      latMicro: z.number().int().min(-90_000_000).max(90_000_000),
+      lonMicro: z.number().int().min(-180_000_000).max(180_000_000),
+    })
+    .nullable()
+    .optional(),
+});
+
+const conflictDecisionSchema = z.object({
+  decision: z.enum(['KEEP_LOCAL', 'USE_SOURCE']),
+});
+
 const idParamSchema = z.object({
   id: z
     .string()
@@ -87,6 +122,13 @@ interface OrdersDeps {
   config: AppConfig;
   /** Проверенное состояние собственной подложки. Пусто — её просто нет. */
   basemap?: () => BasemapState;
+  /**
+   * Подменяемый HTTP для подсказок адреса.
+   *
+   * Существует только ради проверок: настоящих обращений к DaData в тестах
+   * не бывает, а разрешать их «случайно» из-за забытой заглушки нельзя.
+   */
+  suggestFetch?: typeof globalThis.fetch;
 }
 
 /**
@@ -187,6 +229,17 @@ function toListItem(order: {
     // сослаться на конкретное состояние заказа.
     version: order.version,
     updatedAt: order.updatedAt.toISOString(),
+  };
+}
+
+function contextOf(request: { ip: string; headers: Record<string, unknown> }): {
+  ip: string | null;
+  userAgent: string | null;
+} {
+  const agent = request.headers['user-agent'];
+  return {
+    ip: request.ip,
+    userAgent: typeof agent === 'string' ? agent.slice(0, 255) : null,
   };
 }
 
@@ -539,5 +592,83 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 255) : null,
       },
     );
+  });
+
+  // --- Локальный адрес логиста -------------------------------------------
+
+  /**
+   * Подсказки адреса.
+   *
+   * Ключ и адрес DaData остаются на сервере: браузер обращается только сюда
+   * и получает готовые стандартизованные варианты. Сырой ответ провайдера
+   * наружу не выходит ни в каком виде.
+   */
+  app.get('/api/orders/address-suggestions', async (request) => {
+    await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { query } = suggestQuerySchema.parse(request.query);
+
+    // Окружение решает раньше сети: там, где живой DaData не разрешён,
+    // запрос не отправляется вовсе, а экран продолжает работать по базе.
+    if (!isDadataAllowed(deps.config)) {
+      return { suggestions: [] as AddressSuggestion[], available: false };
+    }
+
+    const suggestions = await suggestAddresses(
+      {
+        credentials: {
+          apiKey: deps.config.DADATA_API_KEY ?? null,
+          secretKey: deps.config.DADATA_SECRET_KEY ?? null,
+        },
+        ...(deps.suggestFetch === undefined ? {} : { fetch: deps.suggestFetch }),
+      },
+      query,
+    );
+
+    return { suggestions, available: true };
+  });
+
+  /** Сохранить локальный адрес. Точка принимается только из точной подсказки. */
+  app.put('/api/orders/:id/address', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = localAddressSchema.parse(request.body);
+
+    return setLocalAddress(
+      deps,
+      actor,
+      id,
+      { address: body.address, point: body.point ?? null },
+      contextOf(request),
+    );
+  });
+
+  /** Снять локальную правку: рабочим снова становится адрес МоегоСклада. */
+  app.delete('/api/orders/:id/address', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    return clearLocalAddress(deps, actor, id, contextOf(request));
+  });
+
+  /** Решение по расхождению адресов: оставить локальный либо принять источник. */
+  app.post('/api/orders/:id/address/resolve-conflict', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = conflictDecisionSchema.parse(request.body);
+
+    return resolveAddressConflict(deps, actor, id, body.decision, contextOf(request));
+  });
+
+  /**
+   * Полная история адреса.
+   *
+   * Здесь персональные данные выдаются целиком, поэтому доступ закрыт ролями
+   * на входе: это профильный административный просмотр, а не часть списка.
+   */
+  app.get('/api/orders/:id/address-history', async (request) => {
+    await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    return { items: await listAddressHistory(deps, id) };
   });
 }
