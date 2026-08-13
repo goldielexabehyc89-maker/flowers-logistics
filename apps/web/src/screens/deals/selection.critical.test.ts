@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   dropUnavailable,
+  intervalProblem,
   parseTimeFilter,
   selectAll,
   selectionNumber,
@@ -39,6 +40,10 @@ function card(overrides: Partial<DealCard> = {}): DealCard {
     draftRouteId: null,
     draftRouteNumber: null,
     selectable: true,
+    sourceStartMinute: 600,
+    sourceEndMinute: 720,
+    sourceIntervalRaw: 'с 10:00 по 12:00',
+    version: 1,
     ...overrides,
   };
 }
@@ -125,5 +130,21 @@ describe('фильтр времени', () => {
     expect(parseTimeFilter('25:00')).toBeNull();
     expect(parseTimeFilter('10:60')).toBeNull();
     expect(parseTimeFilter('десять')).toBeNull();
+  });
+});
+
+describe('ручной интервал', () => {
+  it('обе границы обязательны и окончание строго позже начала', () => {
+    expect(intervalProblem('10:00', '14:00')).toBeNull();
+    expect(intervalProblem('10:00', '')).toMatch(/обе границы/i);
+    expect(intervalProblem('', '14:00')).toMatch(/обе границы/i);
+    // Равные границы интервалом не являются: доставить «в момент» нельзя.
+    expect(intervalProblem('14:00', '14:00')).toMatch(/позже начала/i);
+    expect(intervalProblem('15:00', '14:00')).toMatch(/позже начала/i);
+  });
+
+  it('границы суток соблюдаются', () => {
+    expect(intervalProblem('00:00', '23:59')).toBeNull();
+    expect(intervalProblem('10:00', '24:00')).toMatch(/обе границы/i);
   });
 });

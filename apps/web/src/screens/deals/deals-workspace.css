@@ -278,3 +278,13 @@
   justify-content: center;
   cursor: default;
 }
+
+/* Форма интервала раскрывается прямо в карточке: отдельный диалог ради двух
+   полей отвлекал бы от списка. */
+.deals__interval-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  padding-top: 6px;
+}

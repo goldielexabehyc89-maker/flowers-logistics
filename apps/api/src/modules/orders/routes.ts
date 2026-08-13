@@ -312,6 +312,8 @@ async function dealCards(db: Database, ids: string[]) {
       needsAttention: true,
       attentionReasons: true,
       geoState: true,
+      version: true,
+      intervalRaw: true,
       routeOrders: {
         where: { removedAt: null },
         select: { routeId: true, route: { select: { number: true, state: true } } },
@@ -346,7 +348,15 @@ async function dealCards(db: Database, ids: string[]) {
         deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,
         endMinute: row.manualIntervalEndMinute ?? row.intervalEndMinute,
+        // Исходный интервал показывается рядом с рабочим: решение о правке
+        // принимается именно их сравнением.
+        sourceStartMinute: row.intervalStartMinute,
+        sourceEndMinute: row.intervalEndMinute,
+        sourceIntervalRaw: row.intervalRaw,
         intervalCorrected: row.manualIntervalStartMinute !== null,
+        // Версия нужна ручной правке интервала: чужое изменение обязано
+        // получить честный отказ, а не молча перезаписаться.
+        version: row.version,
         needsAttention: row.needsAttention,
         attentionReasons: row.attentionReasons,
         geoState: row.geoState,

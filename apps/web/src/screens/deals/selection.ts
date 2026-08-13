@@ -30,6 +30,12 @@ export interface DealCard {
   draftRouteId: string | null;
   draftRouteNumber: string | null;
   selectable: boolean;
+  /** Интервал источника: показывается рядом с рабочим для сравнения. */
+  sourceStartMinute: number | null;
+  sourceEndMinute: number | null;
+  sourceIntervalRaw: string | null;
+  /** Версия заказа: ручная правка интервала работает по ней. */
+  version: number;
 }
 
 /** Почему заказ нельзя выбрать. `null` — можно. */
@@ -150,4 +156,26 @@ export function parseTimeFilter(value: string): number | null {
     return null;
   }
   return hours * 60 + minutes;
+}
+
+/**
+ * Проверка ручного интервала перед отправкой.
+ *
+ * Возвращает причину отказа, а не булево: интерфейс обязан объяснить, что
+ * именно не так. Это удобство, а не защита — те же правила проверяет сервер,
+ * и его отказ показывается как есть, без оптимистической лжи.
+ */
+export function intervalProblem(from: string, to: string): string | null {
+  const start = parseTimeFilter(from);
+  const end = parseTimeFilter(to);
+
+  if (start === null || end === null) {
+    // Половина интервала выглядела бы как заданное время и попала бы
+    // в планирование — поэтому обе границы обязательны.
+    return 'Укажите обе границы в формате ЧЧ:ММ.';
+  }
+  if (end <= start) {
+    return 'Окончание должно быть позже начала.';
+  }
+  return null;
 }

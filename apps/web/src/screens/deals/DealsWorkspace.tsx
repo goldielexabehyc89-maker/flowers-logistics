@@ -31,6 +31,7 @@ import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
 import {
   dropUnavailable,
+  intervalProblem,
   parseTimeFilter,
   selectAll,
   selectionNumber,
@@ -53,6 +54,14 @@ interface DealsResponse {
 
 const PAGE_SIZE = 50;
 
+/** Минуты от полуночи в строку `ЧЧ:ММ` для поля формы. */
+function minutesToText(minute: number | null): string {
+  if (minute === null) {
+    return '';
+  }
+  return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+}
+
 export function DealsWorkspace(): React.JSX.Element {
   const { client } = useAuth();
   const navigate = useNavigate();
@@ -69,6 +78,11 @@ export function DealsWorkspace(): React.JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<DealCard | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  /** Заказ, у которого сейчас правят интервал, и черновик значений. */
+  const [intervalFor, setIntervalFor] = useState<DealCard | null>(null);
+  const [intervalFrom, setIntervalFrom] = useState('');
+  const [intervalTo, setIntervalTo] = useState('');
+  const [intervalError, setIntervalError] = useState<string | null>(null);
 
   /** Ровно те параметры, которыми пользуются список, карта и «выбрать все». */
   const scope = useMemo(() => {
@@ -160,6 +174,33 @@ export function DealsWorkspace(): React.JSX.Element {
           'Часть заказов изменилась. Список обновлён, проверьте выбор.',
       );
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
+    },
+  });
+
+  /**
+   * Ручной интервал доставки.
+   *
+   * Тот же серверный контракт, что и раньше: проверка, аудит, событие и
+   * сохранение правки при синхронизации живут на сервере. Здесь только форма
+   * и честный показ отказа — оптимистически «успех» не рисуется.
+   */
+  const saveInterval = useMutation({
+    mutationFn: (order: DealCard) =>
+      client.put(`/api/orders/${order.id}/interval`, {
+        startMinute: parseTimeFilter(intervalFrom) ?? 0,
+        endMinute: parseTimeFilter(intervalTo) ?? 0,
+        version: order.version,
+      }),
+    onSuccess: () => {
+      setIntervalFor(null);
+      setIntervalError(null);
+      // Обновляются карточка, «Требует внимания», карта и selectable —
+      // все они питаются одним отбором, поэтому достаточно его перечитать.
+      void queryClient.invalidateQueries({ queryKey: ['deals'] });
+      void queryClient.invalidateQueries({ queryKey: ['deals-map'] });
+    },
+    onError: (error: unknown) => {
+      setIntervalError((error as { message?: string }).message ?? 'Не удалось сохранить интервал.');
     },
   });
 
@@ -379,11 +420,80 @@ export function DealsWorkspace(): React.JSX.Element {
                       </p>
                     )}
 
+                    {/* Исходный интервал показывается рядом: правку принимают сравнением. */}
+                    {item.intervalCorrected && (
+                      <div className="deals__muted" data-testid="deal-source-interval">
+                        В МоемСкладе: {item.sourceIntervalRaw ?? '—'}
+                      </div>
+                    )}
+
                     <div className="deals__actions">
                       <Button variant="ghost" onClick={() => setEditing(item)}>
                         Исправить адрес
                       </Button>
+                      <Button
+                        variant="ghost"
+                        data-testid="deal-edit-interval"
+                        onClick={() => {
+                          setIntervalFor(item);
+                          setIntervalFrom(minutesToText(item.startMinute));
+                          setIntervalTo(minutesToText(item.endMinute));
+                          setIntervalError(null);
+                        }}
+                      >
+                        Задать интервал
+                      </Button>
                     </div>
+
+                    {intervalFor?.id === item.id && (
+                      <div className="deals__interval-form" data-testid="deal-interval-form">
+                        <Field label="С">
+                          {(props) => (
+                            <TextInput
+                              {...props}
+                              value={intervalFrom}
+                              placeholder="10:00"
+                              data-testid="deal-interval-from"
+                              onChange={(event) => setIntervalFrom(event.target.value)}
+                            />
+                          )}
+                        </Field>
+                        <Field label="По">
+                          {(props) => (
+                            <TextInput
+                              {...props}
+                              value={intervalTo}
+                              placeholder="14:00"
+                              data-testid="deal-interval-to"
+                              onChange={(event) => setIntervalTo(event.target.value)}
+                            />
+                          )}
+                        </Field>
+                        <Button
+                          variant="primary"
+                          data-testid="deal-interval-save"
+                          disabled={saveInterval.isPending}
+                          onClick={() => {
+                            const problem = intervalProblem(intervalFrom, intervalTo);
+                            if (problem !== null) {
+                              setIntervalError(problem);
+                              return;
+                            }
+                            saveInterval.mutate(item);
+                          }}
+                        >
+                          Сохранить
+                        </Button>
+                        <Button variant="ghost" onClick={() => setIntervalFor(null)}>
+                          Отмена
+                        </Button>
+                        {intervalError !== null && (
+                          <p className="deals__blocked" data-testid="deal-interval-error">
+                            {intervalError}
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </li>
                 );
               })}
