@@ -17,12 +17,23 @@
  * ДЕНЬ. «Сегодня» и «Завтра» — два раздельных представления, и заказы двух дней
  * никогда не смешиваются. Календарный день считает сервер общими московскими
  * функциями: браузер к вычислению дня не допускается вовсе.
+ *
+ * СТРАНИЦА — ПОСЛЕ ПОРЯДКА. Из базы читается вся выборка выбранного дня и
+ * области видимости, `sortQueue` упорядочивает её целиком, и только потом
+ * `takePage` отдаёт запрошенный кусок. Обратный порядок (обрезать в SQL,
+ * упорядочить остаток) разрушил бы групповой приоритет маршрутов — подробный
+ * разбор в `paging.ts`.
+ *
+ * ПОИСК ПО НОМЕРУ сужает ту же выборку, а не открывает новую: день и область
+ * видимости остаются условием запроса, поэтому найти чужой день или чужой
+ * заказ поиском невозможно.
  */
 
 import { moscowToday, shiftCalendarDate } from '@fl/shared';
 import type { Database } from '../../platform/db.js';
 import type { OrderFulfillmentProcessState } from '../../generated/prisma/enums.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { normalizePageRequest, takePage, type PageInfo, type PageRequest } from './paging.js';
 import {
   effectiveMinutes,
   isOverdue,
@@ -67,20 +78,43 @@ export interface QueueItem {
   changedSinceClaim: boolean;
 }
 
-export interface QueueResult {
+export interface QueueResult extends PageInfo {
   day: QueueDay;
   /** Календарная дата Москвы, к которой относится представление. */
   deliveryDate: string;
   scope: QueueScope;
   includeAssigned: boolean;
+  /** Применённый поиск по номеру: клиент показывает его как действующий фильтр. */
+  search: string | null;
   items: QueueItem[];
 }
 
-export interface QueueQuery {
+export interface QueueQuery extends Partial<PageRequest> {
   day: QueueDay;
   scope: QueueScope;
   /** Галочка «Все»: добавить к общей очереди уже назначенные заказы. */
   includeAssigned: boolean;
+  /**
+   * Точный или частичный номер заказа.
+   *
+   * Пустая строка и пробелы поиском не считаются: иначе случайный пробел
+   * в поле превратил бы всю очередь в пустой список без видимой причины.
+   */
+  search?: string | null;
+}
+
+/**
+ * Наибольшая длина строки поиска.
+ *
+ * Номер заказа короткий; всё, что длиннее, — не номер, а способ заставить базу
+ * просматривать таблицу впустую.
+ */
+export const MAX_SEARCH_LENGTH = 64;
+
+/** Строка поиска или `null`, если искать нечего. */
+export function normalizeSearch(value: string | null | undefined): string | null {
+  const trimmed = (value ?? '').trim();
+  return trimmed === '' ? null : trimmed.slice(0, MAX_SEARCH_LENGTH);
 }
 
 /** Календарная дата выбранного представления. Считается только сервером. */
@@ -136,6 +170,10 @@ function orderSelect(date: string) {
  * Строк здесь сотни, а не миллионы: день ограничен физической пропускной
  * способностью мастерской. Поэтому порядок считается в памяти общей функцией,
  * а не подзапросами, которые пришлось бы доказывать заново на каждом плане.
+ *
+ * Читается вся выборка дня, упорядочивается целиком и только затем режется на
+ * страницы. Ответ содержит `total` и `hasMore`, поэтому клиенту не приходится
+ * угадывать, есть ли продолжение, по числу полученных строк.
  */
 export async function readQueue(
   db: Database,
@@ -145,6 +183,8 @@ export async function readQueue(
 ): Promise<QueueResult> {
   const date = resolveQueueDate(query.day, now);
   const todayMoscow = moscowToday(now);
+  const page = normalizePageRequest(query);
+  const search = normalizeSearch(query.search);
 
   const states: OrderFulfillmentProcessState[] =
     query.scope === 'mine'
@@ -164,6 +204,12 @@ export async function readQueue(
       deliveryDate: toDateColumn(date),
       fulfillmentProcessState: { in: states },
       ...(query.scope === 'mine' ? { fulfillmentAssigneeId: viewer.userId } : {}),
+      // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
+      // условия: день, область видимости и состояния остаются в силе.
+      // Регистр не учитывается — номер вводят как придётся.
+      ...(search === null
+        ? {}
+        : { externalName: { contains: search, mode: 'insensitive' as const } }),
     },
     select: orderSelect(date),
   });
@@ -190,14 +236,19 @@ export async function readQueue(
   };
 
   const byId = new Map(rows.map((row) => [row.id, row]));
+  // Порядок считается по ПОЛНОЙ выборке, и только потом берётся страница:
+  // групповой приоритет маршрутов существует лишь у целого списка.
   const sorted = sortQueue(queueOrders, context);
+  const { items: pageItems, ...pageMeta } = takePage(sorted, page);
 
   return {
     day: query.day,
     deliveryDate: date,
     scope: query.scope,
     includeAssigned: query.includeAssigned,
-    items: sorted.map((entry) => {
+    search,
+    ...pageMeta,
+    items: pageItems.map((entry) => {
       const row = byId.get(entry.id);
       const participation = row?.routeOrders[0];
       return {
