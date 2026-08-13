@@ -25,7 +25,7 @@ import {
 import { WarehouseScreen } from './screens/warehouse/WarehouseScreen';
 import { ActiveScreen } from './screens/delivery/ActiveScreen';
 import { HistoryScreen } from './screens/delivery/HistoryScreen';
-import { DealsScreen } from './screens/deals/DealsScreen';
+import { DealsWorkspace } from './screens/deals/DealsWorkspace';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
 import { RoutingScreen } from './screens/routing/RoutingScreen';
@@ -138,7 +138,7 @@ export function App(): React.JSX.Element {
           }
         >
           <Route index element={<Navigate to={LOGISTICS_DEFAULT_TAB} replace />} />
-          <Route path="deals" element={<DealsScreen />} />
+          <Route path="deals" element={<DealsWorkspace />} />
           <Route path="routing" element={<RoutingScreen />} />
           <Route path="route-sheets" element={<RouteSheetsScreen />} />
           <Route path="history" element={<PlaceholderScreen {...LOGISTICS_HISTORY} />} />
