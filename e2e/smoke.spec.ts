@@ -1243,7 +1243,13 @@ test('курьер: досрочность, «Не доставлен» с пр�
   const second = page.locator(`[data-testid="delivery-order"][data-order-number="${secondOrder}"]`);
   await second.getByTestId('delivery-open-failed').click();
   await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
+  // Кнопка активна только при заполненном черновике: если причина не выбрана,
+  // отказ произойдёт здесь и будет назван, а не спрячется за общим таймаутом.
+  await expect(second.getByTestId('delivery-submit')).toBeEnabled();
   await second.getByTestId('delivery-submit').click();
+  // Ответ сервера показывается тостом. Проверяем его до состояния карточки:
+  // иначе отказ выглядел бы «атрибут не изменился» без единого объяснения.
+  await expect(page.locator('.toast-region')).toContainText('Результат записан');
   await expect(second).toHaveAttribute('data-result', 'NOT_DELIVERED');
 
   // 4. Последний результат завершил маршрут: активных доставок не осталось.
