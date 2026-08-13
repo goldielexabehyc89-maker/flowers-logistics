@@ -4,6 +4,13 @@
  * Desktop: боковая панель и верхняя строка. Mobile: верхняя панель и нижняя
  * навигация не более чем из четырёх кнопок, последняя — «Ещё».
  *
+ * Единственный доступный раздел нижнюю навигацию не получает вовсе. Кнопка,
+ * ведущая на уже открытую страницу, ничего не даёт: она дублирует заголовок,
+ * отнимает высоту у содержимого и выглядит как неработающая. Внутренние
+ * вкладки раздела — «Очередь», «Мои заказы», «Печать» у флориста, рабочие
+ * вкладки склада — к верхнеуровневой навигации отношения не имеют
+ * и остаются на месте.
+ *
  * Разделы, недоступные роли, не отображаются вовсе — в том числе на время загрузки:
  * пока сессия проверяется, показывается экран ожидания, а не пустой каркас с меню.
  */
@@ -30,11 +37,20 @@ export function AppShell(): React.JSX.Element {
   const sections = visibleSections(roles);
   const mobile = splitMobileNavigation(roles);
 
+  /**
+   * Ровно один верхнеуровневый раздел — навигации нет.
+   *
+   * Считается ПОСЛЕ проверки ролей: до неё список разделов пуст у любого
+   * пользователя, и признак был бы ложным. Пустой список сюда тоже попадает:
+   * показывать полосу без единой кнопки незачем.
+   */
+  const singleSection = sections.length <= 1;
+
   const currentTitle =
     sections.find((section) => location.pathname.startsWith(section.path))?.title ?? 'Логистика';
 
   return (
-    <div className="shell">
+    <div className={singleSection ? 'shell shell--single-section' : 'shell'}>
       <aside className="shell__sidebar">
         <div className="shell__brand">Логистика</div>
         <nav aria-label="Основные разделы">
@@ -69,24 +85,26 @@ export function AppShell(): React.JSX.Element {
         <Outlet />
       </main>
 
-      <nav className="shell__bottombar" aria-label="Навигация">
-        {mobile.primary.map((section) => (
-          <NavLink
-            key={section.key}
-            to={section.path}
-            className={({ isActive }) =>
-              isActive ? 'shell__tab shell__tab--active' : 'shell__tab'
-            }
-          >
-            {section.shortTitle}
-          </NavLink>
-        ))}
-        {mobile.extra.length > 0 && (
-          <button type="button" className="shell__tab" onClick={() => setMenuOpen(true)}>
-            Ещё
-          </button>
-        )}
-      </nav>
+      {!singleSection && (
+        <nav className="shell__bottombar" aria-label="Навигация">
+          {mobile.primary.map((section) => (
+            <NavLink
+              key={section.key}
+              to={section.path}
+              className={({ isActive }) =>
+                isActive ? 'shell__tab shell__tab--active' : 'shell__tab'
+              }
+            >
+              {section.shortTitle}
+            </NavLink>
+          ))}
+          {mobile.extra.length > 0 && (
+            <button type="button" className="shell__tab" onClick={() => setMenuOpen(true)}>
+              Ещё
+            </button>
+          )}
+        </nav>
+      )}
 
       <Modal open={menuOpen} title="Разделы" onClose={() => setMenuOpen(false)}>
         <ul className="shell__nav">

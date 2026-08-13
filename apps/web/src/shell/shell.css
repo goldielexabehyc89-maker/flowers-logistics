@@ -13,6 +13,19 @@
   min-height: 100%;
 }
 
+/*
+ * Единственный раздел: нижней полосы нет, и высоту она не занимает.
+ *
+ * Одного `display: none` мало — строка сетки осталась бы и содержимое всё равно
+ * потеряло бы шестьдесят пикселей внизу. Поэтому убирается сама строка.
+ */
+.shell--single-section {
+  grid-template-rows: var(--topbar-height) 1fr;
+  grid-template-areas:
+    'topbar'
+    'content';
+}
+
 .shell__sidebar {
   display: none;
 }
