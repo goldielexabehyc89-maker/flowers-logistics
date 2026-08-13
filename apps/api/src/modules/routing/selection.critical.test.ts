@@ -19,6 +19,7 @@ import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../integrations/moysklad/mapper.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { createDraftFromSelection } from './service.js';
+import { eligibleOrders } from '../planning/service.js';
 
 let ctx: TestContext;
 const IDS = MOYSKLAD_IDS;
@@ -317,5 +318,48 @@ describe('гонка двух логистов и потерянный отве�
         CONTEXT,
       ),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_ALREADY_IN_ROUTE' } });
+  });
+});
+
+describe('автоматический расчёт замораживает ровно выбранное', () => {
+  it('в снимок попадают только выбранные заказы дня', async () => {
+    const selected = [await seedSelectable(), await seedSelectable()];
+    const foreign = await seedSelectable();
+
+    // Проверяется сам отбор планирования: чужой заказ того же дня не должен
+    // попасть в набор, даже будучи полностью пригодным.
+    const chosen = await eligibleOrders(ctx.db, DAY, selected);
+    expect(chosen.map((order) => order.id).sort()).toEqual([...selected].sort());
+    expect(chosen.map((order) => order.id)).not.toContain(foreign);
+
+    // Без выбора поведение прежнее: планируется весь пригодный день.
+    const whole = await eligibleOrders(ctx.db, DAY);
+    expect(whole.map((order) => order.id)).toContain(foreign);
+  });
+
+  it('заказ, ставший непригодным, из выбора выпадает и расчёт его не подменяет', async () => {
+    const good = await seedSelectable();
+    const broken = await seedSelectable();
+    await ctx.db.deliveryOrder.update({
+      where: { id: broken },
+      data: { sourceMissing: true },
+    });
+
+    const chosen = await eligibleOrders(ctx.db, DAY, [good, broken]);
+    expect(chosen.map((order) => order.id)).toEqual([good]);
+  });
+
+  it('заказ, уже попавший в маршрут, в расчёт не берётся', async () => {
+    const ids = [await seedSelectable(), await seedSelectable()];
+    const user = await actor();
+    await createDraftFromSelection(
+      deps(),
+      user,
+      { deliveryDate: DAY, vehicleType: 'CAR', orderIds: [ids[0] as string] },
+      CONTEXT,
+    );
+
+    const chosen = await eligibleOrders(ctx.db, DAY, ids);
+    expect(chosen.map((order) => order.id)).toEqual([ids[1]]);
   });
 });

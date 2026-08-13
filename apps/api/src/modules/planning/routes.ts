@@ -55,6 +55,9 @@ const slotSchema = z.object({
   shiftEndMinute: z.number().int().min(1).max(MINUTES_IN_DAY).optional(),
 });
 
+/** Верхняя граница выбора: она же ограничивает размер матрицы. */
+const MAX_SELECTED_ORDERS = 200;
+
 const requestSchema = z.object({
   deliveryDate: dateSchema,
   slots: z.array(slotSchema).min(1).max(MAX_SLOTS),
@@ -63,6 +66,13 @@ const requestSchema = z.object({
    * не вытесняет: молчаливая замена стёрла бы просмотренный план.
    */
   replacePreviewId: uuid.optional(),
+  /**
+   * Явно выбранные заказы «Сделок».
+   *
+   * Пусто — прежнее поведение: планируется весь пригодный день. Заданный набор
+   * попадает в неизменяемый снимок ровно в этом составе.
+   */
+  orderIds: z.array(uuid).min(1).max(MAX_SELECTED_ORDERS).optional(),
 });
 
 const applySchema = z.object({
