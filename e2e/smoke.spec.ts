@@ -837,7 +837,8 @@ test('планирование: настройки, превью и примен
   await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
 
   // 2. Планирование: превью видно целиком, включая неразмещённые заказы.
-  await page.getByRole('link', { name: 'Планирование' }).first().click();
+  // Отдельной вкладки «Планирование» больше нет: расчёт живёт в «Маршрутизации».
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Планирование маршрутов' })).toBeVisible();
 
   // Условия расчёта показаны до кнопки: логист видит, из чего сложится план.
