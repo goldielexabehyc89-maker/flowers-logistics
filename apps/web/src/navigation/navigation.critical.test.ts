@@ -234,3 +234,19 @@ describe('раздел «Логистика»', () => {
     expect(keys).toContain('couriers');
   });
 });
+
+describe('вложенные адреса доступны наравне с разделом', () => {
+  it('вкладки «Логистики» видимы её ролям и закрыты остальным', () => {
+    for (const path of LOGISTICS_TABS.map((tab) => tab.path)) {
+      expect(isSectionVisible(['ADMIN'], path), path).toBe(true);
+      expect(isSectionVisible(['LOGISTICIAN'], path), path).toBe(true);
+      expect(isSectionVisible(['COURIER'], path), path).toBe(false);
+    }
+  });
+
+  it('похожий по началу чужой адрес разделом не считается', () => {
+    // Иначе `/logistics-report` открывался бы по правам «Логистики».
+    expect(isSectionVisible(['ADMIN'], '/logistics-report')).toBe(false);
+    expect(isSectionVisible(['COURIER'], '/activex')).toBe(false);
+  });
+});

@@ -133,8 +133,20 @@ export function visibleSections(roles: readonly Role[]): readonly AppSection[] {
   return APP_SECTIONS.filter((section) => section.roles.some((role) => roles.includes(role)));
 }
 
+/**
+ * Доступен ли адрес роли.
+ *
+ * Сравнение по префиксу, а не по точному равенству: у раздела «Логистика» есть
+ * вложенные вкладки, и точное сравнение объявляло бы `/logistics/deals`
+ * недоступным. Прежняя версия отправляла такой адрес на первый доступный
+ * раздел, тот перенаправлял на вкладку по умолчанию — и получался цикл.
+ *
+ * Граница проверяется явно: `/logistics-x` не считается частью `/logistics`.
+ */
 export function isSectionVisible(roles: readonly Role[], path: string): boolean {
-  return visibleSections(roles).some((section) => section.path === path);
+  return visibleSections(roles).some(
+    (section) => path === section.path || path.startsWith(`${section.path}/`),
+  );
 }
 
 /**
