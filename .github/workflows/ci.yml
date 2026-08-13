@@ -422,6 +422,8 @@ jobs:
             echo "route=$(get 'маршрут' 1)"
             echo "order1=$(get 'заказ' 1)"
             echo "order2=$(get 'заказ' 2)"
+            echo "courierphone=$(get 'курьер' 1)"
+            echo "courierpin=$(get 'пин курьера' 1)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Браузерный smoke
@@ -435,6 +437,10 @@ jobs:
           E2E_WH_ROUTE: ${{ steps.seed-warehouse.outputs.route }}
           E2E_WH_ORDER_1: ${{ steps.seed-warehouse.outputs.order1 }}
           E2E_WH_ORDER_2: ${{ steps.seed-warehouse.outputs.order2 }}
+          # Тот же курьер, которому склад выдал маршрут: сценарий доставки
+          # продолжает складской, а не заводит второй маршрут.
+          E2E_WH_COURIER_PHONE: ${{ steps.seed-warehouse.outputs.courierphone }}
+          E2E_WH_COURIER_PIN: ${{ steps.seed-warehouse.outputs.courierpin }}
         run: npm run test:e2e
 
   secrets-scan:

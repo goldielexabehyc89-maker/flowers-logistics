@@ -1198,3 +1198,63 @@ test('склад: приёмка → комплектование → пауза
   await activeRow.getByRole('button', { name: 'Открыть лист' }).click();
   await expect(page.locator('.sheet__footer')).toContainText('передан курьеру');
 });
+
+test('курьер: досрочность, «Не доставлен» с причиной, отмена и завершение маршрута', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const courierPhone = process.env['E2E_WH_COURIER_PHONE'] ?? '';
+  const courierPin = process.env['E2E_WH_COURIER_PIN'] ?? '';
+  const routeNumber = process.env['E2E_WH_ROUTE'] ?? '';
+  const firstOrder = process.env['E2E_WH_ORDER_1'] ?? '';
+  const secondOrder = process.env['E2E_WH_ORDER_2'] ?? '';
+
+  test.skip(
+    courierPhone === '' || courierPin === '' || routeNumber === '' || firstOrder === '',
+    'не передана курьерская фикстура (E2E_WH_COURIER_*)',
+  );
+
+  // Сценарий продолжает складской: маршрут уже выдан и находится в `ACTIVE`.
+  await login(page, courierPhone, courierPin);
+  await expect(page.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  const route = page.locator('[data-testid="delivery-route"]', { hasText: routeNumber });
+  await expect(route).toBeVisible();
+
+  // 1. Первый заказ: обычная доставка. Заказ дня ещё не в интервале, поэтому
+  // экран предупреждает о досрочности — но подтвердить разрешает.
+  const first = page.locator('[data-testid="delivery-order"]', { hasText: firstOrder });
+  await first.getByTestId('delivery-open-delivered').click();
+  await first.getByTestId('delivery-submit').click();
+  await expect(first).toHaveAttribute('data-result', 'DELIVERED');
+
+  // 2. Ошибку курьер исправляет сам: заказ снова открыт.
+  await first.getByTestId('delivery-cancel-result').click();
+  await expect(first).toHaveAttribute('data-result', 'none');
+
+  // 3. Повторяем результат и закрываем второй заказ недоставкой с причиной.
+  await first.getByTestId('delivery-open-delivered').click();
+  await first.getByTestId('delivery-submit').click();
+  await expect(first).toHaveAttribute('data-result', 'DELIVERED');
+
+  const second = page.locator('[data-testid="delivery-order"]', { hasText: secondOrder });
+  await second.getByTestId('delivery-open-failed').click();
+  await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
+  await second.getByTestId('delivery-submit').click();
+  await expect(second).toHaveAttribute('data-result', 'NOT_DELIVERED');
+
+  // 4. Последний результат завершил маршрут: активных доставок не осталось.
+  await expect(page.getByText('Активных доставок нет')).toBeVisible();
+
+  // 5. История текущего дня показывает оба результата и не скрывает данные.
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
+  const historyFirst = page.locator('[data-testid="delivery-history-item"]', {
+    hasText: firstOrder,
+  });
+  await expect(historyFirst).toHaveAttribute('data-masked', 'no');
+  await expect(
+    page.locator('[data-testid="delivery-history-item"]', { hasText: secondOrder }),
+  ).toContainText('Нет ответа');
+});

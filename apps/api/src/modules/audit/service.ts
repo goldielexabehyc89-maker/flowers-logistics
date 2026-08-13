@@ -93,6 +93,14 @@ export const AUDIT_ACTIONS = [
   'WAREHOUSE_ISSUE_CANCELLED',
   // Маршрут физически передан курьеру и стал активным.
   'ROUTE_ISSUED_TO_COURIER',
+  // Работа курьера (этап 6.6). В payload только идентификаторы, вид результата
+  // и признаки: ни адреса, ни получателя, ни комментария, ни текста причины.
+  'DELIVERY_RESULT_RECORDED',
+  'DELIVERY_RESULT_CANCELLED',
+  'DELIVERY_RESULT_CORRECTED',
+  'DELIVERY_REASON_UPDATED',
+  // Все заказы маршрута получили окончательный результат.
+  'ROUTE_COMPLETED',
   // Общие настройки планирования: смена и время обслуживания.
   'SETTING_UPDATED',
   // Планирование маршрутов. Ни адресов, ни координат заказов: только
