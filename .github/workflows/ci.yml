@@ -397,6 +397,7 @@ jobs:
           echo "second=$second" >> "$GITHUB_OUTPUT"
 
       - name: Создать готовое превью планирования
+        id: seed-plan
         shell: bash
         run: |
           set -euo pipefail
@@ -405,7 +406,13 @@ jobs:
           # создал бы: склад, обязательные настройки и запуск в состоянии
           # PREVIEW с неизменяемыми снимками. Контракт решателя и путь расчёта
           # доказываются направленными проверками с подменёнными сервисами.
-          npm run --silent seed:e2e-plan
+          output="$(npm run --silent seed:e2e-plan)"
+          run="$(printf '%s' "$output" | sed -n 's/^запуск: //p' | head -1)"
+          if [ -z "$run" ]; then
+            echo "не удалось получить идентификатор превью" >&2
+            exit 1
+          fi
+          echo "planrun=$run" >> "$GITHUB_OUTPUT"
 
       - name: Создать складскую фикстуру
         id: seed-warehouse
@@ -472,6 +479,9 @@ jobs:
           # продолжает складской, а не заводит второй маршрут.
           E2E_WH_COURIER_PHONE: ${{ steps.seed-warehouse.outputs.courierphone }}
           E2E_WH_COURIER_PIN: ${{ steps.seed-warehouse.outputs.courierpin }}
+          # Идентификатор готового превью: сценарий автоматического пути
+          # подменяет только старт расчёта, а читает и применяет настоящее.
+          E2E_PLAN_RUN: ${{ steps.seed-plan.outputs.planrun }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
         run: npm run test:e2e
