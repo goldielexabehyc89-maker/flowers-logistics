@@ -15,32 +15,59 @@
  * ОШИБКА НЕ ОСТАВЛЯЕТ ЛОЖНОГО СОСТОЯНИЯ. Списки не правятся «оптимистично»:
  * после каждого действия и каждого отказа данные перезапрашиваются, а realtime
  * обновляет ровно те запросы, которых касается событие.
+ *
+ * СПИСКИ ГРУЗЯТСЯ СТРАНИЦАМИ. День мастерской — сотня с лишним заказов, и
+ * показывать их разом незачем: человек смотрит десяток. Сервер отдаёт первые
+ * 50 УЖЕ упорядоченных строк вместе с общим количеством, «Загрузить ещё»
+ * добавляет следующие.
+ *
+ * ЛЮБОЕ ИЗМЕНЕНИЕ ВОЗВРАЩАЕТ К ПЕРВОЙ СТРАНИЦЕ. Накопленные страницы
+ * сбрасываются и после собственного действия, и по событию realtime: очередь
+ * живёт, смещения сдвигаются, и дозагрузка поверх устаревшей стопки дала бы
+ * либо повтор строки, либо пропуск. Пиксель прокрутки при этом не сохраняется —
+ * и не обязан: сохранять положение в списке, который перестроился, значило бы
+ * показывать человеку не то место, на которое он смотрел.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
+import { collapseToFirstPage } from '../../realtime/stream';
 import { useToast } from '../../ui/ToastProvider';
 import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
 import { OrderCardPanel } from './OrderCardPanel';
 import {
+  QUEUE_PAGE_SIZE,
   formatDay,
   formatInterval,
   latestJob,
+  mergePages,
+  nextPageOffset,
+  pageSummary,
   printStateLabel,
   processLabel,
   routeLabel,
   type FloristOption,
   type FloristTab,
   type OrderCardView,
+  type PrintJobsResponse,
   type PrintJobView,
   type QueueDay,
   type QueueResponse,
   type ShiftView,
 } from './florist';
 import './florist.css';
+
+/**
+ * Пауза перед серверным поиском.
+ *
+ * Запрос на каждое нажатие клавиши означал бы десяток запросов на один номер
+ * заказа, и ответы возвращались бы вперемешку. Задержка небольшая: поиск
+ * обязан ощущаться мгновенным.
+ */
+const SEARCH_DEBOUNCE_MS = 250;
 
 const TABS: { key: FloristTab; title: string }[] = [
   { key: 'queue', title: 'Очередь' },
@@ -63,6 +90,14 @@ export function FloristScreen(): React.JSX.Element {
   const [printFilter, setPrintFilter] = useState<'attention' | 'printed'>('attention');
   /** Причина принудительного завершения — своя у каждой смены в списке. */
   const [forceReason, setForceReason] = useState<Record<string, string>>({});
+  /** Что человек набрал, и что из этого уже ушло на сервер. */
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   const scope = tab === 'mine' ? 'mine' : 'general';
 
@@ -71,21 +106,65 @@ export function FloristScreen(): React.JSX.Element {
     queryFn: () => client.get<{ shift: ShiftView | null }>('/api/florist/shift'),
   });
 
-  const queueQuery = useQuery({
-    queryKey: ['florist-queue', day, scope, includeAssigned],
-    queryFn: () =>
+  /**
+   * Очередь страницами.
+   *
+   * День, область, галочка «Все» и строка поиска входят в ключ запроса, поэтому
+   * смена любого из них — это другой список: накопленные страницы отбрасываются
+   * сами, и первая страница нового набора запрашивается заново. Смешать
+   * «Сегодня» с «Завтра» или чужой поиск со своим здесь физически нечем.
+   */
+  const queueQuery = useInfiniteQuery({
+    queryKey: ['florist-queue', day, scope, includeAssigned, search],
+    queryFn: ({ pageParam }) =>
       client.get<QueueResponse>(
-        `/api/florist/queue?day=${day}&scope=${scope}&all=${includeAssigned ? 'true' : 'false'}`,
+        `/api/florist/queue?day=${day}&scope=${scope}&all=${includeAssigned ? 'true' : 'false'}` +
+          `&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}` +
+          (search === '' ? '' : `&search=${encodeURIComponent(search)}`),
       ),
+    initialPageParam: 0,
+    getNextPageParam: (last: QueueResponse) => nextPageOffset(last) ?? undefined,
     enabled: tab !== 'print',
   });
 
-  const printQuery = useQuery({
+  const printQuery = useInfiniteQuery({
     queryKey: ['florist-print-jobs', printFilter],
-    queryFn: () =>
-      client.get<{ items: PrintJobView[] }>(`/api/florist/print-jobs?filter=${printFilter}`),
+    queryFn: ({ pageParam }) =>
+      client.get<PrintJobsResponse>(
+        `/api/florist/print-jobs?filter=${printFilter}&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}`,
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (last: PrintJobsResponse) => nextPageOffset(last) ?? undefined,
     enabled: tab === 'print',
   });
+
+  /**
+   * Смена фильтра сбрасывает накопленные страницы ВСЕХ представлений очереди.
+   *
+   * Каждое сочетание дня, области, галочки «Все» и поиска — свой запрос со
+   * своим кэшем, поэтому смешаться они не могут и сами по себе. Но кэш прежнего
+   * представления помнит и вторую, и третью догруженные страницы, и возврат
+   * к нему показал бы стопку, набранную неизвестно когда: за это время заказы
+   * успели уйти в работу, а новые — появиться. Честнее начать с первой
+   * страницы, чем восстановить вид, которого больше нет.
+   */
+  useEffect(() => {
+    queryClient.setQueriesData<unknown>({ queryKey: ['florist-queue'] }, collapseToFirstPage);
+  }, [day, scope, includeAssigned, search, queryClient]);
+
+  useEffect(() => {
+    queryClient.setQueriesData<unknown>({ queryKey: ['florist-print-jobs'] }, collapseToFirstPage);
+  }, [printFilter, queryClient]);
+
+  const queuePages = queueQuery.data?.pages ?? [];
+  const queueItems = mergePages(queuePages);
+  /** Общее число берётся из ПЕРВОЙ страницы: она самая свежая после сброса. */
+  const queueTotal = queuePages[0]?.total ?? 0;
+  const queueDate = queuePages[0]?.deliveryDate;
+
+  const printPages = printQuery.data?.pages ?? [];
+  const printItems = mergePages(printPages);
+  const printTotal = printPages[0]?.total ?? 0;
 
   const cardQuery = useQuery({
     queryKey: ['florist-card', openOrderId],
@@ -117,6 +196,13 @@ export function FloristScreen(): React.JSX.Element {
    * флористу, и локальная догадка разошлась бы с действительностью.
    */
   async function refresh(): Promise<void> {
+    // Списки с продолжением возвращаются к первой странице ДО перезапроса.
+    // Иначе перезапрашивались бы все накопленные страницы — то есть весь
+    // день целиком, ради чего страницы и вводились, — да ещё и поверх
+    // сместившейся выборки.
+    queryClient.setQueriesData<unknown>({ queryKey: ['florist-queue'] }, collapseToFirstPage);
+    queryClient.setQueriesData<unknown>({ queryKey: ['florist-print-jobs'] }, collapseToFirstPage);
+
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['florist-queue'] }),
       queryClient.invalidateQueries({ queryKey: ['florist-card'] }),
@@ -309,9 +395,27 @@ export function FloristScreen(): React.JSX.Element {
               </button>
             ))}
             <span className="muted text-sm">
-              {queueQuery.data === undefined ? '' : formatDay(queueQuery.data.deliveryDate)}
+              {queueDate === undefined ? '' : formatDay(queueDate)}
             </span>
           </div>
+
+          {/*
+           * Поиск СЕРВЕРНЫЙ и внутри выбранных дня и области.
+           *
+           * Искать по загруженным страницам было бы обманом: заказ, не попавший
+           * в первые пятьдесят, не нашёлся бы вовсе, а человек решил бы, что
+           * его нет. Поэтому номер уходит на сервер, и день со scope остаются
+           * условием выборки.
+           */}
+          <input
+            className="input florist__search"
+            type="search"
+            aria-label="Поиск по номеру заказа"
+            placeholder="Номер заказа"
+            data-testid="florist-search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+          />
 
           {tab === 'queue' && (
             <label className="florist__checkbox">
@@ -334,20 +438,30 @@ export function FloristScreen(): React.JSX.Element {
           onRetry={() => void queueQuery.refetch()}
         />
       )}
-      {tab !== 'print' && queueQuery.isSuccess && queueQuery.data.items.length === 0 && (
+      {tab !== 'print' && queueQuery.isSuccess && queueItems.length === 0 && (
         <EmptyState
-          title={tab === 'mine' ? 'Заказов за вами нет' : 'Очередь пуста'}
+          title={
+            search !== ''
+              ? 'Ничего не найдено'
+              : tab === 'mine'
+                ? 'Заказов за вами нет'
+                : 'Очередь пуста'
+          }
           description={
-            tab === 'mine'
-              ? 'Возьмите заказ из общей очереди.'
-              : 'На выбранный день свободных заказов с подтверждённым составом нет.'
+            search !== ''
+              ? // Поиск не выходит за пределы выбранных дня и раздела, и человек
+                // обязан понимать, где именно искали.
+                'В выбранных дне и разделе заказа с таким номером нет.'
+              : tab === 'mine'
+                ? 'Возьмите заказ из общей очереди.'
+                : 'На выбранный день свободных заказов с подтверждённым составом нет.'
           }
         />
       )}
 
-      {tab !== 'print' && queueQuery.isSuccess && queueQuery.data.items.length > 0 && (
+      {tab !== 'print' && queueQuery.isSuccess && queueItems.length > 0 && (
         <ul className="florist__list" data-testid="florist-queue">
-          {queueQuery.data.items.map((item) => (
+          {queueItems.map((item) => (
             <li
               key={item.id}
               className={`florist__row${item.overdue ? ' florist__row--overdue' : ''}`}
@@ -401,6 +515,32 @@ export function FloristScreen(): React.JSX.Element {
         </ul>
       )}
 
+      {/*
+       * Продолжение показывается ЧИСЛАМИ, а не намёком.
+       *
+       * «Показано 50 из 111» отвечает сразу на два вопроса: сколько человек уже
+       * видит и сколько всего есть. Без общего числа список выглядит полным,
+       * и заказ, оставшийся за границей страницы, просто не существует для того,
+       * кто на него смотрит.
+       */}
+      {tab !== 'print' && queueQuery.isSuccess && queueItems.length > 0 && (
+        <div className="florist__more">
+          <span className="muted text-sm" data-testid="florist-queue-count">
+            {pageSummary(queueItems.length, queueTotal)}
+          </span>
+          {queueQuery.hasNextPage && (
+            <Button
+              variant="secondary"
+              data-testid="florist-load-more"
+              disabled={queueQuery.isFetchingNextPage}
+              onClick={() => void queueQuery.fetchNextPage()}
+            >
+              {queueQuery.isFetchingNextPage ? 'Загружаем…' : 'Загрузить ещё'}
+            </Button>
+          )}
+        </div>
+      )}
+
       {tab === 'print' && (
         <div className="florist__filters card">
           <div className="row" role="group" aria-label="Фильтр заданий печати">
@@ -429,7 +569,7 @@ export function FloristScreen(): React.JSX.Element {
           onRetry={() => void printQuery.refetch()}
         />
       )}
-      {tab === 'print' && printQuery.isSuccess && printQuery.data.items.length === 0 && (
+      {tab === 'print' && printQuery.isSuccess && printItems.length === 0 && (
         <EmptyState
           title="Заданий нет"
           description={
@@ -440,9 +580,9 @@ export function FloristScreen(): React.JSX.Element {
         />
       )}
 
-      {tab === 'print' && printQuery.isSuccess && printQuery.data.items.length > 0 && (
+      {tab === 'print' && printQuery.isSuccess && printItems.length > 0 && (
         <ul className="florist__list" data-testid="florist-print-list">
-          {printQuery.data.items.map((job) => (
+          {printItems.map((job) => (
             <li key={job.id} className="florist__row" data-testid="print-row">
               <div className="florist__row-main">
                 <button
@@ -509,6 +649,31 @@ export function FloristScreen(): React.JSX.Element {
             </li>
           ))}
         </ul>
+      )}
+
+      {/*
+       * Продолжение очереди печати — не удобство, а доступность действия.
+       *
+       * Ошибка печати, случившаяся раньше сотни других заданий, без него
+       * недостижима: ни повторить, ни отметить вручную её нельзя, потому что
+       * строки просто нет на экране.
+       */}
+      {tab === 'print' && printQuery.isSuccess && printItems.length > 0 && (
+        <div className="florist__more">
+          <span className="muted text-sm" data-testid="print-count">
+            {pageSummary(printItems.length, printTotal)}
+          </span>
+          {printQuery.hasNextPage && (
+            <Button
+              variant="secondary"
+              data-testid="print-load-more"
+              disabled={printQuery.isFetchingNextPage}
+              onClick={() => void printQuery.fetchNextPage()}
+            >
+              {printQuery.isFetchingNextPage ? 'Загружаем…' : 'Загрузить ещё'}
+            </Button>
+          )}
+        </div>
       )}
 
       {openOrderId !== null && cardQuery.isPending && <LoadingState title="Открываем карточку…" />}

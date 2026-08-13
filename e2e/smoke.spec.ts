@@ -885,6 +885,76 @@ test('планирование: настройки, превью и примен
 });
 
 /**
+ * Длинная очередь: первая страница, продолжение, серверный поиск и сброс.
+ *
+ * День мастерской — сотня с лишним заказов. Проверяется не «список
+ * прокручивается», а три решения, ошибка в которых стоит собранного не того
+ * букета:
+ *
+ *  * экран строит ПЕРВУЮ страницу, а не весь день, и честно называет оба числа;
+ *  * заказ за пределами первой страницы достижим — продолжением и поиском;
+ *  * смена дня возвращает список к первой странице, а не дополняет чужой.
+ *
+ * Проверка выполняется только там, где фикстура длинной очереди создана:
+ * на трёх заказах кнопки продолжения нет вовсе, и утверждать по ней нечего.
+ */
+async function checkLongQueue(floristPage: Page): Promise<void> {
+  const prefix = process.env['E2E_FLORIST_QUEUE_PREFIX'] ?? '';
+  const seeded = Number(process.env['E2E_FLORIST_QUEUE_COUNT'] ?? '0');
+  if (prefix === '' || seeded <= 50) {
+    return;
+  }
+
+  const rows = floristPage.getByTestId('florist-row');
+  const counter = floristPage.getByTestId('florist-queue-count');
+
+  // Первая страница ровно 50 строк: весь день в DOM не строится.
+  await expect(counter).toBeVisible();
+  await expect(rows).toHaveCount(50);
+
+  const summary = (await counter.innerText()).trim();
+  const parsed = /Показано (\d+) из (\d+)/.exec(summary);
+  expect(parsed, `счётчик очереди: ${summary}`).not.toBeNull();
+  const total = Number(parsed?.[2] ?? '0');
+  expect(total).toBeGreaterThan(50);
+
+  // Продолжение добавляет следующую страницу и НЕ повторяет уже показанное.
+  await floristPage.getByTestId('florist-load-more').click();
+  await expect(rows).toHaveCount(Math.min(total, 100));
+  const numbers = await Promise.all(
+    (await rows.all()).map((row) => row.getAttribute('data-order-number')),
+  );
+  expect(new Set(numbers).size, 'страницы не должны повторять заказ').toBe(numbers.length);
+
+  // Карточка открывается из ЛЮБОЙ страницы, а не только из первой.
+  await rows.nth(60).getByRole('button', { name: 'Открыть' }).click();
+  await expect(floristPage.getByTestId('florist-card')).toBeVisible();
+  await floristPage.getByTestId('florist-card').getByRole('button', { name: 'Закрыть' }).click();
+  await expect(floristPage.getByTestId('florist-card')).toHaveCount(0);
+
+  // Серверный поиск достаёт заказ, которого нет ни на одной загруженной
+  // странице. Поиск по показанному здесь ответил бы «ничего нет».
+  const deepNumber = `${prefix}-${String(seeded - 1).padStart(4, '0')}`;
+  const searchField = floristPage.getByTestId('florist-search');
+  await searchField.fill(deepNumber);
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('data-order-number', deepNumber);
+  await expect(counter).toContainText('Показано 1 из 1');
+
+  // Снятие поиска возвращает к первой странице, а не к прежней стопке.
+  await searchField.fill('');
+  await expect(rows).toHaveCount(50);
+
+  // Смена дня сбрасывает накопленное полностью: заказы двух дней не смешиваются.
+  await floristPage.getByTestId('florist-load-more').click();
+  await expect(rows).toHaveCount(Math.min(total, 100));
+  await floristPage.getByTestId('florist-day-tomorrow').click();
+  await expect(rows).toHaveCount(0);
+  await floristPage.getByTestId('florist-day-today').click();
+  await expect(rows).toHaveCount(50);
+}
+
+/**
  * Флорист: смена → захват → карточка → «Собран» → бланк с QR → ручная отметка.
  *
  * Сценарий проходит весь путь браузером и БЕЗ живого МоегоСклада: состав
@@ -937,6 +1007,9 @@ test('флорист: смена, захват, сборка, бланк и от
   for (const foreign of ['Настройки', 'Сотрудники и курьеры', 'Маршрутизация']) {
     await expect(floristPage.getByRole('link', { name: foreign })).toHaveCount(0);
   }
+
+  // 2.1. Длинная очередь: страница, продолжение, поиск и сброс.
+  await checkLongQueue(floristPage);
 
   // 3. Без смены заказ взять нельзя: кнопка захвата выключена.
   const row = floristPage.locator('.florist__row', { hasText: orderNumber });

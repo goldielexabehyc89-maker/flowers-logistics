@@ -10,7 +10,12 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { ApiError } from '../lib/api-client';
-import { invalidationKeysFor, parseEventBuffer, reconnectDelayMs } from './stream';
+import {
+  collapseToFirstPage,
+  invalidationKeysFor,
+  parseEventBuffer,
+  reconnectDelayMs,
+} from './stream';
 
 export type RealtimeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped';
 
@@ -72,6 +77,10 @@ export function useRealtime(): RealtimeState {
       }
 
       for (const key of invalidationKeysFor(event.event)) {
+        // Сначала сбрасываются накопленные страницы, и только потом идёт
+        // перезапрос: иначе список с продолжением перезапросил бы каждую
+        // страницу заново и вернул бы весь день целиком.
+        queryClient.setQueriesData<unknown>({ queryKey: key }, collapseToFirstPage);
         void queryClient.invalidateQueries({ queryKey: key });
       }
     };

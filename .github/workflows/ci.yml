@@ -424,12 +424,29 @@ jobs:
             echo "order2=$(get 'заказ' 2)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Наполнить очередь флориста
+        id: seed-florist-queue
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Продолжение списка проверяется только там, где заказов больше одной
+          # страницы. Заказы производственные и логистической области не видны,
+          # поэтому остальные сценарии остаются прежними.
+          output="$(npm run --silent seed:e2e-florist-queue -- --count=60)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n '1p'; }
+          {
+            echo "prefix=$(get 'префикс')"
+            echo "count=$(get 'количество')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Браузерный smoke
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
           E2E_ADMIN_CODE: ${{ steps.bootstrap.outputs.code }}
           E2E_ORDER_NUMBER: ${{ steps.seed-order.outputs.number }}
           E2E_ORDER_NUMBER_2: ${{ steps.seed-order.outputs.second }}
+          E2E_FLORIST_QUEUE_PREFIX: ${{ steps.seed-florist-queue.outputs.prefix }}
+          E2E_FLORIST_QUEUE_COUNT: ${{ steps.seed-florist-queue.outputs.count }}
           E2E_WH_STORAGE_CELL: ${{ steps.seed-warehouse.outputs.storage }}
           E2E_WH_ROUTE_CELL: ${{ steps.seed-warehouse.outputs.routecell }}
           E2E_WH_ROUTE: ${{ steps.seed-warehouse.outputs.route }}
