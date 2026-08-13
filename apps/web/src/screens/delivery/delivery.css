@@ -1,0 +1,137 @@
+/**
+ * Мобильная компоновка курьера.
+ *
+ * Экран рассчитан на телефон в одной руке: крупные цели нажатия, один столбец,
+ * маршрут отличается цветной полосой слева. Настольная ширина ограничена —
+ * растянутый на весь монитор список доставок читается хуже, а не лучше.
+ */
+
+.delivery {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+}
+
+.delivery__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.delivery__route {
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 10px;
+  overflow: hidden;
+  /* Цвет маршрута — устойчивая подсказка «это другой лист», а не украшение. */
+  border-left: 6px solid hsl(var(--route-accent, 210) 60% 45%);
+}
+
+.delivery__route-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--surface-muted, #f6f6f6);
+}
+
+.delivery__route-title {
+  font-weight: 600;
+}
+
+.delivery__route-meta {
+  color: var(--text-muted, #666);
+  font-size: 13px;
+}
+
+.delivery__orders {
+  display: flex;
+  flex-direction: column;
+}
+
+.delivery__order {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-top: 1px solid var(--border, #d9d9d9);
+}
+
+.delivery__order--late {
+  /* Опоздание видно, но результат им не блокируется. */
+  background: var(--danger-surface, #fdf1f1);
+}
+
+.delivery__order--done {
+  opacity: 0.65;
+}
+
+.delivery__order-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.delivery__order-number {
+  font-weight: 600;
+}
+
+.delivery__order-line {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.delivery__order-muted {
+  color: var(--text-muted, #666);
+  font-size: 13px;
+}
+
+.delivery__warning {
+  font-size: 13px;
+  color: var(--warning-text, #8a5a00);
+}
+
+.delivery__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.delivery__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 0;
+}
+
+.delivery__history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 720px;
+}
+
+.delivery__history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 10px;
+}
+
+.delivery__history-item--cancelled {
+  opacity: 0.6;
+  text-decoration-line: line-through;
+}
+
+@media (min-width: 720px) {
+  .delivery__order {
+    padding: 14px 16px;
+  }
+}
