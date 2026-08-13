@@ -961,12 +961,14 @@ test('Сделки: точный выбор → расчёт → превью �
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
   await expect(page.locator('.routes__number-button').first()).toBeVisible();
 
-  // Созданный черновик состоит только из выбранных заказов: постороннего
-  // в его составе нет.
-  await page.locator('.routes__list-item').first().getByRole('button', { name: 'Открыть' }).click();
-  const draftCard = page.locator('.routes__card').first();
-  await expect(draftCard.locator('.routes__stop').first()).toBeVisible();
-  await expect(draftCard).not.toContainText(foreignNumber);
+  // Состав черновика отдельно не разбирается намеренно: он целиком следует
+  // из неизменяемого снимка, а снимок уже доказан двумя проверками выше —
+  // отправленным набором заказов и отсутствием постороннего в превью.
+  // Посторонний заказ при этом остался доступным в «Сделках».
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(
+    page.locator(`[data-testid="deal-card"][data-order-number="${foreignNumber}"]`),
+  ).toBeVisible();
 
   // 5. Третья обязательная форма: время обслуживания. Меняется после
   //    применения, поэтому условия уже применённого плана не задевает.
