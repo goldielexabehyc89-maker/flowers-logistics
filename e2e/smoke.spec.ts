@@ -1219,12 +1219,14 @@ test('курьер: досрочность, «Не доставлен» с пр�
   await login(page, courierPhone, courierPin);
   await expect(page.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
 
-  const route = page.locator('[data-testid="delivery-route"]', { hasText: routeNumber });
+  // Локаторы по ТОЧНОМУ атрибуту, а не по подстроке: номера заказов фикстуры
+  // отличаются одним символом, и `hasText` цеплял соседнюю карточку.
+  const route = page.locator(`[data-testid="delivery-route"][data-route-number="${routeNumber}"]`);
   await expect(route).toBeVisible();
 
   // 1. Первый заказ: обычная доставка. Заказ дня ещё не в интервале, поэтому
   // экран предупреждает о досрочности — но подтвердить разрешает.
-  const first = page.locator('[data-testid="delivery-order"]', { hasText: firstOrder });
+  const first = page.locator(`[data-testid="delivery-order"][data-order-number="${firstOrder}"]`);
   await first.getByTestId('delivery-open-delivered').click();
   await first.getByTestId('delivery-submit').click();
   await expect(first).toHaveAttribute('data-result', 'DELIVERED');
@@ -1238,7 +1240,7 @@ test('курьер: досрочность, «Не доставлен» с пр�
   await first.getByTestId('delivery-submit').click();
   await expect(first).toHaveAttribute('data-result', 'DELIVERED');
 
-  const second = page.locator('[data-testid="delivery-order"]', { hasText: secondOrder });
+  const second = page.locator(`[data-testid="delivery-order"][data-order-number="${secondOrder}"]`);
   await second.getByTestId('delivery-open-failed').click();
   await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
   await second.getByTestId('delivery-submit').click();
@@ -1250,11 +1252,10 @@ test('курьер: досрочность, «Не доставлен» с пр�
   // 5. История текущего дня показывает оба результата и не скрывает данные.
   await page.getByRole('link', { name: 'История' }).first().click();
   await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
-  const historyFirst = page.locator('[data-testid="delivery-history-item"]', {
-    hasText: firstOrder,
-  });
-  await expect(historyFirst).toHaveAttribute('data-masked', 'no');
   await expect(
-    page.locator('[data-testid="delivery-history-item"]', { hasText: secondOrder }),
+    page.locator(`[data-testid="delivery-history-item"][data-order-number="${firstOrder}"]`),
+  ).toHaveAttribute('data-masked', 'no');
+  await expect(
+    page.locator(`[data-testid="delivery-history-item"][data-order-number="${secondOrder}"]`),
   ).toContainText('Нет ответа');
 });
