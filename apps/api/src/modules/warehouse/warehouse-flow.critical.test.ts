@@ -669,6 +669,24 @@ describe('комплектование', () => {
         CONTEXT,
       ),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_IN_ROUTE' } });
+
+    // Ни один отказ не сдвинул коробку: оба заказа лежат там же, где лежали.
+    // Это и есть смысл второго физического скана — ошибиться ячейкой можно,
+    // а переместить заказ ошибкой нельзя.
+    expect(await activeCellOf(mine.id)).toBe(storage.id);
+    expect(await activeCellOf(foreign.id)).toBe(storage.id);
+
+    // Правильная пара переносит ровно один заказ.
+    const picked = await pickOrderToRouteCell(
+      flow,
+      actor,
+      route.id,
+      { orderNumber: mine.number, cellCode: routeCell.code },
+      CONTEXT,
+    );
+    expect(picked).toMatchObject({ picked: 1, total: 1 });
+    expect(await activeCellOf(mine.id)).toBe(routeCell.id);
+    expect(await activeCellOf(foreign.id)).toBe(storage.id);
   });
 
   it('возврат маршрута в черновик помечает заказы и блокирует выдачу', async () => {

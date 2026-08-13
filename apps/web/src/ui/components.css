@@ -291,3 +291,76 @@
     max-width: none;
   }
 }
+
+/* --- Экран сканирования склада --------------------------------------------
+   Экран перекрывает раздел целиком: кладовщик держит коробку и телефон, и
+   любая видимая под камерой кнопка была бы нажата случайно. Управление
+   прижато к низу — до него достаёт большой палец одной руки. */
+.scanner {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+}
+
+.scanner__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.scanner__video {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  background: #000;
+}
+
+.scanner__failure {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+}
+
+.scanner__progress {
+  font-weight: 600;
+}
+
+/* Уведомление лежит поверх видео и забирает внимание целиком: результат
+   каждого скана обязан быть прочитан, а не мелькнуть в углу. */
+.scanner__live {
+  display: contents;
+}
+
+.scanner__notice {
+  position: fixed;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: var(--space-3);
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
+}
+
+/* Цвет — дополнение, а не единственный признак: текст и live-region
+   сообщают исход сами по себе. */
+.scanner__notice--success {
+  border-color: var(--color-success);
+}
+
+.scanner__notice--error {
+  border-color: var(--color-error);
+}

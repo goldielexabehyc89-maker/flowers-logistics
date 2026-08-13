@@ -28,6 +28,8 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
+import { ScannerScreen } from '../../scan/ScannerScreen';
+import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
   CELL_KIND_LABELS,
   SCAN_HINTS,
@@ -138,10 +140,156 @@ function ScanField({
   );
 }
 
+/**
+ * Безопасный текст отказа для окна сканера.
+ *
+ * Наружу идёт только публичное сообщение сервера: ни стека, ни внутреннего
+ * кода, ни адреса с получателем.
+ */
+function failureText(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.message : fallback;
+}
+
+function conflictKind(error: unknown): string | null {
+  return error instanceof ApiError ? (error.conflict?.kind ?? null) : null;
+}
+
 function useApiError(): (error: unknown, fallback: string) => void {
   const { showToast } = useToast();
   return (error: unknown, fallback: string) => {
     showToast(error instanceof ApiError ? error.message : fallback, 'error');
+  };
+}
+
+/**
+ * Приёмка: заказ → ячейка хранения.
+ *
+ * Пара отправляется одним существующим запросом, поэтому прерванная цепочка
+ * не оставляет «приёмки без ячейки». Маршрутная ячейка не подставляется молча:
+ * сервер отвечает отдельным конфликтом, а человек отвечает согласием.
+ */
+function receiveIntentHandler(
+  client: ReturnType<typeof useAuth>['client'],
+  onPlaced: () => Promise<void>,
+): (intent: ScanIntent) => Promise<ScanEvent> {
+  let consentedCell: string | null = null;
+
+  return async (intent) => {
+    try {
+      if (intent.kind === 'resolveOrder') {
+        const context = await client.get<ScanContext>(
+          `/api/warehouse/scan/order?number=${encodeURIComponent(intent.code)}`,
+        );
+        return { type: 'orderResolved', orderNumber: context.orderNumber };
+      }
+      if (intent.kind === 'submitPair') {
+        const agreed = consentedCell === intent.cellCode;
+        const result = await client.post<{ orderNumber: string; cellCode: string }>(
+          '/api/warehouse/placements',
+          {
+            orderNumber: intent.orderNumber,
+            cellCode: intent.cellCode,
+            ...(agreed ? { allowRouteCell: true } : {}),
+          },
+        );
+        consentedCell = null;
+        await onPlaced();
+        return {
+          type: 'succeeded',
+          text: `Заказ ${result.orderNumber} принят в ячейку ${result.cellCode}`,
+          final: true,
+        };
+      }
+      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
+    } catch (error) {
+      if (intent.kind === 'submitPair' && conflictKind(error) === 'ROUTE_CELL_REQUIRES_CHOICE') {
+        consentedCell = intent.cellCode;
+        return { type: 'consentRequired', cellCode: intent.cellCode };
+      }
+      return { type: 'failed', text: failureText(error, 'Не удалось разместить заказ.') };
+    }
+  };
+}
+
+/**
+ * Комплектование: для КАЖДОГО заказа своя пара «заказ → маршрутная ячейка».
+ *
+ * Код ячейки берётся из второго скана, а не из загруженной карточки листа:
+ * подставленный код доказывал бы только то, что карточка открыта, а физический
+ * QR доказывает, что кладовщик действительно принёс коробку к нужной полке.
+ */
+function pickIntentHandler(
+  client: ReturnType<typeof useAuth>['client'],
+  routeId: string,
+  onPicked: () => Promise<void>,
+): (intent: ScanIntent) => Promise<ScanEvent> {
+  return async (intent) => {
+    try {
+      if (intent.kind === 'resolveOrder') {
+        const context = await client.get<ScanContext>(
+          `/api/warehouse/scan/order?number=${encodeURIComponent(intent.code)}`,
+        );
+        if (context.route === null || context.route.id !== routeId) {
+          return { type: 'failed', text: 'Этот заказ не входит в выбранный маршрутный лист.' };
+        }
+        return { type: 'orderResolved', orderNumber: context.orderNumber };
+      }
+      if (intent.kind === 'submitPair') {
+        const result = await client.post<{ orderNumber: string; picked: number; total: number }>(
+          `/api/warehouse/routes/${routeId}/pick`,
+          { orderNumber: intent.orderNumber, cellCode: intent.cellCode },
+        );
+        await onPicked();
+        return {
+          type: 'succeeded',
+          text: `Заказ ${result.orderNumber} перенесён`,
+          progress: { done: result.picked, total: result.total },
+          final: true,
+        };
+      }
+      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
+    } catch (error) {
+      return { type: 'failed', text: failureText(error, 'Не удалось перенести заказ.') };
+    }
+  };
+}
+
+/**
+ * Выдача: одна сессия на весь оставшийся лист.
+ *
+ * Камера не закрывается между заказами — курьер стоит рядом, и открывать
+ * её заново на каждую коробку значит терять время на пустом месте. Повтор
+ * уже выданного заказа называется честно и прогресс второй раз не двигает.
+ */
+function issueIntentHandler(
+  client: ReturnType<typeof useAuth>['client'],
+  routeId: string,
+  onIssued: () => Promise<void>,
+): (intent: ScanIntent) => Promise<ScanEvent> {
+  return async (intent) => {
+    if (intent.kind !== 'issueOrder') {
+      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
+    }
+    try {
+      const result = await client.post<{
+        orderNumber: string;
+        issued: number;
+        total: number;
+        unchanged: boolean;
+        routeActivated: boolean;
+      }>(`/api/warehouse/routes/${routeId}/issue`, { orderNumber: intent.orderNumber });
+      await onIssued();
+      return {
+        type: 'succeeded',
+        text: result.unchanged
+          ? `Заказ ${result.orderNumber} уже был выдан: ${result.issued} из ${result.total}`
+          : `Заказ ${result.orderNumber} выдан: ${result.issued} из ${result.total}`,
+        progress: { done: result.issued, total: result.total },
+        final: result.routeActivated,
+      };
+    } catch (error) {
+      return { type: 'failed', text: failureText(error, 'Не удалось выдать заказ.') };
+    }
   };
 }
 
@@ -156,6 +304,7 @@ function StorageTab(): React.JSX.Element {
   const [orderInput, setOrderInput] = useState('');
   const [cellInput, setCellInput] = useState('');
   const [scanned, setScanned] = useState<ScanContext | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   const placements = useQuery({
     queryKey: ['warehouse-placements'],
@@ -211,10 +360,39 @@ function StorageTab(): React.JSX.Element {
     });
   }
 
+  if (scanning) {
+    return (
+      <ScannerScreen
+        chain="RECEIVE"
+        operation="Приёмка на склад"
+        onIntent={receiveIntentHandler(client, async () => {
+          await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+        })}
+        onClose={() => setScanning(false)}
+      />
+    );
+  }
+
   return (
     <>
       <div className="card stack">
         <h3>Приёмка</h3>
+
+        {/* Камера — третий способ ввода, а не замена: аппаратный сканер
+            и ручной ввод ниже остаются рабочими. */}
+        <div className="row">
+          <Button
+            variant="primary"
+            data-testid="wh-scan-camera"
+            onClick={() => {
+              setScanned(null);
+              setCellInput('');
+              setScanning(true);
+            }}
+          >
+            Сканировать заказ
+          </Button>
+        </div>
 
         {scanned === null ? (
           <ScanField
@@ -389,6 +567,16 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
   const [cancelReason, setCancelReason] = useState('');
   const [nextCourier, setNextCourier] = useState('');
   const [cancelOpen, setCancelOpen] = useState(false);
+  /**
+   * Подтверждённый заказ незавершённой пары комплектования.
+   *
+   * Ручной и аппаратный путь обязаны требовать ту же пару «заказ → ячейка»,
+   * что и камера: иначе автоподстановка кода ячейки из карточки обошла бы
+   * физическое подтверждение, ради которого пара и введена.
+   */
+  const [pickOrder, setPickOrder] = useState<string | null>(null);
+  const [pickCellInput, setPickCellInput] = useState('');
+  const [scanning, setScanning] = useState(false);
 
   const routes = useQuery({
     queryKey: ['warehouse-routes', date],
@@ -421,19 +609,40 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
     onError: (error: unknown) => reportError(error, 'Не удалось привязать ячейку.'),
   });
 
+  /** Подтверждение первого скана: заказ обязан входить в выбранный лист. */
+  const resolvePickOrder = useMutation({
+    mutationFn: (number: string) =>
+      client.get<ScanContext>(`/api/warehouse/scan/order?number=${encodeURIComponent(number)}`),
+    onSuccess: (context) => {
+      if (context.route === null || context.route.id !== routeId) {
+        setOrderInput('');
+        showToast('Этот заказ не входит в выбранный маршрутный лист.', 'error');
+        return;
+      }
+      setPickOrder(context.orderNumber);
+      setOrderInput('');
+    },
+    onError: (error: unknown) => {
+      setOrderInput('');
+      reportError(error, 'Не удалось распознать заказ.');
+    },
+  });
+
   const pick = useMutation({
-    mutationFn: (cellCode: string) =>
+    mutationFn: (pair: { orderNumber: string; cellCode: string }) =>
       client.post<{ orderNumber: string; picked: number; total: number }>(
         `/api/warehouse/routes/${routeId ?? ''}/pick`,
-        { orderNumber: orderInput, cellCode },
+        pair,
       ),
     onSuccess: async (result) => {
-      setOrderInput('');
+      setPickOrder(null);
+      setPickCellInput('');
       await refresh();
       showToast(`Заказ ${result.orderNumber}: ${result.picked} из ${result.total}`, 'success');
     },
     onError: (error: unknown) => {
-      setOrderInput('');
+      // Подтверждённый заказ остаётся: человек повторяет только скан ячейки.
+      setPickCellInput('');
       reportError(error, 'Не удалось перенести заказ.');
     },
   });
@@ -494,6 +703,25 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
   });
 
   const view = route.data ?? null;
+
+  if (scanning && routeId !== null && view !== null) {
+    return (
+      <ScannerScreen
+        chain={mode === 'picking' ? 'PICK' : 'ISSUE'}
+        operation={
+          mode === 'picking'
+            ? `Комплектование листа ${view.routeNumber}`
+            : `Выдача листа ${view.routeNumber}`
+        }
+        onIntent={
+          mode === 'picking'
+            ? pickIntentHandler(client, routeId, refresh)
+            : issueIntentHandler(client, routeId, refresh)
+        }
+        onClose={() => setScanning(false)}
+      />
+    );
+  }
 
   return (
     <>
@@ -599,26 +827,80 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
                 </div>
               ) : (
                 <div className="stack">
-                  <ScanField
-                    label="Заказ"
-                    hint="Отсканируйте заказ, затем подтвердите перенос"
-                    value={orderInput}
-                    onChange={setOrderInput}
-                    onSubmit={() =>
-                      orderInput.trim() !== '' && pick.mutate(view.routeCell?.code ?? '')
-                    }
-                    autoFocus
-                    testId="wh-pick-order"
-                    disabled={pick.isPending}
-                  />
-                  <Button
-                    variant="primary"
-                    data-testid="wh-pick-submit"
-                    disabled={pick.isPending || orderInput.trim() === ''}
-                    onClick={() => pick.mutate(view.routeCell?.code ?? '')}
-                  >
-                    Перенести в маршрутную ячейку
-                  </Button>
+                  {/* Камера ведёт ту же пару, что и поля ниже. */}
+                  <div className="row">
+                    <Button
+                      variant="primary"
+                      data-testid="wh-pick-camera"
+                      onClick={() => {
+                        setPickOrder(null);
+                        setPickCellInput('');
+                        setScanning(true);
+                      }}
+                    >
+                      Сканировать заказ
+                    </Button>
+                  </div>
+
+                  {pickOrder === null ? (
+                    <ScanField
+                      label="Заказ"
+                      hint="Отсканируйте заказ, затем — маршрутную ячейку"
+                      value={orderInput}
+                      onChange={setOrderInput}
+                      onSubmit={() =>
+                        orderInput.trim() !== '' && resolvePickOrder.mutate(orderInput)
+                      }
+                      autoFocus
+                      testId="wh-pick-order"
+                      disabled={resolvePickOrder.isPending}
+                    />
+                  ) : (
+                    <div className="stack">
+                      <div className="row">
+                        <div>
+                          <div className="field__label">Заказ</div>
+                          <strong data-testid="wh-pick-scanned">{pickOrder}</strong>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          data-testid="wh-pick-reset"
+                          onClick={() => {
+                            setPickOrder(null);
+                            setPickCellInput('');
+                          }}
+                        >
+                          Отменить
+                        </Button>
+                      </div>
+
+                      {/* Код ячейки вводится или сканируется заново, а не
+                          подставляется из карточки листа. */}
+                      <ScanField
+                        label="Маршрутная ячейка"
+                        hint="Отсканируйте QR маршрутной ячейки этого листа"
+                        value={pickCellInput}
+                        onChange={setPickCellInput}
+                        onSubmit={() =>
+                          pickCellInput.trim() !== '' &&
+                          pick.mutate({ orderNumber: pickOrder, cellCode: pickCellInput })
+                        }
+                        autoFocus
+                        testId="wh-pick-cell"
+                        disabled={pick.isPending}
+                      />
+                      <Button
+                        variant="primary"
+                        data-testid="wh-pick-submit"
+                        disabled={pick.isPending || pickCellInput.trim() === ''}
+                        onClick={() =>
+                          pick.mutate({ orderNumber: pickOrder, cellCode: pickCellInput })
+                        }
+                      >
+                        Перенести в маршрутную ячейку
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </>
@@ -642,6 +924,18 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
                 </div>
               ) : (
                 <div className="stack">
+                  {/* Одна сессия на весь оставшийся лист: камера не закрывается
+                      между заказами, курьер стоит рядом. */}
+                  <div className="row">
+                    <Button
+                      variant="primary"
+                      data-testid="wh-issue-camera"
+                      onClick={() => setScanning(true)}
+                    >
+                      Начать сканирование заказов
+                    </Button>
+                  </div>
+
                   <ScanField
                     label="Заказ"
                     hint="Сканируйте заказы по одному"

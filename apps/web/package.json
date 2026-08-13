@@ -12,6 +12,7 @@
   "dependencies": {
     "@fl/shared": "*",
     "@tanstack/react-query": "^5.101.4",
+    "jsqr": "1.4.0",
     "maplibre-gl": "6.2.0",
     "pmtiles": "4.4.1",
     "react": "^19.2.8",
