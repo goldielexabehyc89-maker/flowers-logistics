@@ -24,6 +24,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { effectiveAddress } from '../address.js';
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { Database } from '../../../platform/db.js';
 import type { AppLogger } from '../../../platform/logging/logger.js';
@@ -121,6 +122,7 @@ interface ClaimedJob {
 interface OrderSnapshot {
   id: string;
   address: string | null;
+  localAddress: string | null;
   inScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
@@ -207,6 +209,7 @@ async function readOrder(db: Database, orderId: string): Promise<OrderSnapshot |
     select: {
       id: true,
       address: true,
+      localAddress: true,
       inScope: true,
       sourceArchived: true,
       sourceMissing: true,
@@ -220,7 +223,7 @@ async function readOrder(db: Database, orderId: string): Promise<OrderSnapshot |
 
 async function lockOrder(tx: TransactionClient, orderId: string): Promise<OrderSnapshot | null> {
   const rows = await tx.$queryRaw<OrderSnapshot[]>`
-    SELECT "id", "address", "inScope", "sourceArchived", "sourceMissing",
+    SELECT "id", "address", "localAddress", "inScope", "sourceArchived", "sourceMissing",
            "geoState", "geoSource", "geoGeneration", "version"
     FROM "DeliveryOrder"
     WHERE "id" = ${orderId}::uuid
@@ -250,7 +253,9 @@ export function staleReason(
   if (order.geoGeneration !== job.geoGeneration) {
     return 'GENERATION_CHANGED';
   }
-  if ((order.address ?? '') !== addressAtRequest) {
+  // Сравнивается РАБОЧИЙ адрес: локальная правка меняет то, что отправляли,
+  // ровно так же, как изменение источника.
+  if ((effectiveAddress(order) ?? '') !== addressAtRequest) {
     return 'ADDRESS_CHANGED';
   }
   if (!order.inScope || order.sourceArchived || order.sourceMissing) {
@@ -463,8 +468,8 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
   // Заказ мог измениться ещё до запроса — незачем тратить платное обращение.
   // Адрес сравнивается сам с собой намеренно: здесь проверяются поколение,
   // область и ручная точка, а «прежнего» адреса ещё не существует.
-  const before = staleReason(order, job, order?.address ?? '');
-  const address = order?.address ?? '';
+  const address = order === null ? '' : (effectiveAddress(order) ?? '');
+  const before = staleReason(order, job, address);
   if (before !== null || address.trim() === '') {
     await finishStale(deps, job, before ?? 'OUT_OF_SCOPE');
     return { ...EMPTY_OUTCOME, stale: true };

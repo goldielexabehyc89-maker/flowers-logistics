@@ -12,6 +12,7 @@
  * смены адреса, невозможно применить к новому адресу по ошибке.
  */
 
+import { effectiveAddress } from '../address.js';
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { TransactionClient } from '../../auth/sessions.js';
 import type { Database } from '../../../platform/db.js';
@@ -38,6 +39,9 @@ export function retryDelayMs(attempts: number): number {
 export interface EnqueueCandidate {
   id: string;
   address: string | null;
+  /// Локальная правка логиста: рабочим считается именно она.
+  /// Необязательна: прежний код её не передаёт, и это значит «правки нет».
+  localAddress?: string | null;
   inScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
@@ -56,7 +60,9 @@ export interface EnqueueCandidate {
  * не переспрашивается: решение человека автоматика не пересматривает.
  */
 export function isGeocodable(order: EnqueueCandidate): boolean {
-  if (order.address === null || order.address.trim() === '') {
+  // Провайдеру уходит РАБОЧИЙ адрес: исправленный логистом сильнее исходного.
+  const address = effectiveAddress(order);
+  if (address === null) {
     return false;
   }
   if (!order.inScope || order.sourceArchived || order.sourceMissing) {

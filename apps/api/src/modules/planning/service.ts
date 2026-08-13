@@ -124,6 +124,14 @@ export interface RequestPlanInput {
    * решал, применять ли его.
    */
   replacePreviewId?: string | undefined;
+  /**
+   * Явно выбранные заказы.
+   *
+   * Пусто — прежнее поведение: планируется весь пригодный день. Заданный
+   * набор замораживается снимком целиком и ровно в этом составе: чужой заказ
+   * того же дня не попадёт ни в матрицу, ни в решатель, ни в превью.
+   */
+  orderIds?: readonly string[] | undefined;
 }
 
 export async function requestPlan(
@@ -165,8 +173,24 @@ export async function requestPlan(
   const slots = normalizeSlots(input.slots, shift);
   await assertCouriersAssignable(deps.db, actor, slots);
 
-  const orders = await eligibleOrders(deps.db, input.deliveryDate);
+  const orders = await eligibleOrders(deps.db, input.deliveryDate, input.orderIds);
   assertOrdersArePlannable(orders);
+
+  // Выбор проверяется целиком: если хотя бы один заказ успел стать непригодным
+  // или уйти в чужой маршрут, расчёт не запускается. Молча посчитать «почти
+  // тот же» набор значило бы подменить решение логиста.
+  if (input.orderIds !== undefined) {
+    const found = new Set(orders.map((order) => order.id));
+    const missing = input.orderIds.filter((id) => !found.has(id));
+    if (missing.length > 0) {
+      throw new AppError('CONFLICT', {
+        message: 'selected orders are no longer plannable',
+        publicMessage:
+          'Часть выбранных заказов больше нельзя распределить: обновите список и повторите выбор.',
+        conflict: { kind: 'ORDER_NOT_ELIGIBLE', orderIds: missing },
+      });
+    }
+  }
 
   const snapshot = buildInputSnapshot({
     deliveryDate: input.deliveryDate,
@@ -393,9 +417,14 @@ async function assertCouriersAssignable(
 export async function eligibleOrders(
   client: Database | TransactionClient,
   deliveryDate: string,
+  orderIds?: readonly string[] | undefined,
 ): Promise<PlanningOrderRow[]> {
   return client.deliveryOrder.findMany({
     where: {
+      // Явный выбор логиста сужает набор до ровно перечисленных заказов.
+      // Прочие условия остаются в силе: выбранный, но ставший непригодным
+      // заказ обязан отсеяться здесь, а не тихо попасть в расчёт.
+      ...(orderIds === undefined ? {} : { id: { in: [...orderIds] } }),
       deliveryDate: toDateColumn(deliveryDate),
       inScope: true,
       sourceArchived: false,

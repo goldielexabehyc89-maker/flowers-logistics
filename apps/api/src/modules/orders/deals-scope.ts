@@ -1,0 +1,175 @@
+/**
+ * Канонический отбор «Сделок».
+ *
+ * Список, карта и «выбрать все» обязаны видеть ОДНО множество. Поэтому условие
+ * живёт здесь единственным SQL-выражением, а три эндпоинта отличаются только
+ * тем, что делают с уже отобранными идентификаторами: страница, точки или
+ * полный набор для выбора. Три независимых `where` разошлись бы в первый же
+ * день — и логист отправил бы в расчёт не то, что видел на экране.
+ *
+ * Почему сырой SQL, а не Prisma `where`: отбор идёт по ЭФФЕКТИВНОМУ интервалу
+ * (`COALESCE(ручной, исходный)`) и по эффективному адресу, а выразить
+ * `COALESCE` в `where` нельзя. Дублировать же правило на клиенте нельзя тем
+ * более.
+ */
+
+import { Prisma } from '../../generated/prisma/client.js';
+import type { Database } from '../../platform/db.js';
+
+/** Что показывать: рабочие сделки, требующие внимания либо всё сразу. */
+export type DealsGroup = 'ROUTABLE' | 'ATTENTION' | 'ALL';
+
+export interface DealsScope {
+  /** Московская календарная дата `YYYY-MM-DD`. Обязательна: день выбирает человек. */
+  deliveryDate: string;
+  /** Поиск внутри выбранного дня. Пустая строка ищет всё. */
+  search?: string | null;
+  /** Границы эффективного интервала в минутах от полуночи Москвы. */
+  fromMinute?: number | null;
+  toMinute?: number | null;
+  /** Показывать ли заказы, уже включённые в черновики. Они только для чтения. */
+  includeDrafts?: boolean;
+  group?: DealsGroup;
+}
+
+/**
+ * Состояния маршрутов, участие в которых выводит заказ из рабочих сделок.
+ *
+ * Черновик сюда не входит намеренно: заказ черновика логист может увидеть
+ * отдельным переключателем, но выбрать во второй маршрут — нет.
+ */
+const CLOSED_ROUTE_STATES = ['CONFIRMED', 'ACTIVE', 'COMPLETED'] as const;
+
+function searchCondition(search: string | null | undefined): Prisma.Sql {
+  const value = (search ?? '').trim();
+  if (value === '') {
+    return Prisma.sql`TRUE`;
+  }
+  const pattern = `%${value}%`;
+  // Ищем по номеру, обоим адресам, получателю и комментарию доставки.
+  // Эффективный адрес — это локальный либо исходный, поэтому проверяются оба:
+  // иначе заказ, найденный глазами в карточке, не находился бы поиском.
+  return Prisma.sql`(
+    "externalName" ILIKE ${pattern}
+    OR "address" ILIKE ${pattern}
+    OR "localAddress" ILIKE ${pattern}
+    OR "recipient" ILIKE ${pattern}
+    OR ("comment" IS NOT NULL AND "comment" <> '' AND "comment" ILIKE ${pattern})
+  )`;
+}
+
+function intervalCondition(
+  from: number | null | undefined,
+  to: number | null | undefined,
+): Prisma.Sql {
+  const conditions: Prisma.Sql[] = [];
+  // Фильтр действует по ЭФФЕКТИВНОМУ интервалу: ручной сильнее исходного.
+  // Заказ без интервала фильтр времени не отбрасывает — он и так требует
+  // внимания, и прятать его от логиста нельзя.
+  if (from !== null && from !== undefined) {
+    conditions.push(
+      Prisma.sql`COALESCE("manualIntervalEndMinute", "intervalEndMinute") IS NULL
+        OR COALESCE("manualIntervalEndMinute", "intervalEndMinute") >= ${from}`,
+    );
+  }
+  if (to !== null && to !== undefined) {
+    conditions.push(
+      Prisma.sql`COALESCE("manualIntervalStartMinute", "intervalStartMinute") IS NULL
+        OR COALESCE("manualIntervalStartMinute", "intervalStartMinute") <= ${to}`,
+    );
+  }
+  if (conditions.length === 0) {
+    return Prisma.sql`TRUE`;
+  }
+  return Prisma.sql`(${Prisma.join(
+    conditions.map((condition) => Prisma.sql`(${condition})`),
+    ' AND ',
+  )})`;
+}
+
+function groupCondition(group: DealsGroup): Prisma.Sql {
+  if (group === 'ATTENTION') {
+    return Prisma.sql`"needsAttention" = true`;
+  }
+  if (group === 'ROUTABLE') {
+    // Пригодным считается заказ без блокирующего внимания и с подтверждённой
+    // точкой: без координаты его нельзя ни показать на карте, ни посчитать.
+    return Prisma.sql`"needsAttention" = false AND "geoState" = 'RESOLVED'`;
+  }
+  return Prisma.sql`TRUE`;
+}
+
+/**
+ * Условие отбора целиком.
+ *
+ * Подтверждённые, активные и завершённые маршруты, архивные и пропавшие заказы
+ * в рабочую область не входят: их состав уже решён, и показывать их рядом
+ * с нераспределёнными значит приглашать к ошибке.
+ */
+export function dealsWhere(scope: DealsScope): Prisma.Sql {
+  const group = scope.group ?? 'ALL';
+  const draftsClause =
+    (scope.includeDrafts ?? false)
+      ? Prisma.sql`TRUE`
+      : Prisma.sql`NOT EXISTS (
+        SELECT 1 FROM "RouteOrder" ro
+        WHERE ro."orderId" = o."id" AND ro."removedAt" IS NULL
+      )`;
+
+  return Prisma.sql`
+    o."inScope" = true
+    AND o."sourceArchived" = false
+    AND o."sourceMissing" = false
+    AND o."deliveryDate" = ${scope.deliveryDate}::date
+    AND NOT EXISTS (
+      SELECT 1 FROM "RouteOrder" ro
+      JOIN "DeliveryRoute" r ON r."id" = ro."routeId"
+      WHERE ro."orderId" = o."id"
+        AND ro."removedAt" IS NULL
+        AND r."state"::text IN (${Prisma.join(
+          CLOSED_ROUTE_STATES.map((state) => Prisma.sql`${state}`),
+          ', ',
+        )})
+    )
+    AND ${draftsClause}
+    AND ${searchCondition(scope.search)}
+    AND ${intervalCondition(scope.fromMinute, scope.toMinute)}
+    AND ${groupCondition(group)}
+  `;
+}
+
+/**
+ * Идентификаторы отобранных заказов в устойчивом порядке.
+ *
+ * Порядок один для всех потребителей: по эффективному началу интервала, затем
+ * по номеру. Без второго ключа страницы «плавали» бы между запросами, и заказ
+ * мог бы не попасть ни на одну страницу.
+ */
+export async function dealsIds(
+  db: Database,
+  scope: DealsScope,
+  page?: { limit: number; offset: number },
+): Promise<string[]> {
+  const limitClause =
+    page === undefined ? Prisma.sql`` : Prisma.sql`LIMIT ${page.limit} OFFSET ${page.offset}`;
+
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT o."id"
+    FROM "DeliveryOrder" o
+    WHERE ${dealsWhere(scope)}
+    ORDER BY COALESCE(o."manualIntervalStartMinute", o."intervalStartMinute") NULLS FIRST,
+             o."externalName" ASC
+    ${limitClause}
+  `;
+  return rows.map((row) => row.id);
+}
+
+/** Сколько заказов в отборе. Считается тем же условием, что и список. */
+export async function dealsCount(db: Database, scope: DealsScope): Promise<number> {
+  const rows = await db.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count
+    FROM "DeliveryOrder" o
+    WHERE ${dealsWhere(scope)}
+  `;
+  return Number(rows[0]?.count ?? 0n);
+}

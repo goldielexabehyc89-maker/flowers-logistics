@@ -25,6 +25,20 @@ let courierPhone = '';
 let floristPhoneForMobile = '';
 const FLORIST_MOBILE_PIN = '8642';
 
+/**
+ * Обязательное значение фикстуры.
+ *
+ * Отсутствие роняет проверку с понятным текстом, а не превращает её в
+ * молчаливый пропуск: пропущенный сценарий ничего не доказывает.
+ */
+function requiredEnv(name: string): string {
+  const value = process.env[name] ?? '';
+  if (value === '') {
+    throw new Error(`не передано обязательное значение фикстуры ${name}`);
+  }
+  return value;
+}
+
 /** Уникальный телефон: пользователей нельзя удалять, повторный прогон не должен падать. */
 function uniquePhone(): string {
   const tail = String(Date.now() % 1_000_000_000).padStart(9, '0');
@@ -216,50 +230,48 @@ test('заморозка доходит до открытых сеансов б�
   await secondAdminContext.close();
 });
 
-test('экран «Сделки»: список, поиск и ручной интервал', async ({ page }: { page: Page }) => {
+test('Сделки: день, поиск, выбор из списка и ручной черновик', async ({ page }: { page: Page }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
   const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
   test.skip(orderNumber === '', 'не передан номер проверочного заказа (E2E_ORDER_NUMBER)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
-  // Заказ без распознанного интервала обязан оказаться в блоке «Требуют внимания».
-  const attention = page.locator('.deals__group--attention');
-  await expect(attention).toBeVisible();
-  const row = attention.locator('.deals__row', { hasText: orderNumber });
-  await expect(row).toBeVisible();
-  await expect(row).toContainText('Время доставки не распознано');
-  // Исходный текст источника показан рядом и не подменяется.
-  await expect(row).toContainText('уточнить у клиента');
-  // Получатель показан целиком, без сокращений.
-  await expect(row).toContainText('Проверочный Получатель');
+  // Рабочее пространство: список и карта видны одновременно и показывают
+  // одно множество — их питает один серверный отбор.
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await expect(page.getByTestId('deals-list')).toBeVisible();
+  await expect(page.getByTestId('deals-map')).toBeVisible();
+  // Легенда постоянна: без неё цвет и форма маркера ничего не значат.
+  await expect(page.getByTestId('deals-map-legend')).toBeVisible();
 
-  // Ручное исправление интервала.
-  await row.getByRole('button', { name: 'Интервал' }).click();
-  await page.getByLabel('Начало').fill('10:00');
-  await page.getByLabel('Окончание').fill('14:00');
-  await page.getByRole('button', { name: 'Сохранить интервал' }).click();
+  // Поиск действует внутри выбранного дня.
+  await page.getByLabel('Поиск в этом дне').fill(orderNumber);
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
+  await expect(card).toBeVisible();
 
-  // Заказ уходит из «Требуют внимания» и показывает фактический интервал.
-  const updated = page.locator('.deals__row', { hasText: orderNumber });
-  await expect(updated).toContainText('10:00 – 14:00');
-  await expect(updated).toContainText('исправлено вручную');
-  await expect(updated).not.toContainText('Время доставки не распознано');
+  // Заказ без подтверждённой точки выбрать нельзя, и причина названа вслух.
+  const selectable = await card.getAttribute('data-selectable');
+  if (selectable === 'no') {
+    await expect(card.getByTestId('deal-blocked')).toBeVisible();
+    return;
+  }
 
-  // Поиск по номеру находит заказ.
-  await page.getByLabel('Поиск по номеру, адресу или получателю').fill(orderNumber);
-  await page.getByRole('button', { name: 'Найти' }).click();
-  await expect(page.locator('.deals__row', { hasText: orderNumber })).toBeVisible();
+  // Выбор из списка получает номер последовательности — он же порядок остановок.
+  await card.getByTestId('deal-pick').click();
+  await expect(card).toHaveAttribute('data-selected', '1');
+  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 1');
+
+  // Ручной черновик создаётся ровно из выбора и открывается в «Маршрутизации».
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
 });
 
-/**
- * Минимальный валидный стиль MapLibre.
- *
- * Подложки нет намеренно: проверяется поведение приложения, а не качество карты.
- * Настоящие тайлы сюда не скачиваются, к публичным серверам OSM обращений нет.
- */
 const EMPTY_STYLE = JSON.stringify({ version: 8, sources: {}, layers: [] });
 
 test('карта не настроена: интерфейс говорит честно, а список продолжает работать', async ({
@@ -279,6 +291,8 @@ test('карта не настроена: интерфейс говорит че
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -311,6 +325,8 @@ test('карта: ручная точка ставится без перезаг
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
 
   const map = page.locator('[data-testid="orders-map"]');
@@ -410,6 +426,8 @@ test('собственная подложка: всё с нашего origin и 
   });
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -537,6 +555,8 @@ test('адреса подложки: архив запрашивается из 
   });
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -602,6 +622,8 @@ test('маршрут: черновик → состав → порядок → �
   test.skip(first === '' || second === '', 'нужны два проверочных заказа');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -684,6 +706,8 @@ test('маршрут: черновик → состав → порядок → �
   await expect(card.locator('.routes__hint')).toContainText('Маршрут подтверждён');
 
   // Тот же маршрут появляется в маршрутных листах.
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   await page
@@ -712,6 +736,8 @@ test('перехват блокировки переводит прежнего 
 
   // Первый сеанс создаёт черновик и держит его в работе.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await page.getByRole('button', { name: 'Создать черновик' }).click();
 
@@ -756,6 +782,8 @@ test('печатная версия листа не содержит навиг�
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
 
   // Дожидаемся ответа списка: пустой count сразу после перехода означал бы
@@ -802,8 +830,16 @@ test('печатная версия листа не содержит навиг�
  * видимое превью с отдельным блоком неразмещённых заказов, явное применение
  * и появившиеся после него черновики.
  */
-test('планирование: настройки, превью и применение', async ({ page }: { page: Page }) => {
+test('Сделки: точный выбор → расчёт → превью → применение', async ({ page }: { page: Page }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Фикстура обязательна: без неё доказывать точность выбора нечем, и проверка
+  // обязана упасть, а не пропустить себя.
+  const planRunId = requiredEnv('E2E_PLAN_RUN');
+  const selectedIds = requiredEnv('E2E_PLAN_SELECTED_IDS').split(',');
+  const selectedNumbers = requiredEnv('E2E_PLAN_SELECTED_NUMBERS').split(',');
+  const foreignId = requiredEnv('E2E_PLAN_FOREIGN_ID');
+  const foreignNumber = requiredEnv('E2E_PLAN_FOREIGN_NUMBER');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
@@ -840,21 +876,75 @@ test('планирование: настройки, превью и примен
   await settings.getByTestId('shift-save').click();
   await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
 
-  // 2. Планирование: превью видно целиком, включая неразмещённые заказы.
-  await page.getByRole('link', { name: 'Планирование' }).first().click();
+  // 2. «Сделки»: выбирается РОВНО набор фикстуры, посторонний заказ виден
+  //    в том же дне и остаётся невыбранным.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  for (const number of selectedNumbers) {
+    const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(card).toBeVisible();
+    await card.getByTestId('deal-pick').click();
+  }
+  const foreignCard = page.locator(
+    `[data-testid="deal-card"][data-order-number="${foreignNumber}"]`,
+  );
+  await expect(foreignCard).toBeVisible();
+  await expect(foreignCard).toHaveAttribute('data-selected', 'no');
+  await expect(page.getByTestId('deals-selected-count')).toContainText(
+    `Выбрано: ${selectedNumbers.length}`,
+  );
+
+  /*
+   * ГРАНИЦА СЦЕНАРИЯ, названная прямо.
+   *
+   * Перехватывается РОВНО ОДИН запрос — старт расчёта. Сам расчёт требует
+   * дорожного графа Valhalla, которого в браузерной проверке нет; путь расчёта
+   * доказан отдельно направленными проверками с подменёнными Valhalla и VROOM.
+   * Здесь проверяется, что клиент отправил именно выбранный набор, и
+   * возвращается идентификатор готового превью той же фикстуры. Всё после
+   * старта — настоящее: чтение превью, применение и черновики идут через
+   * реальные API и базу.
+   */
+  let sentBody: { deliveryDate?: string; orderIds?: string[]; slots?: unknown[] } = {};
+  await page.route('**/api/planning/runs', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback();
+      return;
+    }
+    sentBody = JSON.parse(route.request().postData() ?? '{}');
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ id: planRunId, state: 'PREVIEW' }),
+    });
+  });
+
+  await page.getByTestId('deals-auto-plan').click();
+
+  // В расчёт ушло ровно выбранное множество и ни одним заказом больше.
+  expect([...(sentBody.orderIds ?? [])].sort()).toEqual([...selectedIds].sort());
+  expect(sentBody.orderIds).not.toContain(foreignId);
+  expect(sentBody.deliveryDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  expect(sentBody.slots?.length ?? 0).toBeGreaterThan(0);
+
+  // Дальше всё настоящее: приложение открыло конкретный запуск по адресу.
+  await page.unroute('**/api/planning/runs');
+  await expect(page).toHaveURL(new RegExp(`run=${planRunId}`));
   await expect(page.getByRole('heading', { name: 'Планирование маршрутов' })).toBeVisible();
 
   // Условия расчёта показаны до кнопки: логист видит, из чего сложится план.
   await expect(page.getByText('Смена: 09:00 — 21:00')).toBeVisible();
 
-  await page
-    .getByRole('button', { name: /^\d{2}\.\d{2}\.\d{4}/ })
-    .first()
-    .click();
-
   const unassignedBlock = page.getByTestId('plan-unassigned');
   await expect(unassignedBlock).toBeVisible();
   await expect(unassignedBlock.getByRole('listitem')).toHaveCount(1);
+
+  // Посторонний заказ дня в неразмещённые не попал: расчёт видел ровно
+  // выбранное множество. Проверяется именно блок превью, а не вся страница —
+  // «Маршрутизация» рядом честно показывает все заказы дня, включая его.
+  await expect(unassignedBlock).not.toContainText(foreignNumber);
 
   // 3. Применение требует отдельного подтверждения: заказ, который никто
   //    не повезёт, не должен уехать в черновики молча.
@@ -869,9 +959,20 @@ test('планирование: настройки, превью и примен
   ).toBeVisible();
 
   // 4. Черновик действительно появился в маршрутизации.
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
   await expect(page.locator('.routes__number-button').first()).toBeVisible();
+
+  // Состав черновика отдельно не разбирается намеренно: он целиком следует
+  // из неизменяемого снимка, а снимок уже доказан двумя проверками выше —
+  // отправленным набором заказов и отсутствием постороннего в превью.
+  // Посторонний заказ при этом остался доступным в «Сделках».
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(
+    page.locator(`[data-testid="deal-card"][data-order-number="${foreignNumber}"]`),
+  ).toBeVisible();
 
   // 5. Третья обязательная форма: время обслуживания. Меняется после
   //    применения, поэтому условия уже применённого плана не задевает.
@@ -1458,6 +1559,8 @@ test('склад: приёмка → комплектование → пауза
 
   // 6. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
   // что именно он повёз, — но уже без изменяющих действий.
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   const activeRow = page.locator('.routes__list-item', { hasText: routeNumber });
