@@ -24,6 +24,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import jsQR from 'jsqr';
 import type { Role } from '@fl/shared';
@@ -48,8 +49,14 @@ import {
 } from './queue-service.js';
 import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX, takePage } from './paging.js';
 import { readOrderCard } from './card.js';
-import { renderPrintFormPdf, qrPayload } from './pdf.js';
-import { buildPrintFormSnapshot } from './print-form.js';
+import { renderPrintFormPdf, qrPayload, formatQuantity } from './pdf.js';
+import {
+  PRINT_TEMPLATE_VERSION,
+  buildPrintFormSnapshot,
+  canonicalJson as printFormCanonicalJson,
+  snapshotHash as printFormHash,
+  type PrintFormSnapshot,
+} from './print-form.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { requirePhoto, MAX_PHOTO_BYTES } from './photo.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
@@ -140,7 +147,9 @@ interface SeedOptions {
     quantity: string;
     kind?: 'PRODUCT' | 'BUNDLE' | 'SERVICE';
     assortmentId?: string;
-    components?: { name: string; quantity: string; assortmentId?: string }[];
+    /** Обозначение единицы, замороженное в снимке. Отсутствие — штатное. */
+    uomName?: string;
+    components?: { name: string; quantity: string; assortmentId?: string; uomName?: string }[];
   }[];
 }
 
@@ -174,6 +183,8 @@ async function seedOrder(options: SeedOptions = {}): Promise<{ id: string; numbe
       assortmentKindRaw: (position.kind ?? 'PRODUCT').toLowerCase(),
       name: position.name,
       quantity: position.quantity,
+      uomId: position.uomName === undefined ? null : crypto.randomUUID(),
+      uomName: position.uomName ?? null,
       characteristicLabel: null,
       components: (position.components ?? []).map((component, componentIndex) => ({
         externalComponentId: crypto.randomUUID(),
@@ -183,6 +194,8 @@ async function seedOrder(options: SeedOptions = {}): Promise<{ id: string; numbe
         assortmentKindRaw: 'product',
         name: component.name,
         quantity: component.quantity,
+        uomId: component.uomName === undefined ? null : crypto.randomUUID(),
+        uomName: component.uomName ?? null,
       })),
     })),
   };
@@ -215,6 +228,8 @@ async function seedOrder(options: SeedOptions = {}): Promise<{ id: string; numbe
           assortmentKindRaw: position.assortmentKindRaw,
           name: position.name,
           quantity: position.quantity,
+          uomId: position.uomId,
+          uomName: position.uomName,
           characteristicLabel: position.characteristicLabel,
           components: {
             create: position.components.map((component) => ({
@@ -225,6 +240,8 @@ async function seedOrder(options: SeedOptions = {}): Promise<{ id: string; numbe
               assortmentKindRaw: component.assortmentKindRaw,
               name: component.name,
               quantity: component.quantity,
+              uomId: component.uomId,
+              uomName: component.uomName,
             })),
           },
         })),
@@ -888,6 +905,159 @@ describe('печатный бланк', () => {
   });
 });
 
+// --- 4а. Единица измерения на экране и на бумаге ------------------------------
+
+/**
+ * Единица измерения проходит весь путь: снимок → карточка → бланк.
+ *
+ * Проверяется не наличие поля, а два обещания, которые дороже всего нарушить:
+ * старый бланк не меняется задним числом, а новый действительно печатает
+ * единицу, а не молча теряет её по дороге.
+ */
+describe('единица измерения в карточке и бланке', () => {
+  it('карточка показывает единицу позиций и компонентов, а её отсутствие — просто числом', async () => {
+    const order = await seedOrder({
+      number: uniqueNumber('UOM'),
+      positions: [
+        {
+          name: 'Букет «Весна»',
+          quantity: '1',
+          uomName: 'шт',
+          kind: 'BUNDLE',
+          components: [
+            { name: 'Роза', quantity: '11', uomName: 'шт' },
+            { name: 'Лента', quantity: '0.5', uomName: 'м' },
+          ],
+        },
+        // У этой позиции единицы нет вовсе: карточка обязана показать одно число.
+        { name: 'Упаковка', quantity: '2' },
+      ],
+    });
+
+    const card = await readOrderCard(ctx.db, order.id);
+
+    expect(card.positions.map((position) => position.uomName)).toEqual(['шт', null]);
+    expect(card.positions[0]?.components.map((component) => component.uomName)).toEqual([
+      'шт',
+      'м',
+    ]);
+    // Каноническое значение остаётся с точкой: запятая — дело показа.
+    expect(card.positions[0]?.components[1]?.quantity).toBe('0.5');
+    expect(card.positions[1]?.quantity).toBe('2');
+  });
+
+  it('новый бланк печатает единицу, а бланк без неё даёт другой документ', async () => {
+    const florist = await floristOnShift();
+    const withUnits = await seedOrder({
+      number: uniqueNumber('UOMP'),
+      positions: [{ name: 'Роза', quantity: '11', uomName: 'шт' }],
+    });
+    const withoutUnits = await seedOrder({
+      number: uniqueNumber('UOMP'),
+      positions: [{ name: 'Роза', quantity: '11' }],
+    });
+
+    const first = await claimAndAssemble(florist, withUnits.id);
+    const second = await claimAndAssemble(florist, withoutUnits.id);
+
+    const stored = await ctx.db.orderPrintForm.findFirstOrThrow({
+      where: { orderId: withUnits.id },
+      select: { snapshot: true, templateVersion: true },
+    });
+    expect(stored.templateVersion).toBe(PRINT_TEMPLATE_VERSION);
+    expect((stored.snapshot as unknown as PrintFormSnapshot).positions[0]?.uomName).toBe('шт');
+
+    // Байты двух бланков отличаются, значит единица действительно нарисована,
+    // а не потерялась между снимком и документом. Номер заказа у обоих свой,
+    // поэтому сравнивается размер строки состава, а не документ целиком.
+    const printed = await renderJobDocument(ctx.db, first.printJobId);
+    const plain = await renderJobDocument(ctx.db, second.printJobId);
+    expect(Buffer.from(printed.bytes).equals(Buffer.from(plain.bytes))).toBe(false);
+  });
+
+  it('снимок версии 1 без единицы читается, печатается и не меняет свой хеш', async () => {
+    // Ровно то, что лежит в базе от прежней версии приложения: ключа единицы
+    // в JSON нет вовсе, а не «есть со значением null».
+    const legacy = {
+      orderNumber: 'FL-LEGACY-1',
+      deliveryDate: DAY,
+      intervalStartMinute: 600,
+      intervalEndMinute: 840,
+      cardText: 'С праздником!',
+      description: 'Комментарий',
+      positions: [
+        {
+          name: 'Роза',
+          quantity: '11',
+          characteristicLabel: null,
+          isBundle: false,
+          components: [{ name: 'Лента', quantity: '1' }],
+        },
+      ],
+    } as unknown as PrintFormSnapshot;
+
+    // Отсутствующий ключ в канонический JSON не попадает: хеш прежних бланков
+    // не сдвигается от того, что у новых появилось новое поле.
+    const canonical = printFormCanonicalJson(legacy);
+    expect(canonical).not.toContain('uomName');
+    expect(printFormHash(legacy)).toBe(createHash('sha256').update(canonical).digest('hex'));
+
+    const before = await renderPrintFormPdf(legacy);
+    const after = await renderPrintFormPdf(legacy);
+    expect(Buffer.from(before).equals(Buffer.from(after))).toBe(true);
+  });
+
+  it('переименование единицы в каталоге не меняет уже напечатанный бланк', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder({
+      number: uniqueNumber('UOMF'),
+      positions: [
+        {
+          name: 'Роза',
+          quantity: '11',
+          uomName: 'шт',
+          kind: 'BUNDLE',
+          components: [{ name: 'Лента', quantity: '0.5', uomName: 'м' }],
+        },
+      ],
+    });
+    const { printJobId } = await claimAndAssemble(florist, order.id);
+
+    const before = await renderJobDocument(ctx.db, printJobId);
+
+    // Каталог МоегоСклада переименовал единицу — состав в базе обновился.
+    await ctx.db.deliveryOrderPosition.updateMany({
+      where: { orderId: order.id },
+      data: { uomName: 'штука' },
+    });
+    await ctx.db.deliveryOrderPositionComponent.updateMany({
+      where: { position: { orderId: order.id } },
+      data: { uomName: 'метр' },
+    });
+
+    const after = await renderJobDocument(ctx.db, printJobId);
+
+    // Бумага уже приложена к букету: документ обязан остаться побайтово тем же.
+    expect(Buffer.from(before.bytes).equals(Buffer.from(after.bytes))).toBe(true);
+    const stored = await ctx.db.orderPrintForm.findFirstOrThrow({
+      where: { orderId: order.id },
+      select: { snapshot: true },
+    });
+    const snapshot = stored.snapshot as unknown as PrintFormSnapshot;
+    expect(snapshot.positions[0]?.uomName).toBe('шт');
+    expect(snapshot.positions[0]?.components[0]?.uomName).toBe('м');
+  });
+
+  it('число человеку получает запятую, единицу и ничего лишнего', () => {
+    expect(formatQuantity('0.5', 'м')).toBe('0,5 м');
+    expect(formatQuantity('2', 'шт')).toBe('2 шт');
+    // Единицы нет — только число: ни «ед. не указана», ни подставленного «шт».
+    expect(formatQuantity('2', null)).toBe('2');
+    expect(formatQuantity('2', '  ')).toBe('2');
+    expect(formatQuantity('2', undefined)).toBe('2');
+  });
+});
+
 // --- 5. Изменение снимка -----------------------------------------------------
 
 /** Тот же снимок с другим составом: имитация внешнего изменения заказа. */
@@ -1147,6 +1317,272 @@ describe('очередь', () => {
     }
 
     expect(expected).toBe('2027-03-10');
+  });
+});
+
+// --- 6а. «Мои заказы»: работа отдельно от собранных ---------------------------
+
+/**
+ * Разделение работы и собранных.
+ *
+ * Проверяется именно СЕРВЕРНОЕ разделение: счётчик и страница собранных
+ * обязаны считаться базой. Отфильтруй список в браузере — и у флориста с
+ * шестьюдесятью собранными заголовок показал бы пятьдесят, а заказ за
+ * границей страницы перестал бы существовать.
+ */
+describe('«Мои заказы»: работа и собранные', () => {
+  /** Заказ, взятый в работу и доведённый до нужного состояния. */
+  async function mine(
+    florist: AuthenticatedActor,
+    tag: string,
+    suffix: string,
+    state: 'IN_ASSEMBLY' | 'ASSEMBLED' | 'NEEDS_REVIEW',
+  ): Promise<{ id: string; number: string }> {
+    const order = await seedOrder({ number: `${tag}-${suffix}` });
+    if (state === 'IN_ASSEMBLY') {
+      await claimOrder(ctx.db, florist, order.id, CONTEXT);
+      return order;
+    }
+    await claimAndAssemble(florist, order.id);
+    if (state === 'NEEDS_REVIEW') {
+      // Заказ изменился ПОСЛЕ сборки: он снова требует работы.
+      await applyChangedSnapshot(order.id);
+    }
+    return order;
+  }
+
+  function ask(
+    florist: AuthenticatedActor,
+    group: 'work' | 'assembled',
+    search: string,
+    page: { limit?: number; offset?: number } = {},
+  ): Promise<QueueResult> {
+    return readQueue(
+      ctx.db,
+      { userId: florist.userId },
+      { day: 'today', scope: 'mine', group, includeAssigned: false, search, ...page },
+      NOW,
+    );
+  }
+
+  it('работа и собранные разделены сервером, NEEDS_REVIEW остаётся в работе', async () => {
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('GRP');
+
+    const inAssembly = await mine(florist, tag, 'WORK', 'IN_ASSEMBLY');
+    const needsReview = await mine(florist, tag, 'REVIEW', 'NEEDS_REVIEW');
+    const assembled = await mine(florist, tag, 'DONE', 'ASSEMBLED');
+
+    const work = await ask(florist, 'work', tag);
+    const workIds = work.items.map((item) => item.id);
+    expect(workIds).toContain(inAssembly.id);
+    // Изменившийся после сборки заказ не завершён и в свёрнутую группу
+    // спрятан быть не может.
+    expect(workIds).toContain(needsReview.id);
+    expect(workIds).not.toContain(assembled.id);
+    expect(work.group).toBe('work');
+    expect(work.total).toBe(2);
+
+    // Точное число собранных приходит ВМЕСТЕ с рабочим списком: заголовок
+    // группы верен, пока сама группа свёрнута и ничего не загружено.
+    expect(work.assembledTotal).toBe(1);
+
+    const done = await ask(florist, 'assembled', tag);
+    expect(done.group).toBe('assembled');
+    expect(done.items.map((item) => item.id)).toEqual([assembled.id]);
+    expect(done.total).toBe(1);
+    expect(done.assembledTotal).toBe(1);
+  });
+
+  it('счётчик собранных считает базу, а не загруженную страницу', async () => {
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('CNT');
+
+    const numbers: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const order = await mine(florist, tag, `A${index}`, 'ASSEMBLED');
+      numbers.push(order.number);
+    }
+
+    // Страница в две строки: счётчик обязан остаться пятёркой.
+    const work = await ask(florist, 'work', tag, { limit: 2 });
+    expect(work.items).toEqual([]);
+    expect(work.assembledTotal).toBe(5);
+
+    const first = await ask(florist, 'assembled', tag, { limit: 2, offset: 0 });
+    expect(first.items).toHaveLength(2);
+    expect(first.total).toBe(5);
+    expect(first.hasMore).toBe(true);
+
+    const second = await ask(florist, 'assembled', tag, { limit: 2, offset: 2 });
+    expect(second.items).toHaveLength(2);
+    const third = await ask(florist, 'assembled', tag, { limit: 2, offset: 4 });
+    expect(third.items).toHaveLength(1);
+    expect(third.hasMore).toBe(false);
+
+    // Страницы не повторяют и не теряют строк.
+    const collected = [...first.items, ...second.items, ...third.items].map((item) => item.number);
+    expect(new Set(collected).size).toBe(5);
+    expect([...collected].sort()).toEqual([...numbers].sort());
+  });
+
+  it('последний собранный сверху, при равном времени порядок устойчив', async () => {
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('ORD');
+
+    const early = await mine(florist, tag, 'EARLY', 'ASSEMBLED');
+    const late = await mine(florist, tag, 'LATE', 'ASSEMBLED');
+    const tieA = await mine(florist, tag, 'TIE-A', 'ASSEMBLED');
+    const tieB = await mine(florist, tag, 'TIE-B', 'ASSEMBLED');
+
+    // Время сборки задаётся явно: иначе четыре заказа одной миллисекунды
+    // проверяли бы не порядок, а скорость машины.
+    const at = (id: string, iso: string) =>
+      ctx.db.deliveryOrder.update({
+        where: { id },
+        data: { fulfillmentAssembledAt: new Date(iso) },
+      });
+    await at(early.id, '2027-03-10T08:00:00.000Z');
+    await at(late.id, '2027-03-10T09:00:00.000Z');
+    await at(tieA.id, '2027-03-10T10:00:00.000Z');
+    await at(tieB.id, '2027-03-10T10:00:00.000Z');
+
+    const first = await ask(florist, 'assembled', tag);
+    // Последний собранный сверху; равное время разводится номером заказа.
+    expect(first.items.map((item) => item.number)).toEqual([
+      `${tag}-TIE-A`,
+      `${tag}-TIE-B`,
+      `${tag}-LATE`,
+      `${tag}-EARLY`,
+    ]);
+
+    // Повторный запрос даёт ТОТ ЖЕ порядок: строки не прыгают между запросами.
+    const again = await ask(florist, 'assembled', tag);
+    expect(again.items.map((item) => item.id)).toEqual(first.items.map((item) => item.id));
+  });
+
+  it('сборка и возврат в работу переносят заказ между группами и счётчиками', async () => {
+    const florist = await floristOnShift();
+    const admin = await actorFor(['ADMIN']);
+    const tag = uniqueNumber('MOVE');
+    const order = await mine(florist, tag, 'ONE', 'IN_ASSEMBLY');
+
+    const before = await ask(florist, 'work', tag);
+    expect(before.items.map((item) => item.id)).toEqual([order.id]);
+    expect(before.assembledTotal).toBe(0);
+
+    const claimed = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { fulfillmentProcessVersion: true },
+    });
+    await assembleOrder(
+      ctx.db,
+      florist,
+      { orderId: order.id, expectedProcessVersion: claimed.fulfillmentProcessVersion },
+      CONTEXT,
+    );
+
+    const afterAssemble = await ask(florist, 'work', tag);
+    expect(afterAssemble.items).toEqual([]);
+    expect(afterAssemble.assembledTotal).toBe(1);
+    expect((await ask(florist, 'assembled', tag)).items.map((item) => item.id)).toEqual([order.id]);
+
+    // Администратор вернул заказ в работу: он обязан уйти из «Собранных».
+    await reopenOrder(ctx.db, admin, { orderId: order.id, reason: 'Повреждена упаковка' }, CONTEXT);
+
+    const afterReopen = await ask(florist, 'work', tag);
+    expect(afterReopen.items.map((item) => item.id)).toEqual([order.id]);
+    expect(afterReopen.assembledTotal).toBe(0);
+    expect((await ask(florist, 'assembled', tag)).items).toEqual([]);
+  });
+
+  it('поиск ищет в обеих группах и не выходит за выбранный день', async () => {
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('FIND');
+    const working = await mine(florist, tag, 'WORK', 'IN_ASSEMBLY');
+    const done = await mine(florist, tag, 'DONE', 'ASSEMBLED');
+
+    // Номер собранного заказа: в работе его нет, но счётчик группы говорит,
+    // что совпадение есть, — именно по нему экран и раскрывает группу.
+    const byAssembled = await ask(florist, 'work', done.number);
+    expect(byAssembled.items).toEqual([]);
+    expect(byAssembled.assembledTotal).toBe(1);
+    expect((await ask(florist, 'assembled', done.number)).items.map((i) => i.id)).toEqual([
+      done.id,
+    ]);
+
+    // Номер рабочего заказа среди собранных не находится: группы не смешаны.
+    const byWork = await ask(florist, 'work', working.number);
+    expect(byWork.items.map((item) => item.id)).toEqual([working.id]);
+    expect(byWork.assembledTotal).toBe(0);
+
+    // Завтрашний день собранных этого дня не показывает вовсе.
+    const tomorrow = await readQueue(
+      ctx.db,
+      { userId: florist.userId },
+      { day: 'tomorrow', scope: 'mine', group: 'assembled', includeAssigned: false, search: tag },
+      NOW,
+    );
+    expect(tomorrow.items).toEqual([]);
+    expect(tomorrow.assembledTotal).toBe(0);
+  });
+
+  it('общая очередь групп не знает: собранных в ней нет ни при какой галочке', async () => {
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('GEN');
+    const assembled = await mine(florist, tag, 'DONE', 'ASSEMBLED');
+
+    for (const includeAssigned of [false, true]) {
+      const general = await readQueue(
+        ctx.db,
+        { userId: florist.userId },
+        { day: 'today', scope: 'general', group: 'assembled', includeAssigned, search: tag },
+        NOW,
+      );
+      // Область собранных существует только у «Моих заказов»: запрос группы
+      // из общей очереди не должен открывать собранные никому.
+      expect(general.group).toBe('work');
+      expect(general.assembledTotal).toBeNull();
+      expect(general.items.map((item) => item.id)).not.toContain(assembled.id);
+    }
+  });
+
+  it('чужие собранные заказы не попадают ни в счётчик, ни в группу', async () => {
+    const florist = await floristOnShift();
+    const other = await floristOnShift();
+    const tag = uniqueNumber('OTH');
+    const foreign = await mine(other, tag, 'FOREIGN', 'ASSEMBLED');
+
+    const work = await ask(florist, 'work', tag);
+    expect(work.assembledTotal).toBe(0);
+    const done = await ask(florist, 'assembled', tag);
+    expect(done.items.map((item) => item.id)).not.toContain(foreign.id);
+    expect(done.total).toBe(0);
+  });
+
+  it('HTTP: группа приходит параметром, умолчание — работа, чужое значение отклоняется', async () => {
+    const token = await tokenFor(['FLORIST']);
+
+    const byDefault = (
+      await call('GET', '/api/florist/queue?day=today&scope=mine', token)
+    ).json() as QueueResult;
+    expect(byDefault.group).toBe('work');
+    expect(typeof byDefault.assembledTotal).toBe('number');
+
+    const assembled = (
+      await call('GET', '/api/florist/queue?day=today&scope=mine&group=assembled', token)
+    ).json() as QueueResult;
+    expect(assembled.group).toBe('assembled');
+
+    // Общая очередь остаётся без счётчика собранных: там их не бывает.
+    const general = (
+      await call('GET', '/api/florist/queue?day=today', token)
+    ).json() as QueueResult;
+    expect(general.assembledTotal).toBeNull();
+
+    expect(
+      (await call('GET', '/api/florist/queue?day=today&scope=mine&group=all', token)).statusCode,
+    ).toBe(400);
   });
 });
 

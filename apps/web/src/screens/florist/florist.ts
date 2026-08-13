@@ -14,6 +14,8 @@ import { formatCalendarDate, formatMinutesOfDay } from '@fl/shared';
 
 export type QueueDay = 'today' | 'tomorrow';
 export type QueueScope = 'general' | 'mine';
+/** Область «Моих заказов»: работа или уже собранные заказы. */
+export type QueueGroup = 'work' | 'assembled';
 export type FloristTab = 'queue' | 'mine' | 'print';
 
 export interface QueueItemView {
@@ -49,9 +51,17 @@ export interface QueueResponse extends PageMeta {
   day: QueueDay;
   deliveryDate: string;
   scope: QueueScope;
+  group: QueueGroup;
   includeAssigned: boolean;
   /** Применённый сервером поиск: пустая строка поиском не считается. */
   search: string | null;
+  /**
+   * Сколько всего собранных заказов в этом дне у флориста.
+   *
+   * Считает сервер, поэтому число верно и тогда, когда группа свёрнута и её
+   * строки не загружены. `null` — область не «Мои заказы».
+   */
+  assembledTotal: number | null;
   items: QueueItemView[];
 }
 
@@ -62,11 +72,14 @@ export interface PrintJobsResponse extends PageMeta {
 export interface CardComponentView {
   name: string | null;
   quantity: string;
+  /** Обозначение единицы измерения на момент снимка. `null` — только число. */
+  uomName: string | null;
 }
 
 export interface CardPositionView {
   name: string | null;
   quantity: string;
+  uomName: string | null;
   characteristicLabel: string | null;
   isBundle: boolean;
   assortmentId: string | null;
@@ -188,6 +201,24 @@ export function formatInterval(item: {
 /** Дата строкой: браузерный парсер даты способен сдвинуть день. */
 export function formatDay(value: string | null): string {
   return value === null ? EMPTY_VALUE : formatCalendarDate(value);
+}
+
+/**
+ * Количество человеку: русская десятичная запятая и единица, если она известна.
+ *
+ * Правило то же, что на бланке (`apps/api/.../pdf.ts`): каноническое значение
+ * хранится с точкой, запятая появляется только при показе. Разойтись эти два
+ * формата не должны — «0.5 м» на экране и «0,5 м» на бумаге читаются как
+ * разные документы об одном заказе.
+ *
+ * Единицы может не быть. Тогда показывается одно число: ни «ед. не указана»,
+ * ни подставленное «шт.» — догадка о единице выглядит как факт и приводит к
+ * собранному не тому букету.
+ */
+export function formatQuantity(quantity: string, uomName: string | null): string {
+  const value = quantity.replace('.', ',');
+  const unit = uomName !== null && uomName.trim() !== '' ? ` ${uomName.trim()}` : '';
+  return `${value}${unit}`;
 }
 
 export interface ActionContext {

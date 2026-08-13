@@ -32,9 +32,11 @@ import {
   assortmentImagesPageSchema,
   bundleComponentsPageSchema,
   orderPositionsPageSchema,
+  uomPageSchema,
   type MoyskladAssortmentImage,
   type MoyskladBundleComponentDto,
   type MoyskladOrderPositionDto,
+  type MoyskladUomDto,
 } from './composition-dto.js';
 
 export type MoyskladErrorCode =
@@ -297,6 +299,11 @@ export class MoyskladClient {
   private async readCollection<T>(
     path: string,
     schema: { safeParse: (value: unknown) => { success: boolean; data?: unknown } },
+    /**
+     * Что разворачивать. `null` — не разворачивать ничего: справочнику единиц
+     * `expand=assortment` не нужен и смысла не имеет.
+     */
+    expand: string | null = 'assortment',
   ): Promise<CollectionPage<T>> {
     const rows: T[] = [];
     let offset = 0;
@@ -306,7 +313,9 @@ export class MoyskladClient {
       const params = new URLSearchParams();
       params.set('limit', String(MAX_EXPANDED_PAGE_SIZE));
       params.set('offset', String(offset));
-      params.set('expand', 'assortment');
+      if (expand !== null) {
+        params.set('expand', expand);
+      }
 
       const body = await this.send('GET', `${path}?${params.toString()}`);
       const parsed = schema.safeParse(body);
@@ -426,6 +435,20 @@ export class MoyskladClient {
       // Переадресация — это уже другой адрес, а значит другое решение о доверии.
       { redirect: 'manual' },
     );
+  }
+
+  /**
+   * Справочник единиц измерения целиком.
+   *
+   * Читается ОДИН раз за проход и кэшируется вызывающей стороной. Альтернатива —
+   * запрос единицы на каждую позицию — превратила бы сотню строк состава в сотню
+   * обращений к лимиту, который делится со всеми приложениями аккаунта.
+   *
+   * Полнота доказывается тем же способом, что и у состава: число строк
+   * сверяется с `meta.size`, страницы читаются до конца.
+   */
+  async listUnitsOfMeasure(): Promise<CollectionPage<MoyskladUomDto>> {
+    return this.readCollection('/entity/uom', uomPageSchema, null);
   }
 
   /**

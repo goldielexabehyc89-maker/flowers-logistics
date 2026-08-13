@@ -67,6 +67,13 @@ const pageQueryShape = {
 const queueQuerySchema = z.object({
   day: z.enum(['today', 'tomorrow']).default('today'),
   scope: z.enum(['general', 'mine']).default('general'),
+  /**
+   * Область «Моих заказов»: работа или собранные.
+   *
+   * Умолчание `work` намеренно: клиент, не знающий о разделении, получает
+   * рабочий список, а не смесь работы с собранным.
+   */
+  group: z.enum(['work', 'assembled']).default('work'),
   /** Галочка «Все»: добавить назначенные заказы к общей очереди. */
   all: z.enum(['true', 'false']).default('false'),
   /** Точный или частичный номер заказа внутри выбранных дня и области. */
@@ -191,6 +198,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
       {
         day: query.day,
         scope: query.scope,
+        group: query.group,
         includeAssigned: query.all === 'true',
         search: query.search ?? null,
         limit: query.limit,

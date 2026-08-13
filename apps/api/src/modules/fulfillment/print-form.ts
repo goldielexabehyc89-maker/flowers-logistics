@@ -24,11 +24,28 @@ import type { FulfillmentAssortmentKind } from './composition.js';
  * таким, каким его печатали. Увеличивается при любом изменении разметки или
  * состава полей формы.
  */
-export const PRINT_TEMPLATE_VERSION = 1;
+export const PRINT_TEMPLATE_VERSION = 2;
+
+/**
+ * Версия, в которой у количества не было единицы измерения.
+ *
+ * Старые бланки не переписываются задним числом: у них другого содержимого
+ * никогда и не было, а повторная печать обязана дать тот же документ.
+ */
+export const PRINT_TEMPLATE_VERSION_WITHOUT_UNITS = 1;
 
 export interface PrintFormComponent {
   name: string | null;
   quantity: string;
+  /**
+   * Обозначение единицы, замороженное вместе с количеством.
+   *
+   * Именно замороженное, а не подтянутое из каталога при печати: переименование
+   * единицы в МоемСкладе не должно менять уже напечатанный бланк.
+   *
+   * Отсутствует у снимков версии 1 — читатель обязан это выдержать.
+   */
+  uomName?: string | null;
 }
 
 export interface PrintFormPosition {
@@ -37,6 +54,7 @@ export interface PrintFormPosition {
   /** Характеристика/вариант. Пусто, пока живого контракта модификаций нет. */
   characteristicLabel: string | null;
   isBundle: boolean;
+  uomName?: string | null;
   components: PrintFormComponent[];
 }
 
@@ -67,12 +85,13 @@ const SNAPSHOT_KEYS: (keyof PrintFormSnapshot)[] = [
 const POSITION_KEYS: (keyof PrintFormPosition)[] = [
   'name',
   'quantity',
+  'uomName',
   'characteristicLabel',
   'isBundle',
   'components',
 ];
 
-const COMPONENT_KEYS: (keyof PrintFormComponent)[] = ['name', 'quantity'];
+const COMPONENT_KEYS: (keyof PrintFormComponent)[] = ['name', 'quantity', 'uomName'];
 
 export function canonicalJson(snapshot: PrintFormSnapshot): string {
   const ordered: Record<string, unknown> = {};
@@ -111,6 +130,7 @@ export interface StoredPosition {
   ordinal: number;
   name: string | null;
   quantity: unknown;
+  uomName: string | null;
   characteristicLabel: string | null;
   assortmentKind: FulfillmentAssortmentKind;
   assortmentId: string | null;
@@ -118,6 +138,7 @@ export interface StoredPosition {
     ordinal: number;
     name: string | null;
     quantity: unknown;
+    uomName: string | null;
   }[];
 }
 
@@ -168,6 +189,7 @@ export function buildPrintFormSnapshot(input: {
       .map((position) => ({
         name: position.name,
         quantity: quantityText(position.quantity),
+        uomName: position.uomName,
         characteristicLabel: position.characteristicLabel,
         isBundle: position.assortmentKind === 'BUNDLE',
         components: [...position.components]
@@ -175,6 +197,7 @@ export function buildPrintFormSnapshot(input: {
           .map((component) => ({
             name: component.name,
             quantity: quantityText(component.quantity),
+            uomName: component.uomName,
           })),
       })),
   };

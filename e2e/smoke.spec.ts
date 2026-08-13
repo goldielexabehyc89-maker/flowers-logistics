@@ -21,6 +21,10 @@ const COURIER_PIN = '1357';
 /** Телефон курьера, созданного первым сценарием; нужен следующим. */
 let courierPhone = '';
 
+/** Телефон флориста, созданного сценарием сборки; нужен мобильной проверке. */
+let floristPhoneForMobile = '';
+const FLORIST_MOBILE_PIN = '8642';
+
 /**
  * Обязательное значение фикстуры.
  *
@@ -1028,10 +1032,34 @@ async function checkLongQueue(floristPage: Page): Promise<void> {
   expect(new Set(numbers).size, 'страницы не должны повторять заказ').toBe(numbers.length);
 
   // Карточка открывается из ЛЮБОЙ страницы, а не только из первой.
-  await rows.nth(60).getByRole('button', { name: 'Открыть' }).click();
-  await expect(floristPage.getByTestId('florist-card')).toBeVisible();
-  await floristPage.getByTestId('florist-card').getByRole('button', { name: 'Закрыть' }).click();
-  await expect(floristPage.getByTestId('florist-card')).toHaveCount(0);
+  //
+  // ИМЕННО ЭТОТ ДЕФЕКТ И ПРОВЕРЯЕТСЯ. Раньше карточка рисовалась блоком ПОСЛЕ
+  // всего списка: она была в DOM, поэтому автоматическая проверка её находила,
+  // а человек на шестьдесят первой строке не видел ничего. Поэтому здесь
+  // сравниваются КООРДИНАТЫ: окно обязано перекрывать то место экрана, куда
+  // человек смотрит, а не находиться экранами ниже.
+  const opener = rows.nth(60).getByTestId('row-open');
+  await expect(opener).toHaveText('Просмотр');
+  await opener.click();
+
+  const dialog = floristPage.getByTestId('florist-card-dialog');
+  await expect(dialog).toBeVisible();
+  const dialogBox = await dialog.boundingBox();
+  const viewport = floristPage.viewportSize();
+  expect(dialogBox, 'окно карточки обязано иметь геометрию').not.toBeNull();
+  expect(dialogBox?.y ?? -1).toBeGreaterThanOrEqual(0);
+  expect(dialogBox?.y ?? Number.MAX_SAFE_INTEGER).toBeLessThan(viewport?.height ?? 0);
+
+  // Номер строки — обычный текст: карточку открывает только кнопка.
+  await expect(rows.nth(60).locator('span.florist__number')).toHaveCount(1);
+  await expect(rows.nth(60).locator('button.florist__number')).toHaveCount(0);
+
+  // Закрытие возвращает фокус на ту кнопку, которая окно открыла, и НЕ сбрасывает
+  // накопленные страницы: человек продолжает с того места, где остановился.
+  await dialog.getByRole('button', { name: 'Закрыть' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+  await expect(rows).toHaveCount(Math.min(total, 100));
 
   // Серверный поиск достаёт заказ, которого нет ни на одной загруженной
   // странице. Поиск по показанному здесь ответил бы «ничего нет».
@@ -1059,8 +1087,8 @@ async function checkLongQueue(floristPage: Page): Promise<void> {
  * Флорист: смена → захват → карточка → «Собран» → бланк с QR → ручная отметка.
  *
  * Сценарий проходит весь путь браузером и БЕЗ живого МоегоСклада: состав
- * заказа создан фикстурой, фотографии нет, и карточка обязана честно сказать
- * «Фото отсутствует», а не сломаться.
+ * заказа создан фикстурой, фотографии у номенклатуры нет — и карточка обязана
+ * не оставить на её месте ни надписи, ни пустого прямоугольника.
  *
  * Сценарий выполняется собственным флористом, а не администратором: право
  * на «Собран» есть только у того, за кем закреплён заказ, и проверять это
@@ -1077,7 +1105,7 @@ test('флорист: смена, захват, сборка, бланк и от
   const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
   test.skip(orderNumber === '', 'не передан номер проверочного заказа (E2E_ORDER_NUMBER)');
 
-  const FLORIST_PIN = '8642';
+  const FLORIST_PIN = FLORIST_MOBILE_PIN;
 
   // 1. Администратор заводит флориста.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
@@ -1102,6 +1130,9 @@ test('флорист: смена, захват, сборка, бланк и от
   const context = await browser.newContext({ acceptDownloads: true });
   const floristPage = await context.newPage();
   await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
+  // Мобильная проверка входит тем же человеком: код активации одноразовый,
+  // и завести второго флориста ради узкого экрана было бы лишней сущностью.
+  floristPhoneForMobile = floristPhone;
   await expect(floristPage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
 
   // Чужих разделов у флориста нет.
@@ -1139,8 +1170,13 @@ test('флорист: смена, захват, сборка, бланк и от
 
   // 6. Карточка: состав, бандл с компонентом, текст открытки и комментарий.
   //    Ни адреса, ни получателя, ни цены здесь быть не должно.
-  await mineRow.getByRole('button', { name: 'Открыть' }).click();
+  const mineOpener = mineRow.getByTestId('row-open');
+  await expect(mineOpener).toHaveText('Просмотр');
+  await mineOpener.click();
+
+  const cardDialog = floristPage.getByTestId('florist-card-dialog');
   const card = floristPage.getByTestId('florist-card');
+  await expect(cardDialog).toBeVisible();
   await expect(card).toBeVisible();
   await expect(card).toContainText('Букет проверочный');
   await expect(card).toContainText('Роза проверочная');
@@ -1149,11 +1185,30 @@ test('флорист: смена, захват, сборка, бланк и от
   await expect(card).not.toContainText('проверочный адрес');
   await expect(card).not.toContainText('Проверочный Получатель');
 
-  // Фотографии у проверочной номенклатуры нет, и карточка говорит об этом прямо.
-  await expect(card.getByTestId('position-photo-empty')).toContainText('Фото отсутствует');
+  // Единица измерения: у компонента она подтверждена, у бандла её нет —
+  // и тогда показывается ОДНО ЧИСЛО, без «ед. не указана» и без «шт».
+  await expect(card).toContainText('11 шт');
+  await expect(card.getByTestId('position-quantity').first()).toHaveText('1');
+  await expect(card).not.toContainText('ед. не указана');
 
-  // 7. «Собран»: одна операция, после которой появляется бланк.
+  // Фотографии у проверочной номенклатуры нет — и на её месте НИЧЕГО НЕТ:
+  // ни надписи, ни рамки, ни зарезервированной высоты.
+  await expect(card.getByTestId('position-photo')).toHaveCount(0);
+  await expect(card).not.toContainText('Фото отсутствует');
+
+  // Закрытие по Escape возвращает фокус на кнопку, открывшую окно, и не
+  // трогает ни выбранный день, ни вкладку.
+  await floristPage.keyboard.press('Escape');
+  await expect(cardDialog).toBeHidden();
+  await expect(mineOpener).toBeFocused();
+  await expect(floristPage.getByTestId('florist-tab-mine')).toHaveAttribute('aria-pressed', 'true');
+  await mineOpener.click();
+  await expect(cardDialog).toBeVisible();
+
+  // 7. «Собран»: одна операция, после которой появляется бланк. Окно при этом
+  //    ОСТАЁТСЯ открытым и показывает результат — закрывать его решает человек.
   await clickAndAwait(floristPage, card.getByTestId('card-assemble'), 'POST', '/assemble');
+  await expect(cardDialog).toBeVisible();
   await expect(card).toContainText('Собран');
   await expect(card.getByTestId('card-print-state')).toContainText('Ожидает печати');
 
@@ -1164,11 +1219,66 @@ test('флорист: смена, захват, сборка, бланк и от
   ]);
   expect(download.suggestedFilename()).toBe(`order-${orderNumber}.pdf`);
 
+  // 8.1. «Мои заказы»: собранный заказ ушёл из работы в свёрнутую группу.
+  //
+  //      Проверяется главное обещание разделения: заказ не исчез бесследно —
+  //      его точное число видно ДО раскрытия, а строки не построены, пока
+  //      группу не раскрыли.
+  await cardDialog.getByRole('button', { name: 'Закрыть' }).click();
+  await expect(cardDialog).toBeHidden();
+
+  await expect(floristPage.locator('.florist__row', { hasText: orderNumber })).toHaveCount(0);
+  const assembledToggle = floristPage.getByTestId('florist-assembled-toggle');
+  await expect(floristPage.getByTestId('florist-assembled-title')).toContainText('Собранные — 1');
+  await expect(assembledToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(floristPage.getByTestId('florist-assembled')).toHaveCount(0);
+
+  await assembledToggle.click();
+  await expect(assembledToggle).toHaveAttribute('aria-expanded', 'true');
+  const assembledRow = floristPage
+    .getByTestId('florist-assembled')
+    .locator('.florist__row', { hasText: orderNumber });
+  await expect(assembledRow).toBeVisible();
+  await expect(assembledRow).toContainText('Собран');
+  // Просмотр собранного заказа остаётся доступным.
+  await expect(assembledRow.getByTestId('row-open')).toHaveText('Просмотр');
+
+  // Возврат во вкладку сворачивает группу заново: собранное работой не является.
+  await floristPage.getByTestId('florist-tab-queue').click();
+  await floristPage.getByTestId('florist-tab-mine').click();
+  await expect(floristPage.getByTestId('florist-assembled-toggle')).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  );
+
+  // Поиск номера собранного заказа раскрывает группу сам: иначе человек
+  // получил бы пустой рабочий список и решил, что заказа нет.
+  const mineSearch = floristPage.getByTestId('florist-search');
+  await mineSearch.fill(orderNumber);
+  await expect(floristPage.getByTestId('florist-assembled-found')).toBeVisible();
+  await expect(
+    floristPage.getByTestId('florist-assembled').locator('.florist__row', { hasText: orderNumber }),
+  ).toBeVisible();
+
+  // Снятие поиска возвращает обычное свёрнутое состояние.
+  await mineSearch.fill('');
+  await expect(floristPage.getByTestId('florist-assembled-toggle')).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  );
+
   // 9. Вкладка «Печать»: задание ждёт, ручная отметка его завершает.
   await floristPage.getByTestId('florist-tab-print').click();
   const printRow = floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber });
   await expect(printRow).toBeVisible();
   await expect(printRow).toContainText('Ожидает печати');
+
+  // Номер в очереди печати — текст; карточку открывает та же кнопка «Просмотр».
+  await expect(printRow.locator('button.florist__number')).toHaveCount(0);
+  await printRow.getByTestId('print-open').click();
+  await expect(cardDialog).toBeVisible();
+  await cardDialog.getByRole('button', { name: 'Закрыть' }).click();
+  await expect(cardDialog).toBeHidden();
 
   await clickAndAwait(floristPage, printRow.getByTestId('print-mark'), 'POST', '/printed');
 
@@ -1180,6 +1290,90 @@ test('флорист: смена, захват, сборка, бланк и от
   await expect(
     floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
   ).toContainText('Напечатано');
+
+  await context.close();
+});
+
+/**
+ * Флорист на телефоне: нет лишней полосы внизу и карточка помещается в окно.
+ *
+ * Две проверки, которые нельзя сделать на широком экране:
+ *
+ *  * у пользователя с ОДНИМ верхнеуровневым разделом нижней навигации нет
+ *    вовсе, и содержимое получает её высоту. Единственная кнопка «Флорист»
+ *    вела бы на уже открытую страницу и отнимала бы шестьдесят пикселей;
+ *  * карточка открывается окном, помещается в экран и прокручивает СВОЁ
+ *    содержимое. Страница под окном при этом не двигается — иначе человек
+ *    терял бы и место в очереди, и само окно.
+ */
+test('флорист на телефоне: без нижней полосы, карточка окном внутри экрана', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(floristPhoneForMobile === '', 'флорист не создан предыдущим сценарием');
+
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  const mobilePage = await context.newPage();
+
+  await login(mobilePage, floristPhoneForMobile, FLORIST_MOBILE_PIN);
+  await expect(mobilePage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
+
+  // Нижней полосы нет ни как кнопки, ни как строки сетки: оболочка переходит
+  // в раскладку единственного раздела, а не прячет полосу `display: none`.
+  await expect(mobilePage.locator('.shell__bottombar')).toHaveCount(0);
+  await expect(mobilePage.locator('.shell')).toHaveClass(/shell--single-section/);
+
+  // Содержимое получает освободившуюся высоту и доходит до низа экрана.
+  const contentBox = await mobilePage.locator('.shell__content').boundingBox();
+  const viewport = mobilePage.viewportSize();
+  expect(contentBox, 'содержимое обязано иметь геометрию').not.toBeNull();
+  expect((contentBox?.y ?? 0) + (contentBox?.height ?? 0)).toBeGreaterThanOrEqual(
+    (viewport?.height ?? 0) - 1,
+  );
+
+  // Внутренние вкладки раздела при этом остаются: их убирать было бы потерей.
+  for (const tab of ['queue', 'mine', 'print'] as const) {
+    await expect(mobilePage.getByTestId(`florist-tab-${tab}`)).toBeVisible();
+  }
+
+  // Карточка первого доступного заказа.
+  const firstRow = mobilePage.locator('.florist__row').first();
+  await expect(firstRow).toBeVisible();
+  const opener = firstRow.getByTestId('row-open');
+  await expect(opener).toHaveText('Просмотр');
+
+  const scrollBefore = await mobilePage.evaluate<number>('window.scrollY');
+  await opener.click();
+
+  const dialog = mobilePage.getByTestId('florist-card-dialog');
+  await expect(dialog).toBeVisible();
+
+  // Окно помещается в экран целиком: ни верх, ни низ за него не выходят.
+  const box = await dialog.boundingBox();
+  expect(box, 'окно карточки обязано иметь геометрию').not.toBeNull();
+  expect(box?.y ?? -1).toBeGreaterThanOrEqual(0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual((viewport?.height ?? 0) + 1);
+  expect(box?.width ?? 0).toBeLessThanOrEqual(viewport?.width ?? 0);
+
+  // Прокручивается содержимое окна, а не страница под ним.
+  const overflow = await mobilePage.evaluate<string>(
+    "getComputedStyle(document.querySelector('dialog[open] .modal__body')).overflowY",
+  );
+  expect(overflow).toBe('auto');
+  await mobilePage.evaluate(
+    "document.querySelector('dialog[open] .modal__body').scrollTop = 10000",
+  );
+  expect(await mobilePage.evaluate<number>('window.scrollY')).toBe(scrollBefore);
+
+  // Escape закрывает окно и возвращает фокус на кнопку, его открывшую.
+  await mobilePage.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
 
   await context.close();
 });
@@ -1511,7 +1705,7 @@ test('самовывоз: флорист собрал → склад приня�
   await floristPage.getByTestId('florist-tab-mine').click();
   await floristPage
     .locator('.florist__row', { hasText: orderNumber })
-    .getByRole('button', { name: 'Открыть' })
+    .getByTestId('row-open')
     .click();
   await clickAndAwait(
     floristPage,

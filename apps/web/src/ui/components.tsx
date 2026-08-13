@@ -173,13 +173,34 @@ export interface ModalProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
-  /** Закрытие по Escape и клику вне окна. Отключается там, где нужен явный выбор. */
+  /** Закрытие по Escape и крестиком. Отключается там, где нужен явный выбор. */
   dismissible?: boolean;
+  /**
+   * Закрытие кликом по затемнению.
+   *
+   * По умолчанию выключено: окно с наполовину заполненной формой не должно
+   * исчезать от промаха мимо поля. Включается там, где окно только показывает
+   * данные и случайное закрытие ничего не теряет.
+   */
+  dismissOnBackdrop?: boolean;
+  /** Дополнительный класс окна: ширина зависит от содержимого, а не от компонента. */
+  className?: string;
+  /** Метка для браузерных проверок: они обязаны отличать одно окно от другого. */
+  testId?: string;
 }
 
 /**
  * Модальное окно на native <dialog>: браузер сам обеспечивает фокус-ловушку,
- * закрытие по Escape и корректную роль для программ чтения с экрана.
+ * закрытие по Escape, верхний слой поверх остальной страницы и корректную роль
+ * для программ чтения с экрана.
+ *
+ * ВЕРХНИЙ СЛОЙ ВАЖЕН НЕ КАК ЭФФЕКТ. Окно, вставленное обычным блоком в конец
+ * страницы, оказывается ниже всего списка: человек нажимает кнопку и не видит
+ * ничего. `showModal()` кладёт окно в top layer поверх текущей прокрутки, и
+ * оно появляется там, куда человек смотрит.
+ *
+ * ОКНО В ОКНЕ ДОПУСТИМО. Второй `showModal()` встаёт поверх первого, и Escape
+ * закрывает только верхнее: фотографию можно закрыть, не потеряв карточку.
  */
 export function Modal({
   open,
@@ -188,6 +209,9 @@ export function Modal({
   children,
   footer,
   dismissible = true,
+  dismissOnBackdrop = false,
+  className,
+  testId,
 }: ModalProps): React.JSX.Element | null {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const openerRef = useRef<Element | null>(null);
@@ -229,8 +253,27 @@ export function Modal({
     return () => dialog.removeEventListener('cancel', handleCancel);
   }, [dismissible, onClose]);
 
+  /**
+   * Клик по затемнению.
+   *
+   * Затемнение — псевдоэлемент самого `<dialog>`, поэтому событие приходит с
+   * `target === dialog`. Проверка именно такая: клик по любому содержимому
+   * окна имеет другую цель и закрытием не считается.
+   */
+  function handleBackdropClick(event: React.MouseEvent<HTMLDialogElement>): void {
+    if (dismissible && dismissOnBackdrop && event.target === dialogRef.current) {
+      onClose();
+    }
+  }
+
   return (
-    <dialog ref={dialogRef} className="modal" aria-label={title}>
+    <dialog
+      ref={dialogRef}
+      className={['modal', className].filter(Boolean).join(' ')}
+      aria-label={title}
+      data-testid={testId}
+      onClick={handleBackdropClick}
+    >
       <div className="modal__header">
         <h2>{title}</h2>
         {dismissible && (

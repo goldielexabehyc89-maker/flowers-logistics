@@ -198,6 +198,29 @@ describe('видимость разделов', () => {
     expect(courier.primary).toHaveLength(2);
     expect(courier.extra).toHaveLength(0);
   });
+
+  /**
+   * Правило единственного раздела.
+   *
+   * Проверяется именно число ВЕРХНЕУРОВНЕВЫХ разделов, а не наличие вкладок
+   * внутри раздела: у кладовщика вкладок несколько, но раздел один, и нижняя
+   * кнопка «Склад» вела бы на уже открытую страницу.
+   */
+  it('чистым производственным ролям доступен ровно один верхнеуровневый раздел', () => {
+    for (const role of ['FLORIST', 'WAREHOUSE', 'MANAGER'] as const) {
+      expect(visibleSections([role])).toHaveLength(1);
+    }
+  });
+
+  it('нескольким ролям остаётся обычная навигация', () => {
+    // Две роли — два раздела: скрывать навигацию здесь было бы потерей функции.
+    expect(visibleSections(['FLORIST', 'WAREHOUSE']).length).toBeGreaterThan(1);
+    expect(visibleSections(['ADMIN']).length).toBeGreaterThan(1);
+  });
+
+  it('пустые роли не дают ни одного раздела и полосы тоже не требуют', () => {
+    expect(visibleSections([])).toHaveLength(0);
+  });
 });
 
 describe('раздел «Логистика»', () => {

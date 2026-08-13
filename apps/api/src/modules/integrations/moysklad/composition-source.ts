@@ -76,6 +76,12 @@ export class CompositionSource {
   private readonly client: MoyskladClient;
   private readonly ids: Ids;
   private readonly bundles = new Map<string, FulfillmentComponentSnapshot[]>();
+  /**
+   * Справочник единиц: UUID → обозначение. Читается лениво и ровно один раз
+   * за проход. `null` — ещё не читали; пустая карта — читали и не получили,
+   * повторять в этом же проходе незачем.
+   */
+  private units: Map<string, string> | null = null;
   private requests = 0;
 
   constructor(client: MoyskladClient, ids: Ids) {
@@ -95,6 +101,37 @@ export class CompositionSource {
       description: text(order.description),
       cardText: attribute(order, this.ids.cardTextAttribute).text,
     };
+  }
+
+  /**
+   * Справочник единиц измерения — один раз за проход.
+   *
+   * Отказ справочника НЕ роняет состав: количество остаётся, единица становится
+   * пустой. Единица — уточнение, а не условие пригодности заказа, и терять
+   * из-за неё весь букет нельзя. Следующий успешный проход создаст ревизию
+   * с заполненной единицей.
+   */
+  private async unitNames(): Promise<Map<string, string>> {
+    if (this.units !== null) {
+      return this.units;
+    }
+    const names = new Map<string, string>();
+    try {
+      this.requests += 1;
+      for (const unit of (await this.client.listUnitsOfMeasure()).rows) {
+        // Обозначение («шт», «м») короче названия и именно оно печатается рядом
+        // с числом; название берётся только когда обозначения нет.
+        const label = text(unit.description) ?? text(unit.name);
+        if (label !== null) {
+          names.set(unit.id, label);
+        }
+      }
+    } catch {
+      // Пустая карта запомнена намеренно: повторять заведомо неудачный запрос
+      // на каждую позицию прохода бессмысленно.
+    }
+    this.units = names;
+    return names;
   }
 
   /**
@@ -159,6 +196,8 @@ export class CompositionSource {
         ? await this.components(assortment.id, row.assortment?.updated ?? null)
         : [];
 
+    const units = await this.unitNames();
+
     return {
       externalPositionId: row.id,
       ordinal: index,
@@ -167,6 +206,11 @@ export class CompositionSource {
       assortmentKindRaw: assortment.rawType,
       name: assortment.name,
       quantity: quantity(row.quantity),
+      uomId: assortment.uomId,
+      // Название берётся ТОЛЬКО из справочника. Выводить единицу из названия
+      // позиции или подставлять «шт.» по умолчанию запрещено: догадка выглядит
+      // как факт и уводит сборку.
+      uomName: assortment.uomId === null ? null : (units.get(assortment.uomId) ?? null),
       // Живого контракта характеристики нет: модификаций в аккаунте ноль.
       // Заполнить поле догадкой значило бы объявить проверенным непроверенное.
       characteristicLabel: null,
@@ -202,6 +246,7 @@ export class CompositionSource {
       throw new CompositionError('BUNDLE_UNAVAILABLE');
     }
 
+    const units = await this.unitNames();
     const components = rows.map((row, index) => {
       const assortment = describeAssortment(row.assortment);
       return {
@@ -212,6 +257,8 @@ export class CompositionSource {
         assortmentKindRaw: assortment.rawType,
         name: assortment.name,
         quantity: quantity(row.quantity),
+        uomId: assortment.uomId,
+        uomName: assortment.uomId === null ? null : (units.get(assortment.uomId) ?? null),
       };
     });
 
@@ -252,6 +299,8 @@ interface DescribedAssortment {
   kind: ReturnType<typeof assortmentKindFrom>;
   rawType: string | null;
   name: string | null;
+  /** Идентификатор единицы измерения; название берётся из справочника прохода. */
+  uomId: string | null;
 }
 
 /**
@@ -263,7 +312,7 @@ interface DescribedAssortment {
  */
 function describeAssortment(assortment: MoyskladAssortmentDto | undefined): DescribedAssortment {
   if (assortment === undefined) {
-    return { id: null, kind: 'OTHER', rawType: null, name: null };
+    return { id: null, kind: 'OTHER', rawType: null, name: null, uomId: null };
   }
 
   const rawType = text(assortment.meta?.type);
@@ -272,6 +321,7 @@ function describeAssortment(assortment: MoyskladAssortmentDto | undefined): Desc
     kind: assortmentKindFrom(rawType),
     rawType,
     name: text(assortment.name),
+    uomId: idFromHref(assortment.uom?.meta?.href),
   };
 }
 

@@ -68,6 +68,22 @@ const LINE = 13;
  */
 const FIXED_DATE = new Date(Date.UTC(2020, 0, 1, 0, 0, 0));
 
+/**
+ * Количество человеку: русская десятичная запятая и единица, если она известна.
+ *
+ * Каноническое значение хранится с точкой — это машинный формат сравнения
+ * и хеша. Запятая появляется только при показе, и только здесь: два разных
+ * форматирования одного числа однажды разошлись бы между экраном и бумагой.
+ *
+ * Единицы может не быть: тогда печатается одно число, без «ед. не указана»
+ * и без подставленного «шт.».
+ */
+export function formatQuantity(quantity: string, uomName: string | null | undefined): string {
+  const value = quantity.replace('.', ',');
+  const unit = typeof uomName === 'string' && uomName.trim() !== '' ? ` ${uomName.trim()}` : '';
+  return `${value}${unit}`;
+}
+
 function formatMinutes(minute: number | null): string {
   if (minute === null) {
     return '';
@@ -233,10 +249,16 @@ export async function renderPrintFormPdf(snapshot: PrintFormSnapshot): Promise<U
     if (cursor < MARGIN) break;
     const characteristic =
       position.characteristicLabel === null ? '' : ` (${position.characteristicLabel})`;
-    paragraph(`${position.quantity} × ${position.name ?? 'без названия'}${characteristic}`);
+    paragraph(
+      `${formatQuantity(position.quantity, position.uomName)} × ${position.name ?? 'без названия'}${characteristic}`,
+    );
     for (const component of position.components) {
       if (cursor < MARGIN) break;
-      paragraph(`— ${component.quantity} × ${component.name ?? 'без названия'}`, 14, SMALL_SIZE);
+      paragraph(
+        `— ${formatQuantity(component.quantity, component.uomName)} × ${component.name ?? 'без названия'}`,
+        14,
+        SMALL_SIZE,
+      );
     }
   }
 

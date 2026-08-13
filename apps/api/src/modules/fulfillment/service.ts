@@ -396,6 +396,8 @@ async function replacePositions(
         assortmentKindRaw: position.assortmentKindRaw,
         name: position.name,
         quantity: position.quantity,
+        uomId: position.uomId,
+        uomName: position.uomName,
         characteristicLabel: position.characteristicLabel,
         components: {
           create: position.components.map((component) => ({
@@ -406,6 +408,8 @@ async function replacePositions(
             assortmentKindRaw: component.assortmentKindRaw,
             name: component.name,
             quantity: component.quantity,
+            uomId: component.uomId,
+            uomName: component.uomName,
           })),
         },
       },

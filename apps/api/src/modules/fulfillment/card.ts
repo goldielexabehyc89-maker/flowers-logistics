@@ -13,8 +13,13 @@
  *
  * Фото в БД не хранится и в карточке не передаётся байтами: отдаётся только
  * идентификатор номенклатуры, по которому браузер просит серверный проxy.
- * Недоступное фото карточку не ломает — на его месте остаётся честное
- * «Фото отсутствует».
+ * Недоступное фото карточку не ломает и места под себя не занимает.
+ *
+ * ЕДИНИЦА ИЗМЕРЕНИЯ отдаётся ОБОЗНАЧЕНИЕМ, а не ссылкой на каталог. Клиенту
+ * нужен ответ на вопрос «два чего», а UUID справочника МоегоСклада ему не
+ * нужен ни для показа, ни для действия. Обозначение то самое, что было
+ * получено в момент снимка: переименование единицы в каталоге не должно
+ * задним числом менять уже показанный состав.
  */
 
 import { AppError } from '../../platform/errors.js';
@@ -28,11 +33,14 @@ import type { FulfillmentAssortmentKind } from './composition.js';
 export interface CardComponent {
   name: string | null;
   quantity: string;
+  /** Обозначение единицы на момент снимка. `null` — показывается одно число. */
+  uomName: string | null;
 }
 
 export interface CardPosition {
   name: string | null;
   quantity: string;
+  uomName: string | null;
   characteristicLabel: string | null;
   isBundle: boolean;
   /**
@@ -115,12 +123,13 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
           ordinal: true,
           name: true,
           quantity: true,
+          uomName: true,
           characteristicLabel: true,
           assortmentKind: true,
           assortmentId: true,
           components: {
             orderBy: { ordinal: 'asc' },
-            select: { name: true, quantity: true },
+            select: { name: true, quantity: true, uomName: true },
           },
         },
       },
@@ -185,12 +194,14 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
     positions: visible.map((position) => ({
       name: position.name,
       quantity: quantityText(position.quantity),
+      uomName: position.uomName,
       characteristicLabel: position.characteristicLabel,
       isBundle: position.assortmentKind === 'BUNDLE',
       assortmentId: position.assortmentId,
       components: position.components.map((component) => ({
         name: component.name,
         quantity: quantityText(component.quantity),
+        uomName: component.uomName,
       })),
     })),
     process: {
