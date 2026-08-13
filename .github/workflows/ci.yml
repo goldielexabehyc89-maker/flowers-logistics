@@ -422,6 +422,23 @@ jobs:
             echo "route=$(get 'маршрут' 1)"
             echo "order1=$(get 'заказ' 1)"
             echo "order2=$(get 'заказ' 2)"
+            echo "courierphone=$(get 'курьер' 1)"
+            echo "courierpin=$(get 'пин курьера' 1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Наполнить очередь флориста
+        id: seed-florist-queue
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Продолжение списка проверяется только там, где заказов больше одной
+          # страницы. Заказы производственные и логистической области не видны,
+          # поэтому остальные сценарии остаются прежними.
+          output="$(npm run --silent seed:e2e-florist-queue -- --count=60)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n '1p'; }
+          {
+            echo "prefix=$(get 'префикс')"
+            echo "count=$(get 'количество')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Создать фикстуру самовывоза
@@ -444,14 +461,40 @@ jobs:
           E2E_ADMIN_CODE: ${{ steps.bootstrap.outputs.code }}
           E2E_ORDER_NUMBER: ${{ steps.seed-order.outputs.number }}
           E2E_ORDER_NUMBER_2: ${{ steps.seed-order.outputs.second }}
+          E2E_FLORIST_QUEUE_PREFIX: ${{ steps.seed-florist-queue.outputs.prefix }}
+          E2E_FLORIST_QUEUE_COUNT: ${{ steps.seed-florist-queue.outputs.count }}
           E2E_WH_STORAGE_CELL: ${{ steps.seed-warehouse.outputs.storage }}
           E2E_WH_ROUTE_CELL: ${{ steps.seed-warehouse.outputs.routecell }}
           E2E_WH_ROUTE: ${{ steps.seed-warehouse.outputs.route }}
           E2E_WH_ORDER_1: ${{ steps.seed-warehouse.outputs.order1 }}
           E2E_WH_ORDER_2: ${{ steps.seed-warehouse.outputs.order2 }}
+          # Тот же курьер, которому склад выдал маршрут: сценарий доставки
+          # продолжает складской, а не заводит второй маршрут.
+          E2E_WH_COURIER_PHONE: ${{ steps.seed-warehouse.outputs.courierphone }}
+          E2E_WH_COURIER_PIN: ${{ steps.seed-warehouse.outputs.courierpin }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
         run: npm run test:e2e
+
+      # Playwright сохраняет снимок страницы момента отказа рядом с результатами,
+      # но в журнал он не попадает, и отказ приходится разбирать вслепую.
+      # Печатается только доступностное дерево: ни трасс, ни файлов cookie,
+      # ни заголовков — токенам просочиться неоткуда.
+      - name: Показать снимок страницы при отказе
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r file; do
+            found=1
+            echo "::group::$file"
+            cat "$file"
+            echo "::endgroup::"
+          done < <(find test-results -name 'error-context.md' -print 2>/dev/null | sort)
+          if [ "$found" = "0" ]; then
+            echo "снимков страницы нет: отказ произошёл вне браузерной проверки"
+          fi
 
   secrets-scan:
     name: Запрещённые файлы и поиск секретов

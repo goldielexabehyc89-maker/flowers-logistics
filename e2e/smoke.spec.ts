@@ -885,6 +885,76 @@ test('планирование: настройки, превью и примен
 });
 
 /**
+ * Длинная очередь: первая страница, продолжение, серверный поиск и сброс.
+ *
+ * День мастерской — сотня с лишним заказов. Проверяется не «список
+ * прокручивается», а три решения, ошибка в которых стоит собранного не того
+ * букета:
+ *
+ *  * экран строит ПЕРВУЮ страницу, а не весь день, и честно называет оба числа;
+ *  * заказ за пределами первой страницы достижим — продолжением и поиском;
+ *  * смена дня возвращает список к первой странице, а не дополняет чужой.
+ *
+ * Проверка выполняется только там, где фикстура длинной очереди создана:
+ * на трёх заказах кнопки продолжения нет вовсе, и утверждать по ней нечего.
+ */
+async function checkLongQueue(floristPage: Page): Promise<void> {
+  const prefix = process.env['E2E_FLORIST_QUEUE_PREFIX'] ?? '';
+  const seeded = Number(process.env['E2E_FLORIST_QUEUE_COUNT'] ?? '0');
+  if (prefix === '' || seeded <= 50) {
+    return;
+  }
+
+  const rows = floristPage.getByTestId('florist-row');
+  const counter = floristPage.getByTestId('florist-queue-count');
+
+  // Первая страница ровно 50 строк: весь день в DOM не строится.
+  await expect(counter).toBeVisible();
+  await expect(rows).toHaveCount(50);
+
+  const summary = (await counter.innerText()).trim();
+  const parsed = /Показано (\d+) из (\d+)/.exec(summary);
+  expect(parsed, `счётчик очереди: ${summary}`).not.toBeNull();
+  const total = Number(parsed?.[2] ?? '0');
+  expect(total).toBeGreaterThan(50);
+
+  // Продолжение добавляет следующую страницу и НЕ повторяет уже показанное.
+  await floristPage.getByTestId('florist-load-more').click();
+  await expect(rows).toHaveCount(Math.min(total, 100));
+  const numbers = await Promise.all(
+    (await rows.all()).map((row) => row.getAttribute('data-order-number')),
+  );
+  expect(new Set(numbers).size, 'страницы не должны повторять заказ').toBe(numbers.length);
+
+  // Карточка открывается из ЛЮБОЙ страницы, а не только из первой.
+  await rows.nth(60).getByRole('button', { name: 'Открыть' }).click();
+  await expect(floristPage.getByTestId('florist-card')).toBeVisible();
+  await floristPage.getByTestId('florist-card').getByRole('button', { name: 'Закрыть' }).click();
+  await expect(floristPage.getByTestId('florist-card')).toHaveCount(0);
+
+  // Серверный поиск достаёт заказ, которого нет ни на одной загруженной
+  // странице. Поиск по показанному здесь ответил бы «ничего нет».
+  const deepNumber = `${prefix}-${String(seeded - 1).padStart(4, '0')}`;
+  const searchField = floristPage.getByTestId('florist-search');
+  await searchField.fill(deepNumber);
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('data-order-number', deepNumber);
+  await expect(counter).toContainText('Показано 1 из 1');
+
+  // Снятие поиска возвращает к первой странице, а не к прежней стопке.
+  await searchField.fill('');
+  await expect(rows).toHaveCount(50);
+
+  // Смена дня сбрасывает накопленное полностью: заказы двух дней не смешиваются.
+  await floristPage.getByTestId('florist-load-more').click();
+  await expect(rows).toHaveCount(Math.min(total, 100));
+  await floristPage.getByTestId('florist-day-tomorrow').click();
+  await expect(rows).toHaveCount(0);
+  await floristPage.getByTestId('florist-day-today').click();
+  await expect(rows).toHaveCount(50);
+}
+
+/**
  * Флорист: смена → захват → карточка → «Собран» → бланк с QR → ручная отметка.
  *
  * Сценарий проходит весь путь браузером и БЕЗ живого МоегоСклада: состав
@@ -937,6 +1007,9 @@ test('флорист: смена, захват, сборка, бланк и от
   for (const foreign of ['Настройки', 'Сотрудники и курьеры', 'Маршрутизация']) {
     await expect(floristPage.getByRole('link', { name: foreign })).toHaveCount(0);
   }
+
+  // 2.1. Длинная очередь: страница, продолжение, поиск и сброс.
+  await checkLongQueue(floristPage);
 
   // 3. Без смены заказ взять нельзя: кнопка захвата выключена.
   const row = floristPage.locator('.florist__row', { hasText: orderNumber });
@@ -1197,6 +1270,83 @@ test('склад: приёмка → комплектование → пауза
   await expect(activeRow).toContainText('Передан курьеру');
   await activeRow.getByRole('button', { name: 'Открыть лист' }).click();
   await expect(page.locator('.sheet__footer')).toContainText('передан курьеру');
+});
+
+test('курьер: досрочность, «Не доставлен» с причиной, отмена и завершение маршрута', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const courierPhone = process.env['E2E_WH_COURIER_PHONE'] ?? '';
+  const courierPin = process.env['E2E_WH_COURIER_PIN'] ?? '';
+  const routeNumber = process.env['E2E_WH_ROUTE'] ?? '';
+  const firstOrder = process.env['E2E_WH_ORDER_1'] ?? '';
+  const secondOrder = process.env['E2E_WH_ORDER_2'] ?? '';
+
+  test.skip(
+    courierPhone === '' || courierPin === '' || routeNumber === '' || firstOrder === '',
+    'не передана курьерская фикстура (E2E_WH_COURIER_*)',
+  );
+
+  // Сценарий продолжает складской: маршрут уже выдан и находится в `ACTIVE`.
+  await login(page, courierPhone, courierPin);
+  await expect(page.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  // Локаторы по ТОЧНОМУ атрибуту, а не по подстроке: номера заказов фикстуры
+  // отличаются одним символом, и `hasText` цеплял соседнюю карточку.
+  const route = page.locator(`[data-testid="delivery-route"][data-route-number="${routeNumber}"]`);
+  await expect(route).toBeVisible();
+
+  // 1. Первый заказ: обычная доставка. Заказ дня ещё не в интервале, поэтому
+  // экран предупреждает о досрочности — но подтвердить разрешает.
+  const first = page.locator(`[data-testid="delivery-order"][data-order-number="${firstOrder}"]`);
+  await first.getByTestId('delivery-open-delivered').click();
+  await first.getByTestId('delivery-submit').click();
+  await expect(first).toHaveAttribute('data-result', 'DELIVERED');
+
+  // 2. Ошибку курьер исправляет сам: заказ снова открыт.
+  await first.getByTestId('delivery-cancel-result').click();
+  await expect(first).toHaveAttribute('data-result', 'none');
+
+  // 3. Повторяем результат и закрываем второй заказ недоставкой с причиной.
+  await first.getByTestId('delivery-open-delivered').click();
+  await first.getByTestId('delivery-submit').click();
+  await expect(first).toHaveAttribute('data-result', 'DELIVERED');
+
+  const second = page.locator(`[data-testid="delivery-order"][data-order-number="${secondOrder}"]`);
+  await second.getByTestId('delivery-open-failed').click();
+  await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
+  // Кнопка активна только при заполненном черновике: если причина не выбрана,
+  // отказ произойдёт здесь и будет назван, а не спрячется за общим таймаутом.
+  await expect(second.getByTestId('delivery-submit')).toBeEnabled();
+  await second.getByTestId('delivery-submit').click();
+  // Состояние карточки здесь не проверяется намеренно: это ПОСЛЕДНИЙ заказ,
+  // его результат завершает маршрут, и список активных доставок пустеет —
+  // карточки больше не существует. Доказательством служат ответ сервера
+  // в тосте и сам факт опустевшего списка.
+  await expect(page.locator('.toast-region')).toContainText('Маршрут завершён');
+
+  // 4. Последний результат завершил маршрут: активных доставок не осталось.
+  await expect(page.getByText('Активных доставок нет')).toBeVisible();
+
+  // 5. История текущего дня показывает оба результата и не скрывает данные.
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
+  // У первого заказа записей ДВЕ: отменённая и новая. Это и есть доказательство
+  // того, что история не переписывается — отменённый результат остаётся в ней
+  // вместе со своим прежним содержимым.
+  const firstHistory = page.locator(
+    `[data-testid="delivery-history-item"][data-order-number="${firstOrder}"]`,
+  );
+  await expect(firstHistory).toHaveCount(2);
+  await expect(firstHistory.first()).toHaveAttribute('data-masked', 'no');
+  // Отменённая запись помечена и зачёркнута, а не удалена.
+  await expect(
+    page.locator('[data-testid="delivery-history-item"]').filter({ hasText: 'отменён' }),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(`[data-testid="delivery-history-item"][data-order-number="${secondOrder}"]`),
+  ).toContainText('Нет ответа');
 });
 
 test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({

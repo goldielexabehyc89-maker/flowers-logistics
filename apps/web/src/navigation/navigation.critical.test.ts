@@ -158,14 +158,15 @@ describe('видимость разделов', () => {
     for (const key of placeholderKeys) {
       expect(sectionKeys).toContain(key);
     }
-    // Разделы «Флорист» (6.2–6.3), «Склад» (6.5) и «Самовывоз» (6.7) получили
-    // рабочие экраны и заглушками больше не являются: заглушка перехватывала бы
-    // тот же адрес и показывала «раздел не реализован» поверх работающего
-    // экрана. Остальные разделы по-прежнему честно говорят о неготовности.
-    for (const key of ['active', 'history', 'reports']) {
+    // «Флорист» (6.2–6.3), «Склад» (6.5), «Активные» и «История» (6.6)
+    // и «Самовывоз» (6.7) получили рабочие экраны и заглушками больше
+    // не являются: заглушка перехватывала бы тот же адрес и показывала
+    // «раздел не реализован» поверх работающего экрана. Оставшийся раздел
+    // по-прежнему честно говорит о неготовности.
+    for (const key of ['reports']) {
       expect(placeholderKeys).toContain(key);
     }
-    for (const key of ['florist', 'warehouse', 'pickup']) {
+    for (const key of ['florist', 'warehouse', 'pickup', 'active', 'history']) {
       expect(placeholderKeys).not.toContain(key);
       expect(sectionKeys).toContain(key);
     }

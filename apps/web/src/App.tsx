@@ -12,6 +12,8 @@ import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
 import { NoSectionsScreen, PLACEHOLDERS, PlaceholderScreen } from './screens/PlaceholderScreen';
 import { WarehouseScreen } from './screens/warehouse/WarehouseScreen';
+import { ActiveScreen } from './screens/delivery/ActiveScreen';
+import { HistoryScreen } from './screens/delivery/HistoryScreen';
 import { DealsScreen } from './screens/deals/DealsScreen';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
@@ -80,6 +82,22 @@ export function App(): React.JSX.Element {
           element={
             <SectionRoute>
               <WarehouseScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/active"
+          element={
+            <SectionRoute>
+              <ActiveScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/history"
+          element={
+            <SectionRoute>
+              <HistoryScreen />
             </SectionRoute>
           }
         />

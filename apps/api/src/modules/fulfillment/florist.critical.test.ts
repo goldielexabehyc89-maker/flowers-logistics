@@ -39,7 +39,14 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MoyskladClient } from '../integrations/moysklad/client.js';
 import { applyFulfillmentSnapshot } from './service.js';
 import { snapshotHash as compositionHash, type FulfillmentSnapshot } from './composition.js';
-import { readQueue, resolveQueueDate } from './queue-service.js';
+import {
+  MAX_SEARCH_LENGTH,
+  readQueue,
+  resolveQueueDate,
+  type QueueQuery,
+  type QueueResult,
+} from './queue-service.js';
+import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX, takePage } from './paging.js';
 import { readOrderCard } from './card.js';
 import { renderPrintFormPdf, qrPayload } from './pdf.js';
 import { buildPrintFormSnapshot } from './print-form.js';
@@ -834,10 +841,12 @@ describe('печатный бланк', () => {
       conflict: { kind: 'PRINT_JOB_ALREADY_COMPLETED' },
     });
 
+    // Задание только что создано, поэтому в порядке «новые сверху» оно
+    // заведомо на первой странице любого подходящего фильтра.
     const attention = await listPrintJobs(ctx.db, { filter: 'attention', limit: 100 });
-    expect(attention.map((job) => job.id)).not.toContain(printJobId);
+    expect(attention.items.map((job) => job.id)).not.toContain(printJobId);
     const history = await listPrintJobs(ctx.db, { filter: 'printed', limit: 100 });
-    expect(history.map((job) => job.id)).toContain(printJobId);
+    expect(history.items.map((job) => job.id)).toContain(printJobId);
   });
 
   it('база не принимает «напечатано» без автора и «ошибку» без кода', async () => {
@@ -974,26 +983,44 @@ describe('изменение заказа во время и после сбор
 
 // --- 6. Очередь --------------------------------------------------------------
 
+/**
+ * Общая метка заказов одной проверки.
+ *
+ * Тестовая база общая и ничего не удаляет: к моменту этих проверок на
+ * забронированном дне уже лежат десятки заказов прежних сценариев. Пока
+ * очередь отдавалась целиком, это было безразлично; со страницами по 50 строк
+ * чужие заказы вытеснили бы свои за границу первой страницы, и проверка
+ * доказывала бы порядок создания, а не порядок очереди.
+ *
+ * Поэтому каждая проверка помечает свои заказы уникальной меткой и просит
+ * очередь ровно по ней. Метка — часть номера, то есть тот же серверный поиск,
+ * которым пользуется человек.
+ */
+function queueTag(prefix: string): string {
+  return uniqueNumber(prefix);
+}
+
 describe('очередь', () => {
   it('«Сегодня» и «Завтра» не смешиваются, просроченные сверху', async () => {
     const florist = await floristOnShift();
-    const today = await seedOrder({ number: uniqueNumber('TD'), startMinute: 660, endMinute: 780 });
+    const tag = queueTag('MIX');
+    const today = await seedOrder({ number: `${tag}-TD`, startMinute: 660, endMinute: 780 });
     const overdue = await seedOrder({
-      number: uniqueNumber('OV'),
+      number: `${tag}-OV`,
       startMinute: 480,
       endMinute: 540,
     });
     const noTime = await seedOrder({
-      number: uniqueNumber('NT'),
+      number: `${tag}-NT`,
       startMinute: null,
       endMinute: null,
     });
-    const tomorrow = await seedOrder({ number: uniqueNumber('TM'), day: NEXT_DAY });
+    const tomorrow = await seedOrder({ number: `${tag}-TM`, day: NEXT_DAY });
 
     const queue = await readQueue(
       ctx.db,
       { userId: florist.userId },
-      { day: 'today', scope: 'general', includeAssigned: false },
+      { day: 'today', scope: 'general', includeAssigned: false, search: tag },
       NOW,
     );
 
@@ -1011,7 +1038,7 @@ describe('очередь', () => {
     const next = await readQueue(
       ctx.db,
       { userId: florist.userId },
-      { day: 'tomorrow', scope: 'general', includeAssigned: false },
+      { day: 'tomorrow', scope: 'general', includeAssigned: false, search: tag },
       NOW,
     );
     expect(next.deliveryDate).toBe(NEXT_DAY);
@@ -1024,14 +1051,15 @@ describe('очередь', () => {
   it('назначенные заказы появляются только с галочкой «Все» и показывают флориста', async () => {
     const florist = await floristOnShift();
     const other = await floristOnShift();
-    const free = await seedOrder({ number: uniqueNumber('FR') });
-    const taken = await seedOrder({ number: uniqueNumber('TK') });
+    const tag = queueTag('ASG');
+    const free = await seedOrder({ number: `${tag}-FR` });
+    const taken = await seedOrder({ number: `${tag}-TK` });
     await claimOrder(ctx.db, other, taken.id, CONTEXT);
 
     const general = await readQueue(
       ctx.db,
       { userId: florist.userId },
-      { day: 'today', scope: 'general', includeAssigned: false },
+      { day: 'today', scope: 'general', includeAssigned: false, search: tag },
       NOW,
     );
     expect(general.items.map((item) => item.id)).toContain(free.id);
@@ -1040,16 +1068,19 @@ describe('очередь', () => {
     const all = await readQueue(
       ctx.db,
       { userId: florist.userId },
-      { day: 'today', scope: 'general', includeAssigned: true },
+      { day: 'today', scope: 'general', includeAssigned: true, search: tag },
       NOW,
     );
     const assigned = all.items.find((item) => item.id === taken.id);
+    // Поиск не обедняет строку: назначенный заказ по-прежнему объясняет,
+    // кем именно он занят.
     expect(assigned?.assignee?.id).toBe(other.userId);
+    expect(assigned?.assignee?.fullName).not.toBe('');
 
     const mine = await readQueue(
       ctx.db,
       { userId: other.userId },
-      { day: 'today', scope: 'mine', includeAssigned: false },
+      { day: 'today', scope: 'mine', includeAssigned: false, search: tag },
       NOW,
     );
     expect(mine.items.map((item) => item.id)).toContain(taken.id);
@@ -1062,10 +1093,15 @@ describe('очередь', () => {
 
     // Ранний маршрут: поздняя остановка внутри него всё равно выше любого
     // заказа более позднего маршрута.
-    const earlyFirst = await seedOrder({ number: 'FL-R1-A', startMinute: 600, endMinute: 660 });
-    const earlySecond = await seedOrder({ number: 'FL-R1-B', startMinute: 900, endMinute: 960 });
-    const lateFirst = await seedOrder({ number: 'FL-R2-A', startMinute: 700, endMinute: 760 });
-    const loose = await seedOrder({ number: 'FL-LOOSE', startMinute: 610, endMinute: 620 });
+    const tag = queueTag('GRP');
+    const earlyFirst = await seedOrder({ number: `${tag}-R1-A`, startMinute: 600, endMinute: 660 });
+    const earlySecond = await seedOrder({
+      number: `${tag}-R1-B`,
+      startMinute: 900,
+      endMinute: 960,
+    });
+    const lateFirst = await seedOrder({ number: `${tag}-R2-A`, startMinute: 700, endMinute: 760 });
+    const loose = await seedOrder({ number: `${tag}-LOOSE`, startMinute: 610, endMinute: 620 });
 
     const early = await seedConfirmedRoute(admin.userId, 'R-EARLY', [
       earlyFirst.id,
@@ -1077,7 +1113,7 @@ describe('очередь', () => {
     const queue = await readQueue(
       ctx.db,
       { userId: florist.userId },
-      { day: 'today', scope: 'general', includeAssigned: false },
+      { day: 'today', scope: 'general', includeAssigned: false, search: tag },
       NOW,
     );
 
@@ -1119,11 +1155,12 @@ async function seedConfirmedRoute(
   createdById: string,
   prefix: string,
   orderIds: string[],
+  day: string = DAY,
 ): Promise<string> {
   const route = await ctx.db.deliveryRoute.create({
     data: {
       number: `${prefix}-${process.hrtime.bigint() % 100_000n}`,
-      deliveryDate: toDateColumn(DAY),
+      deliveryDate: toDateColumn(day),
       state: 'CONFIRMED',
       vehicleType: 'CAR',
       createdById,
@@ -1139,6 +1176,415 @@ async function seedConfirmedRoute(
   });
   return route.id;
 }
+
+// --- 6.1. Страницы очереди ---------------------------------------------------
+
+/**
+ * День эксплуатационного объёма.
+ *
+ * Отдельный день внутри забронированного месяца: тысяча заказов на общем дне
+ * замедлила бы все остальные проверки очереди и сделала бы их зависимыми от
+ * порядка запуска.
+ */
+const SCALE_DAY = '2027-03-20';
+
+/**
+ * Тысяча заказов дешёвым способом.
+ *
+ * Полная фикстура `seedOrder` создаёт позиции, компоненты и ревизию — для
+ * порядка очереди ничего из этого не нужно, а тысяча таких заказов заняла бы
+ * минуты. Очередь читает область, день, состояние состава и время; ровно это
+ * здесь и создаётся.
+ */
+async function seedBulkOrders(input: {
+  tag: string;
+  count: number;
+  day: string;
+  startMinuteOf: (index: number) => number | null;
+}): Promise<{ id: string; number: string }[]> {
+  const data = Array.from({ length: input.count }, (_, index) => {
+    const startMinute = input.startMinuteOf(index);
+    const externalId = crypto.randomUUID();
+    /**
+     * Подтверждённый, но пустой состав.
+     *
+     * База требует полноты подтверждённого состояния (`READY` без хеша она не
+     * принимает), и хеш здесь настоящий — от снимка без позиций. Позиции
+     * порядку очереди безразличны, а тысяча полных снимков стоила бы минут
+     * ради данных, которые ни одна из этих проверок не читает.
+     */
+    const snapshot: FulfillmentSnapshot = {
+      externalId,
+      description: null,
+      cardText: null,
+      positions: [],
+    };
+    return {
+      externalId,
+      fulfillmentSnapshotHash: compositionHash(snapshot),
+      // Ширина номера постоянная: сравнение строк не должно зависеть
+      // от того, что «10» короче «9».
+      externalName: `${input.tag}-${String(index).padStart(4, '0')}`,
+      externalUpdated: new Date('2027-03-01T00:00:00.000Z'),
+      deliveryDate: toDateColumn(input.day),
+      intervalKind: startMinute === null ? ('MISSING' as const) : ('RANGE' as const),
+      intervalStartMinute: startMinute,
+      intervalEndMinute: startMinute === null ? null : startMinute + 60,
+      address: 'Москва, проверочный адрес 7',
+      inScope: false,
+      fulfillmentInScope: true,
+      fulfillmentCompositionState: 'READY' as const,
+      fulfillmentCompositionSyncedAt: new Date(),
+    };
+  });
+
+  await ctx.db.deliveryOrder.createMany({ data });
+
+  return ctx.db.deliveryOrder.findMany({
+    where: { externalName: { startsWith: input.tag } },
+    select: { id: true, externalName: true },
+    orderBy: { externalName: 'asc' },
+  });
+}
+
+/** Все страницы подряд: именно так их и накапливает клиент. */
+async function readAllPages(
+  viewerId: string,
+  query: QueueQuery,
+  limit: number,
+  now: Date,
+): Promise<{ ids: string[]; total: number; pages: number }> {
+  const ids: string[] = [];
+  let pages = 0;
+  let page = await readQueue(ctx.db, { userId: viewerId }, { ...query, limit, offset: 0 }, now);
+
+  for (;;) {
+    pages += 1;
+    ids.push(...page.items.map((item) => item.id));
+    if (!page.hasMore) {
+      break;
+    }
+    // Страховка от бесконечного цикла: неверный `hasMore` обязан провалить
+    // проверку, а не подвесить её.
+    expect(pages).toBeLessThan(100);
+    page = await readQueue(
+      ctx.db,
+      { userId: viewerId },
+      { ...query, limit, offset: page.offset + page.limit },
+      now,
+    );
+  }
+
+  return { ids, total: page.total, pages };
+}
+
+describe('страницы очереди', () => {
+  it('склейка страниц равна полному упорядоченному списку', () => {
+    // Чистое правило среза: он не переставляет, не теряет и не дублирует.
+    const ordered = Array.from({ length: 1000 }, (_, index) => `item-${index}`);
+
+    for (const limit of [1, 7, 50, 100]) {
+      const glued: string[] = [];
+      for (let offset = 0; offset < ordered.length; offset += limit) {
+        const page = takePage(ordered, { limit, offset });
+        expect(page.total, `limit=${limit}`).toBe(ordered.length);
+        expect(page.hasMore, `limit=${limit} offset=${offset}`).toBe(
+          offset + page.items.length < ordered.length,
+        );
+        glued.push(...page.items);
+      }
+      expect(glued, `limit=${limit}`).toEqual(ordered);
+    }
+
+    // Смещение за концом списка — пустая страница с честным total, а не ошибка.
+    const beyond = takePage(ordered, { limit: 50, offset: 5000 });
+    expect(beyond.items).toEqual([]);
+    expect(beyond.total).toBe(1000);
+    expect(beyond.hasMore).toBe(false);
+
+    // Размер страницы ограничен сервером, а не доверием к клиенту.
+    expect(takePage(ordered, { limit: 100_000, offset: 0 }).items).toHaveLength(PAGE_SIZE_MAX);
+    expect(takePage(ordered, { limit: 0, offset: -5 }).limit).toBe(1);
+    expect(takePage(ordered, { limit: 0, offset: -5 }).offset).toBe(0);
+  });
+
+  it('тысяча заказов: порядок до и после разбиения на страницы совпадает', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const florist = await floristOnShift();
+    const tag = queueTag('SCALE');
+
+    /**
+     * Ранний маршрут намеренно длиннее страницы, а его остановки — поздние.
+     *
+     * Это и есть та ловушка, ради которой срез делается ПОСЛЕ порядка. Если
+     * бы страница набиралась в SQL по срочности, поздние остановки раннего
+     * листа не попали бы в первую полусотню, и на их месте оказались бы
+     * заказы позднего листа — флорист получил бы два наполовину собранных
+     * маршрута вместо одного готового.
+     */
+    const ROUTE_A_STOPS = 60;
+    const ROUTE_B_STOPS = 5;
+    const TOTAL = 1000;
+
+    const orders = await seedBulkOrders({
+      tag,
+      count: TOTAL,
+      day: SCALE_DAY,
+      startMinuteOf: (index) => {
+        if (index === 0) return 540; // самая ранняя доставка дня — в листе A
+        if (index < ROUTE_A_STOPS) return 1000; // остальной лист A — поздний
+        if (index < ROUTE_A_STOPS + ROUTE_B_STOPS) return 600; // лист B — раньше
+        // Заказы без листа: обычная срочность, часть без времени вовсе.
+        return index % 7 === 0 ? null : 660 + (index % 120);
+      },
+    });
+    expect(orders).toHaveLength(TOTAL);
+
+    const routeA = orders.slice(0, ROUTE_A_STOPS).map((order) => order.id);
+    const routeB = orders
+      .slice(ROUTE_A_STOPS, ROUTE_A_STOPS + ROUTE_B_STOPS)
+      .map((order) => order.id);
+    await seedConfirmedRoute(admin.userId, 'R-SCALE-A', routeA, SCALE_DAY);
+    await seedConfirmedRoute(admin.userId, 'R-SCALE-B', routeB, SCALE_DAY);
+
+    const query = {
+      day: 'tomorrow' as const,
+      scope: 'general' as const,
+      includeAssigned: false,
+      search: tag,
+    };
+    // `SCALE_DAY` не «сегодня» и не «завтра» относительно NOW, поэтому
+    // представление выбирается моментом, а не датой: день считает сервер.
+    const scaleNow = new Date('2027-03-19T09:00:00.000Z');
+    const readPage = (limit: number, offset: number): Promise<QueueResult> =>
+      readQueue(ctx.db, { userId: florist.userId }, { ...query, limit, offset }, scaleNow);
+
+    const first = await readPage(PAGE_SIZE_DEFAULT, 0);
+    expect(first.deliveryDate).toBe(SCALE_DAY);
+    expect(first.total).toBe(TOTAL);
+    expect(first.items).toHaveLength(PAGE_SIZE_DEFAULT);
+    expect(first.hasMore).toBe(true);
+    expect(first.search).toBe(tag);
+
+    // Полный порядок, собранный страницами двух разных размеров.
+    const byFifty: string[] = [];
+    for (let offset = 0; offset < TOTAL; offset += PAGE_SIZE_DEFAULT) {
+      byFifty.push(...(await readPage(PAGE_SIZE_DEFAULT, offset)).items.map((item) => item.id));
+    }
+    const byHundred: string[] = [];
+    for (let offset = 0; offset < TOTAL; offset += PAGE_SIZE_MAX) {
+      byHundred.push(...(await readPage(PAGE_SIZE_MAX, offset)).items.map((item) => item.id));
+    }
+
+    // Размер страницы не влияет на канонический порядок.
+    expect(byFifty).toEqual(byHundred);
+    // Ни дублей, ни пропусков.
+    expect(new Set(byFifty).size).toBe(TOTAL);
+    expect(byFifty).toHaveLength(TOTAL);
+    expect(new Set(byFifty)).toEqual(new Set(orders.map((order) => order.id)));
+
+    // Первая страница целиком внутри раннего листа: граница страницы прошла
+    // ВНУТРИ маршрута и не подняла следующий лист.
+    const routeASet = new Set(routeA);
+    expect(byFifty.slice(0, PAGE_SIZE_DEFAULT).every((id) => routeASet.has(id))).toBe(true);
+    expect(byFifty.slice(0, ROUTE_A_STOPS)).toEqual(routeA);
+    expect(byFifty.slice(ROUTE_A_STOPS, ROUTE_A_STOPS + ROUTE_B_STOPS)).toEqual(routeB);
+
+    // Ни один заказ позднего листа не оказался выше оставшихся заказов раннего.
+    const lastOfA = Math.max(...routeA.map((id) => byFifty.indexOf(id)));
+    const firstOfB = Math.min(...routeB.map((id) => byFifty.indexOf(id)));
+    expect(lastOfA).toBeLessThan(firstOfB);
+
+    // Устойчивый добор: повторное чтение той же страницы даёт то же самое.
+    const again = await readPage(PAGE_SIZE_DEFAULT, PAGE_SIZE_DEFAULT);
+    expect(again.items.map((item) => item.id)).toEqual(
+      byFifty.slice(PAGE_SIZE_DEFAULT, PAGE_SIZE_DEFAULT * 2),
+    );
+
+    // Смещение за концом: честный total и никакого обещания продолжения.
+    const beyond = await readPage(PAGE_SIZE_DEFAULT, TOTAL + 10);
+    expect(beyond.items).toEqual([]);
+    expect(beyond.total).toBe(TOTAL);
+    expect(beyond.hasMore).toBe(false);
+  }, 120_000);
+
+  it('поиск по номеру не смешивает дни и области видимости', async () => {
+    const viewer = await floristOnShift();
+    const other = await floristOnShift();
+    const tag = queueTag('SRCH');
+
+    const todayFree = await seedOrder({ number: `${tag}-TODAY-A` });
+    const todayTaken = await seedOrder({ number: `${tag}-TODAY-B` });
+    const tomorrow = await seedOrder({ number: `${tag}-TOMORROW`, day: NEXT_DAY });
+    await claimOrder(ctx.db, other, todayTaken.id, CONTEXT);
+
+    const ask = (
+      day: 'today' | 'tomorrow',
+      scope: 'general' | 'mine',
+      search: string,
+      includeAssigned = false,
+    ): Promise<QueueResult> =>
+      readQueue(ctx.db, { userId: viewer.userId }, { day, scope, includeAssigned, search }, NOW);
+
+    // День остаётся условием: завтрашний заказ поиском в «Сегодня» не достать.
+    const todayHits = await ask('today', 'general', tag);
+    expect(todayHits.items.map((item) => item.id)).toEqual([todayFree.id]);
+    expect(todayHits.total).toBe(1);
+
+    const tomorrowHits = await ask('tomorrow', 'general', tag);
+    expect(tomorrowHits.items.map((item) => item.id)).toEqual([tomorrow.id]);
+
+    // Область видимости тоже остаётся: чужое назначение не раскрывается ни
+    // в «Моих заказах», ни в общей очереди без галочки «Все».
+    const mine = await ask('today', 'mine', tag);
+    expect(mine.items).toEqual([]);
+    expect(mine.total).toBe(0);
+    const withAssigned = await ask('today', 'general', tag, true);
+    expect(withAssigned.items.map((item) => item.id)).toContain(todayTaken.id);
+
+    // Точный номер находит ровно один заказ; регистр значения не имеет.
+    const exact = await ask('today', 'general', `${tag}-TODAY-A`);
+    expect(exact.items.map((item) => item.number)).toEqual([`${tag}-TODAY-A`]);
+    const lower = await ask('today', 'general', `${tag}-today-a`.toLowerCase());
+    expect(lower.items.map((item) => item.id)).toEqual([todayFree.id]);
+
+    // Пустой поиск — не фильтр: пробел не должен опустошать очередь.
+    const blank = await readQueue(
+      ctx.db,
+      { userId: viewer.userId },
+      { day: 'today', scope: 'general', includeAssigned: false, search: '   ' },
+      NOW,
+    );
+    expect(blank.search).toBeNull();
+    expect(blank.total).toBeGreaterThan(0);
+  });
+
+  it('HTTP: размер страницы по умолчанию 50, больше максимума отклоняется', async () => {
+    const token = await tokenFor(['FLORIST']);
+
+    const byDefault = (await call('GET', '/api/florist/queue?day=today', token)).json() as {
+      limit: number;
+      offset: number;
+      total: number;
+      hasMore: boolean;
+      items: unknown[];
+    };
+    expect(byDefault.limit).toBe(PAGE_SIZE_DEFAULT);
+    expect(byDefault.offset).toBe(0);
+    expect(byDefault.items.length).toBeLessThanOrEqual(PAGE_SIZE_DEFAULT);
+    expect(typeof byDefault.total).toBe('number');
+    expect(typeof byDefault.hasMore).toBe('boolean');
+
+    // Отказ, а не молчаливое урезание: клиент обязан узнать, что весь день
+    // одним ответом ему не отдадут.
+    for (const query of [
+      `limit=${PAGE_SIZE_MAX + 1}`,
+      'limit=100000',
+      'limit=0',
+      'offset=-1',
+      `search=${'x'.repeat(MAX_SEARCH_LENGTH + 1)}`,
+    ]) {
+      const response = await call('GET', `/api/florist/queue?day=today&${query}`, token);
+      expect(response.statusCode, query).toBe(400);
+    }
+
+    const jobs = (await call('GET', '/api/florist/print-jobs', token)).json() as {
+      limit: number;
+      total: number;
+      hasMore: boolean;
+    };
+    expect(jobs.limit).toBe(PAGE_SIZE_DEFAULT);
+    expect(typeof jobs.total).toBe('number');
+    expect(typeof jobs.hasMore).toBe('boolean');
+    expect(
+      (await call('GET', `/api/florist/print-jobs?limit=${PAGE_SIZE_MAX + 1}`, token)).statusCode,
+    ).toBe(400);
+  });
+
+  it('сто двадцать заданий печати: ошибка за пределами первой страницы достижима', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    const { printFormId, printJobId } = await claimAndAssemble(florist, order.id);
+
+    // 119 более НОВЫХ заданий поверх настоящего: искомая ошибка становится
+    // самой старой из своих и уезжает за первую страницу.
+    const base = Date.now();
+    await ctx.db.orderPrintJob.createMany({
+      data: Array.from({ length: 119 }, (_, index) => ({
+        orderId: order.id,
+        printFormId,
+        attempt: index + 2,
+        state: 'PENDING' as const,
+        createdAt: new Date(base + (index + 1) * 1000),
+      })),
+    });
+
+    // Ошибка ставится вместе с кодом: база не принимает её без причины.
+    await ctx.db.orderPrintJob.update({
+      where: { id: printJobId },
+      data: { state: 'ERROR', lastErrorCode: 'PRINTER_OFFLINE', lastErrorAt: new Date(base) },
+    });
+
+    const seen: string[] = [];
+    let page = await listPrintJobs(ctx.db, {
+      filter: 'attention',
+      limit: PAGE_SIZE_DEFAULT,
+      offset: 0,
+    });
+    for (;;) {
+      seen.push(...page.items.map((job) => job.id));
+      if (seen.includes(printJobId) || !page.hasMore) {
+        break;
+      }
+      const nextOffset = page.offset + page.limit;
+      expect(nextOffset).toBeLessThan(10_000);
+      page = await listPrintJobs(ctx.db, {
+        filter: 'attention',
+        limit: PAGE_SIZE_DEFAULT,
+        offset: nextOffset,
+      });
+    }
+
+    expect(page.total).toBeGreaterThanOrEqual(120);
+    const position = seen.indexOf(printJobId);
+    // Именно то, чего не умела прежняя версия: задание нашлось за пределами
+    // первых 50 строк.
+    expect(position).toBeGreaterThanOrEqual(PAGE_SIZE_DEFAULT);
+    expect(new Set(seen).size).toBe(seen.length);
+
+    // Найденное задание полноценно: его можно повторить и отметить вручную.
+    const retried = await retryPrint(ctx.db, florist, printJobId, CONTEXT);
+    expect(retried.printFormId).toBe(printFormId);
+    expect(retried.state).toBe('PENDING');
+    const printed = await markPrinted(ctx.db, florist, printJobId, CONTEXT);
+    expect(printed.state).toBe('PRINTED');
+  }, 60_000);
+
+  it('очередь одного дня целиком доступна по страницам', async () => {
+    const florist = await floristOnShift();
+    const tag = queueTag('WALK');
+    const orders = await seedBulkOrders({
+      tag,
+      count: 137,
+      day: SCALE_DAY,
+      startMinuteOf: (index) => 600 + (index % 60),
+    });
+
+    const walked = await readAllPages(
+      florist.userId,
+      { day: 'tomorrow', scope: 'general', includeAssigned: false, search: tag },
+      PAGE_SIZE_DEFAULT,
+      // Момент выбирает представление: `SCALE_DAY` — «завтра» для 19 марта.
+      new Date('2027-03-19T09:00:00.000Z'),
+    );
+
+    expect(walked.total).toBe(137);
+    expect(walked.ids).toHaveLength(137);
+    expect(new Set(walked.ids).size).toBe(137);
+    expect(new Set(walked.ids)).toEqual(new Set(orders.map((order) => order.id)));
+    expect(walked.pages).toBe(3);
+  }, 60_000);
+});
 
 // --- 7. Карточка и фото ------------------------------------------------------
 
