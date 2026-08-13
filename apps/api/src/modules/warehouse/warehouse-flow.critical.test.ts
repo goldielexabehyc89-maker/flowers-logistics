@@ -188,6 +188,38 @@ async function activeCellOf(orderId: string): Promise<string | null> {
   return row?.cellId ?? null;
 }
 
+/**
+ * Ищет деньги в разобранном ответе и возвращает путь до находки.
+ *
+ * Проверять деньги подстрокой в тексте ответа нельзя: идентификаторы UUIDv7
+ * и номера содержат случайные цифры, и любая короткая сумма рано или поздно
+ * встретится в них сама по себе. Разбор отвечает на настоящий вопрос —
+ * есть ли в ответе поле про деньги или значение, равное сумме заказа.
+ */
+function moneyLeak(value: unknown, amountMinor: bigint, path = 'ответ'): string | null {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const found = moneyLeak(item, amountMinor, `${path}[${index}]`);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    for (const [key, item] of Object.entries(value)) {
+      if (/sum|cash|amount|price|minor/i.test(key)) return `${path}.${key}`;
+      const found = moneyLeak(item, amountMinor, `${path}.${key}`);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+
+  if (typeof value === 'number' || typeof value === 'string') {
+    if (String(value) === String(amountMinor)) return path;
+  }
+  return null;
+}
+
 // --- 1. Граница с FLORIST ----------------------------------------------------
 
 describe('независимость от FLORIST', () => {
@@ -917,10 +949,14 @@ describe('права и состав ответа', () => {
         'Складская проверка потока',
         'Получатель Потоковый',
         'которого склад видеть не должен',
-        '7770',
       ]) {
         expect(response.body, `${url} / ${secret}`).not.toContain(secret);
       }
+
+      // Деньги ищутся по разобранному ответу, а не подстрокой в тексте.
+      // Подстрока «7770» встречается в случайных идентификаторах сама по себе:
+      // проверка обвиняла бы склад в утечке суммы из-за совпадения в UUID.
+      expect(moneyLeak(JSON.parse(response.body), 777000n), url).toBeNull();
     }
   });
 });
