@@ -241,7 +241,15 @@ function fakeSolver(
             vehicle: vehicle.id,
             steps: [
               { type: 'start', arrival: at },
-              ...request.jobs.map((job) => ({ type: 'job', id: job.id, arrival: at })),
+              // Прибытие в начало смены для заказа с окном — раннее. Настоящий
+              // VROOM в таком случае сообщает ожидание, и подделка обязана вести
+              // себя так же: иначе проверяется не тот ответ, который бывает.
+              ...request.jobs.map((job) => ({
+                type: 'job',
+                id: job.id,
+                arrival: at,
+                waiting_time: Math.max(0, (job.time_windows?.[0]?.[0] ?? at) - at),
+              })),
               { type: 'end', arrival: at },
             ],
             duration: 120,
@@ -457,7 +465,12 @@ describe('условия планирования', () => {
             vehicle: vehicle?.id ?? 1,
             steps: [
               { type: 'start', arrival: at },
-              ...rest.map((job) => ({ type: 'job', id: job.id, arrival: at })),
+              ...rest.map((job) => ({
+                type: 'job',
+                id: job.id,
+                arrival: at,
+                waiting_time: Math.max(0, (job.time_windows?.[0]?.[0] ?? at) - at),
+              })),
               { type: 'end', arrival: at },
             ],
           },
@@ -1185,7 +1198,12 @@ describe('применение превью', () => {
             vehicle: vehicle?.id ?? 1,
             steps: [
               { type: 'start', arrival: at },
-              { type: 'job', id: head?.id ?? 1, arrival: at },
+              {
+                type: 'job',
+                id: head?.id ?? 1,
+                arrival: at,
+                waiting_time: Math.max(0, (head?.time_windows?.[0]?.[0] ?? at) - at),
+              },
               { type: 'end', arrival: at },
             ],
           },

@@ -467,6 +467,36 @@ describe('сухой прогон', () => {
     expect(result.stdout).toContain(VALID_SHA);
   });
 
+  it('план staging называет фактические ворота, а не прежние', async () => {
+    // План читает дежурный перед выкаткой, и он обязан описывать то, что
+    // проверка делает СЕЙЧАС. Прежний текст обещал «SHA-256 tiles.tar»
+    // и «пробную матрицу», хотя проверяются оба артефакта графа и предельная
+    // матрица 60×60 обоими профилями с регрессией пешего профиля. Устаревший
+    // план хуже отсутствующего: он создаёт ложную уверенность.
+    const result = await run(STAGING_SCRIPT, ['--version', VALID_SHA, '--dry-run']);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('tiles.tar И valhalla.json');
+    expect(result.stdout).toContain('бюджетом матрицы обоих профилей');
+    expect(result.stdout).toContain('ПРЕДЕЛЬНУЮ матрицу 60×60');
+    expect(result.stdout).toContain('регрессию пешеходного профиля');
+    expect(result.stdout).not.toContain('пробную матрицу на синтетических точках');
+
+    // Порядок шагов не менялся: миграции по-прежнему после проверок графа
+    // и решателя, а запуск приложения — после миграций.
+    const graph = result.stdout.indexOf('valhalla.json');
+    const matrix = result.stdout.indexOf('ПРЕДЕЛЬНУЮ матрицу');
+    const solver = result.stdout.indexOf('время обслуживания по типу машины');
+    const migrations = result.stdout.indexOf('prisma migrate deploy');
+    const app = result.stdout.indexOf('запустить приложение из точной версии образа');
+
+    expect(graph).toBeGreaterThan(0);
+    expect(graph).toBeLessThan(matrix);
+    expect(matrix).toBeLessThan(solver);
+    expect(solver).toBeLessThan(migrations);
+    expect(migrations).toBeLessThan(app);
+  });
+
   it('production показывает план с обязательными шагами', async () => {
     const result = await run(PRODUCTION_SCRIPT, ['--version', VALID_SHA, '--dry-run']);
 
@@ -1140,7 +1170,9 @@ describe('геостек в командах выкатки', () => {
       const plan = whole.slice(whole.indexOf('cat <<PLAN'), whole.indexOf('\nPLAN\n'));
 
       const routing = plan.indexOf('маршрутизатор');
-      const matrix = plan.indexOf('матриц');
+      // Именно ПРЕДЕЛЬНАЯ матрица: слово «матрица» встречается и раньше,
+      // в шаге проверки бюджета графа, и по нему порядок не судят.
+      const matrix = plan.search(/ПРЕДЕЛЬНУЮ\s+матриц/);
       const migrate = plan.indexOf('миграци');
       const app = plan.lastIndexOf('приложение');
 
@@ -1452,7 +1484,7 @@ describe('решатель в командах выкатки', () => {
       { plan: /подложк[уи] по манифесту/, body: /require_geo_artifacts/ },
       { plan: /доставить Compose-файл/, body: /sync_compose_file/ },
       { plan: /поднять маршрутизатор/, body: /up -d --no-build valhalla"/ },
-      { plan: /пробн(ую|ая) матриц/, body: /require_routing_ready/ },
+      { plan: /ПРЕДЕЛЬНУЮ\s+матриц/, body: /require_routing_ready/ },
       { plan: /поднять решатель/, body: /up -d --no-build vroom"/ },
       { plan: /проверить решатель пробной задачей/, body: /require_solver_ready/ },
       { plan: /применить миграции/, body: /run --rm app npx prisma migrate deploy/ },

@@ -76,6 +76,10 @@ function fakeSolve(
     ignoreOurMatrix?: boolean;
     /** Правдоподобный ответ с нулевым временем обслуживания. */
     ignoreServicePerType?: boolean;
+    /** Приезжает раньше окна и честно сообщает ожидание — обычная работа. */
+    arriveEarly?: boolean;
+    /** Приезжает раньше окна и об ожидании молчит — доказательства нет. */
+    arriveEarlySilently?: boolean;
   } = {},
 ) {
   let call = 0;
@@ -117,6 +121,21 @@ function fakeSolve(
           second = window === null ? second + 20 * 60 : window[0];
           if (options.violateWindow === true && window !== null) {
             second = window[1] + 60 * 60;
+          }
+          // Раннее прибытие — не нарушение: курьер ждёт, и решатель обязан
+          // сообщить, сколько именно.
+          if (
+            window !== null &&
+            (options.arriveEarly === true || options.arriveEarlySilently === true)
+          ) {
+            const early = window[0] - 30 * 60;
+            second = window[0];
+            return {
+              type: 'job' as const,
+              id: job,
+              arrival: early,
+              ...(options.arriveEarlySilently === true ? {} : { waiting_time: 30 * 60 }),
+            };
           }
           return { type: 'job' as const, id: job, arrival: second };
         }),
@@ -333,6 +352,33 @@ describe('ворота пилота', () => {
     expect(['WINDOW_VIOLATED', 'SOLVER_TIME_WINDOW']).toContain(report.failure);
   });
 
+  it('раннее прибытие с сообщённым ожиданием — не нарушение окна', async () => {
+    // Ровно этот случай остановил первый настоящий операционный прогон:
+    // решатель, граф и матрицы были исправны, а контрольный слой сравнивал
+    // сырое прибытие с началом окна.
+    const report = await runPilotScenario(
+      depsWith((size) => fakeMatrix(size), fakeSolve({ arriveEarly: true })),
+      { label: 'ожидание', orderCount: 9, vehicleType: 'CAR', repeats: 3 },
+    );
+
+    expect(report.failure).toBeNull();
+    expect(report.gatesPassed).toBe(true);
+    // Повторы того же входа обязаны остаться совпадающими.
+    expect(report.deterministic).toBe(true);
+  });
+
+  it('раннее прибытие БЕЗ сообщённого ожидания отказывает', async () => {
+    // Обратная сторона того же правила: молчание об ожидании доказательством
+    // соблюдённого окна не является.
+    const report = await runPilotScenario(
+      depsWith((size) => fakeMatrix(size), fakeSolve({ arriveEarlySilently: true })),
+      { label: 'без ожидания', orderCount: 9, vehicleType: 'CAR' },
+    );
+
+    expect(report.gatesPassed).toBe(false);
+    expect(report.failure).toBe('SOLVER_TIME_WINDOW');
+  });
+
   it('решателю уходит наша матрица и время обслуживания по типу машины', async () => {
     let seen: VroomRequest | null = null;
     const deps = depsWith(
@@ -386,10 +432,12 @@ describe('ворота пилота', () => {
             vehicle: vehicle.id,
             steps: [
               { type: 'start', arrival: vehicle.time_window[0] },
+              // Прибытие внутрь окна, если оно задано: этот случай проверяет
+              // отсутствие агрегатов, а не соблюдение обещанного времени.
               ...request.jobs.map((job, index) => ({
                 type: 'job',
                 id: job.id,
-                arrival: vehicle.time_window[0] + (index + 1) * 600,
+                arrival: job.time_windows?.[0]?.[0] ?? vehicle.time_window[0] + (index + 1) * 600,
               })),
               { type: 'end', arrival: vehicle.time_window[1] },
             ],

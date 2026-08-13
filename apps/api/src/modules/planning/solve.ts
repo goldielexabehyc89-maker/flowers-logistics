@@ -225,6 +225,77 @@ export interface PlanResult {
  * обещает соблюдать жёсткие ограничения, но обещание — не доказательство:
  * ошибка в нашем запросе выглядела бы как корректный ответ на другой вопрос.
  */
+/**
+ * Обслуживание начинается внутри обещанного окна.
+ *
+ * ЧТО ИМЕННО ОБЕЩАНО КЛИЕНТУ.
+ *
+ * Окно ограничивает НАЧАЛО ОБСЛУЖИВАНИЯ, а не физическое прибытие. Так устроен
+ * и контракт VROOM: приехав раньше, курьер ждёт, и решатель сообщает это
+ * ожидание отдельным полем шага. Обе границы окна включительные.
+ *
+ * ПОЧЕМУ ПРОВЕРКА ИМЕННО ТАКАЯ.
+ *
+ * Раньше сравнивался сырой `arrival`, и раннее прибытие выглядело нарушением.
+ * Первый настоящий прогон пилота отказал именно на этом — при исправных
+ * решателе, графе и матрицах. Обратная ошибка не менее опасна: посчитать
+ * `Math.max(arrival, start)` и объявить окно соблюдённым значило бы поверить
+ * решателю на слово вместо того, чтобы прочитать, сколько он ждал.
+ *
+ * Поэтому доказательством служит сумма `arrival + waiting_time`, и считается
+ * она В СЕКУНДАХ: округление до минуты спрятало бы нарушение длиной меньше
+ * минуты, а именно такие и появляются на границах окна.
+ *
+ * FAIL CLOSED. Для заказа с окном отсутствие `arrival` означает, что ответ
+ * недоказуем, а раннее прибытие без сообщённого ожидания — что доказательство
+ * неполно. И то и другое отвергается, а не додумывается.
+ */
+function assertServiceStartsInWindow(
+  step: { arrival?: number | undefined; waiting_time?: number | undefined },
+  order: { windowStartMinute: number | null; windowEndMinute: number | null },
+): void {
+  const windowStartSec =
+    order.windowStartMinute === null ? null : order.windowStartMinute * SECONDS_IN_MINUTE;
+  const windowEndSec =
+    order.windowEndMinute === null ? null : order.windowEndMinute * SECONDS_IN_MINUTE;
+
+  if (windowStartSec === null && windowEndSec === null) {
+    // Окна нет — обещания нет. Отсутствие `waiting_time` здесь допустимо:
+    // старые сохранённые и тестовые ответы его не содержат, и требовать его
+    // там, где он ничего не доказывает, значило бы ломать их без причины.
+    return;
+  }
+
+  const arrival = step.arrival;
+  if (arrival === undefined) {
+    throw new PlanContractError('SOLVER_TIME_WINDOW');
+  }
+
+  const waiting = step.waiting_time;
+
+  if (windowStartSec !== null && arrival < windowStartSec) {
+    // Приехали раньше — обязаны дождаться. Молчание решателя об ожидании
+    // не является доказательством того, что он подождал.
+    if (waiting === undefined) {
+      throw new PlanContractError('SOLVER_TIME_WINDOW');
+    }
+    if (arrival + waiting < windowStartSec) {
+      throw new PlanContractError('SOLVER_TIME_WINDOW');
+    }
+  }
+
+  const serviceStart = arrival + (waiting ?? 0);
+
+  if (windowStartSec !== null && serviceStart < windowStartSec) {
+    throw new PlanContractError('SOLVER_TIME_WINDOW');
+  }
+  // Прибытие после конца окна сюда тоже попадает: обслуживание начинается
+  // не раньше прибытия, поэтому его начало заведомо позже границы.
+  if (windowEndSec !== null && serviceStart > windowEndSec) {
+    throw new PlanContractError('SOLVER_TIME_WINDOW');
+  }
+}
+
 export function parseSolution(snapshot: PlanInputSnapshot, solution: VroomSolution): PlanResult {
   const orderByJobId = new Map(snapshot.orders.map((order, index) => [index + 1, order]));
   const slotByIndex = new Map(snapshot.slots.map((slot) => [slot.slotIndex, slot]));
@@ -291,16 +362,11 @@ export function parseSolution(snapshot: PlanInputSnapshot, solution: VroomSoluti
 
       const arrival = step.arrival;
 
-      if (arrival !== undefined) {
-        if (arrival > shiftEndSec) {
-          throw new PlanContractError('SOLVER_SHIFT');
-        }
-        if (order.windowEndMinute !== null && arrival > order.windowEndMinute * SECONDS_IN_MINUTE) {
-          // Обслуживание начинается не раньше прибытия, поэтому прибытие
-          // после конца окна — прямое нарушение обещания клиенту.
-          throw new PlanContractError('SOLVER_TIME_WINDOW');
-        }
+      if (arrival !== undefined && arrival > shiftEndSec) {
+        throw new PlanContractError('SOLVER_SHIFT');
       }
+
+      assertServiceStartsInWindow(step, order);
 
       stops.push({
         orderId: order.orderId,
