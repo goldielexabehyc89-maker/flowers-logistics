@@ -83,6 +83,8 @@ async function main(): Promise<number> {
           assortmentKindRaw: 'bundle',
           name: 'Букет самовывоза',
           quantity: '1',
+          uomId: null,
+          uomName: null,
           characteristicLabel: null,
           components: [
             {
@@ -93,6 +95,8 @@ async function main(): Promise<number> {
               assortmentKindRaw: 'product',
               name: 'Роза проверочная',
               quantity: '9',
+              uomId: null,
+              uomName: null,
             },
           ],
         },
