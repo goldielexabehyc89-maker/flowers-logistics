@@ -56,7 +56,7 @@ import {
   type SourceMatrix,
 } from './solve.js';
 import type { PlanInputSnapshot, SnapshotOrder, SnapshotPoint } from './input.js';
-import { INPUT_SNAPSHOT_VERSION } from './input.js';
+import { INPUT_SNAPSHOT_VERSION, orderWindow } from './input.js';
 import { readSnapshotFile } from '../orders/snapshot/file.js';
 import { assertSnapshotIsSafe } from '../orders/snapshot-export.js';
 
@@ -276,7 +276,7 @@ export function buildSyntheticDay(options: SyntheticDayOptions): PlanInputSnapsh
 
 /**
  * Берёт из снимка `orders-snapshot@2` только его форму дня: количество заказов
- * и их временные окна.
+ * и их временные окна — нормализованные тем же кодом, что и на боевом пути.
  *
  * Координат в снимке нет и быть не должно — он обезличен. Поэтому точки
  * остаются синтетическими и детерминированными, а из снимка приходит то,
@@ -293,13 +293,37 @@ export function buildDayFromSnapshotShape(
   for (let index = 0; index < count; index += 1) {
     const source = usable[index]!;
     const target = day.orders[index]!;
-    const start = source.manualIntervalStartMinute ?? source.intervalStartMinute;
-    const end = source.manualIntervalEndMinute ?? source.intervalEndMinute;
 
-    target.windowStartMinute = start ?? null;
-    target.windowEndMinute = end ?? null;
-    target.windowSource = start === null || start === undefined ? null : 'MOYSKLAD';
-    target.windowExact = start !== null && start !== undefined && start === end;
+    // Окно считает ТОТ ЖЕ код, что и боевой расчёт.
+    //
+    // Собственная арифметика здесь однажды уже разошлась с продуктом: адаптер
+    // не читал `intervalKind` и копировал точное время как `start=t, end=null`.
+    // Решателю такое окно не отправлялось вовсе — `buildSolverRequest` требует
+    // обе границы, — а строгая проверка начала обслуживания видела неполное
+    // представление и закрывалась. Обещание «ровно в t» тихо превращалось
+    // в «когда угодно», и замечал это только отказ пилота.
+    const window = orderWindow(source);
+
+    if (window === null) {
+      // Интервала нет — заказ планируется в любое время смены.
+      target.windowStartMinute = null;
+      target.windowEndMinute = null;
+      target.windowSource = null;
+      target.windowExact = false;
+      continue;
+    }
+
+    if (typeof window === 'string') {
+      // Противоречивое сочетание вида интервала и полей. Ослаблять окно
+      // до «без ограничений» нельзя: это другое обещание, а не отсутствие
+      // обещания. Fail closed — тот же контракт, что и на боевом пути.
+      throw new PilotGateError('SOLVER_TIME_WINDOW');
+    }
+
+    target.windowStartMinute = window.startMinute;
+    target.windowEndMinute = window.endMinute;
+    target.windowSource = window.source;
+    target.windowExact = window.exact;
   }
 
   return day;
@@ -324,6 +348,12 @@ export async function readPilotSnapshot(path: string): Promise<readonly Snapshot
 
 /** Ровно те поля снимка, которые нужны пилоту. Псевдонимы и суммы не читаются. */
 export interface SnapshotShapeOrder {
+  /**
+   * Вид интервала. Без него точное время неотличимо от полуоткрытого
+   * диапазона: `EXACT` хранит только начало, и именно оно превращается
+   * в жёсткое окно нулевой ширины.
+   */
+  intervalKind: string;
   intervalStartMinute: number | null;
   intervalEndMinute: number | null;
   manualIntervalStartMinute: number | null;

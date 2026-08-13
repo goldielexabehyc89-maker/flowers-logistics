@@ -27,7 +27,9 @@ import {
   runPilot,
   runPilotScenario,
   type PilotDeps,
+  type SnapshotShapeOrder,
 } from './pilot.js';
+import { buildSolverRequest } from './solve.js';
 
 const GRAPH = 'a'.repeat(64);
 
@@ -210,12 +212,14 @@ describe('синтетический день пилота', () => {
       {
         orders: [
           {
+            intervalKind: 'RANGE',
             intervalStartMinute: 600,
             intervalEndMinute: 840,
             manualIntervalStartMinute: null,
             manualIntervalEndMinute: null,
           },
           {
+            intervalKind: 'MISSING',
             intervalStartMinute: null,
             intervalEndMinute: null,
             manualIntervalStartMinute: 720,
@@ -229,9 +233,191 @@ describe('синтетический день пилота', () => {
     expect(day.orders).toHaveLength(2);
     expect(day.orders[0]?.windowStartMinute).toBe(600);
     expect(day.orders[0]?.windowEndMinute).toBe(840);
-    // Ручной интервал сильнее исходного, а совпавшие границы — точное время.
+    // Ручной интервал сильнее исходного. Признак «точное время» при этом
+    // остаётся ложным ровно так же, как на боевом пути: он означает
+    // «клиенту названа минута», а не «границы совпали».
     expect(day.orders[1]?.windowStartMinute).toBe(720);
-    expect(day.orders[1]?.windowExact).toBe(true);
+    expect(day.orders[1]?.windowEndMinute).toBe(720);
+    expect(day.orders[1]?.windowSource).toBe('MANUAL');
+  });
+});
+
+/**
+ * Точное время не теряется по дороге из снимка.
+ *
+ * Именно этим отказал завершающий snapshot-прогон: адаптер снимка не читал
+ * `intervalKind` и копировал `EXACT` как `start=t, end=null`. Такое окно
+ * `buildSolverRequest` решателю НЕ отправляет — ему нужны обе границы, —
+ * а строгая проверка начала обслуживания видела неполное представление
+ * и закрывалась. Обещание «ровно в t» тихо становилось «когда угодно».
+ *
+ * Поэтому окно снимка теперь считает тот же `orderWindow`, что и боевой путь,
+ * а здесь закреплены все четыре вида интервала и приоритет ручного.
+ */
+describe('форма дня из снимка совпадает с боевой семантикой', () => {
+  function shapeOrder(overrides: Partial<SnapshotShapeOrder> & { intervalKind: string }) {
+    return {
+      intervalStartMinute: null,
+      intervalEndMinute: null,
+      manualIntervalStartMinute: null,
+      manualIntervalEndMinute: null,
+      ...overrides,
+    };
+  }
+
+  it('EXACT со стартом t превращается в жёсткое окно нулевой ширины', () => {
+    const day = buildDayFromSnapshotShape(
+      { orders: [shapeOrder({ intervalKind: 'EXACT', intervalStartMinute: 840 })] },
+      {},
+    );
+
+    expect(day.orders[0]?.windowStartMinute).toBe(840);
+    expect(day.orders[0]?.windowEndMinute).toBe(840);
+    expect(day.orders[0]?.windowExact).toBe(true);
+    expect(day.orders[0]?.windowSource).toBe('MOYSKLAD');
+  });
+
+  it('EXACT уходит решателю ровно как [t*60, t*60]', () => {
+    const day = buildDayFromSnapshotShape(
+      { orders: [shapeOrder({ intervalKind: 'EXACT', intervalStartMinute: 840 })] },
+      {},
+    );
+    const size = day.points.length;
+    const request = buildSolverRequest({
+      snapshot: day,
+      matrices: {
+        CAR: {
+          durationsSec: Array.from({ length: size }, () => Array.from({ length: size }, () => 60)),
+          distancesM: Array.from({ length: size }, () => Array.from({ length: size }, () => 100)),
+        },
+      },
+    });
+
+    // Прежде окна здесь не было вовсе: решатель не получал обещания,
+    // а проверка требовала его соблюдения.
+    expect(request.jobs[0]?.time_windows).toEqual([[840 * 60, 840 * 60]]);
+  });
+
+  it('RANGE сохраняет обе настоящие границы', () => {
+    const day = buildDayFromSnapshotShape(
+      {
+        orders: [
+          shapeOrder({ intervalKind: 'RANGE', intervalStartMinute: 600, intervalEndMinute: 780 }),
+        ],
+      },
+      {},
+    );
+
+    expect(day.orders[0]?.windowStartMinute).toBe(600);
+    expect(day.orders[0]?.windowEndMinute).toBe(780);
+    expect(day.orders[0]?.windowExact).toBe(false);
+  });
+
+  it('MISSING и UNRECOGNIZED окна не получают либо честно отказывают', () => {
+    const missing = buildDayFromSnapshotShape(
+      { orders: [shapeOrder({ intervalKind: 'MISSING' })] },
+      {},
+    );
+    expect(missing.orders[0]?.windowStartMinute).toBeNull();
+    expect(missing.orders[0]?.windowEndMinute).toBeNull();
+    expect(missing.orders[0]?.windowSource).toBeNull();
+
+    // Нераспознанный интервал — это НЕ «без ограничений»: считать нечего,
+    // и подменять его свободой значило бы пообещать другое.
+    expect(() =>
+      buildDayFromSnapshotShape({ orders: [shapeOrder({ intervalKind: 'UNRECOGNIZED' })] }, {}),
+    ).toThrow(/SOLVER_TIME_WINDOW/);
+  });
+
+  it('полный ручной интервал сильнее импортированного', () => {
+    const day = buildDayFromSnapshotShape(
+      {
+        orders: [
+          shapeOrder({
+            intervalKind: 'EXACT',
+            intervalStartMinute: 840,
+            manualIntervalStartMinute: 600,
+            manualIntervalEndMinute: 780,
+          }),
+        ],
+      },
+      {},
+    );
+
+    expect(day.orders[0]?.windowStartMinute).toBe(600);
+    expect(day.orders[0]?.windowEndMinute).toBe(780);
+    expect(day.orders[0]?.windowSource).toBe('MANUAL');
+  });
+
+  it('противоречивое представление закрывается, а не ослабляет окно', () => {
+    // `RANGE` без второй границы и `EXACT` без начала — не полуокна,
+    // а испорченные данные. Молча превратить их в «когда угодно» нельзя.
+    for (const broken of [
+      shapeOrder({ intervalKind: 'RANGE', intervalStartMinute: 600 }),
+      shapeOrder({ intervalKind: 'EXACT' }),
+    ]) {
+      expect(
+        () => buildDayFromSnapshotShape({ orders: [broken] }, {}),
+        broken.intervalKind,
+      ).toThrow(/SOLVER_TIME_WINDOW/);
+    }
+  });
+
+  it('точное время из снимка проходит весь путь: ранний приезд с ожиданием', async () => {
+    // Сквозная проверка ровно того пути, который отказал: снимок → окно →
+    // запрос решателю → строгая проверка начала обслуживания.
+    const day = buildDayFromSnapshotShape(
+      {
+        orders: [
+          shapeOrder({ intervalKind: 'EXACT', intervalStartMinute: 720 }),
+          shapeOrder({ intervalKind: 'RANGE', intervalStartMinute: 600, intervalEndMinute: 780 }),
+          shapeOrder({ intervalKind: 'MISSING' }),
+        ],
+      },
+      { vehicleType: 'CAR' },
+    );
+
+    const report = await runPilotScenario(
+      depsWith((size) => fakeMatrix(size), fakeSolve({ arriveEarly: true })),
+      { label: 'снимок', orderCount: 3, vehicleType: 'CAR', repeats: 3 },
+      day,
+    );
+
+    expect(report.failure).toBeNull();
+    expect(report.gatesPassed).toBe(true);
+    expect(report.deterministic).toBe(true);
+  });
+
+  it('форма настоящего дня: 6 диапазонов, 1 точное время, 3 без окна', () => {
+    // Та же форма, что и в утверждённом снимке приёмки. Точное время обязано
+    // дожить до запроса решателю, иначе прогон снова остановится на CAR.
+    const orders = [
+      ...Array.from({ length: 6 }, (_, index) =>
+        shapeOrder({
+          intervalKind: 'RANGE',
+          intervalStartMinute: 600 + index * 30,
+          intervalEndMinute: 780 + index * 30,
+        }),
+      ),
+      shapeOrder({ intervalKind: 'EXACT', intervalStartMinute: 720 }),
+      ...Array.from({ length: 3 }, () => shapeOrder({ intervalKind: 'MISSING' })),
+    ];
+
+    for (const vehicleType of ['CAR', 'FOOT'] as const) {
+      const day = buildDayFromSnapshotShape({ orders }, { vehicleType });
+
+      const windowed = day.orders.filter((order) => order.windowStartMinute !== null);
+      const exact = day.orders.filter((order) => order.windowExact);
+
+      expect(windowed, vehicleType).toHaveLength(7);
+      expect(exact, vehicleType).toHaveLength(1);
+      expect(exact[0]?.windowStartMinute, vehicleType).toBe(720);
+      expect(exact[0]?.windowEndMinute, vehicleType).toBe(720);
+      // Ни одного полуокна: решателю уходит либо полное окно, либо ничего.
+      for (const order of day.orders) {
+        expect(order.windowStartMinute === null, vehicleType).toBe(order.windowEndMinute === null);
+      }
+    }
   });
 });
 
