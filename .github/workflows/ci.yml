@@ -407,12 +407,35 @@ jobs:
           # PREVIEW с неизменяемыми снимками. Контракт решателя и путь расчёта
           # доказываются направленными проверками с подменёнными сервисами.
           output="$(npm run --silent seed:e2e-plan)"
-          run="$(printf '%s' "$output" | sed -n 's/^запуск: //p' | head -1)"
-          if [ -z "$run" ]; then
-            echo "не удалось получить идентификатор превью" >&2
-            exit 1
-          fi
-          echo "planrun=$run" >> "$GITHUB_OUTPUT"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n "$2p"; }
+
+          run="$(get 'запуск' 1)"
+          assigned1="$(get 'в маршруте id' 1)"
+          assigned2="$(get 'в маршруте id' 2)"
+          unassigned="$(get 'неразмещённый id' 1)"
+          foreign_id="$(get 'посторонний id' 1)"
+          foreign_number="$(get 'посторонний' 1)"
+          number1="$(get 'в маршруте' 1)"
+          number2="$(get 'в маршруте' 2)"
+          number3="$(get 'неразмещённый' 1)"
+
+          # Сценарий доказывает точность выбора, поэтому неполная фикстура —
+          # это отказ сборки, а не повод пропустить проверку.
+          for value in "$run" "$assigned1" "$assigned2" "$unassigned" \
+                       "$foreign_id" "$foreign_number" "$number1" "$number2" "$number3"; do
+            if [ -z "$value" ]; then
+              echo "фикстура превью неполна: браузерной проверке нечем доказывать выбор" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "planrun=$run"
+            echo "selectedids=$assigned1,$assigned2,$unassigned"
+            echo "selectednumbers=$number1,$number2,$number3"
+            echo "foreignid=$foreign_id"
+            echo "foreignnumber=$foreign_number"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Создать складскую фикстуру
         id: seed-warehouse
@@ -482,6 +505,10 @@ jobs:
           # Идентификатор готового превью: сценарий автоматического пути
           # подменяет только старт расчёта, а читает и применяет настоящее.
           E2E_PLAN_RUN: ${{ steps.seed-plan.outputs.planrun }}
+          E2E_PLAN_SELECTED_IDS: ${{ steps.seed-plan.outputs.selectedids }}
+          E2E_PLAN_SELECTED_NUMBERS: ${{ steps.seed-plan.outputs.selectednumbers }}
+          E2E_PLAN_FOREIGN_ID: ${{ steps.seed-plan.outputs.foreignid }}
+          E2E_PLAN_FOREIGN_NUMBER: ${{ steps.seed-plan.outputs.foreignnumber }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
         run: npm run test:e2e

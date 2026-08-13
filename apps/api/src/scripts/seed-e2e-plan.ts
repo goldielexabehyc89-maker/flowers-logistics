@@ -205,6 +205,12 @@ async function main(): Promise<number> {
     ];
     const unassigned = await seedOrder(db, day, 2, POINTS[0] ?? DEPOT);
 
+    // Четвёртый заказ того же дня с подтверждённой точкой, НЕ входящий
+    // в неизменяемый снимок расчёта. Он нужен браузерной проверке как
+    // доказательство: расчёт берёт ровно выбранное, а посторонний заказ
+    // не попадает ни в превью, ни в созданные черновики.
+    const foreign = await seedOrder(db, day, 3, POINTS[1] ?? DEPOT);
+
     const run = await db.routePlanRun.create({
       data: {
         deliveryDate: toDateColumn(day),
@@ -331,9 +337,14 @@ async function main(): Promise<number> {
     // Значения нужны браузерному сценарию, поэтому печатаются отдельными строками.
     process.stdout.write(`запуск: ${run.id}\n`);
     process.stdout.write(`неразмещённый: ${unassigned.number}\n`);
+    process.stdout.write(`неразмещённый id: ${unassigned.id}\n`);
     for (const order of assigned) {
       process.stdout.write(`в маршруте: ${order.number}\n`);
+      process.stdout.write(`в маршруте id: ${order.id}\n`);
     }
+    // Посторонний заказ дня: он обязан остаться вне расчёта и вне черновиков.
+    process.stdout.write(`посторонний: ${foreign.number}\n`);
+    process.stdout.write(`посторонний id: ${foreign.id}\n`);
 
     return 0;
   } finally {

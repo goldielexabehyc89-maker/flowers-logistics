@@ -21,6 +21,20 @@ const COURIER_PIN = '1357';
 /** Телефон курьера, созданного первым сценарием; нужен следующим. */
 let courierPhone = '';
 
+/**
+ * Обязательное значение фикстуры.
+ *
+ * Отсутствие роняет проверку с понятным текстом, а не превращает её в
+ * молчаливый пропуск: пропущенный сценарий ничего не доказывает.
+ */
+function requiredEnv(name: string): string {
+  const value = process.env[name] ?? '';
+  if (value === '') {
+    throw new Error(`не передано обязательное значение фикстуры ${name}`);
+  }
+  return value;
+}
+
 /** Уникальный телефон: пользователей нельзя удалять, повторный прогон не должен падать. */
 function uniquePhone(): string {
   const tail = String(Date.now() % 1_000_000_000).padStart(9, '0');
@@ -812,8 +826,16 @@ test('печатная версия листа не содержит навиг�
  * видимое превью с отдельным блоком неразмещённых заказов, явное применение
  * и появившиеся после него черновики.
  */
-test('планирование: настройки, превью и применение', async ({ page }: { page: Page }) => {
+test('Сделки: точный выбор → расчёт → превью → применение', async ({ page }: { page: Page }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Фикстура обязательна: без неё доказывать точность выбора нечем, и проверка
+  // обязана упасть, а не пропустить себя.
+  const planRunId = requiredEnv('E2E_PLAN_RUN');
+  const selectedIds = requiredEnv('E2E_PLAN_SELECTED_IDS').split(',');
+  const selectedNumbers = requiredEnv('E2E_PLAN_SELECTED_NUMBERS').split(',');
+  const foreignId = requiredEnv('E2E_PLAN_FOREIGN_ID');
+  const foreignNumber = requiredEnv('E2E_PLAN_FOREIGN_NUMBER');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
@@ -850,20 +872,66 @@ test('планирование: настройки, превью и примен
   await settings.getByTestId('shift-save').click();
   await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
 
-  // 2. Планирование: превью видно целиком, включая неразмещённые заказы.
-  // Отдельной вкладки «Планирование» больше нет: расчёт живёт в «Маршрутизации».
-  // Вкладки принадлежат разделу «Логистика», поэтому сначала открывается он.
+  // 2. «Сделки»: выбирается РОВНО набор фикстуры, посторонний заказ виден
+  //    в том же дне и остаётся невыбранным.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  for (const number of selectedNumbers) {
+    const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(card).toBeVisible();
+    await card.getByTestId('deal-pick').click();
+  }
+  const foreignCard = page.locator(
+    `[data-testid="deal-card"][data-order-number="${foreignNumber}"]`,
+  );
+  await expect(foreignCard).toBeVisible();
+  await expect(foreignCard).toHaveAttribute('data-selected', 'no');
+  await expect(page.getByTestId('deals-selected-count')).toContainText(
+    `Выбрано: ${selectedNumbers.length}`,
+  );
+
+  /*
+   * ГРАНИЦА СЦЕНАРИЯ, названная прямо.
+   *
+   * Перехватывается РОВНО ОДИН запрос — старт расчёта. Сам расчёт требует
+   * дорожного графа Valhalla, которого в браузерной проверке нет; путь расчёта
+   * доказан отдельно направленными проверками с подменёнными Valhalla и VROOM.
+   * Здесь проверяется, что клиент отправил именно выбранный набор, и
+   * возвращается идентификатор готового превью той же фикстуры. Всё после
+   * старта — настоящее: чтение превью, применение и черновики идут через
+   * реальные API и базу.
+   */
+  let sentBody: { deliveryDate?: string; orderIds?: string[]; slots?: unknown[] } = {};
+  await page.route('**/api/planning/runs', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback();
+      return;
+    }
+    sentBody = JSON.parse(route.request().postData() ?? '{}');
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ id: planRunId, state: 'PREVIEW' }),
+    });
+  });
+
+  await page.getByTestId('deals-auto-plan').click();
+
+  // В расчёт ушло ровно выбранное множество и ни одним заказом больше.
+  expect([...(sentBody.orderIds ?? [])].sort()).toEqual([...selectedIds].sort());
+  expect(sentBody.orderIds).not.toContain(foreignId);
+  expect(sentBody.deliveryDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  expect(sentBody.slots?.length ?? 0).toBeGreaterThan(0);
+
+  // Дальше всё настоящее: приложение открыло конкретный запуск по адресу.
+  await page.unroute('**/api/planning/runs');
+  await expect(page).toHaveURL(new RegExp(`run=${planRunId}`));
   await expect(page.getByRole('heading', { name: 'Планирование маршрутов' })).toBeVisible();
 
   // Условия расчёта показаны до кнопки: логист видит, из чего сложится план.
   await expect(page.getByText('Смена: 09:00 — 21:00')).toBeVisible();
-
-  await page
-    .getByRole('button', { name: /^\d{2}\.\d{2}\.\d{4}/ })
-    .first()
-    .click();
 
   const unassignedBlock = page.getByTestId('plan-unassigned');
   await expect(unassignedBlock).toBeVisible();
@@ -880,6 +948,10 @@ test('планирование: настройки, превью и примен
   await expect(
     page.locator('[data-plan-state="APPLIED"]').getByText(/Создано черновиков: 1/),
   ).toBeVisible();
+
+  // Посторонний заказ не появился ни в превью, ни в неразмещённых:
+  // расчёт видел ровно выбранное множество.
+  await expect(page.locator('main')).not.toContainText(foreignNumber);
 
   // 4. Черновик действительно появился в маршрутизации.
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
@@ -1494,97 +1566,4 @@ test('самовывоз: флорист собрал → склад приня�
   await expect(managerPage.getByTestId('pickup-issue')).toHaveCount(0);
 
   await managerContext.close();
-});
-
-/**
- * Автоматический путь от выбора в «Сделках».
- *
- * ГРАНИЦА СЦЕНАРИЯ, названная прямо. Сам расчёт требует дорожного графа
- * Valhalla — гигабайтов, которых в браузерной проверке нет. Поэтому
- * перехватывается РОВНО ОДИН запрос — старт расчёта: проверяется, что клиент
- * отправил именно выбранный набор, и возвращается идентификатор превью,
- * созданного штатной фикстурой. Всё, что после старта, — настоящее:
- * чтение превью, применение и созданные черновики идут через реальные API
- * и базу. Сам путь расчёта отдельно доказан направленными проверками
- * с подменёнными Valhalla и VROOM.
- */
-test('Сделки: точный выбор → автоматический расчёт → превью → применение', async ({
-  page,
-}: {
-  page: Page;
-}) => {
-  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  const planRunId = process.env['E2E_PLAN_RUN'] ?? '';
-  test.skip(planRunId === '', 'не передан идентификатор превью (E2E_PLAN_RUN)');
-
-  await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Сделки' }).first().click();
-  await expect(page.getByTestId('deals-workspace')).toBeVisible();
-
-  const cards = page.getByTestId('deal-card');
-  const available = cards.filter({ has: page.locator('[data-selectable="yes"]') });
-  const count = await available.count();
-  test.skip(count === 0, 'в рабочем дне нет заказов, доступных для выбора');
-
-  // Выбирается ровно один заказ; его номер запоминается для проверки запроса.
-  const chosen = available.first();
-  const chosenNumber = await chosen.getAttribute('data-order-number');
-  await chosen.getByTestId('deal-pick').click();
-  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 1');
-
-  // Перехватывается ТОЛЬКО старт расчёта. Тело запроса проверяется буквально:
-  // в расчёт обязан уйти именно выбранный набор, а не весь день.
-  let sentBody: { deliveryDate?: string; orderIds?: string[]; slots?: unknown[] } = {};
-  await page.route('**/api/planning/runs', async (route) => {
-    if (route.request().method() !== 'POST') {
-      await route.fallback();
-      return;
-    }
-    sentBody = JSON.parse(route.request().postData() ?? '{}');
-    await route.fulfill({
-      status: 201,
-      contentType: 'application/json',
-      body: JSON.stringify({ id: planRunId, state: 'PREVIEW' }),
-    });
-  });
-
-  await page.getByTestId('deals-auto-plan').click();
-
-  // Запрос содержал ровно выбранное: один заказ, дата дня и слоты транспорта.
-  expect(sentBody.orderIds).toHaveLength(1);
-  expect(sentBody.deliveryDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-  expect(sentBody.slots?.length ?? 0).toBeGreaterThan(0);
-
-  // Дальше всё настоящее: приложение открыло конкретный запуск по URL.
-  await expect(page).toHaveURL(new RegExp(`\\?run=${planRunId}`));
-  await page.unroute('**/api/planning/runs');
-
-  // Превью читается настоящим API: маршруты и неразмещённые с причинами.
-  await page
-    .getByRole('button', { name: /^\d{2}\.\d{2}\.\d{4}/ })
-    .first()
-    .click();
-  const unassigned = page.getByTestId('plan-unassigned');
-  await expect(unassigned).toBeVisible();
-
-  // До явного применения черновиков нет: превью ничего не создаёт само.
-  await expect(page.locator('[data-plan-state="APPLIED"]')).toHaveCount(0);
-
-  // Применение — отдельное осознанное действие, а неразмещённый заказ требует
-  // ещё одного подтверждения: он не должен уехать в черновики молча.
-  await page.getByRole('button', { name: 'Применить' }).click();
-  await expect(page.getByRole('heading', { name: /неразмещёнными заказами/ })).toBeVisible();
-  await page.getByRole('button', { name: 'Применить частично' }).click();
-  await expect(page.locator('[data-plan-state="APPLIED"]')).toBeVisible();
-
-  // Чужой заказ того же дня, не входивший в выбор, в результат не попал:
-  // выбранный заказ остался в «Сделках» и в снимок расчёта не включался.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Сделки' }).first().click();
-  if (chosenNumber !== null) {
-    await expect(
-      page.locator(`[data-testid="deal-card"][data-order-number="${chosenNumber}"]`),
-    ).toBeVisible();
-  }
 });

@@ -15,6 +15,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
@@ -97,7 +98,29 @@ export function PlanningScreen(): React.JSX.Element {
   const [slots, setSlots] = useState<SlotDraft[]>([
     { vehicleType: 'CAR', capacityOrders: 20, courierUserId: null },
   ]);
-  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  /**
+   * Открытый запуск восстанавливается из адреса.
+   *
+   * Обновление страницы и прямая ссылка обязаны возвращать тот же расчёт:
+   * иначе логист, вернувшийся по ссылке, увидел бы список вместо того
+   * превью, которое обсуждал.
+   */
+  const [params, setParams] = useSearchParams();
+  const openRunId = params.get('run');
+  const setOpenRunId = (value: string | null): void => {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (value === null) {
+          next.delete('run');
+        } else {
+          next.set('run', value);
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  };
   const [confirmingApply, setConfirmingApply] = useState(false);
 
   const settings = useQuery({
