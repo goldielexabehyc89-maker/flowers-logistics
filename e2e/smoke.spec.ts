@@ -254,6 +254,8 @@ test('Сделки: день, поиск, выбор из списка и руч
   await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
 });
 
+const EMPTY_STYLE = JSON.stringify({ version: 8, sources: {}, layers: [] });
+
 test('карта не настроена: интерфейс говорит честно, а список продолжает работать', async ({
   page,
 }: {
