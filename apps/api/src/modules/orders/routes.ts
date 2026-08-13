@@ -759,8 +759,14 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     );
   });
 
-  /** Снять локальную правку: рабочим снова становится адрес МоегоСклада. */
-  app.delete('/api/orders/:id/address', async (request) => {
+  /**
+   * Снять локальную правку: рабочим снова становится адрес МоегоСклада.
+   *
+   * Метод `POST`, а не `DELETE`: в этом приложении `DELETE`-маршрутов нет
+   * вовсе — ничего не удаляется, и снятие правки тоже лишь добавляет запись
+   * в историю.
+   */
+  app.post('/api/orders/:id/address/clear', async (request) => {
     const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
     const { id } = idParamSchema.parse(request.params);
 

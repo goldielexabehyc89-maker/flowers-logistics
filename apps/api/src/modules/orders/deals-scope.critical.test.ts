@@ -25,8 +25,8 @@ const IDS = MOYSKLAD_IDS;
 const href = (kind: string, id: string): string => `${MOYSKLAD_BASE_URL}/entity/${kind}/${id}`;
 
 /** Отдельный день на файл: база общая, и чужие заказы не должны мешать. */
-const DAY = '2027-03-11';
-const OTHER_DAY = '2027-03-12';
+const DAY = '2027-09-11';
+const OTHER_DAY = '2027-09-12';
 const ADDRESS = 'Москва, синтетическая улица, дом 1';
 
 beforeAll(async () => {
@@ -240,7 +240,7 @@ describe('поиск и время действуют на то же множе�
 
 describe('страницы и порядок', () => {
   it('страницы не пересекаются и покрывают весь отбор', async () => {
-    const day = '2027-03-13';
+    const day = '2027-09-13';
     for (let index = 0; index < 5; index += 1) {
       await seedRoutable({ deliveryPlannedMoment: `${day} 12:00:00.000` });
     }
