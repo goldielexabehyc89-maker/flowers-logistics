@@ -8,3 +8,7 @@ playwright-report/
 test-results/
 prisma/migrations/
 deploy/state/
+
+# Сгенерированные артефакты карты: их размеры и контрольные суммы записаны
+# в манифест, и переформатирование JSON ломает проверку подложки.
+.e2e-basemap/

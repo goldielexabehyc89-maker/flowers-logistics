@@ -426,6 +426,23 @@ jobs:
             echo "courierpin=$(get 'пин курьера' 1)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Создать складскую фикстуру камеры
+        id: seed-warehouse-camera
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Второй независимый лист с ячейками: сценарий камеры не делит
+          # фикстуру с ручным складским сценарием.
+          output="$(npm run --silent seed:e2e-warehouse)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n "$2p"; }
+          {
+            echo "storage=$(get 'ячейка хранения' 1)"
+            echo "routecell=$(get 'маршрутная ячейка' 1)"
+            echo "route=$(get 'маршрут' 1)"
+            echo "order1=$(get 'заказ' 1)"
+            echo "order2=$(get 'заказ' 2)"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Наполнить очередь флориста
         id: seed-florist-queue
         shell: bash
@@ -472,6 +489,11 @@ jobs:
           # продолжает складской, а не заводит второй маршрут.
           E2E_WH_COURIER_PHONE: ${{ steps.seed-warehouse.outputs.courierphone }}
           E2E_WH_COURIER_PIN: ${{ steps.seed-warehouse.outputs.courierpin }}
+          E2E_WH_CAM_STORAGE: ${{ steps.seed-warehouse-camera.outputs.storage }}
+          E2E_WH_CAM_ROUTE_CELL: ${{ steps.seed-warehouse-camera.outputs.routecell }}
+          E2E_WH_CAM_ROUTE: ${{ steps.seed-warehouse-camera.outputs.route }}
+          E2E_WH_CAM_ORDER_1: ${{ steps.seed-warehouse-camera.outputs.order1 }}
+          E2E_WH_CAM_ORDER_2: ${{ steps.seed-warehouse-camera.outputs.order2 }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
         run: npm run test:e2e

@@ -1216,7 +1216,12 @@ test('склад: приёмка → комплектование → пауза
   await page.getByTestId('wh-bind-submit').click();
   await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
 
+  // Ручной путь требует ту же пару «заказ → ячейка», что и камера: код ячейки
+  // из карточки листа больше не подставляется.
   await page.getByTestId('wh-pick-order').fill(firstOrder);
+  await page.getByTestId('wh-pick-order').press('Enter');
+  await expect(page.getByTestId('wh-pick-scanned')).toHaveText(firstOrder);
+  await page.getByTestId('wh-pick-cell').fill(routeCell);
   await page.getByTestId('wh-pick-submit').click();
   await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
 
@@ -1229,6 +1234,9 @@ test('склад: приёмка → комплектование → пауза
   await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
 
   await page.getByTestId('wh-pick-order').fill(secondOrder);
+  await page.getByTestId('wh-pick-order').press('Enter');
+  await expect(page.getByTestId('wh-pick-scanned')).toHaveText(secondOrder);
+  await page.getByTestId('wh-pick-cell').fill(routeCell);
   await page.getByTestId('wh-pick-submit').click();
   await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
 
@@ -1473,4 +1481,209 @@ test('самовывоз: флорист собрал → склад приня�
   await expect(managerPage.getByTestId('pickup-issue')).toHaveCount(0);
 
   await managerContext.close();
+});
+
+/**
+ * Камера склада с подменённым адаптером.
+ *
+ * Настоящего устройства и разрешения в CI нет, а проводку «кнопка → шаг →
+ * сервер» доказать нужно. Поэтому адаптер камеры подменяется двойником,
+ * который отдаёт коды по команде теста: проверяется реальная цепочка
+ * приложения, а не работа драйвера камеры.
+ */
+test('склад с камеры: приёмка, комплектование парой и непрерывная выдача', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  // Собственная фикстура: сценарий камеры не делит ячейки и лист с ручным
+  // складским сценарием, иначе они мешали бы друг другу порядком запуска.
+  const storageCell = process.env['E2E_WH_CAM_STORAGE'] ?? '';
+  const routeCell = process.env['E2E_WH_CAM_ROUTE_CELL'] ?? '';
+  const routeNumber = process.env['E2E_WH_CAM_ROUTE'] ?? '';
+  const firstOrder = process.env['E2E_WH_CAM_ORDER_1'] ?? '';
+  const secondOrder = process.env['E2E_WH_CAM_ORDER_2'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    storageCell === '' || routeCell === '' || routeNumber === '' || firstOrder === '',
+    'не передана складская фикстура камеры (E2E_WH_CAM_*)',
+  );
+
+  // Двойник камеры ставится до загрузки приложения: настоящий adapter
+  // запрашивал бы разрешение, которого в CI не выдать. Обращение идёт через
+  // `globalThis`: тип страницы здесь — типы Node, а не DOM.
+  await page.addInitScript(() => {
+    interface FakeCameraGlobals {
+      __flCameraAdapter?: unknown;
+      __flCameraRunning?: boolean;
+      __flScan?: (code: string) => void;
+      __flClear?: () => void;
+    }
+    const scope = globalThis as unknown as FakeCameraGlobals;
+
+    const queue: string[] = [];
+    let onCode: ((code: string) => void) | null = null;
+    let onEmpty: (() => void) | null = null;
+    let running = false;
+
+    const pump = (): void => {
+      if (!running) {
+        return;
+      }
+      // Настоящий QR не исчезает из кадра оттого, что приложение занято:
+      // код повторяется, пока тест не уберёт его сам. Иначе двойник терял бы
+      // значение, которое машина отвергла как «идёт запрос».
+      const next = queue[0];
+      if (next === undefined) {
+        onEmpty?.();
+      } else {
+        onCode?.(next);
+      }
+      setTimeout(pump, 40);
+    };
+
+    scope.__flCameraAdapter = {
+      start: (
+        _video: unknown,
+        events: { onCode: (code: string) => void; onEmptyFrame: () => void },
+      ) => {
+        onCode = events.onCode;
+        onEmpty = events.onEmptyFrame;
+        running = true;
+        scope.__flCameraRunning = true;
+        setTimeout(pump, 40);
+        return Promise.resolve({
+          stop: () => {
+            running = false;
+            onCode = null;
+            onEmpty = null;
+            scope.__flCameraRunning = false;
+          },
+        });
+      },
+    };
+
+    scope.__flScan = (code: string) => {
+      queue.push(code);
+    };
+    scope.__flClear = () => {
+      queue.length = 0;
+    };
+  });
+
+  /** Подносит QR к камере и убирает его после того, как шаг сменился. */
+  const scan = async (code: string, until: () => Promise<void>): Promise<void> => {
+    await page.evaluate((value) => {
+      (globalThis as unknown as { __flScan: (code: string) => void }).__flScan(value);
+    }, code);
+    await until();
+    await page.evaluate(() => {
+      (globalThis as unknown as { __flClear: () => void }).__flClear();
+    });
+  };
+  const cameraRunning = (): Promise<boolean> =>
+    page.evaluate(
+      () => (globalThis as unknown as { __flCameraRunning?: boolean }).__flCameraRunning === true,
+    );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Склад' }).first().click();
+
+  const hint = page.getByTestId('scan-hint');
+  const success = page.getByTestId('scan-success');
+
+  // 1. Приёмка: камера открывается только по нажатию и ведёт пару шагов.
+  expect(await cameraRunning()).toBe(false);
+  await page.getByTestId('wh-scan-camera').click();
+  await expect(hint).toHaveText('Сканируйте QR заказа');
+  expect(await cameraRunning()).toBe(true);
+
+  await scan(firstOrder, async () => {
+    await expect(hint).toHaveText('Сканируйте QR ячейки');
+  });
+  await scan(storageCell, async () => {
+    await expect(success).toContainText(firstOrder);
+  });
+
+  // Успех закрылся сам, экран вернулся во вкладку, камера погашена.
+  await expect(page.getByTestId('wh-scan-camera')).toBeVisible();
+  expect(await cameraRunning()).toBe(false);
+
+  const placed = page.locator('[data-testid="wh-placement-row"]', { hasText: firstOrder });
+  await expect(placed).toContainText(storageCell);
+
+  // Второй заказ — новое нажатие: камера сама не запускается.
+  await page.getByTestId('wh-scan-camera').click();
+  await scan(secondOrder, async () => {
+    await expect(hint).toHaveText('Сканируйте QR ячейки');
+  });
+  await scan(storageCell, async () => {
+    await expect(success).toContainText(secondOrder);
+  });
+  await expect(page.getByTestId('wh-scan-camera')).toBeVisible();
+
+  // 2. Комплектование: пара «заказ → маршрутная ячейка» для КАЖДОГО заказа.
+  await page.getByTestId('wh-tab-picking').click();
+  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
+  await page.getByTestId('wh-bind-cell').fill(routeCell);
+  await page.getByTestId('wh-bind-submit').click();
+  await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
+
+  await page.getByTestId('wh-pick-camera').click();
+  await scan(firstOrder, async () => {
+    await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+  });
+
+  // Чужая ячейка отказывает и ничего не переносит.
+  await scan(storageCell, async () => {
+    await expect(page.getByTestId('scan-error')).toBeVisible();
+  });
+  await page.getByTestId('scan-retry').click();
+  await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+
+  await scan(routeCell, async () => {
+    await expect(success).toContainText(firstOrder);
+  });
+  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
+
+  // Второй заказ — новая пара и новое нажатие.
+  await page.getByTestId('wh-pick-camera').click();
+  await scan(secondOrder, async () => {
+    await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+  });
+  await scan(routeCell, async () => {
+    await expect(success).toContainText(secondOrder);
+  });
+  await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
+
+  // 3. Выдача: курьер подтверждается до камеры, сессия одна на весь лист.
+  await page.getByTestId('wh-tab-issue').click();
+  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
+  await expect(page.getByTestId('wh-issue-camera')).toHaveCount(0);
+  await page.getByTestId('wh-confirm-courier').click();
+
+  await page.getByTestId('wh-issue-camera').click();
+  await scan(firstOrder, async () => {
+    await expect(success).toContainText('1 из 2');
+  });
+  // Камера не закрылась между заказами.
+  await expect(hint).toHaveText('Сканируйте QR заказа');
+  expect(await cameraRunning()).toBe(true);
+
+  // Повтор того же заказа честно сообщает, что он уже выдан, и не двигает счётчик.
+  await scan(firstOrder, async () => {
+    await expect(success).toContainText('уже был выдан: 1 из 2');
+  });
+
+  await scan(secondOrder, async () => {
+    await expect(success).toContainText('2 из 2');
+  });
+
+  // Последний заказ закрыл сессию: экран вернулся к листу, маршрут ACTIVE.
+  await expect(page.locator('[data-testid="wh-route-card"]')).toHaveAttribute(
+    'data-route-state',
+    'ACTIVE',
+  );
+  expect(await cameraRunning()).toBe(false);
 });
