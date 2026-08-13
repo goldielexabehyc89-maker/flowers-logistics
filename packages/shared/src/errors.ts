@@ -172,6 +172,10 @@ export const CONFLICT_KINDS = [
   'ORDER_NOT_PICKUP',
   /** Самовывозный заказ уже выдан покупателю. */
   'PICKUP_ALREADY_ISSUED',
+  /** У заказа нет локальной правки адреса: снимать нечего. */
+  'ADDRESS_NOT_CORRECTED',
+  /** У заказа нет расхождения адресов: решать нечего. */
+  'ADDRESS_NO_CONFLICT',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

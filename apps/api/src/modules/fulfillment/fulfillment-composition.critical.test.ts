@@ -61,6 +61,16 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await ctx.db.integrationCursor.deleteMany({ where: { provider: PROVIDER } });
+  /*
+   * Замок прохода принадлежит ТЕСТУ, а не файлу.
+   *
+   * `heldLocks` живёт в модуле, а освобождает его `finally` внутри прохода.
+   * Тест, прерванный по своему таймауту, до этого `finally` не доходит — и
+   * дальше каждый `runSyncOnce` молча возвращает «занято», ничего не
+   * импортируя. Один медленный тест превращался в цепочку чужих отказов
+   * «заказ не найден», по которым настоящую причину не видно вовсе.
+   */
+  heldLocks.clear();
 });
 
 // --- Фикстуры ---------------------------------------------------------------
@@ -73,6 +83,11 @@ interface PositionSpec {
   name?: string;
   /** Версия номенклатуры: для бандла это ключ кэша компонентов. */
   updated?: string | null;
+  /**
+   * Ссылка на единицу измерения — ровно так, как её отдаёт живой API:
+   * `meta.href` без названия. Название приходит только справочником.
+   */
+  uomId?: string;
   /** Лишние ключи ответа: они не должны никуда попасть. */
   extra?: Record<string, unknown>;
 }
@@ -85,6 +100,9 @@ function positionRow(spec: PositionSpec = {}): Record<string, unknown> {
     name: spec.name ?? 'Роза красная',
     meta: { href: href(type, assortmentId), type },
     ...(spec.updated === null ? {} : { updated: spec.updated ?? '2026-08-01 10:00:00.000' }),
+    ...(spec.uomId === undefined
+      ? {}
+      : { uom: { meta: { href: href('uom', spec.uomId), type: 'uom' } } }),
   };
 
   return {
@@ -195,6 +213,8 @@ interface FakeApi {
   fetch: typeof globalThis.fetch;
   /** Сколько раз запрошены компоненты конкретного бандла. */
   bundleCalls: (bundleId: string) => number;
+  /** Сколько раз запрошен справочник единиц измерения за весь проход. */
+  unitCalls: () => number;
 }
 
 interface FakeApiSpec {
@@ -203,6 +223,11 @@ interface FakeApiSpec {
   positions?: Record<string, { rows: Record<string, unknown>[]; size?: number }>;
   /** Компоненты по идентификатору бандла. */
   components?: Record<string, { rows: Record<string, unknown>[]; size?: number }>;
+  /**
+   * Справочник единиц измерения. По умолчанию пуст: у большинства проверок
+   * единицы нет, и это штатное состояние состава.
+   */
+  units?: { rows: Record<string, unknown>[]; size?: number };
   /** Пути, отвечающие ошибкой. */
   failPath?: (path: string) => boolean;
 }
@@ -246,6 +271,13 @@ function fakeApi(spec: FakeApiSpec): FakeApi {
       return json({ rows: entry.rows, meta: { size: entry.size ?? entry.rows.length } });
     }
 
+    // Справочник единиц — СВОЙ адрес. Без этой ветки он попадал бы в общую
+    // выдачу страниц заказов и молча съедал очередную страницу списка.
+    if (/\/entity\/uom$/i.test(path)) {
+      const entry = spec.units ?? { rows: [] };
+      return json({ rows: entry.rows, meta: { size: entry.size ?? entry.rows.length } });
+    }
+
     const page = pages[listCalls] ?? [];
     listCalls += 1;
     return json({ rows: page, meta: { size: total } });
@@ -257,6 +289,7 @@ function fakeApi(spec: FakeApiSpec): FakeApi {
     bundleCalls: (bundleId) =>
       calls.filter((call) => call.path === `/api/remap/1.2/entity/bundle/${bundleId}/components`)
         .length,
+    unitCalls: () => calls.filter((call) => call.path === '/api/remap/1.2/entity/uom').length,
   };
 }
 
@@ -547,6 +580,181 @@ describe('сохранение производственного состава
     expect(positions).toHaveLength(1);
     expect(positions[0]?.assortmentKind).toBe('OTHER');
     expect(positions[0]?.assortmentId).toBeNull();
+  });
+});
+
+// --- Единицы измерения ------------------------------------------------------
+
+/**
+ * Единица измерения количества.
+ *
+ * Проверяется не «поле сохранилось», а три решения, ошибка в которых стоит
+ * собранного не того букета либо потерянного дня общего лимита аккаунта:
+ * единица приходит ССЫЛКОЙ и разворачивается ОДНИМ справочником на проход;
+ * отказ справочника не отменяет состав; догадка вместо факта не подставляется.
+ */
+describe('единица измерения количества', () => {
+  const PIECE = randomUUID();
+  const METRE = randomUUID();
+
+  const unitRows = [
+    // Обозначение и полное название приходят разными полями: на бланке нужно
+    // короткое обозначение.
+    { id: PIECE, name: 'Штука', description: 'шт', code: '796', externalCode: 'PCS' },
+    // У этой единицы обозначения нет вовсе — остаётся только название.
+    { id: METRE, name: 'Метр' },
+  ];
+
+  it('единица приходит ссылкой, а название — одним справочником на весь проход', async () => {
+    const bundleId = randomUUID();
+    const order = orderRow({
+      positions: [
+        positionRow({ quantity: 2, name: 'Роза', uomId: PIECE }),
+        positionRow({ quantity: 0.5, name: 'Лента', uomId: METRE }),
+        positionRow({ type: 'bundle', assortmentId: bundleId, quantity: 1, uomId: PIECE }),
+        // Позиция без единицы вовсе: состав от этого неполным не становится.
+        positionRow({ quantity: 3, name: 'Упаковка' }),
+      ],
+    });
+
+    const api = fakeApi({
+      pages: [[order]],
+      units: { rows: unitRows },
+      components: {
+        [bundleId]: {
+          rows: [
+            componentRow({ quantity: 11, name: 'Пион', uomId: PIECE }),
+            componentRow({ quantity: 1.5, name: 'Фоамиран', uomId: METRE }),
+          ],
+        },
+      },
+    });
+
+    await runSyncOnce(deps(api));
+
+    const stored = await storedOrder(order['id'] as string);
+    const positions = await storedPositions(stored.id);
+
+    // Обозначение предпочитается названию, а название берётся только тогда,
+    // когда обозначения нет. Отсутствующая единица остаётся пустой.
+    expect(positions.map((p) => p.uomName)).toEqual(['шт', 'Метр', 'шт', null]);
+    expect(positions.map((p) => p.uomId)).toEqual([PIECE, METRE, PIECE, null]);
+    expect(positions[3]?.quantity.toString()).toBe('3');
+
+    // Компоненты бандла получают единицу по тем же правилам: половина состава
+    // с единицами и половина без них читалась бы как разные документы.
+    const components = positions[2]?.components ?? [];
+    expect(components.map((c) => c.uomName)).toEqual(['шт', 'Метр']);
+    expect(components.map((c) => c.uomId)).toEqual([PIECE, METRE]);
+
+    // ГЛАВНОЕ: справочник прочитан ОДИН раз на шесть строк состава. Запрос на
+    // строку превратил бы день мастерской в тысячи обращений к общему лимиту.
+    expect(api.unitCalls()).toBe(1);
+  });
+
+  it('отказ справочника сохраняет количество без единицы и не повторяет запрос', async () => {
+    const order = orderRow({
+      positions: [
+        positionRow({ quantity: 2, name: 'Роза', uomId: PIECE }),
+        positionRow({ quantity: 4, name: 'Хризантема', uomId: PIECE }),
+        positionRow({ quantity: 6, name: 'Гвоздика', uomId: METRE }),
+      ],
+    });
+
+    const api = fakeApi({
+      pages: [[order]],
+      units: { rows: unitRows },
+      failPath: (path) => path.endsWith('/entity/uom'),
+    });
+
+    await runSyncOnce(deps(api));
+
+    const stored = await storedOrder(order['id'] as string);
+    // Состав ПРИГОДЕН: единица — уточнение, а не условие существования заказа.
+    expect(stored.fulfillmentCompositionState).toBe('READY');
+
+    const positions = await storedPositions(stored.id);
+    expect(positions.map((p) => p.quantity.toString())).toEqual(['2', '4', '6']);
+    expect(positions.map((p) => p.uomName)).toEqual([null, null, null]);
+    // Ссылка сохраняется даже без названия: следующий успешный проход
+    // достроит обозначение, не потеряв связь с каталогом.
+    expect(positions.map((p) => p.uomId)).toEqual([PIECE, PIECE, METRE]);
+
+    // Заведомо неудачный запрос не повторяется на каждой позиции прохода.
+    expect(api.unitCalls()).toBe(1);
+  });
+
+  it('следующий успешный проход достраивает единицу новой ревизией', async () => {
+    const orderId = randomUUID();
+    const position = positionRow({ quantity: 2, name: 'Роза', uomId: PIECE });
+
+    const failing = fakeApi({
+      pages: [[orderRow({ id: orderId, positions: [position] })]],
+      units: { rows: unitRows },
+      failPath: (path) => path.endsWith('/entity/uom'),
+    });
+    await runSyncOnce(deps(failing));
+
+    const first = await storedOrder(orderId);
+    const firstHash = first.fulfillmentSnapshotHash;
+
+    const working = fakeApi({
+      pages: [
+        [orderRow({ id: orderId, updated: '2026-08-20 12:00:00.000', positions: [position] })],
+      ],
+      units: { rows: unitRows },
+    });
+    await runSyncOnce(deps(working, new Date('2026-08-20T12:30:00.000Z')));
+
+    const second = await storedOrder(orderId);
+    // Появившаяся единица — изменение позиции: канонический хеш обязан
+    // измениться, иначе «2» и «2 шт» считались бы одним и тем же составом.
+    expect(second.fulfillmentSnapshotHash).not.toBe(firstHash);
+    expect((await storedPositions(second.id))[0]?.uomName).toBe('шт');
+
+    const revisions = await ctx.db.orderFulfillmentRevision.findMany({
+      where: { orderId: second.id },
+      orderBy: { receivedAt: 'asc' },
+      select: { snapshot: true },
+    });
+    expect(revisions).toHaveLength(2);
+  });
+
+  it('из справочника сохраняются только ссылка и обозначение', async () => {
+    const order = orderRow({ positions: [positionRow({ quantity: 1, uomId: PIECE })] });
+    await runSyncOnce(deps(fakeApi({ pages: [[order]], units: { rows: unitRows } })));
+
+    const stored = await storedOrder(order['id'] as string);
+    const revision = await ctx.db.orderFulfillmentRevision.findFirstOrThrow({
+      where: { orderId: stored.id },
+      select: { snapshot: true },
+    });
+
+    const snapshot = revision.snapshot as unknown as FulfillmentSnapshot;
+    // Порядок ключей в `jsonb` не сохраняется — его доказывает канонический
+    // JSON. Здесь важен СОСТАВ: лишнего поля каталога в снимке быть не должно.
+    expect([...Object.keys(snapshot.positions[0] ?? {})].sort()).toEqual(
+      [
+        'externalPositionId',
+        'ordinal',
+        'assortmentId',
+        'assortmentKind',
+        'assortmentKindRaw',
+        'name',
+        'quantity',
+        'uomId',
+        'uomName',
+        'characteristicLabel',
+        'components',
+      ].sort(),
+    );
+
+    // Ни кода ОКЕИ, ни внешнего кода, ни полного названия каталога в снимке
+    // нет: хранить непоказываемое — значит однажды показать его случайно.
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized).not.toContain('796');
+    expect(serialized).not.toContain('PCS');
+    expect(serialized).not.toContain('Штука');
   });
 });
 
@@ -1473,6 +1681,18 @@ describe('подтверждённый снимок не смешивается 
 });
 
 describe('область и запрос состава', () => {
+  /*
+   * Три прохода подряд, и последний из них — контрольная сверка.
+   *
+   * Сверка по своей природе читает ВСЕ заказы окна, а тестовая база общая на
+   * весь критический набор: её наполняют и соседние файлы. Поэтому стоимость
+   * этого теста растёт вместе с набором и упирается в пятисекундное умолчание,
+   * хотя проверяет он одно — что все три пути чтения просят `expand` состава.
+   *
+   * Срок задан явно, как у других заведомо дорогих проверок этого раздела.
+   * Ослабления здесь нет: ни одно утверждение не смягчено, а прежний отказ
+   * был отказом по времени чтения чужих строк, а не по существу.
+   */
   it('состав запрашивается на всех путях чтения заказов', async () => {
     const expandOf = (api: FakeApi) =>
       api.calls
@@ -1496,7 +1716,7 @@ describe('область и запрос состава', () => {
       allowReconciliation: true,
     });
     expect(expandOf(reconciliation).every((e) => e === 'state,positions.assortment')).toBe(true);
-  });
+  }, 60_000);
 
   it('самовывоз утверждённого склада получает состав наравне с доставкой', async () => {
     const order = orderRow({ pickup: true, positions: [positionRow({ name: 'Роза' })] });

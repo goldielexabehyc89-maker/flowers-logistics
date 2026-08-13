@@ -67,6 +67,11 @@ export const AUDIT_ACTIONS = [
   'ORDER_GEO_RESOLVED',
   'ORDER_GEO_LOW_PRECISION',
   'ORDER_GEO_FAILED',
+  // Локальная правка адреса. Самих адресов здесь нет намеренно: они
+  // персональные и живут только в профильной истории OrderAddressHistory.
+  'ORDER_ADDRESS_CORRECTED',
+  'ORDER_ADDRESS_CLEARED',
+  'ORDER_ADDRESS_CONFLICT_RESOLVED',
   // Склады. В аудит попадают название, координаты и признаки — адресов клиентов
   // здесь нет, а адрес склада является служебным и персональным не считается.
   'DEPOT_CREATED',

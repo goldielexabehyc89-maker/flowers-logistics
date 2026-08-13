@@ -116,6 +116,10 @@ model User {
   routeEditLeases    RouteEditLease[]
   geoChanges         OrderGeoHistory[]
 
+  /// Локальные правки адреса: авторство правки и записи её истории.
+  correctedAddresses  DeliveryOrder[]       @relation("OrderLocalAddressAuthor")
+  addressHistoryItems OrderAddressHistory[] @relation("OrderAddressHistoryActor")
+
   floristShifts       FloristShift[]  @relation("FloristShiftUser")
   closedFloristShifts FloristShift[]  @relation("FloristShiftClosedBy")
   assignedFulfillment DeliveryOrder[] @relation("OrderFulfillmentAssignee")
@@ -429,6 +433,25 @@ enum OrderAttentionReason {
   MISSING_ADDRESS
   MISSING_RECIPIENT
   CASH_OVERPAYMENT
+  /// Исходный адрес МоегоСклада изменился при действующей локальной правке.
+  /// Значение добавлено В КОНЕЦ: вставка в середину сдвинула бы уже записанные
+  /// строки, и прежний код прочитал бы не то, что записывал.
+  ADDRESS_CONFLICT
+}
+
+/// Что произошло с адресом заказа. Причина изменения не требуется решением
+/// владельца, поэтому в истории её нет — есть действие, значения и автор.
+enum OrderAddressAction {
+  /// Логист задал или заменил локальный адрес.
+  LOCAL_ADDRESS_SET
+  /// Логист снял локальную правку: рабочим снова становится исходный адрес.
+  LOCAL_ADDRESS_CLEARED
+  /// Синхронизация обнаружила расхождение с источником.
+  SOURCE_CONFLICT_DETECTED
+  /// Человек решил оставить локальный адрес.
+  CONFLICT_RESOLVED_KEEP_LOCAL
+  /// Человек решил принять новый адрес МоегоСклада.
+  CONFLICT_RESOLVED_USE_SOURCE
 }
 
 /// Почему заказ перестал относиться к нашей области.
@@ -509,7 +532,42 @@ model DeliveryOrder {
   manualIntervalSetAt       DateTime?
 
   /// Адрес только из `shipmentAddress`; резервных источников нет.
+  ///
+  /// Этим полем владеет синхронизация МоегоСклада. Локальная правка его НЕ
+  /// перезаписывает: иначе следующий проход синхронизации молча вернул бы
+  /// прежнее значение, а логист не узнал бы, что его работа исчезла.
   address   String?
+
+  /// Локально исправленный логистом адрес.
+  ///
+  /// Пока он задан, рабочим («эффективным») считается именно он: список, карта,
+  /// геокодирование, матрица и маршрут используют его, а не исходный. Обратной
+  /// отправки в МойСклад ещё нет, и делать вид, что она произошла, нельзя —
+  /// поэтому исходное поле остаётся нетронутым (`docs/OWNER_DECISIONS.md`,
+  /// `LOG-001`).
+  localAddress String?
+  /// Кто и когда исправил. Заполняются только вместе с самим адресом:
+  /// «адрес есть, автора нет» — состояние, которого не должно существовать.
+  localAddressSetAt   DateTime?
+  localAddressSetById String?   @db.Uuid
+  localAddressSetBy   User?     @relation("OrderLocalAddressAuthor", fields: [localAddressSetById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Каким был исходный адрес в момент локальной правки.
+  ///
+  /// Это опора сравнения, а не копия «на всякий случай»: конфликт — это
+  /// изменение источника ПОСЛЕ правки, и без снимка того, что логист видел,
+  /// отличить его от первой же синхронизации невозможно.
+  sourceAddressAtLocalEdit String?
+
+  /// Источник изменился при действующей локальной правке.
+  ///
+  /// Заказ не выбирается в маршрут, пока человек не решит, какое значение
+  /// верное. Молча выбрать одно из двух нельзя: оба могут быть правильными.
+  addressConflict           Boolean   @default(false)
+  addressConflictDetectedAt DateTime?
+
+  /// Неизменяемая история локального адреса и разрешения конфликтов.
+  addressHistory OrderAddressHistory[]
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
   recipient String?
   /// Только «Комментарий по доставке». Необязателен.
@@ -788,6 +846,16 @@ model DeliveryOrderPosition {
   /// в букете — обычное дело, а `float` теряет его молча.
   quantity Decimal @db.Decimal(20, 6)
 
+  /// Единица измерения на момент снимка: стабильный внешний UUID и то
+  /// обозначение, которое было получено тогда.
+  ///
+  /// Оба поля nullable. У номенклатуры единицы может не быть, справочник может
+  /// оказаться недоступным — тогда показывается одно число. Подставлять «шт.»
+  /// по умолчанию или выводить единицу из названия позиции запрещено: догадка
+  /// выглядит как факт и уводит сборку.
+  uomId   String? @db.Uuid
+  uomName String?
+
   /// Отображаемая характеристика модификации. Всегда пусто до подтверждения
   /// живого контракта: сырой JSON МоегоСклада здесь хранить запрещено.
   characteristicLabel String?
@@ -820,6 +888,10 @@ model DeliveryOrderPositionComponent {
   assortmentKindRaw String?
   name              String?
   quantity          Decimal                   @db.Decimal(20, 6)
+  /// Единица измерения компонента. Правила те же, что у позиции: состав
+  /// не должен показывать часть количеств с единицами, а часть без них.
+  uomId             String?                   @db.Uuid
+  uomName           String?
 
   createdAt DateTime @default(now())
 
@@ -1542,6 +1614,38 @@ model OrderGeoHistory {
   /// Автор. Пусто у системной инвалидации: её выполняет синхронизация.
   actorUserId String? @db.Uuid
   actor       User?   @relation(fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([orderId, occurredAt])
+}
+
+/// Неизменяемая история локального адреса заказа.
+///
+/// Отдельно от общего `AuditLog` намеренно: адрес — персональные данные, и
+/// дублировать его в журнал, который читают все административные экраны,
+/// realtime и логи, нельзя. Полная история доступна только `ADMIN` и
+/// `LOGISTICIAN` через профильный API.
+///
+/// `UPDATE` и `DELETE` запрещены триггером: история, которую можно поправить,
+/// доказательством не является. Причина изменения не запрашивается — решение
+/// владельца (`docs/OWNER_DECISIONS.md`, `LOG-001`).
+model OrderAddressHistory {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  action     OrderAddressAction
+  occurredAt DateTime           @default(now())
+
+  /// Прежнее и новое значения ЭФФЕКТИВНОГО адреса: именно его видит логист.
+  oldAddress String?
+  newAddress String?
+  /// Каким был исходный адрес МоегоСклада в этот момент.
+  sourceAddress String?
+
+  /// Автор. Пусто у системного обнаружения конфликта: его находит синхронизация.
+  actorUserId String? @db.Uuid
+  actor       User?   @relation("OrderAddressHistoryActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([orderId, occurredAt])
 }

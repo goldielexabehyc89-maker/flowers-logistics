@@ -55,6 +55,43 @@ export const assortmentSchema = z.object({
    * при его отсутствии кэш компонентов переиспользовать нельзя.
    */
   updated: z.string().min(1).optional(),
+  /**
+   * Единица измерения — ССЫЛКА, а не развёрнутый объект.
+   *
+   * В ответе позиции приходит только `meta.href`, откуда берётся идентификатор.
+   * Название единицы здесь отсутствует и запрашивается ОДНИМ справочником
+   * на проход: запрос на каждую позицию превратил бы сотню строк состава
+   * в сотню обращений к чужому общему лимиту.
+   *
+   * Поле необязательное: у номенклатуры единицы может не быть вовсе, и это
+   * не делает состав неполным.
+   */
+  uom: z.object({ meta: metaSchema.optional() }).optional(),
+});
+
+/**
+ * Единица измерения из справочника `/entity/uom`.
+ *
+ * Берутся только идентификатор и то, что показывается человеку. Полное
+ * описание, код ОКЕИ, признаки и служебные ссылки не читаются: карточка и бланк
+ * их не показывают, а хранить непоказываемое незачем.
+ */
+export const uomSchema = z.object({
+  id: uuidLike,
+  name: z.string().optional(),
+  /** Краткое обозначение: «шт», «м», «кг». Именно оно уходит в снимок. */
+  description: z.string().optional(),
+});
+
+export type MoyskladUomDto = z.infer<typeof uomSchema>;
+
+export const uomPageSchema = z.object({
+  rows: z.array(uomSchema),
+  meta: z.object({
+    size: z.number().int().min(0),
+    limit: z.number().optional(),
+    offset: z.number().optional(),
+  }),
 });
 
 export type MoyskladAssortmentDto = z.infer<typeof assortmentSchema>;

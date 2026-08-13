@@ -46,6 +46,16 @@ export interface FulfillmentComponentSnapshot {
   name: string | null;
   /** Десятичная строка: `number` для количества теряет дробную часть на округлении. */
   quantity: string;
+  /**
+   * Единица измерения на момент снимка.
+   *
+   * Хранятся оба значения: стабильный внешний UUID и то обозначение, которое
+   * было получено ТОГДА. Название в каталоге переименовывают, а бланк обязан
+   * печататься тем же, чем печатался. Оба поля nullable: у номенклатуры единицы
+   * может не быть, и это не делает состав неполным — показывается одно число.
+   */
+  uomId: string | null;
+  uomName: string | null;
 }
 
 export interface FulfillmentPositionSnapshot {
@@ -56,6 +66,8 @@ export interface FulfillmentPositionSnapshot {
   assortmentKindRaw: string | null;
   name: string | null;
   quantity: string;
+  uomId: string | null;
+  uomName: string | null;
   /**
    * Отображаемая характеристика модификации.
    *
@@ -92,6 +104,8 @@ const POSITION_KEYS: (keyof FulfillmentPositionSnapshot)[] = [
   'assortmentKindRaw',
   'name',
   'quantity',
+  'uomId',
+  'uomName',
   'characteristicLabel',
   'components',
 ];
@@ -104,6 +118,8 @@ const COMPONENT_KEYS: (keyof FulfillmentComponentSnapshot)[] = [
   'assortmentKindRaw',
   'name',
   'quantity',
+  'uomId',
+  'uomName',
 ];
 
 /** Канонический JSON: ключи в фиксированном порядке на всех трёх уровнях. */

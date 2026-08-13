@@ -1,5 +1,5 @@
 /**
- * Карточка сборки заказа.
+ * Содержимое карточки сборки. Живёт внутри модального окна (`FloristScreen`).
  *
  * Показывается ровно то, что утвердил владелец: номер, московские дата и
  * интервал, состав с бандлами и компонентами, «Текст открытки» и нижний
@@ -7,8 +7,9 @@
  * здесь нет — карточка флориста намеренно не является карточкой заказа.
  *
  * ФОТО. Загружается отдельным запросом при открытии и НЕ сохраняется: ни в
- * состоянии приложения, ни в кэше. Недоступное фото карточку не ломает —
- * на его месте остаётся честное «Фото отсутствует».
+ * состоянии приложения, ни в кэше. Отсутствующее и недоступное фото не
+ * оставляет после себя ни надписи, ни пустого прямоугольника: отсутствие
+ * фотографии — обычное состояние, а не сообщение, которое стоит читать.
  *
  * ОШИБКА НЕ ОСТАВЛЯЕТ ЛОЖНОГО СОСТОЯНИЯ. Ни одно действие не меняет карточку
  * «оптимистично»: экран перерисовывается только после ответа сервера, а отказ
@@ -18,12 +19,13 @@
 
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
-import { Button, StatusBadge } from '../../ui/components';
+import { Button, Modal, StatusBadge } from '../../ui/components';
 import {
   EMPTY_VALUE,
   availableActions,
   formatDay,
   formatInterval,
+  formatQuantity,
   latestJob,
   printStateLabel,
   processLabel,
@@ -34,20 +36,29 @@ import {
 
 interface PhotoProps {
   assortmentId: string | null;
+  /** Название позиции: alt обязан связывать фото с тем, что человек собирает. */
+  positionName: string;
 }
 
 /**
- * Фотография позиции.
+ * Фотография позиции: миниатюра и окно поверх карточки.
  *
  * Обычный `<img src>` здесь непригоден: запрос ушёл бы без заголовка
  * авторизации и получил бы 401, а токен в адресе оказался бы в истории
  * браузера и журналах прокси. Поэтому байты забираются запросом и живут
  * только временной ссылкой, которая освобождается при закрытии карточки.
+ *
+ * ПОКА ФОТО НЕТ — НЕТ И МЕСТА ПОД НЕГО. Ни надписи, ни рамки, ни
+ * зарезервированной высоты: у большинства позиций фотографии не существует
+ * вовсе, и пустой прямоугольник у каждой строки растягивал бы состав втрое
+ * ради сообщения «ничего нет».
+ *
+ * Внешний адрес источника не показывается нигде — ни в `src`, ни в `alt`.
  */
-function PositionPhoto({ assortmentId }: PhotoProps): React.JSX.Element | null {
+function PositionPhoto({ assortmentId, positionName }: PhotoProps): React.JSX.Element | null {
   const { client } = useAuth();
   const [url, setUrl] = useState<string | null>(null);
-  const [missing, setMissing] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
 
   useEffect(() => {
     if (assortmentId === null) {
@@ -61,6 +72,8 @@ function PositionPhoto({ assortmentId }: PhotoProps): React.JSX.Element | null {
       .getBlob(`/api/florist/assortment/${assortmentId}/photo`, 'image/*')
       .then((blob) => {
         if (revoked) {
+          // Карточка успела закрыться: ссылку создавать незачем, а созданную
+          // никто бы уже не освободил.
           return;
         }
         objectUrl = URL.createObjectURL(blob);
@@ -68,9 +81,7 @@ function PositionPhoto({ assortmentId }: PhotoProps): React.JSX.Element | null {
       })
       .catch(() => {
         // Отсутствующее или недоступное фото — штатное состояние карточки.
-        if (!revoked) {
-          setMissing(true);
-        }
+        // Отдельного видимого состояния у него нет по решению владельца.
       });
 
     return () => {
@@ -81,34 +92,56 @@ function PositionPhoto({ assortmentId }: PhotoProps): React.JSX.Element | null {
     };
   }, [assortmentId, client]);
 
-  if (assortmentId === null) {
+  if (url === null) {
     return null;
   }
 
-  if (missing || url === null) {
-    return (
-      <div className="florist__photo florist__photo--empty" data-testid="position-photo-empty">
-        {missing ? 'Фото отсутствует' : 'Загружаем фото…'}
-      </div>
-    );
-  }
+  const alt = `Фотография позиции «${positionName}»`;
 
   return (
-    <img
-      className="florist__photo"
-      src={url}
-      alt="Фотография позиции"
-      data-testid="position-photo"
-    />
+    <>
+      <button
+        type="button"
+        className="florist__photo-thumb"
+        data-testid="position-photo"
+        aria-label={`Открыть фотографию позиции «${positionName}»`}
+        onClick={() => setZoomed(true)}
+      >
+        <img src={url} alt={alt} />
+      </button>
+
+      {/*
+       * Отдельное окно ПОВЕРХ карточки, а не вместо неё.
+       *
+       * Второй `showModal()` встаёт выше первого, поэтому Escape и крестик
+       * закрывают только фотографию: карточка остаётся открытой со всем своим
+       * состоянием, а фокус возвращается на ту миниатюру, которую нажали.
+       */}
+      <Modal
+        open={zoomed}
+        title={positionName}
+        onClose={() => setZoomed(false)}
+        dismissOnBackdrop
+        className="modal--wide"
+        testId="position-photo-dialog"
+      >
+        <img className="florist__photo-full" src={url} alt={alt} />
+      </Modal>
+    </>
   );
 }
 
 function Position({ position }: { position: CardPositionView }): React.JSX.Element {
+  const name = position.name ?? 'без названия';
+
   return (
     <li className="florist__position" data-testid="card-position">
       <div className="florist__position-head">
-        <span className="florist__position-qty">{position.quantity}</span>
-        <span className="florist__position-name">{position.name ?? 'без названия'}</span>
+        <PositionPhoto assortmentId={position.assortmentId} positionName={name} />
+        <span className="florist__position-qty" data-testid="position-quantity">
+          {formatQuantity(position.quantity, position.uomName)}
+        </span>
+        <span className="florist__position-name">{name}</span>
         {position.characteristicLabel !== null && (
           <span className="muted text-sm">{position.characteristicLabel}</span>
         )}
@@ -119,13 +152,12 @@ function Position({ position }: { position: CardPositionView }): React.JSX.Eleme
         <ul className="florist__components">
           {position.components.map((component, index) => (
             <li key={`${component.name ?? 'component'}-${index}`}>
-              {component.quantity} × {component.name ?? 'без названия'}
+              {formatQuantity(component.quantity, component.uomName)} ×{' '}
+              {component.name ?? 'без названия'}
             </li>
           ))}
         </ul>
       )}
-
-      <PositionPhoto assortmentId={position.assortmentId} />
     </li>
   );
 }
@@ -137,7 +169,6 @@ export interface OrderCardPanelProps {
   hasActiveShift: boolean;
   florists: FloristOption[];
   busy: boolean;
-  onClose: () => void;
   onClaim: () => void;
   onRelease: () => void;
   onAssemble: () => void;
@@ -162,22 +193,14 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
   const [target, setTarget] = useState('');
 
   return (
-    <section className="florist__card card stack" data-testid="florist-card">
+    <div className="stack" data-testid="florist-card">
       <header className="florist__card-head">
-        <div>
-          <h2>{card.number}</h2>
-          <p className="muted text-sm">
-            {formatDay(card.deliveryDate)} · {formatInterval(card)}
-          </p>
-        </div>
-        <div className="row">
-          <StatusBadge tone={card.process.state === 'NEEDS_REVIEW' ? 'warning' : 'info'}>
-            {processLabel(card.process.state)}
-          </StatusBadge>
-          <Button variant="ghost" onClick={props.onClose}>
-            Закрыть
-          </Button>
-        </div>
+        <p className="muted text-sm">
+          {formatDay(card.deliveryDate)} · {formatInterval(card)}
+        </p>
+        <StatusBadge tone={card.process.state === 'NEEDS_REVIEW' ? 'warning' : 'info'}>
+          {processLabel(card.process.state)}
+        </StatusBadge>
       </header>
 
       {card.changedSinceClaim && (
@@ -222,7 +245,12 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
 
       <div className="row florist__actions">
         {actions.canClaim && (
-          <Button variant="primary" disabled={props.busy} onClick={props.onClaim}>
+          <Button
+            variant="primary"
+            disabled={props.busy}
+            data-testid="card-claim"
+            onClick={props.onClaim}
+          >
             Взять в работу
           </Button>
         )}
@@ -318,6 +346,6 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
           </Button>
         </div>
       )}
-    </section>
+    </div>
   );
 }

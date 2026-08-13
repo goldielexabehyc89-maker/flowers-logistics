@@ -27,13 +27,28 @@
  * ПОИСК ПО НОМЕРУ сужает ту же выборку, а не открывает новую: день и область
  * видимости остаются условием запроса, поэтому найти чужой день или чужой
  * заказ поиском невозможно.
+ *
+ * «МОИ ЗАКАЗЫ» — ДВЕ ОБЛАСТИ, А НЕ ОДИН СПИСОК (`FUL-008`).
+ *
+ * Работа (`IN_ASSEMBLY`, `NEEDS_REVIEW`) и собранные (`ASSEMBLED`) читаются
+ * РАЗНЫМИ запросами со своей страницей каждый, а счётчик собранных считается
+ * базой. Отфильтровать всё `mine` в браузере было бы неверно вдвойне: страница
+ * из пятидесяти строк дала бы счётчик «собранных» по загруженному куску, а не
+ * по дню, и заказ за границей страницы просто не существовал бы. Свёрнутая
+ * группа не запрашивается вовсе — только её точное число.
  */
 
 import { moscowToday, shiftCalendarDate } from '@fl/shared';
 import type { Database } from '../../platform/db.js';
 import type { OrderFulfillmentProcessState } from '../../generated/prisma/enums.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { normalizePageRequest, takePage, type PageInfo, type PageRequest } from './paging.js';
+import {
+  normalizePageRequest,
+  pageInfo,
+  takePage,
+  type PageInfo,
+  type PageRequest,
+} from './paging.js';
 import {
   effectiveMinutes,
   isOverdue,
@@ -51,6 +66,14 @@ export type QueueDay = 'today' | 'tomorrow';
 export type QueueScope = 'general' | 'mine';
 
 /**
+ * Область внутри «Моих заказов»: работа или уже собранное.
+ *
+ * Для общей очереди значение всегда `work`: собранный заказ в неё не попадает
+ * ни при какой галочке.
+ */
+export type QueueGroup = 'work' | 'assembled';
+
+/**
  * Состояния, которые считаются незавершённой работой.
  *
  * `ASSEMBLED` сюда не входит: собранный заказ из очереди сборки уходит —
@@ -59,8 +82,14 @@ export type QueueScope = 'general' | 'mine';
  */
 const UNFINISHED_STATES = ['NEW', 'IN_ASSEMBLY', 'NEEDS_REVIEW'] as const;
 
-/** Состояния «Моих заказов»: всё, что закреплено за флористом прямо сейчас. */
-const MINE_STATES = ['IN_ASSEMBLY', 'ASSEMBLED', 'NEEDS_REVIEW'] as const;
+/**
+ * Рабочая область «Моих заказов».
+ *
+ * `NEEDS_REVIEW` здесь, а не среди собранных: изменившийся после сборки заказ
+ * не завершён, и спрятать его в свёрнутую группу значило бы скрыть требующую
+ * действия работу за один клик от глаз (`FUL-008`).
+ */
+const MINE_WORK_STATES = ['IN_ASSEMBLY', 'NEEDS_REVIEW'] as const;
 
 export interface QueueItem {
   id: string;
@@ -83,15 +112,29 @@ export interface QueueResult extends PageInfo {
   /** Календарная дата Москвы, к которой относится представление. */
   deliveryDate: string;
   scope: QueueScope;
+  group: QueueGroup;
   includeAssigned: boolean;
   /** Применённый поиск по номеру: клиент показывает его как действующий фильтр. */
   search: string | null;
+  /**
+   * Сколько собранных заказов у флориста в этом дне (и при этом поиске).
+   *
+   * Считается базой и приходит в ОБОИХ ответах области `mine`, в том числе
+   * когда группа свёрнута и её строки не запрашивались вовсе. Без этого числа
+   * заголовок «Собранные» пришлось бы либо считать по загруженной странице,
+   * либо не показывать вовсе — и собранный заказ исчезал бы бесследно.
+   *
+   * `null` для общей очереди: там собранных нет по определению.
+   */
+  assembledTotal: number | null;
   items: QueueItem[];
 }
 
 export interface QueueQuery extends Partial<PageRequest> {
   day: QueueDay;
   scope: QueueScope;
+  /** Работа или собранные. Имеет смысл только для области `mine`. */
+  group?: QueueGroup;
   /** Галочка «Все»: добавить к общей очереди уже назначенные заказы. */
   includeAssigned: boolean;
   /**
@@ -175,6 +218,38 @@ function orderSelect(date: string) {
  * страницы. Ответ содержит `total` и `hasMore`, поэтому клиенту не приходится
  * угадывать, есть ли продолжение, по числу полученных строк.
  */
+/**
+ * Общая часть условия обеих областей: день, производственная область и поиск.
+ *
+ * Одно место намеренно: рабочий список, страница собранных и счётчик собранных
+ * обязаны отбирать заказы по одинаковым правилам. Разойдись они хоть в одном
+ * условии — счётчик показал бы одно число, а раскрытая группа другое.
+ */
+function buildScopeWhere(input: {
+  date: string;
+  assigneeId: string | null;
+  search: string | null;
+}) {
+  return {
+    fulfillmentInScope: true,
+    sourceArchived: false,
+    sourceMissing: false,
+    // Пустой состав при `PENDING` неотличим от настоящего пустого состава,
+    // поэтому в очередь попадает только подтверждённый.
+    fulfillmentCompositionState: 'READY' as const,
+    deliveryDate: toDateColumn(input.date),
+    ...(input.assigneeId === null ? {} : { fulfillmentAssigneeId: input.assigneeId }),
+    // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
+    // условия: день, область видимости и состояния остаются в силе.
+    // Регистр не учитывается — номер вводят как придётся.
+    ...(input.search === null
+      ? {}
+      : { externalName: { contains: input.search, mode: 'insensitive' as const } }),
+  };
+}
+
+type ScopeWhere = ReturnType<typeof buildScopeWhere>;
+
 export async function readQueue(
   db: Database,
   viewer: { userId: string },
@@ -185,32 +260,59 @@ export async function readQueue(
   const todayMoscow = moscowToday(now);
   const page = normalizePageRequest(query);
   const search = normalizeSearch(query.search);
+  const mine = query.scope === 'mine';
+  // Область собранных существует только у «Моих заказов»: в общей очереди
+  // собранного заказа нет ни при какой галочке.
+  const group: QueueGroup = mine && query.group === 'assembled' ? 'assembled' : 'work';
 
-  const states: OrderFulfillmentProcessState[] =
-    query.scope === 'mine'
-      ? [...MINE_STATES]
-      : query.includeAssigned
-        ? [...UNFINISHED_STATES]
-        : ['NEW'];
+  const context = {
+    viewDate: date,
+    todayMoscow,
+    nowMinuteMoscow: moscowMinuteOfDay(now),
+  };
+
+  const scopeWhere = buildScopeWhere({
+    date,
+    assigneeId: mine ? viewer.userId : null,
+    search,
+  });
+
+  /**
+   * Точное число собранных считает БАЗА.
+   *
+   * Именно оно стоит в заголовке свёрнутой группы, поэтому считать его по
+   * загруженной странице нельзя: у флориста с шестьюдесятью собранными
+   * заголовок показал бы пятьдесят. Поиск входит в условие — во время поиска
+   * счётчик обязан говорить о найденном, а не обо всём дне.
+   */
+  const assembledTotal = mine
+    ? await db.deliveryOrder.count({
+        where: { ...scopeWhere, fulfillmentProcessState: 'ASSEMBLED' },
+      })
+    : null;
+
+  if (group === 'assembled') {
+    return readAssembledPage(db, {
+      day: query.day,
+      date,
+      scope: query.scope,
+      includeAssigned: query.includeAssigned,
+      search,
+      page,
+      context,
+      scopeWhere,
+      total: assembledTotal ?? 0,
+    });
+  }
+
+  const states: OrderFulfillmentProcessState[] = mine
+    ? [...MINE_WORK_STATES]
+    : query.includeAssigned
+      ? [...UNFINISHED_STATES]
+      : ['NEW'];
 
   const rows = await db.deliveryOrder.findMany({
-    where: {
-      fulfillmentInScope: true,
-      sourceArchived: false,
-      sourceMissing: false,
-      // Пустой состав при `PENDING` неотличим от настоящего пустого состава,
-      // поэтому в очередь попадает только подтверждённый.
-      fulfillmentCompositionState: 'READY',
-      deliveryDate: toDateColumn(date),
-      fulfillmentProcessState: { in: states },
-      ...(query.scope === 'mine' ? { fulfillmentAssigneeId: viewer.userId } : {}),
-      // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
-      // условия: день, область видимости и состояния остаются в силе.
-      // Регистр не учитывается — номер вводят как придётся.
-      ...(search === null
-        ? {}
-        : { externalName: { contains: search, mode: 'insensitive' as const } }),
-    },
+    where: { ...scopeWhere, fulfillmentProcessState: { in: states } },
     select: orderSelect(date),
   });
 
@@ -229,12 +331,6 @@ export async function readQueue(
     };
   });
 
-  const context = {
-    viewDate: date,
-    todayMoscow,
-    nowMinuteMoscow: moscowMinuteOfDay(now),
-  };
-
   const byId = new Map(rows.map((row) => [row.id, row]));
   // Порядок считается по ПОЛНОЙ выборке, и только потом берётся страница:
   // групповой приоритет маршрутов существует лишь у целого списка.
@@ -245,41 +341,113 @@ export async function readQueue(
     day: query.day,
     deliveryDate: date,
     scope: query.scope,
+    group,
     includeAssigned: query.includeAssigned,
     search,
+    assembledTotal,
     ...pageMeta,
     items: pageItems.map((entry) => {
       const row = byId.get(entry.id);
-      const participation = row?.routeOrders[0];
-      return {
-        id: entry.id,
-        number: entry.externalName,
-        deliveryDate:
-          row?.deliveryDate === undefined || row.deliveryDate === null
-            ? null
-            : fromDateColumn(row.deliveryDate),
-        startMinute: entry.startMinute,
-        endMinute: entry.endMinute,
-        overdue: isOverdue(entry, context),
-        processState: row?.fulfillmentProcessState ?? 'NEW',
-        // Имя показывается только там, где оно нужно для решения: занятый заказ
-        // должен объяснять, кем именно он занят.
-        assignee:
-          row === undefined || row.fulfillmentAssignee === null
-            ? null
-            : { id: row.fulfillmentAssignee.id, fullName: row.fulfillmentAssignee.fullName },
-        route:
-          participation === undefined
-            ? null
-            : {
-                id: participation.route.id,
-                number: participation.route.number,
-                position: participation.position,
-              },
-        hasPrintForm: (row?.printForms.length ?? 0) > 0,
-        changedSinceClaim: row === undefined ? false : hasChangedSinceClaim(row),
-      };
+      if (row === undefined) {
+        throw new Error(`queue row disappeared between sort and page: ${entry.id}`);
+      }
+      return toQueueItem(
+        row,
+        { startMinute: entry.startMinute, endMinute: entry.endMinute },
+        context,
+      );
     }),
+  };
+}
+
+/**
+ * Страница собранных заказов дня.
+ *
+ * Здесь срез делает САМА БАЗА, и это не противоречие `paging.ts`: группового
+ * правила у собранных нет вовсе. Порядок полный и выражается SQL — последний
+ * собранный сверху, при равном времени устойчивый добор по номеру, — поэтому
+ * `skip`/`take` над ним дают ровно ту же страницу, что и срез в памяти, и не
+ * заставляют читать весь накопленный день ради пятидесяти строк.
+ *
+ * Смысл сортировки именно такой: флорист ищет среди собранных то, что собрал
+ * только что, — чтобы перепечатать бланк или проверить состав.
+ */
+async function readAssembledPage(
+  db: Database,
+  input: {
+    day: QueueDay;
+    date: string;
+    scope: QueueScope;
+    includeAssigned: boolean;
+    search: string | null;
+    page: PageRequest;
+    context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number };
+    scopeWhere: ScopeWhere;
+    total: number;
+  },
+): Promise<QueueResult> {
+  const rows = await db.deliveryOrder.findMany({
+    where: { ...input.scopeWhere, fulfillmentProcessState: 'ASSEMBLED' },
+    select: orderSelect(input.date),
+    orderBy: [{ fulfillmentAssembledAt: 'desc' }, { externalName: 'asc' }],
+    skip: input.page.offset,
+    take: input.page.limit,
+  });
+
+  return {
+    day: input.day,
+    deliveryDate: input.date,
+    scope: input.scope,
+    group: 'assembled',
+    includeAssigned: input.includeAssigned,
+    search: input.search,
+    assembledTotal: input.total,
+    ...pageInfo(input.page, input.total, rows.length),
+    items: rows.map((row) => toQueueItem(row, effectiveMinutes(row), input.context)),
+  };
+}
+
+/** Строка списка из прочитанной строки заказа. Общая для обеих областей. */
+function toQueueItem(
+  row: {
+    id: string;
+    externalName: string;
+    deliveryDate: Date | null;
+    fulfillmentProcessState: string;
+    fulfillmentAssignedAt: Date | null;
+    fulfillmentAssignee: { id: string; fullName: string } | null;
+    printForms: { id: string }[];
+    fulfillmentRevisions: { receivedAt: Date }[];
+    routeOrders: { position: number | null; route: { id: string; number: string } }[];
+  },
+  minutes: { startMinute: number | null; endMinute: number | null },
+  context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number },
+): QueueItem {
+  const participation = row.routeOrders[0];
+  return {
+    id: row.id,
+    number: row.externalName,
+    deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
+    startMinute: minutes.startMinute,
+    endMinute: minutes.endMinute,
+    overdue: isOverdue(minutes, context),
+    processState: row.fulfillmentProcessState,
+    // Имя показывается только там, где оно нужно для решения: занятый заказ
+    // должен объяснять, кем именно он занят.
+    assignee:
+      row.fulfillmentAssignee === null
+        ? null
+        : { id: row.fulfillmentAssignee.id, fullName: row.fulfillmentAssignee.fullName },
+    route:
+      participation === undefined
+        ? null
+        : {
+            id: participation.route.id,
+            number: participation.route.number,
+            position: participation.position,
+          },
+    hasPrintForm: row.printForms.length > 0,
+    changedSinceClaim: hasChangedSinceClaim(row),
   };
 }
 

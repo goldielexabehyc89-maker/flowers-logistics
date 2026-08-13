@@ -21,6 +21,8 @@ import { assignmentStateOf, calendarDate } from './eligibility.js';
 import {
   addOrders,
   createDraft,
+  createDraftFromSelection,
+  MAX_SELECTION_SIZE,
   moveOrders,
   reorder,
   returnOrders,
@@ -74,6 +76,18 @@ const listQuerySchema = z.object({
 const createSchema = z.object({
   deliveryDate: dateSchema,
   vehicleType: z.enum(['CAR', 'FOOT']),
+});
+
+/**
+ * Черновик ровно из выбора «Сделок».
+ *
+ * Порядок массива — это порядок остановок: логист расставил номера на карте,
+ * и сервер обязан сохранить именно его.
+ */
+const selectionDraftSchema = z.object({
+  deliveryDate: dateSchema,
+  vehicleType: z.enum(['CAR', 'FOOT']),
+  orderIds: z.array(uuid).min(1).max(MAX_SELECTION_SIZE),
 });
 
 const ordersSchema = z.object({
@@ -202,6 +216,17 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
 
     const created = await createDraft(deps, actor, body, contextOf(request));
     return reply.code(201).send(created);
+  });
+
+  /** Один черновик из выбранных заказов. Ничего не подтверждает. */
+  app.post('/api/routes/from-selection', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const body = selectionDraftSchema.parse(request.body);
+
+    const created = await createDraftFromSelection(deps, actor, body, contextOf(request));
+    // Повтор потерянного ответа возвращает прежний маршрут и код 200:
+    // 201 означал бы, что создан ещё один.
+    return reply.code(created.repeated ? 200 : 201).send(created);
   });
 
   app.get('/api/routes/:id', async (request) => {

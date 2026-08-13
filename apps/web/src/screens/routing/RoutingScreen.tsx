@@ -26,6 +26,7 @@ import {
   TextInput,
 } from '../../ui/components';
 import { RouteCard } from './RouteCard';
+import { PlanningScreen } from '../planning/PlanningScreen';
 import { MapPanel, requestMapPick } from './MapPanel';
 import { geoHint, isMappable, type OrderGeo } from './geo';
 import {
@@ -401,6 +402,14 @@ export function RoutingScreen(): React.JSX.Element {
       {openRouteId !== null && (
         <RouteCard routeId={openRouteId} onClose={() => setOpenRouteId(null)} />
       )}
+
+      {/*
+        Автоматический расчёт живёт здесь же, а не отдельной вкладкой:
+        рядом карта, нераспределённые заказы и ручное редактирование маршрутов.
+        Отдельный пункт «Планирование» из навигации убран, но ни доменные
+        модели, ни история расчётов не тронуты — это тот же экран расчёта.
+      */}
+      <PlanningScreen />
     </section>
   );
 }

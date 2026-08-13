@@ -18,14 +18,14 @@ import {
   TEST_SECRETS,
   type TestContext,
 } from '../../auth/testing/harness.js';
-import { loadConfig } from '../../../platform/config.js';
+import { dadataEnvironment, loadConfig } from '../../../platform/config.js';
 import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../../integrations/moysklad/config.js';
 import { applyOrderSnapshot } from '../../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../../integrations/moysklad/mapper.js';
 import { DadataError } from '../../integrations/dadata/client.js';
 import type { DadataAddress } from '../../integrations/dadata/dto.js';
-import { shouldGeocodeAutomatically } from './enabled.js';
+import { isDadataAllowed, shouldGeocodeAutomatically } from './enabled.js';
 import { backfillGeocoding, isGeocodable, retryDelayMs, RETRY_DELAYS_MS } from './queue.js';
 import {
   createGeocodeWorker,
@@ -218,7 +218,7 @@ async function jobOf(orderId: string) {
 
 // ---------------------------------------------------------------------------
 
-describe('окружение: вне production обращений не бывает', () => {
+describe('окружение: живой DaData только там, где он разрешён', () => {
   const base = {
     DATABASE_URL: resolveTestDatabaseUrl(),
     NODE_ENV: 'test',
@@ -226,74 +226,85 @@ describe('окружение: вне production обращений не быва
     ...TEST_SECRETS,
   };
 
-  it('автоматическое геокодирование включается только при всех четырёх условиях', () => {
-    const production = loadConfig({
-      ...base,
-      APP_ENV: 'production',
-      APP_ENVIRONMENT_MARKER: 'production',
-      DADATA_API_KEY: 'key',
-      DADATA_SECRET_KEY: 'secret',
-      DADATA_GEOCODING_ENABLED: 'true',
-    });
-    expect(shouldGeocodeAutomatically(production)).toBe(true);
+  const withKeys = {
+    DADATA_API_KEY: 'key',
+    DADATA_SECRET_KEY: 'secret',
+    DADATA_GEOCODING_ENABLED: 'true',
+  };
 
-    // Ни одно окружение, кроме production, не создаёт клиент и worker.
-    for (const env of ['local', 'staging'] as const) {
-      const config = loadConfig({ ...base, APP_ENV: env, APP_ENVIRONMENT_MARKER: env });
-      expect(shouldGeocodeAutomatically(config), env).toBe(false);
+  it('оба разрешённых окружения включаются только при совпавших маркерах, ключах и флаге', () => {
+    // Владелец разрешил staging наравне с production: адреса настоящие,
+    // расход квоты принят. Прежний абсолютный запрет вне production заменён.
+    for (const env of ['production', 'staging'] as const) {
+      const config = loadConfig({
+        ...base,
+        APP_ENV: env,
+        APP_ENVIRONMENT_MARKER: env,
+        ...withKeys,
+      });
+      expect(isDadataAllowed(config), env).toBe(true);
+      expect(shouldGeocodeAutomatically(config), env).toBe(true);
     }
 
-    // Production без ключей и без флага тоже не обращается никуда.
-    const noKeys = loadConfig({
-      ...base,
-      APP_ENV: 'production',
-      APP_ENVIRONMENT_MARKER: 'production',
-    });
-    expect(shouldGeocodeAutomatically(noKeys)).toBe(false);
+    // Разрешённое окружение без ключей и без флага никуда не обращается:
+    // «не настраивали» — это не согласие тратить чужие деньги.
+    for (const env of ['production', 'staging'] as const) {
+      const bare = loadConfig({ ...base, APP_ENV: env, APP_ENVIRONMENT_MARKER: env });
+      expect(isDadataAllowed(bare), env).toBe(false);
+    }
   });
 
-  it('ключи вне production запрещают запуск, а не молча игнорируются', () => {
-    for (const env of ['local', 'staging'] as const) {
-      expect(() =>
-        loadConfig({ ...base, APP_ENV: env, APP_ENVIRONMENT_MARKER: env, DADATA_API_KEY: 'key' }),
-      ).toThrow(/DADATA_API_KEY/);
+  it('local и CI остаются запрещёнными: ключи там не размещаются вовсе', () => {
+    expect(() =>
+      loadConfig({ ...base, APP_ENV: 'local', APP_ENVIRONMENT_MARKER: 'local', ...withKeys }),
+    ).toThrow(/DADATA_API_KEY/);
 
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        DADATA_GEOCODING_ENABLED: 'true',
+      }),
+    ).toThrow(/DADATA_GEOCODING_ENABLED/);
+
+    const local = loadConfig({ ...base, APP_ENV: 'local', APP_ENVIRONMENT_MARKER: 'local' });
+    expect(isDadataAllowed(local)).toBe(false);
+  });
+
+  it('смешанные маркеры запрещены в обе стороны', () => {
+    // Ошибка развёртывания опаснее отсутствия настройки: продолжать с платным
+    // ключом там, где неясно, какое это окружение, нельзя.
+    for (const [env, marker] of [
+      ['production', 'staging'],
+      ['staging', 'production'],
+      ['staging', 'local'],
+      ['production', 'local'],
+    ] as const) {
+      expect(dadataEnvironment({ APP_ENV: env, APP_ENVIRONMENT_MARKER: marker })).toBe('denied');
+      expect(
+        () => loadConfig({ ...base, APP_ENV: env, APP_ENVIRONMENT_MARKER: marker, ...withKeys }),
+        `${env}/${marker}`,
+      ).toThrow();
+    }
+  });
+
+  it('половина пары ключей — отказ, а не частичный доступ', () => {
+    for (const env of ['production', 'staging'] as const) {
       expect(() =>
         loadConfig({
           ...base,
           APP_ENV: env,
           APP_ENVIRONMENT_MARKER: env,
+          DADATA_API_KEY: 'key',
           DADATA_GEOCODING_ENABLED: 'true',
         }),
-      ).toThrow(/DADATA_GEOCODING_ENABLED/);
+      ).toThrow(/DADATA_SECRET_KEY/);
     }
   });
 
-  it('смешанный маркер окружения запрещён', () => {
-    expect(() =>
-      loadConfig({
-        ...base,
-        APP_ENV: 'production',
-        APP_ENVIRONMENT_MARKER: 'staging',
-        DADATA_API_KEY: 'key',
-        DADATA_SECRET_KEY: 'secret',
-      }),
-    ).toThrow();
-  });
-
-  it('включённое геокодирование требует обоих ключей', () => {
-    expect(() =>
-      loadConfig({
-        ...base,
-        APP_ENV: 'production',
-        APP_ENVIRONMENT_MARKER: 'production',
-        DADATA_API_KEY: 'key',
-        DADATA_GEOCODING_ENABLED: 'true',
-      }),
-    ).toThrow(/DADATA_SECRET_KEY/);
-  });
-
-  it('тестовая конфигурация геокодирование не включает', () => {
+  it('тестовая конфигурация живой DaData не включает', () => {
+    expect(isDadataAllowed(ctx.config)).toBe(false);
     expect(shouldGeocodeAutomatically(ctx.config)).toBe(false);
     expect(ctx.config.DADATA_API_KEY).toBeUndefined();
   });
