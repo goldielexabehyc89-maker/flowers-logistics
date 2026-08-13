@@ -131,8 +131,20 @@
   color: var(--color-error);
 }
 
+/*
+ * Окно НЕ РАСТЁТ ЗА ЭКРАН.
+ *
+ * Карточка сборки с длинным составом на телефоне выше экрана целиком, а
+ * страница под окном прокручиваться не должна: человек потерял бы и место
+ * в очереди, и само окно. Поэтому высота ограничена вьюпортом, а содержимое
+ * получает собственную прокрутку между неподвижными шапкой и подвалом.
+ *
+ * `dvh` вместо `vh` намеренно: на телефоне адресная строка сворачивается, и
+ * `vh` оставил бы нижнюю часть окна под ней.
+ */
 .modal {
   width: min(560px, calc(100vw - 2 * var(--space-4)));
+  max-height: calc(100dvh - 2 * var(--space-4));
   padding: 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
@@ -141,12 +153,30 @@
   box-shadow: var(--shadow-md);
 }
 
+/*
+ * Колонкой — только открытое окно.
+ *
+ * Авторский `display` перекрывает браузерное `dialog:not([open]) {
+ * display: none }`, и закрытое окно осталось бы видимым блоком посреди
+ * страницы. Поэтому раскладка задаётся именно открытому состоянию.
+ */
+.modal[open] {
+  display: flex;
+  flex-direction: column;
+}
+
 .modal::backdrop {
   background: rgb(28 36 48 / 45%);
 }
 
+/* Широкое окно: состав заказа с миниатюрами в 560 пикселей не помещается. */
+.modal--wide {
+  width: min(760px, calc(100vw - 2 * var(--space-4)));
+}
+
 .modal__header {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
@@ -156,10 +186,14 @@
 
 .modal__body {
   padding: var(--space-4);
+  overflow-y: auto;
+  /* Прокручивается содержимое, а не страница под окном. */
+  overscroll-behavior: contain;
 }
 
 .modal__footer {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: var(--space-2);
   padding: var(--space-4);

@@ -27,6 +27,21 @@
  * либо повтор строки, либо пропуск. Пиксель прокрутки при этом не сохраняется —
  * и не обязан: сохранять положение в списке, который перестроился, значило бы
  * показывать человеку не то место, на которое он смотрел.
+ *
+ * КАРТОЧКА — МОДАЛЬНОЕ ОКНО. Раньше она рисовалась обычным блоком ПОСЛЕ всего
+ * списка: на первой странице из пятидесяти заказов человек нажимал кнопку и не
+ * видел ничего — карточка появлялась экранами ниже. Теперь она открывается
+ * поверх списка, а список под ней остаётся ровно там, где был: день, вкладка,
+ * поиск, догруженные страницы и прокрутка переживают открытие и закрытие,
+ * потому что ничего из этого не размонтируется.
+ *
+ * ОТКРЫВАЕТ ТОЛЬКО КНОПКА `Просмотр`. Кликабельный номер и кликабельная строка
+ * убраны: в плотном списке они срабатывали при попытке выделить номер или
+ * прокрутить страницу пальцем.
+ *
+ * «МОИ ЗАКАЗЫ» — ДВЕ ГРУППЫ. Работа раскрыта, собранные свёрнуты и загружаются
+ * только после раскрытия. Обе группы считает и отдаёт сервер: фильтровать
+ * загруженную страницу в браузере значило бы врать в счётчике.
  */
 
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -36,7 +51,14 @@ import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { collapseToFirstPage } from '../../realtime/stream';
 import { useToast } from '../../ui/ToastProvider';
-import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  Modal,
+  StatusBadge,
+} from '../../ui/components';
 import { OrderCardPanel } from './OrderCardPanel';
 import {
   QUEUE_PAGE_SIZE,
@@ -55,6 +77,7 @@ import {
   type PrintJobsResponse,
   type PrintJobView,
   type QueueDay,
+  type QueueItemView,
   type QueueResponse,
   type ShiftView,
 } from './florist';
@@ -87,6 +110,15 @@ export function FloristScreen(): React.JSX.Element {
   const [day, setDay] = useState<QueueDay>('today');
   const [includeAssigned, setIncludeAssigned] = useState(false);
   const [openOrderId, setOpenOrderId] = useState<string | null>(null);
+  /**
+   * Раскрыта ли группа «Собранные».
+   *
+   * Состояние только в памяти экрана: ни в БД, ни в browser storage. При
+   * каждом входе во вкладку и при смене дня группа снова свёрнута — собранный
+   * заказ работой не является, и открытая стопка вчерашних успехов закрывала
+   * бы то, что нужно собрать сейчас.
+   */
+  const [assembledOpen, setAssembledOpen] = useState(false);
   const [printFilter, setPrintFilter] = useState<'attention' | 'printed'>('attention');
   /** Причина принудительного завершения — своя у каждой смены в списке. */
   const [forceReason, setForceReason] = useState<Record<string, string>>({});
@@ -106,22 +138,28 @@ export function FloristScreen(): React.JSX.Element {
     queryFn: () => client.get<{ shift: ShiftView | null }>('/api/florist/shift'),
   });
 
+  /** Адрес страницы списка. Один на обе группы: условия у них общие. */
+  function queueUrl(group: 'work' | 'assembled', offset: number): string {
+    return (
+      `/api/florist/queue?day=${day}&scope=${scope}&group=${group}` +
+      `&all=${includeAssigned ? 'true' : 'false'}` +
+      `&limit=${QUEUE_PAGE_SIZE}&offset=${offset}` +
+      (search === '' ? '' : `&search=${encodeURIComponent(search)}`)
+    );
+  }
+
   /**
-   * Очередь страницами.
+   * Рабочий список страницами.
    *
-   * День, область, галочка «Все» и строка поиска входят в ключ запроса, поэтому
-   * смена любого из них — это другой список: накопленные страницы отбрасываются
-   * сами, и первая страница нового набора запрашивается заново. Смешать
-   * «Сегодня» с «Завтра» или чужой поиск со своим здесь физически нечем.
+   * День, область, группа, галочка «Все» и строка поиска входят в ключ запроса,
+   * поэтому смена любого из них — это другой список: накопленные страницы
+   * отбрасываются сами, и первая страница нового набора запрашивается заново.
+   * Смешать «Сегодня» с «Завтра», работу с собранным или чужой поиск со своим
+   * здесь физически нечем.
    */
   const queueQuery = useInfiniteQuery({
-    queryKey: ['florist-queue', day, scope, includeAssigned, search],
-    queryFn: ({ pageParam }) =>
-      client.get<QueueResponse>(
-        `/api/florist/queue?day=${day}&scope=${scope}&all=${includeAssigned ? 'true' : 'false'}` +
-          `&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}` +
-          (search === '' ? '' : `&search=${encodeURIComponent(search)}`),
-      ),
+    queryKey: ['florist-queue', day, scope, 'work', includeAssigned, search],
+    queryFn: ({ pageParam }) => client.get<QueueResponse>(queueUrl('work', pageParam)),
     initialPageParam: 0,
     getNextPageParam: (last: QueueResponse) => nextPageOffset(last) ?? undefined,
     enabled: tab !== 'print',
@@ -152,6 +190,16 @@ export function FloristScreen(): React.JSX.Element {
     queryClient.setQueriesData<unknown>({ queryKey: ['florist-queue'] }, collapseToFirstPage);
   }, [day, scope, includeAssigned, search, queryClient]);
 
+  /**
+   * Вход во вкладку и смена дня сворачивают группу собранных.
+   *
+   * Именно вход, а не первое построение экрана: человек возвращается в «Мои
+   * заказы» за работой, и раскрытая стопка собранного отодвигала бы её вниз.
+   */
+  useEffect(() => {
+    setAssembledOpen(false);
+  }, [tab, day]);
+
   useEffect(() => {
     queryClient.setQueriesData<unknown>({ queryKey: ['florist-print-jobs'] }, collapseToFirstPage);
   }, [printFilter, queryClient]);
@@ -161,6 +209,44 @@ export function FloristScreen(): React.JSX.Element {
   /** Общее число берётся из ПЕРВОЙ страницы: она самая свежая после сброса. */
   const queueTotal = queuePages[0]?.total ?? 0;
   const queueDate = queuePages[0]?.deliveryDate;
+
+  /**
+   * Сколько собранных заказов в этом дне. Считает сервер.
+   *
+   * Число приходит вместе с рабочим списком, поэтому оно известно и тогда,
+   * когда группа свёрнута и её строки не запрашивались.
+   */
+  const assembledTotal = queuePages[0]?.assembledTotal ?? 0;
+
+  /**
+   * Поиск временно раскрывает группу собранных.
+   *
+   * Иначе человек, ищущий номер уже собранного заказа, получил бы пустой
+   * рабочий список и решил, что заказа нет вовсе. Раскрытие именно временное:
+   * снятие поиска возвращает обычное свёрнутое состояние, потому что оно
+   * вычисляется, а не запоминается.
+   */
+  const foundInAssembled = tab === 'mine' && search !== '' && assembledTotal > 0;
+  const assembledExpanded = tab === 'mine' && (assembledOpen || foundInAssembled);
+
+  /**
+   * Собранные загружаются ТОЛЬКО после раскрытия.
+   *
+   * Свёрнутая группа не строит ни одной строки DOM и не занимает ни одного
+   * запроса: у флориста к концу дня их шестьдесят, и держать их в памяти ради
+   * заголовка со счётчиком незачем.
+   */
+  const assembledQuery = useInfiniteQuery({
+    queryKey: ['florist-queue', day, scope, 'assembled', includeAssigned, search],
+    queryFn: ({ pageParam }) => client.get<QueueResponse>(queueUrl('assembled', pageParam)),
+    initialPageParam: 0,
+    getNextPageParam: (last: QueueResponse) => nextPageOffset(last) ?? undefined,
+    enabled: assembledExpanded,
+  });
+
+  const assembledPages = assembledQuery.data?.pages ?? [];
+  const assembledItems = assembledExpanded ? mergePages(assembledPages) : [];
+  const assembledShownTotal = assembledPages[0]?.total ?? assembledTotal;
 
   const printPages = printQuery.data?.pages ?? [];
   const printItems = mergePages(printPages);
@@ -270,6 +356,59 @@ export function FloristScreen(): React.JSX.Element {
   }
 
   const card = cardQuery.data?.card ?? null;
+
+  /**
+   * Строка списка. Одна и та же в работе и в собранных.
+   *
+   * Номер — обычный текст. Кликабельным он был раньше и в плотном списке
+   * срабатывал при попытке выделить номер или прокрутить страницу пальцем;
+   * открыть карточку теперь можно только явной кнопкой `Просмотр`.
+   */
+  function queueRow(item: QueueItemView): React.JSX.Element {
+    return (
+      <li
+        key={item.id}
+        className={`florist__row${item.overdue ? ' florist__row--overdue' : ''}`}
+        data-testid="florist-row"
+        data-order-number={item.number}
+      >
+        <div className="florist__row-main">
+          <span className="florist__number">{item.number}</span>
+          <span className="florist__time">{formatInterval(item)}</span>
+          {item.overdue && <StatusBadge tone="error">Просрочен</StatusBadge>}
+          {routeLabel(item) !== null && <StatusBadge tone="info">{routeLabel(item)}</StatusBadge>}
+          {item.changedSinceClaim && <StatusBadge tone="warning">Заказ изменён</StatusBadge>}
+        </div>
+
+        <div className="florist__row-side">
+          <span className="muted text-sm">{processLabel(item.processState)}</span>
+          {item.assignee !== null && (
+            <span className="muted text-sm" data-testid="row-assignee">
+              {item.assignee.fullName}
+            </span>
+          )}
+          {item.processState === 'NEW' && (
+            <Button
+              variant="primary"
+              disabled={action.isPending || !hasActiveShift}
+              data-testid="row-claim"
+              onClick={() =>
+                action.mutate({
+                  path: `/api/florist/orders/${item.id}/claim`,
+                  success: `Заказ ${item.number} взят в работу`,
+                })
+              }
+            >
+              Взять в работу
+            </Button>
+          )}
+          <Button variant="ghost" data-testid="row-open" onClick={() => setOpenOrderId(item.id)}>
+            Просмотр
+          </Button>
+        </div>
+      </li>
+    );
+  }
 
   return (
     <section className="stack florist">
@@ -453,7 +592,11 @@ export function FloristScreen(): React.JSX.Element {
                 // обязан понимать, где именно искали.
                 'В выбранных дне и разделе заказа с таким номером нет.'
               : tab === 'mine'
-                ? 'Возьмите заказ из общей очереди.'
+                ? assembledTotal > 0
+                  ? // Пустая работа при непустой группе — не «заказов нет»:
+                    // человек собрал всё и обязан это понимать.
+                    'Всё, что было за вами на этот день, собрано.'
+                  : 'Возьмите заказ из общей очереди.'
                 : 'На выбранный день свободных заказов с подтверждённым составом нет.'
           }
         />
@@ -461,57 +604,7 @@ export function FloristScreen(): React.JSX.Element {
 
       {tab !== 'print' && queueQuery.isSuccess && queueItems.length > 0 && (
         <ul className="florist__list" data-testid="florist-queue">
-          {queueItems.map((item) => (
-            <li
-              key={item.id}
-              className={`florist__row${item.overdue ? ' florist__row--overdue' : ''}`}
-              data-testid="florist-row"
-              data-order-number={item.number}
-            >
-              <div className="florist__row-main">
-                <button
-                  type="button"
-                  className="florist__number"
-                  onClick={() => setOpenOrderId(item.id)}
-                >
-                  {item.number}
-                </button>
-                <span className="florist__time">{formatInterval(item)}</span>
-                {item.overdue && <StatusBadge tone="error">Просрочен</StatusBadge>}
-                {routeLabel(item) !== null && (
-                  <StatusBadge tone="info">{routeLabel(item)}</StatusBadge>
-                )}
-                {item.changedSinceClaim && <StatusBadge tone="warning">Заказ изменён</StatusBadge>}
-              </div>
-
-              <div className="florist__row-side">
-                <span className="muted text-sm">{processLabel(item.processState)}</span>
-                {item.assignee !== null && (
-                  <span className="muted text-sm" data-testid="row-assignee">
-                    {item.assignee.fullName}
-                  </span>
-                )}
-                {item.processState === 'NEW' && (
-                  <Button
-                    variant="primary"
-                    disabled={action.isPending || !hasActiveShift}
-                    data-testid="row-claim"
-                    onClick={() =>
-                      action.mutate({
-                        path: `/api/florist/orders/${item.id}/claim`,
-                        success: `Заказ ${item.number} взят в работу`,
-                      })
-                    }
-                  >
-                    Взять в работу
-                  </Button>
-                )}
-                <Button variant="ghost" onClick={() => setOpenOrderId(item.id)}>
-                  Открыть
-                </Button>
-              </div>
-            </li>
-          ))}
+          {queueItems.map((item) => queueRow(item))}
         </ul>
       )}
 
@@ -539,6 +632,76 @@ export function FloristScreen(): React.JSX.Element {
             </Button>
           )}
         </div>
+      )}
+
+      {/*
+       * Собранные заказы выбранного дня.
+       *
+       * Группа существует всегда, даже пустой: без неё исчезновение заказа из
+       * рабочего списка после «Собран» выглядело бы как потеря. Число в
+       * заголовке серверное и видно СВЁРНУТЫМ — именно оно отвечает на вопрос
+       * «а где он теперь».
+       */}
+      {tab === 'mine' && queueQuery.isSuccess && (
+        <section className="florist__group" data-testid="florist-assembled-group">
+          <button
+            type="button"
+            className="florist__group-head"
+            aria-expanded={assembledExpanded}
+            aria-controls="florist-assembled-list"
+            data-testid="florist-assembled-toggle"
+            onClick={() => setAssembledOpen((current) => !current)}
+          >
+            <span data-testid="florist-assembled-title">Собранные — {assembledTotal}</span>
+            <span aria-hidden="true">{assembledExpanded ? '▲' : '▼'}</span>
+          </button>
+
+          {foundInAssembled && !assembledOpen && (
+            <p className="muted text-sm" data-testid="florist-assembled-found">
+              Совпадение найдено среди собранных: группа раскрыта на время поиска.
+            </p>
+          )}
+
+          {assembledExpanded && (
+            <div id="florist-assembled-list" className="stack">
+              {assembledQuery.isPending && <LoadingState title="Загружаем собранные…" />}
+              {assembledQuery.isError && (
+                <ErrorState
+                  description="Собранные заказы не загрузились."
+                  onRetry={() => void assembledQuery.refetch()}
+                />
+              )}
+              {assembledQuery.isSuccess && assembledItems.length === 0 && (
+                <EmptyState
+                  title="Собранных заказов нет"
+                  description="В выбранном дне вы пока ничего не собрали."
+                />
+              )}
+              {assembledQuery.isSuccess && assembledItems.length > 0 && (
+                <>
+                  <ul className="florist__list" data-testid="florist-assembled">
+                    {assembledItems.map((item) => queueRow(item))}
+                  </ul>
+                  <div className="florist__more">
+                    <span className="muted text-sm" data-testid="florist-assembled-count">
+                      {pageSummary(assembledItems.length, assembledShownTotal)}
+                    </span>
+                    {assembledQuery.hasNextPage && (
+                      <Button
+                        variant="secondary"
+                        data-testid="florist-assembled-load-more"
+                        disabled={assembledQuery.isFetchingNextPage}
+                        onClick={() => void assembledQuery.fetchNextPage()}
+                      >
+                        {assembledQuery.isFetchingNextPage ? 'Загружаем…' : 'Загрузить ещё'}
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </section>
       )}
 
       {tab === 'print' && (
@@ -585,13 +748,9 @@ export function FloristScreen(): React.JSX.Element {
           {printItems.map((job) => (
             <li key={job.id} className="florist__row" data-testid="print-row">
               <div className="florist__row-main">
-                <button
-                  type="button"
-                  className="florist__number"
-                  onClick={() => setOpenOrderId(job.orderId)}
-                >
-                  {job.orderNumber}
-                </button>
+                {/* Номер — текст. Карточку открывает кнопка `Просмотр` ниже:
+                    во всех списках флориста это одно и то же действие. */}
+                <span className="florist__number">{job.orderNumber}</span>
                 <span className="muted text-sm">{formatMoscowDateTime(job.createdAt)}</span>
                 <StatusBadge
                   tone={
@@ -611,6 +770,13 @@ export function FloristScreen(): React.JSX.Element {
               </div>
 
               <div className="florist__row-side">
+                <Button
+                  variant="ghost"
+                  data-testid="print-open"
+                  onClick={() => setOpenOrderId(job.orderId)}
+                >
+                  Просмотр
+                </Button>
                 <Button
                   variant="secondary"
                   data-testid="print-download"
@@ -676,79 +842,99 @@ export function FloristScreen(): React.JSX.Element {
         </div>
       )}
 
-      {openOrderId !== null && cardQuery.isPending && <LoadingState title="Открываем карточку…" />}
-      {openOrderId !== null && cardQuery.isError && (
-        <ErrorState
-          description="Карточка не загрузилась."
-          onRetry={() => void cardQuery.refetch()}
-        />
-      )}
+      {/*
+       * Карточка ПОВЕРХ списка, а не после него.
+       *
+       * Окно появляется сразу после нажатия — вместе с состоянием загрузки и
+       * ошибкой внутри него же. Повтор запроса тоже здесь: человек не должен
+       * закрывать окно, чтобы понять, что случилось.
+       *
+       * Список под окном не размонтируется, поэтому день, вкладка, поиск,
+       * догруженные страницы и позиция прокрутки переживают открытие. Фокус
+       * после закрытия возвращается на ту кнопку `Просмотр`, которая окно
+       * открыла, — этим занимается общий `Modal`.
+       */}
+      <Modal
+        open={openOrderId !== null}
+        title={card?.number ?? 'Карточка заказа'}
+        onClose={() => setOpenOrderId(null)}
+        dismissOnBackdrop
+        className="modal--wide"
+        testId="florist-card-dialog"
+      >
+        {cardQuery.isPending && <LoadingState title="Открываем карточку…" />}
+        {cardQuery.isError && (
+          <ErrorState
+            description="Карточка не загрузилась."
+            onRetry={() => void cardQuery.refetch()}
+          />
+        )}
 
-      {card !== null && (
-        <OrderCardPanel
-          card={card}
-          viewerId={viewerId}
-          isAdmin={isAdmin}
-          hasActiveShift={hasActiveShift}
-          florists={floristsQuery.data?.items ?? []}
-          busy={action.isPending}
-          onClose={() => setOpenOrderId(null)}
-          onClaim={() =>
-            action.mutate({
-              path: `/api/florist/orders/${card.id}/claim`,
-              success: `Заказ ${card.number} взят в работу`,
-            })
-          }
-          onRelease={() =>
-            action.mutate({
-              path: `/api/florist/orders/${card.id}/release`,
-              success: 'Заказ возвращён в очередь',
-            })
-          }
-          onAssemble={() =>
-            action.mutate({
-              path: `/api/florist/orders/${card.id}/assemble`,
-              // Версия процесса та, которую видел человек: чужое изменение
-              // обязано отказать, а не перезаписать чужую работу.
-              body: { expectedProcessVersion: card.process.version },
-              success: 'Заказ собран, бланк поставлен в очередь печати',
-            })
-          }
-          onReopen={(reason) =>
-            action.mutate({
-              path: `/api/florist/orders/${card.id}/reopen`,
-              body: { reason },
-              success: 'Заказ возвращён в работу',
-            })
-          }
-          onReassign={(floristId) =>
-            action.mutate({
-              path: `/api/florist/orders/${card.id}/assign`,
-              body: { floristId },
-              success: 'Заказ переназначен',
-            })
-          }
-          onDownload={() => void downloadOrderPdf(card.id, card.number)}
-          onRetry={() => {
-            const job = latestJob(card);
-            if (job !== null) {
+        {card !== null && (
+          <OrderCardPanel
+            card={card}
+            viewerId={viewerId}
+            isAdmin={isAdmin}
+            hasActiveShift={hasActiveShift}
+            florists={floristsQuery.data?.items ?? []}
+            busy={action.isPending}
+            onClaim={() =>
               action.mutate({
-                path: `/api/florist/print-jobs/${job.id}/retry`,
-                success: 'Создана новая попытка печати',
-              });
+                path: `/api/florist/orders/${card.id}/claim`,
+                success: `Заказ ${card.number} взят в работу`,
+              })
             }
-          }}
-          onMarkPrinted={() => {
-            const job = latestJob(card);
-            if (job !== null) {
+            onRelease={() =>
               action.mutate({
-                path: `/api/florist/print-jobs/${job.id}/printed`,
-                success: 'Отмечено напечатанным',
-              });
+                path: `/api/florist/orders/${card.id}/release`,
+                success: 'Заказ возвращён в очередь',
+              })
             }
-          }}
-        />
-      )}
+            onAssemble={() =>
+              action.mutate({
+                path: `/api/florist/orders/${card.id}/assemble`,
+                // Версия процесса та, которую видел человек: чужое изменение
+                // обязано отказать, а не перезаписать чужую работу.
+                body: { expectedProcessVersion: card.process.version },
+                success: 'Заказ собран, бланк поставлен в очередь печати',
+              })
+            }
+            onReopen={(reason) =>
+              action.mutate({
+                path: `/api/florist/orders/${card.id}/reopen`,
+                body: { reason },
+                success: 'Заказ возвращён в работу',
+              })
+            }
+            onReassign={(floristId) =>
+              action.mutate({
+                path: `/api/florist/orders/${card.id}/assign`,
+                body: { floristId },
+                success: 'Заказ переназначен',
+              })
+            }
+            onDownload={() => void downloadOrderPdf(card.id, card.number)}
+            onRetry={() => {
+              const job = latestJob(card);
+              if (job !== null) {
+                action.mutate({
+                  path: `/api/florist/print-jobs/${job.id}/retry`,
+                  success: 'Создана новая попытка печати',
+                });
+              }
+            }}
+            onMarkPrinted={() => {
+              const job = latestJob(card);
+              if (job !== null) {
+                action.mutate({
+                  path: `/api/florist/print-jobs/${job.id}/printed`,
+                  success: 'Отмечено напечатанным',
+                });
+              }
+            }}
+          />
+        )}
+      </Modal>
     </section>
   );
 }
