@@ -140,6 +140,9 @@ model User {
 
   @@index([status])
   @@index([createdAt])
+  deliveryAttempts      DeliveryAttempt[]             @relation("DeliveryAttemptCourier")
+  deliveryCancellations DeliveryAttemptCancellation[] @relation("DeliveryCancelActor")
+  deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
 }
 
 /// Роли пользователя (many-to-many без отдельной таблицы ролей: набор ролей фиксирован).
@@ -678,6 +681,7 @@ model DeliveryOrder {
   placements           OrderPlacement[]
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
+  deliveryAttempts     DeliveryAttempt[]
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
@@ -1040,8 +1044,26 @@ enum RouteState {
   CANCELLED
   /// Маршрут физически передан курьеру (этап 6.5). Значение добавлено в КОНЕЦ:
   /// PostgreSQL хранит порядок объявления, и вставка в середину сдвинула бы
-  /// существующие значения. `COMPLETED` появится вместе с работой курьера.
+  /// существующие значения.
   ACTIVE
+  /// Все заказы маршрута получили окончательный результат (этап 6.6).
+  /// Тоже добавлено в конец и по той же причине.
+  COMPLETED
+}
+
+/// Итог доставки одного заказа. Третьего значения нет намеренно:
+/// «в пути» и «принял маршрут» продукт не вводит.
+enum DeliveryOutcome {
+  DELIVERED
+  NOT_DELIVERED
+}
+
+/// Кто и на каком основании отменил окончательный результат.
+enum DeliveryAttemptCancelKind {
+  /// Курьер исправляет собственную ошибку в течение пяти минут.
+  COURIER_SELF
+  /// Логист или администратор — позже и только с причиной.
+  MANAGER_CORRECTION
 }
 
 /// Почему заказ покинул состав маршрута.
@@ -1134,6 +1156,7 @@ model DeliveryRoute {
   @@index([deliveryDate, state])
   @@index([courierUserId])
   @@index([planRunId])
+  attempts DeliveryAttempt[] @relation("DeliveryAttemptRoute")
 }
 
 /// Участие заказа в маршруте с историей.
@@ -1168,6 +1191,7 @@ model RouteOrder {
   movedToRoute   DeliveryRoute? @relation("RouteOrderMovedTo", fields: [movedToRouteId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   conflicts RouteOrderConflict[]
+  attempts  DeliveryAttempt[]
 
   @@index([routeId, position])
   @@index([orderId])
@@ -1952,4 +1976,110 @@ model RouteIssueSession {
   placements OrderPlacement[]
 
   @@index([routeId, state])
+}
+
+/// Справочник причин недоставки.
+///
+/// Название редактируемое, поэтому история результата хранит СНИМОК названия:
+/// переименование причины не должно задним числом переписать то, что курьер
+/// уже сообщил. Код неизменяем и служит машинным ключом.
+model DeliveryFailureReason {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Машинный код: `NO_ANSWER`, `OTHER` и так далее. Не меняется никогда.
+  code String @unique
+  /// Человеческое название. Именно оно копируется снимком в историю.
+  name String
+  /// Порядок показа курьеру.
+  ordinal Int
+  /// Требует ли причина обязательного комментария. Истинно для «Другое».
+  requiresComment Boolean @default(false)
+  isActive        Boolean @default(true)
+
+  version Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  changedById String? @db.Uuid
+  changedBy   User?   @relation("DeliveryReasonChangedBy", fields: [changedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  attempts DeliveryAttempt[]
+
+  @@index([isActive, ordinal])
+}
+
+/// Окончательный результат доставки одного заказа — неизменяемая попытка.
+///
+/// ПОЧЕМУ ОТДЕЛЬНАЯ ЗАПИСЬ, А НЕ ПОЛЕ ЗАКАЗА. Поле «результат» пришлось бы
+/// перезаписывать при исправлении, и прежняя правда исчезла бы. Здесь каждая
+/// попытка остаётся навсегда, а исправление — это ОТМЕНА одной записи
+/// и появление новой.
+///
+/// Содержимое попытки неизменяемо: триггер `prevent_delivery_attempt_change`
+/// отвергает изменение любого содержательного поля. Меняться разрешено только
+/// техническому ключу `activeKey`, и только в сторону `NULL`.
+///
+/// `activeKey` — тот же приём, что у смены флориста и сессии выдачи: пока
+/// попытка действует, ключ равен идентификатору участия, и уникальный индекс
+/// физически не даёт появиться второй действующей правде. Гонка двух устройств
+/// и повтор потерянного ответа упираются в базу, а не в проверку в коде.
+model DeliveryAttempt {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Заказ и маршрут дублируются намеренно: по ним читают историю, и join
+  /// через участие в каждом запросе стоил бы дороже, чем два индекса.
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  routeId String        @db.Uuid
+  route   DeliveryRoute @relation("DeliveryAttemptRoute", fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  outcome DeliveryOutcome
+
+  reasonId String?                @db.Uuid
+  reason   DeliveryFailureReason? @relation(fields: [reasonId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Снимок названия причины на момент результата.
+  reasonNameSnapshot String?
+  /// Комментарий курьера. Обязателен для причины «Другое».
+  comment String?
+
+  courierUserId String @db.Uuid
+  courier       User   @relation("DeliveryAttemptCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Время фиксирует СЕРВЕР. Часы устройства курьера доказательством не служат.
+  occurredAt DateTime @default(now())
+
+  /// Пока попытка действует — равен `routeOrderId`; после отмены — `NULL`.
+  activeKey String? @unique @db.Uuid
+
+  cancellation DeliveryAttemptCancellation?
+
+  @@index([routeId, occurredAt])
+  @@index([courierUserId, occurredAt])
+  @@index([orderId])
+}
+
+/// Отмена результата — СВЯЗАННАЯ операция, а не правка истории задним числом.
+model DeliveryAttemptCancellation {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  attemptId String          @unique @db.Uuid
+  attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  kind DeliveryAttemptCancelKind
+
+  /// Обязательна для исправления логистом и администратором.
+  reason String?
+
+  actorUserId String @db.Uuid
+  actor       User   @relation("DeliveryCancelActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  occurredAt DateTime @default(now())
+
+  @@index([actorUserId, occurredAt])
 }

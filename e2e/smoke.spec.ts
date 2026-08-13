@@ -1198,3 +1198,80 @@ test('склад: приёмка → комплектование → пауза
   await activeRow.getByRole('button', { name: 'Открыть лист' }).click();
   await expect(page.locator('.sheet__footer')).toContainText('передан курьеру');
 });
+
+test('курьер: досрочность, «Не доставлен» с причиной, отмена и завершение маршрута', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const courierPhone = process.env['E2E_WH_COURIER_PHONE'] ?? '';
+  const courierPin = process.env['E2E_WH_COURIER_PIN'] ?? '';
+  const routeNumber = process.env['E2E_WH_ROUTE'] ?? '';
+  const firstOrder = process.env['E2E_WH_ORDER_1'] ?? '';
+  const secondOrder = process.env['E2E_WH_ORDER_2'] ?? '';
+
+  test.skip(
+    courierPhone === '' || courierPin === '' || routeNumber === '' || firstOrder === '',
+    'не передана курьерская фикстура (E2E_WH_COURIER_*)',
+  );
+
+  // Сценарий продолжает складской: маршрут уже выдан и находится в `ACTIVE`.
+  await login(page, courierPhone, courierPin);
+  await expect(page.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  // Локаторы по ТОЧНОМУ атрибуту, а не по подстроке: номера заказов фикстуры
+  // отличаются одним символом, и `hasText` цеплял соседнюю карточку.
+  const route = page.locator(`[data-testid="delivery-route"][data-route-number="${routeNumber}"]`);
+  await expect(route).toBeVisible();
+
+  // 1. Первый заказ: обычная доставка. Заказ дня ещё не в интервале, поэтому
+  // экран предупреждает о досрочности — но подтвердить разрешает.
+  const first = page.locator(`[data-testid="delivery-order"][data-order-number="${firstOrder}"]`);
+  await first.getByTestId('delivery-open-delivered').click();
+  await first.getByTestId('delivery-submit').click();
+  await expect(first).toHaveAttribute('data-result', 'DELIVERED');
+
+  // 2. Ошибку курьер исправляет сам: заказ снова открыт.
+  await first.getByTestId('delivery-cancel-result').click();
+  await expect(first).toHaveAttribute('data-result', 'none');
+
+  // 3. Повторяем результат и закрываем второй заказ недоставкой с причиной.
+  await first.getByTestId('delivery-open-delivered').click();
+  await first.getByTestId('delivery-submit').click();
+  await expect(first).toHaveAttribute('data-result', 'DELIVERED');
+
+  const second = page.locator(`[data-testid="delivery-order"][data-order-number="${secondOrder}"]`);
+  await second.getByTestId('delivery-open-failed').click();
+  await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
+  // Кнопка активна только при заполненном черновике: если причина не выбрана,
+  // отказ произойдёт здесь и будет назван, а не спрячется за общим таймаутом.
+  await expect(second.getByTestId('delivery-submit')).toBeEnabled();
+  await second.getByTestId('delivery-submit').click();
+  // Состояние карточки здесь не проверяется намеренно: это ПОСЛЕДНИЙ заказ,
+  // его результат завершает маршрут, и список активных доставок пустеет —
+  // карточки больше не существует. Доказательством служат ответ сервера
+  // в тосте и сам факт опустевшего списка.
+  await expect(page.locator('.toast-region')).toContainText('Маршрут завершён');
+
+  // 4. Последний результат завершил маршрут: активных доставок не осталось.
+  await expect(page.getByText('Активных доставок нет')).toBeVisible();
+
+  // 5. История текущего дня показывает оба результата и не скрывает данные.
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
+  // У первого заказа записей ДВЕ: отменённая и новая. Это и есть доказательство
+  // того, что история не переписывается — отменённый результат остаётся в ней
+  // вместе со своим прежним содержимым.
+  const firstHistory = page.locator(
+    `[data-testid="delivery-history-item"][data-order-number="${firstOrder}"]`,
+  );
+  await expect(firstHistory).toHaveCount(2);
+  await expect(firstHistory.first()).toHaveAttribute('data-masked', 'no');
+  // Отменённая запись помечена и зачёркнута, а не удалена.
+  await expect(
+    page.locator('[data-testid="delivery-history-item"]').filter({ hasText: 'отменён' }),
+  ).toHaveCount(1);
+  await expect(
+    page.locator(`[data-testid="delivery-history-item"][data-order-number="${secondOrder}"]`),
+  ).toContainText('Нет ответа');
+});

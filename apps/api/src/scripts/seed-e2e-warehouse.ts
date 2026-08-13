@@ -19,6 +19,16 @@ import { createLogger } from '../platform/logging/logger.js';
 import { createDatabase } from '../platform/db.js';
 import { toDateColumn } from '../modules/integrations/moysklad/delivery-date.js';
 import { moscowToday } from '@fl/shared';
+import { hashSecretCode } from '../modules/auth/crypto.js';
+
+/**
+ * PIN курьера фикстуры.
+ *
+ * Постоянное значение допустимо ровно потому, что скрипт fail closed отказывает
+ * везде, кроме локальной одноразовой базы: в staging и production этого
+ * пользователя не существует.
+ */
+const COURIER_PIN = '4321';
 
 /** Базы, где допустимо создавать проверочные данные. */
 const ALLOWED_DATABASES = ['fl_e2e', 'fl_ci', 'fl_test'];
@@ -83,12 +93,16 @@ async function main(): Promise<number> {
     });
 
     // Курьер фикстуры активен и имеет роль COURIER: подтверждение курьера
-    // требует и того, и другого.
+    // требует и того, и другого. PIN задаётся здесь же — тем же курьером
+    // продолжается сценарий доставки, и заводить второго значило бы проверять
+    // не тот маршрут.
+    const courierPhone = `+79${stamp}${String(Date.now() % 1000).padStart(3, '0')}`;
     const courier = await db.user.create({
       data: {
-        phone: `+79${stamp}${String(Date.now() % 1000).padStart(3, '0')}`,
+        phone: courierPhone,
         fullName: 'Курьер складской проверки',
         status: 'ACTIVE',
+        pinHash: await hashSecretCode(COURIER_PIN, config.AUTH_PIN_PEPPER),
         roles: { create: [{ role: 'COURIER' }] },
         courierProfile: { create: {} },
       },
@@ -139,6 +153,8 @@ async function main(): Promise<number> {
     process.stdout.write(`ячейка хранения: ${storage.normalizedCode}\n`);
     process.stdout.write(`маршрутная ячейка: ${routeCell.normalizedCode}\n`);
     process.stdout.write(`маршрут: ${route.number}\n`);
+    process.stdout.write(`курьер: ${courierPhone}\n`);
+    process.stdout.write(`пин курьера: ${COURIER_PIN}\n`);
     for (const number of numbers) {
       process.stdout.write(`заказ: ${number}\n`);
     }
