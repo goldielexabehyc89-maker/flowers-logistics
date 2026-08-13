@@ -1259,9 +1259,18 @@ test('курьер: досрочность, «Не доставлен» с пр�
   // 5. История текущего дня показывает оба результата и не скрывает данные.
   await page.getByRole('link', { name: 'История' }).first().click();
   await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
+  // У первого заказа записей ДВЕ: отменённая и новая. Это и есть доказательство
+  // того, что история не переписывается — отменённый результат остаётся в ней
+  // вместе со своим прежним содержимым.
+  const firstHistory = page.locator(
+    `[data-testid="delivery-history-item"][data-order-number="${firstOrder}"]`,
+  );
+  await expect(firstHistory).toHaveCount(2);
+  await expect(firstHistory.first()).toHaveAttribute('data-masked', 'no');
+  // Отменённая запись помечена и зачёркнута, а не удалена.
   await expect(
-    page.locator(`[data-testid="delivery-history-item"][data-order-number="${firstOrder}"]`),
-  ).toHaveAttribute('data-masked', 'no');
+    page.locator('[data-testid="delivery-history-item"]').filter({ hasText: 'отменён' }),
+  ).toHaveCount(1);
   await expect(
     page.locator(`[data-testid="delivery-history-item"][data-order-number="${secondOrder}"]`),
   ).toContainText('Нет ответа');
