@@ -23,6 +23,7 @@ import { parseMoscow } from './moscow-time.js';
 import { diffSnapshots, snapshotHash, type OrderSnapshot } from './mapper.js';
 import {
   effectiveAttentionReasons,
+  type AddressAttention,
   type AttentionReason,
   type ManualInterval,
 } from '../../orders/attention.js';
@@ -149,8 +150,9 @@ function orderData(
   snapshot: OrderSnapshot,
   now: Date,
   manual: ManualInterval | null,
+  address?: AddressAttention | null,
 ): Prisma.DeliveryOrderUncheckedUpdateInput {
-  const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual);
+  const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual, address);
 
   return {
     externalName: snapshot.externalName,
@@ -300,7 +302,7 @@ async function updateOrder(
   await tx.deliveryOrder.update({
     where: { id: existing.id },
     data: {
-      ...orderData(snapshot, now, manual),
+      ...orderData(snapshot, now, manual, address),
       version: existing.version + 1,
       ...(conflictDetected ? { addressConflict: true, addressConflictDetectedAt: now } : {}),
     },
