@@ -937,6 +937,12 @@ test('Сделки: точный выбор → расчёт → превью �
   await expect(unassignedBlock).toBeVisible();
   await expect(unassignedBlock.getByRole('listitem')).toHaveCount(1);
 
+  // Посторонний заказ дня в превью не попал: ни в маршруты, ни в
+  // неразмещённые. Проверяется именно карточка запуска, а не вся страница:
+  // «Маршрутизация» рядом честно показывает все заказы дня, включая его.
+  const runCard = page.locator('.routes__card').filter({ hasText: 'Неразмещённые' });
+  await expect(runCard).not.toContainText(foreignNumber);
+
   // 3. Применение требует отдельного подтверждения: заказ, который никто
   //    не повезёт, не должен уехать в черновики молча.
   await page.getByRole('button', { name: 'Применить' }).click();
@@ -949,16 +955,19 @@ test('Сделки: точный выбор → расчёт → превью �
     page.locator('[data-plan-state="APPLIED"]').getByText(/Создано черновиков: 1/),
   ).toBeVisible();
 
-  // Посторонний заказ не появился ни в превью, ни в неразмещённых:
-  // расчёт видел ровно выбранное множество.
-  await expect(page.locator('main')).not.toContainText(foreignNumber);
-
   // 4. Черновик действительно появился в маршрутизации.
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
   await expect(page.locator('.routes__number-button').first()).toBeVisible();
+
+  // Созданный черновик состоит только из выбранных заказов: постороннего
+  // в его составе нет.
+  await page.locator('.routes__list-item').first().getByRole('button', { name: 'Открыть' }).click();
+  const draftCard = page.locator('.routes__card').first();
+  await expect(draftCard.locator('.routes__stop').first()).toBeVisible();
+  await expect(draftCard).not.toContainText(foreignNumber);
 
   // 5. Третья обязательная форма: время обслуживания. Меняется после
   //    применения, поэтому условия уже применённого плана не задевает.
