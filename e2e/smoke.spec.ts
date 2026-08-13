@@ -218,6 +218,8 @@ test('экран «Сделки»: список, поиск и ручной ин
   test.skip(orderNumber === '', 'не передан номер проверочного заказа (E2E_ORDER_NUMBER)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
@@ -275,6 +277,8 @@ test('карта не настроена: интерфейс говорит че
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -307,6 +311,8 @@ test('карта: ручная точка ставится без перезаг
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
 
   const map = page.locator('[data-testid="orders-map"]');
@@ -406,6 +412,8 @@ test('собственная подложка: всё с нашего origin и 
   });
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -533,6 +541,8 @@ test('адреса подложки: архив запрашивается из 
   });
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -598,6 +608,8 @@ test('маршрут: черновик → состав → порядок → �
   test.skip(first === '' || second === '', 'нужны два проверочных заказа');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -680,6 +692,8 @@ test('маршрут: черновик → состав → порядок → �
   await expect(card.locator('.routes__hint')).toContainText('Маршрут подтверждён');
 
   // Тот же маршрут появляется в маршрутных листах.
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   await page
@@ -708,6 +722,8 @@ test('перехват блокировки переводит прежнего 
 
   // Первый сеанс создаёт черновик и держит его в работе.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await page.getByRole('button', { name: 'Создать черновик' }).click();
 
@@ -752,6 +768,8 @@ test('печатная версия листа не содержит навиг�
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
 
   // Дожидаемся ответа списка: пустой count сразу после перехода означал бы
@@ -868,6 +886,8 @@ test('планирование: настройки, превью и примен
   ).toBeVisible();
 
   // 4. Черновик действительно появился в маршрутизации.
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
   await expect(page.locator('.routes__number-button').first()).toBeVisible();
@@ -1267,6 +1287,8 @@ test('склад: приёмка → комплектование → пауза
 
   // 6. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
   // что именно он повёз, — но уже без изменяющих действий.
+  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   const activeRow = page.locator('.routes__list-item', { hasText: routeNumber });
