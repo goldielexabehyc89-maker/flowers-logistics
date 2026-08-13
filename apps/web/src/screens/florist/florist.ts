@@ -30,12 +30,33 @@ export interface QueueItemView {
   changedSinceClaim: boolean;
 }
 
-export interface QueueResponse {
+/**
+ * Страница списка в том виде, в каком её отдаёт сервер.
+ *
+ * `total` и `hasMore` приходят с сервера и клиентом не вычисляются. Считать
+ * «страница неполная — значит, конец» нельзя: последняя страница ровно в
+ * `limit` строк неотличима от промежуточной, и человек решил бы, что заказов
+ * больше нет.
+ */
+export interface PageMeta {
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface QueueResponse extends PageMeta {
   day: QueueDay;
   deliveryDate: string;
   scope: QueueScope;
   includeAssigned: boolean;
+  /** Применённый сервером поиск: пустая строка поиском не считается. */
+  search: string | null;
   items: QueueItemView[];
+}
+
+export interface PrintJobsResponse extends PageMeta {
+  items: PrintJobView[];
 }
 
 export interface CardComponentView {
@@ -115,6 +136,14 @@ export interface FloristOption {
 
 /** Прочерк вместо пустоты: пустая ячейка читается как «забыли показать». */
 export const EMPTY_VALUE = '—';
+
+/**
+ * Сколько строк клиент просит за раз.
+ *
+ * Совпадает с умолчанием сервера. Верхнюю границу задаёт сервер, и просить
+ * больше неё бессмысленно: запрос будет отклонён, а не урезан.
+ */
+export const QUEUE_PAGE_SIZE = 50;
 
 export const PROCESS_LABELS: Record<string, string> = {
   NEW: 'Свободен',
@@ -206,6 +235,54 @@ export function availableActions(context: ActionContext): {
 /** Последнее задание печати заказа: с ним и работают кнопки карточки. */
 export function latestJob(card: OrderCardView): CardPrintJobView | null {
   return [...card.print.jobs].sort((a, b) => b.attempt - a.attempt)[0] ?? null;
+}
+
+/**
+ * Смещение следующей страницы или `null`, если продолжения нет.
+ *
+ * Считается от того, что сервер ФАКТИЧЕСКИ вернул (`offset + limit`), а не от
+ * числа накопленных строк: клиент, потерявший или отбросивший строку, иначе
+ * запросил бы не то смещение и создал бы пропуск.
+ */
+export function nextPageOffset(page: PageMeta): number | null {
+  return page.hasMore ? page.offset + page.limit : null;
+}
+
+/**
+ * Склейка накопленных страниц в один список.
+ *
+ * Повторный идентификатор отбрасывается. Это не украшение: очередь живёт, и
+ * между запросом первой и второй страницы заказ может появиться или уйти —
+ * тогда смещение сдвигается, и одна и та же строка приходит дважды. Два
+ * одинаковых ключа в списке React означают либо предупреждение, либо молча
+ * потерянную строку, а человек увидел бы один заказ дважды и решил, что их два.
+ *
+ * Порядок сохраняется: первым остаётся то вхождение, которое пришло раньше,
+ * то есть выше по канонической очереди.
+ */
+export function mergePages<T extends { id: string }>(pages: readonly { items: T[] }[]): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const page of pages) {
+    for (const item of page.items) {
+      if (seen.has(item.id)) {
+        continue;
+      }
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Сколько строк показано из скольких.
+ *
+ * Человеку нужны оба числа: без общего он не знает, что список продолжается,
+ * а без показанного не понимает, сколько уже просмотрел.
+ */
+export function pageSummary(shown: number, total: number): string {
+  return `Показано ${shown} из ${total}`;
 }
 
 /**

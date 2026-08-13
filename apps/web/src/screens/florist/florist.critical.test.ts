@@ -12,9 +12,13 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  QUEUE_PAGE_SIZE,
   availableActions,
   formatInterval,
   latestJob,
+  mergePages,
+  nextPageOffset,
+  pageSummary,
   printStateLabel,
   processLabel,
   routeLabel,
@@ -213,6 +217,13 @@ describe('показ значений', () => {
     expect(routeLabel({ ...item, route: null })).toBeNull();
   });
 
+  it('счётчик показывает и показанное, и общее', () => {
+    // Оба числа обязательны: без общего список выглядит полным, и заказ за
+    // границей страницы перестаёт существовать для того, кто на него смотрит.
+    expect(pageSummary(50, 111)).toBe('Показано 50 из 111');
+    expect(pageSummary(12, 12)).toBe('Показано 12 из 12');
+  });
+
   it('последнее задание печати — с наибольшим номером попытки', () => {
     const view = card({
       print: {
@@ -240,5 +251,53 @@ describe('показ значений', () => {
 
     expect(latestJob(view)?.id).toBe('job-2');
     expect(latestJob(card())).toBeNull();
+  });
+});
+
+/**
+ * Накопление страниц.
+ *
+ * Проверяется то, чего не видно на экране до самого отказа: смещение следующей
+ * страницы и склейка накопленного. Ошибка здесь не выглядит ошибкой — список
+ * просто показывает заказ дважды или молча теряет его, и человек собирает
+ * не то, что нужно.
+ */
+describe('страницы очереди', () => {
+  it('следующая страница считается по ответу сервера, а не по числу строк', () => {
+    // Продолжение обещает СЕРВЕР. Догадка «пришло меньше, чем просили — значит
+    // конец» ошибается ровно там, где последняя страница полная.
+    expect(nextPageOffset({ total: 111, limit: 50, offset: 0, hasMore: true })).toBe(50);
+    expect(nextPageOffset({ total: 111, limit: 50, offset: 50, hasMore: true })).toBe(100);
+    expect(nextPageOffset({ total: 100, limit: 50, offset: 50, hasMore: false })).toBeNull();
+    // Ровно полная последняя страница продолжения не обещает.
+    expect(nextPageOffset({ total: 50, limit: 50, offset: 0, hasMore: false })).toBeNull();
+  });
+
+  it('склейка страниц не теряет порядок и не повторяет заказ', () => {
+    const page = (numbers: number[]): { items: { id: string }[] } => ({
+      items: numbers.map((value) => ({ id: `order-${value}` })),
+    });
+
+    expect(mergePages([page([1, 2, 3]), page([4, 5])]).map((item) => item.id)).toEqual([
+      'order-1',
+      'order-2',
+      'order-3',
+      'order-4',
+      'order-5',
+    ]);
+
+    // Очередь живая: пока человек читал первую страницу, заказ мог уйти,
+    // смещение сдвинулось, и строка пришла второй раз. В списке она обязана
+    // остаться одна и на своём — верхнем — месте.
+    const withRepeat = mergePages([page([1, 2, 3]), page([3, 4])]);
+    expect(withRepeat.map((item) => item.id)).toEqual(['order-1', 'order-2', 'order-3', 'order-4']);
+    expect(new Set(withRepeat.map((item) => item.id)).size).toBe(withRepeat.length);
+
+    expect(mergePages([])).toEqual([]);
+  });
+
+  it('клиент просит ровно столько, сколько сервер отдаёт по умолчанию', () => {
+    // Разойдись эти числа — «Загрузить ещё» пропускала бы или повторяла строки.
+    expect(QUEUE_PAGE_SIZE).toBe(50);
   });
 });

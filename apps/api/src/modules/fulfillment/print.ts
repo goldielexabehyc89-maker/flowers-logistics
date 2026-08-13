@@ -20,6 +20,7 @@ import type { Database } from '../../platform/db.js';
 import { writeAudit } from '../audit/service.js';
 import { nextPrintAttempt, publishPrintEvent } from './assembly.js';
 import { renderPrintFormPdf, printFormFileName } from './pdf.js';
+import { normalizePageRequest, pageInfo, type PageInfo, type PageRequest } from './paging.js';
 import type { PrintFormSnapshot } from './print-form.js';
 import type { RequestContext } from './shifts.js';
 
@@ -91,7 +92,9 @@ function toView(job: JobRow): PrintJobView {
 /** Что показывает вкладка «Печать». */
 export type PrintFilter = 'attention' | 'printed' | 'all';
 
-export const MAX_PRINT_JOBS = 200;
+export interface PrintJobPage extends PageInfo {
+  items: PrintJobView[];
+}
 
 /**
  * Очередь заданий.
@@ -99,11 +102,23 @@ export const MAX_PRINT_JOBS = 200;
  * По умолчанию — только требующие внимания: ожидающие и ошибки. История
  * успешно напечатанных открывается отдельным фильтром, чтобы рабочий список
  * не превращался в архив (`FUL-002` §2.8).
+ *
+ * СТРАНИЦЫ ЧЕСТНЫЕ ДЛЯ ЛЮБОГО ФИЛЬТРА. Прежняя версия молча отдавала первые
+ * 50 строк и ничем не отличала «заданий ровно столько» от «остальные не
+ * показаны». За сотней заданий это означало, что ошибка печати, случившаяся
+ * раньше других, становилась недостижимой: ни повторить, ни отметить вручную
+ * её было нельзя. Теперь ответ несёт `total` и `hasMore`, и продолжение
+ * доступно при каждом фильтре.
+ *
+ * Срез здесь делает база, и это не противоречит правилу «сначала порядок»:
+ * порядок заданий полный и выражается самой базой — время создания с добором
+ * по идентификатору, — поэтому `skip`/`take` дают ровно ту же страницу, что и
+ * срез в памяти. Группового правила, как у очереди сборки, тут нет.
  */
 export async function listPrintJobs(
   db: Database,
-  input: { filter: PrintFilter; limit: number },
-): Promise<PrintJobView[]> {
+  input: { filter: PrintFilter } & Partial<PageRequest>,
+): Promise<PrintJobPage> {
   const states =
     input.filter === 'attention'
       ? (['PENDING', 'ERROR'] as const)
@@ -111,14 +126,28 @@ export async function listPrintJobs(
         ? (['PRINTED'] as const)
         : (['PENDING', 'ERROR', 'PRINTED'] as const);
 
-  const rows = (await db.orderPrintJob.findMany({
-    where: { state: { in: [...states] } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: Math.min(input.limit, MAX_PRINT_JOBS),
-    select: JOB_SELECT,
-  })) as JobRow[];
+  const page = normalizePageRequest(input);
+  const where = { state: { in: [...states] } };
 
-  return rows.map(toView);
+  // Счёт и страница читаются одним запросом к пулу: разница между ними
+  // возможна только при одновременной печати, и клиент в этом случае
+  // перезапрашивает первую страницу по событию realtime.
+  const [total, rows] = await Promise.all([
+    db.orderPrintJob.count({ where }),
+    db.orderPrintJob.findMany({
+      where,
+      // Устойчивый добор по идентификатору обязателен: без него две записи
+      // с одинаковым временем создания могли бы попасть на две страницы сразу
+      // или не попасть ни на одну.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: page.offset,
+      take: page.limit,
+      select: JOB_SELECT,
+    }) as Promise<JobRow[]>,
+  ]);
+
+  const items = rows.map(toView);
+  return { items, ...pageInfo(page, total, items.length) };
 }
 
 async function readJob(db: Database, jobId: string): Promise<JobRow> {

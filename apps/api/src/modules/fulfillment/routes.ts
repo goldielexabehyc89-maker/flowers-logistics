@@ -21,7 +21,8 @@ import { authenticateWithRoles } from '../auth/guards.js';
 import { MoyskladClient } from '../integrations/moysklad/client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { readOrderCard } from './card.js';
-import { readQueue } from './queue-service.js';
+import { MAX_SEARCH_LENGTH, readQueue } from './queue-service.js';
+import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from './paging.js';
 import { requirePhoto } from './photo.js';
 import {
   listPrintJobs,
@@ -29,7 +30,6 @@ import {
   renderJobDocument,
   renderOrderDocument,
   retryPrint,
-  MAX_PRINT_JOBS,
 } from './print.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
 import {
@@ -52,11 +52,26 @@ const uuid = z
 
 const idParamSchema = z.object({ id: uuid });
 
+/**
+ * Страница списка.
+ *
+ * Слишком большой `limit` отклоняется, а не молча урезается: клиент, попросивший
+ * весь день одним ответом, обязан узнать об отказе, а не получить страницу
+ * и решить, что заказов больше нет.
+ */
+const pageQueryShape = {
+  limit: z.coerce.number().int().min(1).max(PAGE_SIZE_MAX).default(PAGE_SIZE_DEFAULT),
+  offset: z.coerce.number().int().min(0).default(0),
+};
+
 const queueQuerySchema = z.object({
   day: z.enum(['today', 'tomorrow']).default('today'),
   scope: z.enum(['general', 'mine']).default('general'),
   /** Галочка «Все»: добавить назначенные заказы к общей очереди. */
   all: z.enum(['true', 'false']).default('false'),
+  /** Точный или частичный номер заказа внутри выбранных дня и области. */
+  search: z.string().max(MAX_SEARCH_LENGTH).optional(),
+  ...pageQueryShape,
 });
 
 const reasonSchema = z.string().trim().min(MIN_REASON_LENGTH).max(MAX_REASON_LENGTH);
@@ -74,7 +89,7 @@ const assembleSchema = z.object({
 
 const printQuerySchema = z.object({
   filter: z.enum(['attention', 'printed', 'all']).default('attention'),
-  limit: z.coerce.number().int().min(1).max(MAX_PRINT_JOBS).default(50),
+  ...pageQueryShape,
 });
 
 export interface FloristRouteDeps {
@@ -177,6 +192,9 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
         day: query.day,
         scope: query.scope,
         includeAssigned: query.all === 'true',
+        search: query.search ?? null,
+        limit: query.limit,
+        offset: query.offset,
       },
     );
   });
@@ -262,7 +280,11 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   app.get('/api/florist/print-jobs', async (request) => {
     await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const query = printQuerySchema.parse(request.query);
-    return { items: await listPrintJobs(deps.db, { filter: query.filter, limit: query.limit }) };
+    return listPrintJobs(deps.db, {
+      filter: query.filter,
+      limit: query.limit,
+      offset: query.offset,
+    });
   });
 
   app.post('/api/florist/print-jobs/:id/retry', async (request) => {
