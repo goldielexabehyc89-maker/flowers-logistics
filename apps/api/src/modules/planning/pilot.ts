@@ -588,20 +588,38 @@ function assertOrdersPreserved(snapshot: PlanInputSnapshot, plan: PlanResult): v
   }
 }
 
-/** Жёсткое окно и точное время не нарушены ни на одной остановке. */
+/**
+ * Жёсткое окно и точное время не нарушены ни на одной остановке.
+ *
+ * НАЧАЛО ОКНА ЗДЕСЬ НЕ ПРОВЕРЯЕТСЯ, И ЭТО НЕ УПУЩЕНИЕ.
+ *
+ * Окно ограничивает начало обслуживания, а не прибытие: приехав раньше, курьер
+ * ждёт. Доказательство этого требует секунд и поля `waiting_time`, а у пилота
+ * есть только `arrivalMinute` — округлённое физическое прибытие. Проверять
+ * начало окна по нему значило бы либо объявлять нормальное ожидание нарушением
+ * (так первый настоящий прогон и отказал при исправном решателе), либо
+ * додумывать `Math.max(arrival, start)` — то есть верить решателю на слово.
+ *
+ * Поэтому единственная проверка начала окна живёт в `parseSolution`, считается
+ * в секундах по `arrival + waiting_time` и уже выполнена к этому месту: её
+ * нарушение приходит сюда как `SOLVER_TIME_WINDOW` и до ворот не доживает.
+ *
+ * Конец окна пилот проверяет сам и намеренно. Это независимая вторая линия:
+ * прибытие после границы делает окно невыполнимым при любом ожидании, потому
+ * что обслуживание не начинается раньше прибытия. Проверка по округлённой
+ * минуте здесь достаточна — нарушения короче минуты ловит секундная проверка
+ * выше, а не эта.
+ */
 function assertWindowsRespected(snapshot: PlanInputSnapshot, plan: PlanResult): void {
   const byId = new Map(snapshot.orders.map((order) => [order.orderId, order]));
 
   for (const route of plan.routes) {
     for (const stop of route.stops) {
       const order = byId.get(stop.orderId);
-      if (order === undefined || order.windowStartMinute === null || stop.arrivalMinute === null) {
+      if (order === undefined || order.windowEndMinute === null || stop.arrivalMinute === null) {
         continue;
       }
-      if (
-        stop.arrivalMinute < order.windowStartMinute ||
-        (order.windowEndMinute !== null && stop.arrivalMinute > order.windowEndMinute)
-      ) {
+      if (stop.arrivalMinute > order.windowEndMinute) {
         throw new PilotGateError('WINDOW_VIOLATED');
       }
     }

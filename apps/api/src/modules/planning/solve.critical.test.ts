@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertNumericRequest,
+  VroomClient,
   VroomError,
   type VroomSolution,
 } from '../integrations/vroom/client.js';
@@ -274,7 +275,8 @@ describe('точное время доставки', () => {
     expect(() => parseSolution(built, late)).toThrowError(PlanContractError);
 
     // Приезд РАНЬШЕ точного времени нарушением не является: курьер подождёт,
-    // а обслуживание начнётся в названную минуту.
+    // а обслуживание начнётся в названную минуту. Но ожидание обязано быть
+    // СООБЩЁННЫМ: молчание решателя доказательством не является.
     const early: VroomSolution = {
       code: 0,
       routes: [
@@ -282,7 +284,7 @@ describe('точное время доставки', () => {
           vehicle: 1,
           steps: [
             { type: 'start', arrival: 540 * 60 },
-            { type: 'job', id: 1, arrival: 800 * 60 },
+            { type: 'job', id: 1, arrival: 800 * 60, waiting_time: 40 * 60 },
             { type: 'end', arrival: 860 * 60 },
           ],
         },
@@ -291,6 +293,9 @@ describe('точное время доставки', () => {
     };
 
     expect(parseSolution(built, early).routes[0]?.stops).toHaveLength(1);
+    // Наружу по-прежнему показывается физическое прибытие, а не начало
+    // обслуживания: подменять одно другим значило бы врать в маршрутном листе.
+    expect(parseSolution(built, early).routes[0]?.stops[0]?.arrivalMinute).toBe(800);
   });
 
   it('невыполнимое точное время возвращается неразмещённым заказом', () => {
@@ -674,5 +679,272 @@ describe('проверка ответа решателя', () => {
     const plan = parseSolution(built, partial);
     expect(plan.unassignedOrderIds).toEqual(['order-b']);
     expect(plan.routes[0]?.stops).toHaveLength(1);
+  });
+});
+
+/**
+ * Окно ограничивает НАЧАЛО ОБСЛУЖИВАНИЯ, а не прибытие.
+ *
+ * Проверка появилась после первого настоящего операционного прогона пилота.
+ * Решатель, граф и матрицы были исправны, все 3600 элементов посчитались, —
+ * и четыре сценария из шести отказали, потому что контрольный слой сравнивал
+ * сырой `arrival` с началом окна. Приехать раньше и подождать — нормальная
+ * работа курьера, а не нарушение обещания.
+ *
+ * Обратная ошибка не менее опасна: посчитать `Math.max(arrival, start)`
+ * значило бы объявить окно соблюдённым, ни разу не прочитав, ждал ли решатель
+ * на самом деле. Поэтому доказательством служит сумма `arrival + waiting_time`,
+ * и считается она в секундах.
+ */
+describe('начало обслуживания внутри окна', () => {
+  const windowed = order('order-win', 55_780_000, 37_660_000, { start: 600, end: 720 });
+
+  function withWindow(): PlanInputSnapshot {
+    return buildInputSnapshot({
+      deliveryDate: '2026-09-01',
+      graphSha256: '0f'.repeat(32),
+      trafficMode: 'STATIC',
+      maxPoints: 60,
+      shift: { startMinute: 540, endMinute: 1080 },
+      shiftVersion: 1,
+      serviceTime: { carMinutes: 10, footMinutes: 10 },
+      serviceTimeVersion: 1,
+      depots: [DEPOT],
+      orders: [windowed],
+      slots: [
+        {
+          slotIndex: 1,
+          courierUserId: null,
+          vehicleType: 'CAR',
+          capacityOrders: 1,
+          shiftStartMinute: 540,
+          shiftEndMinute: 1080,
+          startDepotId: DEPOT.id,
+          endDepotId: DEPOT.id,
+        },
+      ],
+      slotIds: ['slot-1'],
+    });
+  }
+
+  /** Ответ решателя с одной остановкой: секунды задаются явно. */
+  function answer(step: Record<string, unknown>): VroomSolution {
+    return {
+      code: 0,
+      routes: [
+        {
+          vehicle: 1,
+          steps: [
+            { type: 'start', arrival: 540 * 60 },
+            { type: 'job', id: 1, ...step },
+            { type: 'end', arrival: 1000 * 60 },
+          ],
+        },
+      ],
+      unassigned: [],
+    } as unknown as VroomSolution;
+  }
+
+  it('раннее прибытие с достаточным ожиданием принимается', () => {
+    const plan = parseSolution(withWindow(), answer({ arrival: 540 * 60, waiting_time: 60 * 60 }));
+
+    expect(plan.routes[0]?.stops).toHaveLength(1);
+    expect(plan.routes[0]?.stops[0]?.arrivalMinute).toBe(540);
+  });
+
+  it('раннее прибытие БЕЗ сообщённого ожидания отвергается', () => {
+    // Именно здесь проходит граница между доказательством и доверием: без
+    // `waiting_time` мы не знаем, дождался решатель или начал раньше срока.
+    expect(() => parseSolution(withWindow(), answer({ arrival: 540 * 60 }))).toThrowError(
+      PlanContractError,
+    );
+  });
+
+  it('раннее прибытие с НЕДОСТАТОЧНЫМ ожиданием отвергается', () => {
+    expect(() =>
+      parseSolution(withWindow(), answer({ arrival: 540 * 60, waiting_time: 59 * 60 })),
+    ).toThrowError(PlanContractError);
+  });
+
+  it('прибытие внутри окна с нулевым ожиданием принимается', () => {
+    const plan = parseSolution(withWindow(), answer({ arrival: 660 * 60, waiting_time: 0 }));
+
+    expect(plan.routes[0]?.stops[0]?.arrivalMinute).toBe(660);
+  });
+
+  it('ожидание, уводящее начало обслуживания за конец окна, отвергается', () => {
+    // Прибытие внутри окна, но обслуживание начинается после его конца.
+    // Проверять один `arrival` этого не заметило бы.
+    expect(() =>
+      parseSolution(withWindow(), answer({ arrival: 700 * 60, waiting_time: 30 * 60 })),
+    ).toThrowError(PlanContractError);
+  });
+
+  it('нарушение короче минуты не прячется округлением', () => {
+    // Округление до минуты вернуло бы ровно границу окна и объявило бы
+    // ответ корректным. Поэтому сравнение идёт в секундах.
+    expect(() =>
+      parseSolution(withWindow(), answer({ arrival: 720 * 60 + 20, waiting_time: 0 })),
+    ).toThrowError(PlanContractError);
+
+    // Ровно граница — принимается: обе стороны окна включительны.
+    expect(
+      parseSolution(withWindow(), answer({ arrival: 720 * 60, waiting_time: 0 })).routes[0]?.stops,
+    ).toHaveLength(1);
+  });
+
+  it('заказ с окном без сообщённого прибытия недоказуем и отвергается', () => {
+    expect(() => parseSolution(withWindow(), answer({}))).toThrowError(PlanContractError);
+  });
+
+  it('заказ без окна ожидания не требует', () => {
+    const free = buildInputSnapshot({
+      deliveryDate: '2026-09-01',
+      graphSha256: '0f'.repeat(32),
+      trafficMode: 'STATIC',
+      maxPoints: 60,
+      shift: { startMinute: 540, endMinute: 1080 },
+      shiftVersion: 1,
+      serviceTime: { carMinutes: 10, footMinutes: 10 },
+      serviceTimeVersion: 1,
+      depots: [DEPOT],
+      orders: [order('order-free', 55_790_000, 37_670_000)],
+      slots: [
+        {
+          slotIndex: 1,
+          courierUserId: null,
+          vehicleType: 'CAR',
+          capacityOrders: 1,
+          shiftStartMinute: 540,
+          shiftEndMinute: 1080,
+          startDepotId: DEPOT.id,
+          endDepotId: DEPOT.id,
+        },
+      ],
+      slotIds: ['slot-1'],
+    });
+
+    // Обещания нет — доказывать нечего. Старые сохранённые ответы без поля
+    // ломать из-за этого неправильно.
+    expect(parseSolution(free, answer({ arrival: 600 * 60 })).routes[0]?.stops).toHaveLength(1);
+  });
+
+  it('точное окно [t,t]: ожидание ровно до t принимается, раньше и позже — нет', () => {
+    const exact = buildInputSnapshot({
+      deliveryDate: '2026-09-01',
+      graphSha256: '0f'.repeat(32),
+      trafficMode: 'STATIC',
+      maxPoints: 60,
+      shift: { startMinute: 540, endMinute: 1080 },
+      shiftVersion: 1,
+      serviceTime: { carMinutes: 10, footMinutes: 10 },
+      serviceTimeVersion: 1,
+      depots: [DEPOT],
+      orders: [order('order-exact', 55_780_000, 37_660_000, { start: 840 })],
+      slots: [
+        {
+          slotIndex: 1,
+          courierUserId: null,
+          vehicleType: 'CAR',
+          capacityOrders: 1,
+          shiftStartMinute: 540,
+          shiftEndMinute: 1080,
+          startDepotId: DEPOT.id,
+          endDepotId: DEPOT.id,
+        },
+      ],
+      slotIds: ['slot-1'],
+    });
+
+    expect(
+      parseSolution(exact, answer({ arrival: 800 * 60, waiting_time: 40 * 60 })).routes[0]?.stops,
+    ).toHaveLength(1);
+    // Начало на секунду раньше названной минуты — уже не «ровно в 14:00».
+    expect(() =>
+      parseSolution(exact, answer({ arrival: 800 * 60, waiting_time: 40 * 60 - 1 })),
+    ).toThrowError(PlanContractError);
+    expect(() =>
+      parseSolution(exact, answer({ arrival: 800 * 60, waiting_time: 40 * 60 + 1 })),
+    ).toThrowError(PlanContractError);
+  });
+});
+
+describe('клиент решателя сохраняет ожидание', () => {
+  /** Клиент с подставленным ответом: сеть не нужна, схема та же самая. */
+  function clientReturning(body: unknown): VroomClient {
+    return new VroomClient({
+      baseUrl: 'http://solver.invalid',
+      fetch: (async () =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })) as typeof globalThis.fetch,
+    });
+  }
+
+  function solutionWith(waiting: unknown): unknown {
+    return {
+      code: 0,
+      routes: [
+        {
+          vehicle: 1,
+          steps: [
+            { type: 'start', arrival: 0 },
+            { type: 'job', id: 1, arrival: 60, waiting_time: waiting },
+            { type: 'end', arrival: 120 },
+          ],
+        },
+      ],
+      unassigned: [],
+    };
+  }
+
+  const problem = {
+    jobs: [{ id: 1, location_index: 1, service: 0, delivery: [1] }],
+    vehicles: [
+      {
+        id: 1,
+        profile: 'car' as const,
+        type: 'CAR' as const,
+        start_index: 0,
+        end_index: 0,
+        capacity: [1],
+        time_window: [0, 86_400] as [number, number],
+      },
+    ],
+    matrices: {
+      car: {
+        durations: [
+          [0, 10],
+          [10, 0],
+        ],
+        distances: [
+          [0, 10],
+          [10, 0],
+        ],
+      },
+    },
+  } as unknown as Parameters<VroomClient['solve']>[0];
+
+  it('доносит ожидание до продукта, а не отбрасывает его', async () => {
+    // Пока поле терялось в схеме, доказать начало обслуживания было нечем.
+    const solved = await clientReturning(solutionWith(120)).solve(problem);
+
+    expect(solved.routes[0]?.steps[1]?.waiting_time).toBe(120);
+  });
+
+  it('отвергает отрицательное, нечисловое и бесконечное ожидание', async () => {
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, '60', null]) {
+      await expect(
+        clientReturning(solutionWith(bad)).solve(problem),
+        `ожидание ${String(bad)}`,
+      ).rejects.toThrowError(VroomError);
+    }
+  });
+
+  it('нулевое ожидание — обычное значение, а не отсутствие', async () => {
+    const solved = await clientReturning(solutionWith(0)).solve(problem);
+
+    expect(solved.routes[0]?.steps[1]?.waiting_time).toBe(0);
   });
 });
