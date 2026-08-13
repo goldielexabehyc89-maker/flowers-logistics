@@ -441,6 +441,20 @@ jobs:
             echo "count=$(get 'количество')"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Создать фикстуру самовывоза
+        id: seed-pickup
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Заказ со способом получения «Самовывоз» и ячейка хранения: маршрут
+          # такому заказу не нужен, а раздел выдачи покупателю без него пуст.
+          output="$(npm run --silent seed:e2e-pickup)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n 1p; }
+          {
+            echo "order=$(get 'заказ самовывоза')"
+            echo "cell=$(get 'ячейка самовывоза')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Браузерный smoke
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
@@ -458,6 +472,8 @@ jobs:
           # продолжает складской, а не заводит второй маршрут.
           E2E_WH_COURIER_PHONE: ${{ steps.seed-warehouse.outputs.courierphone }}
           E2E_WH_COURIER_PIN: ${{ steps.seed-warehouse.outputs.courierpin }}
+          E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
+          E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
         run: npm run test:e2e
 
       # Playwright сохраняет снимок страницы момента отказа рядом с результатами,

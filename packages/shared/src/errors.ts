@@ -168,6 +168,10 @@ export const CONFLICT_KINDS = [
    * или администратор, и уже с обязательной причиной.
    */
   'CANCEL_WINDOW_EXPIRED',
+  /** Заказ доставляется курьером: выдавать его покупателю нельзя. */
+  'ORDER_NOT_PICKUP',
+  /** Самовывозный заказ уже выдан покупателю. */
+  'PICKUP_ALREADY_ISSUED',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

@@ -75,6 +75,9 @@ export const REALTIME_TOPICS = [
   'delivery.result_recorded',
   'delivery.result_cancelled',
   'route.completed',
+  // Выдача самовывоза (этап 6.7). Адресуется ADMIN и MANAGER. В payload
+  // только идентификатор заказа: номер, ячейка и получатель туда не уходят.
+  'pickup.issued',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

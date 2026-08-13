@@ -29,6 +29,7 @@ import {
 } from '../../modules/warehouse/routes.js';
 import { registerDeliveryRoutes } from '../../modules/delivery/routes.js';
 import { registerFloristRoutes } from '../../modules/fulfillment/routes.js';
+import { registerPickupRoutes } from '../../modules/pickup/routes.js';
 import { registerSettingsRoutes } from '../../modules/settings/routes.js';
 import { registerPlanningRoutes } from '../../modules/planning/routes.js';
 import { createPlanningDeps } from '../../modules/planning/deps.js';
@@ -150,6 +151,9 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   // токена: без него проксирование фотографий отвечает «Фото отсутствует»
   // и ни одного сетевого обращения не выполняет.
   await registerFloristRoutes(app, { db, config });
+  // Раздел самовывоза: выдача покупателю. Прав склада и логистики не требует
+  // и не выдаёт — у него собственная пара ролей.
+  await registerPickupRoutes(app, { db, config });
   await registerSettingsRoutes(app, { db, config });
   // HTTP-слой планирования аренд не берёт и в сеть не ходит: расчёт выполняет
   // фоновый исполнитель со своим владельцем аренды (см. index.ts).

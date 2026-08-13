@@ -135,6 +135,7 @@ model User {
   boundRouteCells   RouteCellBinding[] @relation("RouteCellBoundBy")
   unboundRouteCells RouteCellBinding[] @relation("RouteCellReleasedBy")
   issuedRoutes      RouteIssueSession[] @relation("IssueSessionCourier")
+  pickupIssues      OrderPickupIssue[]  @relation("PickupIssuedBy")
   confirmedIssues   RouteIssueSession[] @relation("IssueSessionConfirmedBy")
   cancelledIssues   RouteIssueSession[] @relation("IssueSessionCancelledBy")
 
@@ -679,6 +680,7 @@ model DeliveryOrder {
   fulfillmentPositions DeliveryOrderPosition[]
   fulfillmentRevisions OrderFulfillmentRevision[]
   placements           OrderPlacement[]
+  pickupIssue          OrderPickupIssue?
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
   deliveryAttempts     DeliveryAttempt[]
@@ -1817,6 +1819,7 @@ model StorageCell {
   movedInto    OrderPlacement[]   @relation("PlacementMovedToCell")
   movedFrom    OrderPlacement[]   @relation("PlacementFromCell")
   routeBindings RouteCellBinding[]
+  pickupIssues  OrderPickupIssue[] @relation("PickupIssueCell")
 
   @@unique([id, kind])
   @@index([isActive, kind])
@@ -1834,6 +1837,10 @@ enum PlacementReleaseReason {
   ISSUED_TO_COURIER
   /// Изъят со склада без выдачи: брак, отмена, возврат флористу.
   WITHDRAWN
+  /// Выдан покупателю на самовывозе (этап 6.7). Значение добавлено в КОНЕЦ:
+  /// PostgreSQL хранит порядок объявления, и вставка в середину сдвинула бы
+  /// существующие значения.
+  ISSUED_TO_CUSTOMER
 }
 
 /// Как заказ попал в ячейку.
@@ -1894,6 +1901,9 @@ model OrderPlacement {
   /// или отменили. Система не переносит его молча: физическое место меняет
   /// только человек штатным сканированием.
   requiresRelocation Boolean @default(false)
+
+  /// Факт выдачи покупателю, закрывший это размещение. Ровно один на запись.
+  pickupIssue OrderPickupIssue?
 
   @@index([orderId, placedAt])
   @@index([cellId])
@@ -1976,6 +1986,41 @@ model RouteIssueSession {
   placements OrderPlacement[]
 
   @@index([routeId, state])
+}
+
+/// Неизменяемый факт выдачи самовывозного заказа покупателю (этап 6.7).
+///
+/// Отдельная таблица, а не признак у заказа и не ещё одно состояние процесса:
+/// выдача — это событие с автором и серверным временем, и переписать его
+/// нельзя. Признак в строке заказа молча перезаписался бы следующей операцией,
+/// и «кто и когда отдал коробку» перестало бы существовать.
+///
+/// Один заказ выдаётся один раз: уникальность по `orderId` держит база, а не
+/// проверка «сначала посмотреть, потом вставить». Двойной клик и повтор
+/// потерянного ответа проигрывают этому индексу, а не создают второй факт.
+model OrderPickupIssue {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @unique @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Закрытое этой выдачей размещение. Одно размещение выдаётся один раз.
+  placementId String         @unique @db.Uuid
+  placement   OrderPlacement @relation(fields: [placementId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Ячейка, из которой заказ забрали. Дублируется намеренно: история
+  /// размещений живёт своей жизнью, а вопрос «откуда отдали» обязан иметь
+  /// ответ и через год.
+  cellId String      @db.Uuid
+  cell   StorageCell @relation("PickupIssueCell", fields: [cellId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Серверное время. Клиентскому здесь верить нельзя: касса и планшет
+  /// расходятся, а спор о времени выдачи решается этим полем.
+  issuedAt   DateTime @default(now())
+  issuedById String   @db.Uuid
+  issuedBy   User     @relation("PickupIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([issuedAt])
 }
 
 /// Справочник причин недоставки.

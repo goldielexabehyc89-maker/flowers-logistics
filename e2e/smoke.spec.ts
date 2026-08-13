@@ -1348,3 +1348,129 @@ test('курьер: досрочность, «Не доставлен» с пр�
     page.locator(`[data-testid="delivery-history-item"][data-order-number="${secondOrder}"]`),
   ).toContainText('Нет ответа');
 });
+
+test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  const orderNumber = process.env['E2E_PICKUP_ORDER'] ?? '';
+  const cellCode = process.env['E2E_PICKUP_CELL'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    orderNumber === '' || cellCode === '',
+    'не передана фикстура самовывоза (E2E_PICKUP_*)',
+  );
+
+  const MANAGER_PIN = '7351';
+  const FLORIST_PIN = '9512';
+
+  // 1. Администратор заводит менеджера выдачи и флориста.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  async function createUser(name: string, roleLabel: string): Promise<[string, string]> {
+    await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+    await page.getByRole('button', { name: 'Добавить' }).click();
+    await page.getByLabel('ФИО').fill(name);
+    const phone = uniquePhone();
+    await page.getByLabel('Телефон').fill(phone);
+    await page.getByRole('checkbox', { name: roleLabel }).check();
+    const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+    if (await courierRole.isChecked()) {
+      await courierRole.uncheck();
+    }
+    await page.getByRole('button', { name: 'Создать' }).click();
+    const code = (await page.locator('.one-time-code').innerText()).trim();
+    expect(code).toMatch(/^\d{4}$/);
+    await page.getByRole('button', { name: 'Я сохранил код' }).click();
+    return [phone, code];
+  }
+
+  const [managerPhone, managerCode] = await createUser('Менеджер выдачи', 'Менеджер выдачи');
+  const [floristPhone, floristCode] = await createUser('Флорист самовывоза', 'Флорист');
+
+  // 2. Флорист собирает самовывозный заказ: маршрута у него нет, сборка обычная.
+  const floristContext = await browser.newContext();
+  const floristPage = await floristContext.newPage();
+  await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
+  await clickAndAwait(
+    floristPage,
+    floristPage.getByTestId('shift-start'),
+    'POST',
+    '/api/florist/shift/start',
+  );
+  const queueRow = floristPage.locator('.florist__row', { hasText: orderNumber });
+  await expect(queueRow).toBeVisible();
+  await clickAndAwait(floristPage, queueRow.getByTestId('row-claim'), 'POST', '/claim');
+  await floristPage.getByTestId('florist-tab-mine').click();
+  await floristPage
+    .locator('.florist__row', { hasText: orderNumber })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await clickAndAwait(
+    floristPage,
+    floristPage.getByTestId('florist-card').getByTestId('card-assemble'),
+    'POST',
+    '/assemble',
+  );
+  await floristContext.close();
+
+  // 3. Кладовщик принимает заказ в обычную ячейку хранения: маршрут не нужен.
+  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await page.getByTestId('wh-scan-order').fill(orderNumber);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  await expect(page.getByTestId('wh-scanned-order')).toHaveText(orderNumber);
+  await page.getByTestId('wh-scan-cell').fill(cellCode);
+  await page.getByTestId('wh-place').click();
+  await expect(page.locator('.toast-region')).toContainText(orderNumber);
+
+  // 4. Менеджер входит и видит ТОЛЬКО свой раздел.
+  const managerContext = await browser.newContext();
+  const managerPage = await managerContext.newPage();
+  await activate(managerPage, managerPhone, managerCode, MANAGER_PIN);
+  await expect(managerPage.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+  for (const foreign of [
+    'Настройки',
+    'Сотрудники и курьеры',
+    'Маршрутизация',
+    'Склад',
+    'Флорист',
+  ]) {
+    await expect(managerPage.getByRole('link', { name: foreign })).toHaveCount(0);
+  }
+
+  // Заказ ждёт выдачи и лежит в известной ячейке.
+  const waiting = managerPage.locator('[data-testid="pickup-waiting-row"]', {
+    hasText: orderNumber,
+  });
+  await expect(waiting).toContainText(cellCode);
+
+  // 5. Поиск по номеру и выдача покупателю — без второго скана.
+  await managerPage.getByTestId('pickup-search').fill(orderNumber);
+  await managerPage.getByTestId('pickup-search').press('Enter');
+  const card = managerPage.getByTestId('pickup-card');
+  await expect(card.getByTestId('pickup-card-number')).toHaveText(orderNumber);
+  await expect(card.getByTestId('pickup-card-cell')).toHaveText(cellCode);
+  await expect(card).toContainText('Собран');
+
+  await clickAndAwait(managerPage, card.getByTestId('pickup-issue'), 'POST', '/api/pickup/issues');
+
+  // 6. Заказ ушёл из ожидающих и появился среди выданных.
+  await expect(
+    managerPage.locator('[data-testid="pickup-waiting-row"]', { hasText: orderNumber }),
+  ).toHaveCount(0);
+  await expect(
+    managerPage.locator('[data-testid="pickup-issued-row"]', { hasText: orderNumber }),
+  ).toContainText('Выдан');
+
+  // 7. Повторная выдача отказывает штатно, а не создаёт второй факт.
+  await managerPage.getByTestId('pickup-search').fill(orderNumber);
+  await managerPage.getByTestId('pickup-search').press('Enter');
+  await expect(managerPage.getByTestId('pickup-card-blocked')).toContainText('Уже выдан');
+  await expect(managerPage.getByTestId('pickup-issue')).toHaveCount(0);
+
+  await managerContext.close();
+});

@@ -128,6 +128,10 @@ export function invalidationKeysFor(topic: string): string[][] {
   if (topic.startsWith('print_job.')) {
     return [['florist-print-jobs'], ['florist-card']];
   }
+  if (topic.startsWith('pickup.')) {
+    // Выдача самовывоза меняет и карточку у прилавка, и список дня.
+    return [['pickup-day']];
+  }
   if (topic.startsWith('order.')) {
     // Событие не несёт данных заказа: список перезапрашивается целиком.
     // Ни звука, ни всплывающего уведомления — обычный новый заказ рутина.
