@@ -1260,11 +1260,13 @@ test('флорист на телефоне: без нижней полосы, к
   expect(box?.width ?? 0).toBeLessThanOrEqual(viewport?.width ?? 0);
 
   // Прокручивается содержимое окна, а не страница под ним.
-  const overflow = await dialog
-    .locator('.modal__body')
-    .evaluate<string, undefined>('element => getComputedStyle(element).overflowY');
+  const overflow = await mobilePage.evaluate<string>(
+    "getComputedStyle(document.querySelector('dialog[open] .modal__body')).overflowY",
+  );
   expect(overflow).toBe('auto');
-  await dialog.locator('.modal__body').evaluate('element => { element.scrollTop = 10_000; }');
+  await mobilePage.evaluate(
+    "document.querySelector('dialog[open] .modal__body').scrollTop = 10000",
+  );
   expect(await mobilePage.evaluate<number>('window.scrollY')).toBe(scrollBefore);
 
   // Escape закрывает окно и возвращает фокус на кнопку, его открывшую.
