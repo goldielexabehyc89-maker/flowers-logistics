@@ -24,6 +24,23 @@ import {
 import { toDecimalString } from '../integrations/moysklad/money.js';
 import { MAX_MINUTE, MIN_MINUTE, setManualInterval } from './service.js';
 import { fromMicro, setManualPoint } from './geo.js';
+import {
+  ADDRESS_ROLES,
+  clearLocalAddress,
+  listAddressHistory,
+  MAX_ADDRESS_LENGTH,
+  resolveAddressConflict,
+  setLocalAddress,
+} from './address-service.js';
+import { isDadataAllowed } from './geocoding/enabled.js';
+import { dealsCount, dealsIds, type DealsScope } from './deals-scope.js';
+import { addressState } from './address.js';
+import {
+  MAX_QUERY_LENGTH,
+  MIN_QUERY_LENGTH,
+  suggestAddresses,
+  type AddressSuggestion,
+} from '../integrations/dadata/suggest.js';
 import { BASEMAP_PREFIX } from '../geo/basemap/routes.js';
 import type { BasemapState } from '../geo/basemap/manifest.js';
 import { CURRENT_TRAFFIC_MODE } from '../geo/matrix/service.js';
@@ -76,6 +93,45 @@ const setIntervalBodySchema = z.object({
   version: z.number().int().min(0),
 });
 
+/**
+ * Запрос «Сделок».
+ *
+ * День обязателен по смыслу, но по умолчанию берётся московский «сегодня»:
+ * логист открывает экран и сразу видит рабочий день, а не пустую форму.
+ * Слишком большой `limit` отклоняется, а не урезается молча — клиент,
+ * попросивший больше, должен узнать об этом, а не считать, что получил всё.
+ */
+const dealsQuerySchema = z.object({
+  deliveryDate: dateSchema.optional(),
+  search: z.string().trim().max(200).optional(),
+  fromMinute: z.coerce.number().int().min(0).max(1440).optional(),
+  toMinute: z.coerce.number().int().min(0).max(1440).optional(),
+  includeDrafts: z.enum(['true', 'false']).optional(),
+  group: z.enum(['ROUTABLE', 'ATTENTION', 'ALL']).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const suggestQuerySchema = z.object({
+  query: z.string().min(MIN_QUERY_LENGTH).max(MAX_QUERY_LENGTH),
+});
+
+/** Точка принимается только вместе с адресом и только целыми микроградусами. */
+const localAddressSchema = z.object({
+  address: z.string().trim().min(1).max(MAX_ADDRESS_LENGTH),
+  point: z
+    .object({
+      latMicro: z.number().int().min(-90_000_000).max(90_000_000),
+      lonMicro: z.number().int().min(-180_000_000).max(180_000_000),
+    })
+    .nullable()
+    .optional(),
+});
+
+const conflictDecisionSchema = z.object({
+  decision: z.enum(['KEEP_LOCAL', 'USE_SOURCE']),
+});
+
 const idParamSchema = z.object({
   id: z
     .string()
@@ -87,6 +143,13 @@ interface OrdersDeps {
   config: AppConfig;
   /** Проверенное состояние собственной подложки. Пусто — её просто нет. */
   basemap?: () => BasemapState;
+  /**
+   * Подменяемый HTTP для подсказок адреса.
+   *
+   * Существует только ради проверок: настоящих обращений к DaData в тестах
+   * не бывает, а разрешать их «случайно» из-за забытой заглушки нельзя.
+   */
+  suggestFetch?: typeof globalThis.fetch;
 }
 
 /**
@@ -188,6 +251,123 @@ function toListItem(order: {
     version: order.version,
     updatedAt: order.updatedAt.toISOString(),
   };
+}
+
+function contextOf(request: { ip: string; headers: Record<string, unknown> }): {
+  ip: string | null;
+  userAgent: string | null;
+} {
+  const agent = request.headers['user-agent'];
+  return {
+    ip: request.ip,
+    userAgent: typeof agent === 'string' ? agent.slice(0, 255) : null,
+  };
+}
+
+/** Отбор «Сделок» из проверенного запроса. День по умолчанию — московский сегодня. */
+function scopeOf(query: {
+  deliveryDate?: string | undefined;
+  search?: string | undefined;
+  fromMinute?: number | undefined;
+  toMinute?: number | undefined;
+  includeDrafts?: 'true' | 'false' | undefined;
+  group?: 'ROUTABLE' | 'ATTENTION' | 'ALL' | undefined;
+}): DealsScope {
+  return {
+    deliveryDate: query.deliveryDate ?? moscowCalendarDate(new Date()),
+    search: query.search ?? null,
+    fromMinute: query.fromMinute ?? null,
+    toMinute: query.toMinute ?? null,
+    includeDrafts: query.includeDrafts === 'true',
+    group: query.group ?? 'ALL',
+  };
+}
+
+/**
+ * Карточки сделок в порядке переданных идентификаторов.
+ *
+ * Порядок задаёт канонический отбор, а не база: `findMany` вернул бы строки
+ * в своём порядке, и страницы разошлись бы со списком.
+ */
+async function dealCards(db: Database, ids: string[]) {
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const rows = await db.deliveryOrder.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      externalName: true,
+      address: true,
+      localAddress: true,
+      addressConflict: true,
+      recipient: true,
+      comment: true,
+      deliveryDate: true,
+      intervalStartMinute: true,
+      intervalEndMinute: true,
+      manualIntervalStartMinute: true,
+      manualIntervalEndMinute: true,
+      needsAttention: true,
+      attentionReasons: true,
+      geoState: true,
+      version: true,
+      intervalRaw: true,
+      routeOrders: {
+        where: { removedAt: null },
+        select: { routeId: true, route: { select: { number: true, state: true } } },
+        take: 1,
+      },
+    },
+  });
+
+  const byId = new Map(rows.map((row) => [row.id, row]));
+
+  return ids.flatMap((id) => {
+    const row = byId.get(id);
+    if (row === undefined) {
+      return [];
+    }
+    const participation = row.routeOrders[0];
+    const address = addressState(row);
+    return [
+      {
+        id: row.id,
+        number: row.externalName,
+        // Наружу идёт эффективный адрес и признак правки: исходный нужен
+        // только в карточке правки, а не в каждом элементе списка.
+        address: address.effective,
+        sourceAddress: address.source,
+        addressCorrected: address.corrected,
+        addressConflict: address.conflict,
+        recipient: row.recipient,
+        // Пустой комментарий не занимает место: клиент не должен рисовать
+        // строку-заглушку там, где текста нет.
+        comment: row.comment === null || row.comment.trim() === '' ? null : row.comment,
+        deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
+        startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,
+        endMinute: row.manualIntervalEndMinute ?? row.intervalEndMinute,
+        // Исходный интервал показывается рядом с рабочим: решение о правке
+        // принимается именно их сравнением.
+        sourceStartMinute: row.intervalStartMinute,
+        sourceEndMinute: row.intervalEndMinute,
+        sourceIntervalRaw: row.intervalRaw,
+        intervalCorrected: row.manualIntervalStartMinute !== null,
+        // Версия нужна ручной правке интервала: чужое изменение обязано
+        // получить честный отказ, а не молча перезаписаться.
+        version: row.version,
+        needsAttention: row.needsAttention,
+        attentionReasons: row.attentionReasons,
+        geoState: row.geoState,
+        // Заказ черновика показывается только для чтения и ведёт в свой черновик.
+        draftRouteId: participation?.routeId ?? null,
+        draftRouteNumber: participation?.route.number ?? null,
+        selectable:
+          !row.needsAttention && row.geoState === 'RESOLVED' && participation === undefined,
+      },
+    ];
+  });
 }
 
 export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Promise<void> {
@@ -539,5 +719,173 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         userAgent: typeof userAgent === 'string' ? userAgent.slice(0, 255) : null,
       },
     );
+  });
+
+  // --- Локальный адрес логиста -------------------------------------------
+
+  /**
+   * Подсказки адреса.
+   *
+   * Ключ и адрес DaData остаются на сервере: браузер обращается только сюда
+   * и получает готовые стандартизованные варианты. Сырой ответ провайдера
+   * наружу не выходит ни в каком виде.
+   */
+  app.get('/api/orders/address-suggestions', async (request) => {
+    await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { query } = suggestQuerySchema.parse(request.query);
+
+    // Окружение решает раньше сети: там, где живой DaData не разрешён,
+    // запрос не отправляется вовсе, а экран продолжает работать по базе.
+    if (!isDadataAllowed(deps.config)) {
+      return { suggestions: [] as AddressSuggestion[], available: false };
+    }
+
+    const suggestions = await suggestAddresses(
+      {
+        credentials: {
+          apiKey: deps.config.DADATA_API_KEY ?? null,
+          secretKey: deps.config.DADATA_SECRET_KEY ?? null,
+        },
+        ...(deps.suggestFetch === undefined ? {} : { fetch: deps.suggestFetch }),
+      },
+      query,
+    );
+
+    return { suggestions, available: true };
+  });
+
+  /** Сохранить локальный адрес. Точка принимается только из точной подсказки. */
+  app.put('/api/orders/:id/address', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = localAddressSchema.parse(request.body);
+
+    return setLocalAddress(
+      deps,
+      actor,
+      id,
+      { address: body.address, point: body.point ?? null },
+      contextOf(request),
+    );
+  });
+
+  /**
+   * Снять локальную правку: рабочим снова становится адрес МоегоСклада.
+   *
+   * Метод `POST`, а не `DELETE`: в этом приложении `DELETE`-маршрутов нет
+   * вовсе — ничего не удаляется, и снятие правки тоже лишь добавляет запись
+   * в историю.
+   */
+  app.post('/api/orders/:id/address/clear', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    return clearLocalAddress(deps, actor, id, contextOf(request));
+  });
+
+  /** Решение по расхождению адресов: оставить локальный либо принять источник. */
+  app.post('/api/orders/:id/address/resolve-conflict', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = conflictDecisionSchema.parse(request.body);
+
+    return resolveAddressConflict(deps, actor, id, body.decision, contextOf(request));
+  });
+
+  /**
+   * Полная история адреса.
+   *
+   * Здесь персональные данные выдаются целиком, поэтому доступ закрыт ролями
+   * на входе: это профильный административный просмотр, а не часть списка.
+   */
+  app.get('/api/orders/:id/address-history', async (request) => {
+    await authenticateWithRoles(request, deps, ADDRESS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    return { items: await listAddressHistory(deps, id) };
+  });
+
+  // --- Сделки: один отбор для списка, карты и «выбрать все» ---------------
+
+  /** Рабочий список выбранного московского дня. */
+  app.get('/api/deals', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const query = dealsQuerySchema.parse(request.query);
+    const scope = scopeOf(query);
+
+    const [ids, total] = await Promise.all([
+      dealsIds(deps.db, scope, { limit: query.limit, offset: query.offset }),
+      dealsCount(deps.db, scope),
+    ]);
+
+    return {
+      items: await dealCards(deps.db, ids),
+      total,
+      limit: query.limit,
+      offset: query.offset,
+      hasMore: query.offset + ids.length < total,
+      deliveryDate: scope.deliveryDate,
+    };
+  });
+
+  /**
+   * Точки того же множества.
+   *
+   * На карту попадают только подтверждённые координаты: догадка по строке
+   * адреса выглядела бы как настоящая точка и отправила бы курьера не туда.
+   */
+  app.get('/api/deals/map', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const query = dealsQuerySchema.parse(request.query);
+    const scope = scopeOf(query);
+    const ids = await dealsIds(deps.db, scope);
+
+    const rows = await deps.db.deliveryOrder.findMany({
+      where: { id: { in: ids }, geoState: 'RESOLVED' },
+      select: {
+        id: true,
+        externalName: true,
+        geoLatMicro: true,
+        geoLonMicro: true,
+        intervalStartMinute: true,
+        intervalEndMinute: true,
+        manualIntervalStartMinute: true,
+        manualIntervalEndMinute: true,
+        needsAttention: true,
+      },
+    });
+
+    return {
+      points: rows.map((row) => ({
+        orderId: row.id,
+        number: row.externalName,
+        lat: fromMicro(row.geoLatMicro ?? 0),
+        lon: fromMicro(row.geoLonMicro ?? 0),
+        startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,
+        endMinute: row.manualIntervalEndMinute ?? row.intervalEndMinute,
+        needsAttention: row.needsAttention,
+      })),
+      deliveryDate: scope.deliveryDate,
+    };
+  });
+
+  /**
+   * «Выбрать все» — идентификаторы всех пригодных заказов текущего отбора.
+   *
+   * Именно всех, а не загруженной страницы: иначе кнопка обманывала бы,
+   * выбирая только видимое.
+   */
+  app.get('/api/deals/selectable', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_ROLES);
+    const query = dealsQuerySchema.parse(request.query);
+    // Выбрать можно только пригодные: «Требует внимания» и заказы черновиков
+    // в выбор не попадают ни при каком переключателе.
+    const ids = await dealsIds(deps.db, {
+      ...scopeOf(query),
+      includeDrafts: false,
+      group: 'ROUTABLE',
+    });
+
+    return { orderIds: ids, total: ids.length };
   });
 }

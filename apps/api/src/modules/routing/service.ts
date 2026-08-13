@@ -787,3 +787,199 @@ export async function assertCourierAssignable(
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
+
+// --- Черновик ровно из выбора «Сделок» ---------------------------------------
+
+export interface SelectionDraftInput {
+  deliveryDate: string;
+  vehicleType: $Enums.VehicleType;
+  /** Упорядоченный набор заказов: позиция в маршруте равна позиции в массиве. */
+  orderIds: string[];
+}
+
+/** Сколько заказов можно отправить в один ручной черновик за раз. */
+export const MAX_SELECTION_SIZE = 200;
+
+/**
+ * Заказы, пригодные к выбору в «Сделках».
+ *
+ * Правила строже общих правил добавления в маршрут: заказ с блокирующим
+ * вниманием и заказ без подтверждённой точки выбрать нельзя вовсе
+ * (`docs/OWNER_DECISIONS.md`, `LOG-001` и решения владельца 2.9). Общий контракт
+ * `addOrders` этим не связан: туда заказ попадает уже осознанным действием
+ * логиста внутри карточки маршрута.
+ */
+async function assertSelectable(tx: TransactionClient, orderIds: readonly string[]): Promise<void> {
+  const rows = await tx.deliveryOrder.findMany({
+    where: { id: { in: [...orderIds] } },
+    select: { id: true, needsAttention: true, geoState: true },
+  });
+
+  const blocked = rows.filter((row) => row.needsAttention || row.geoState !== 'RESOLVED');
+  if (blocked.length > 0) {
+    throw new AppError('CONFLICT', {
+      message: 'order is not selectable',
+      publicMessage:
+        'Часть заказов больше нельзя распределить: они требуют внимания либо остались без точки.',
+      conflict: {
+        kind: 'ORDER_NOT_ELIGIBLE',
+        orderIds: blocked.map((row) => row.id),
+      },
+    });
+  }
+}
+
+/**
+ * Уже созданный черновик с ТЕМ ЖЕ составом и порядком.
+ *
+ * Ответ на потерянный ответ: повтор того же запроса обязан вернуть прежний
+ * маршрут, а не создать второй и не отказать. Совпадением считается точное
+ * равенство упорядоченного состава — иначе «похожий» черновик выдавался бы
+ * за результат чужого действия.
+ */
+async function existingDraftFor(
+  db: Database,
+  orderIds: readonly string[],
+): Promise<{ id: string; number: string; version: number } | null> {
+  const first = orderIds[0];
+  if (first === undefined) {
+    return null;
+  }
+  const participation = await db.routeOrder.findFirst({
+    where: { orderId: first, removedAt: null },
+    select: { routeId: true },
+  });
+  if (participation === null) {
+    return null;
+  }
+
+  const route = await db.deliveryRoute.findUnique({
+    where: { id: participation.routeId },
+    select: {
+      id: true,
+      number: true,
+      version: true,
+      state: true,
+      orders: {
+        where: { removedAt: null },
+        orderBy: { position: 'asc' },
+        select: { orderId: true },
+      },
+    },
+  });
+
+  if (route === null || route.state !== 'DRAFT') {
+    return null;
+  }
+
+  const actual = route.orders.map((item) => item.orderId);
+  const same =
+    actual.length === orderIds.length && actual.every((id, index) => id === orderIds[index]);
+  return same ? { id: route.id, number: route.number, version: route.version } : null;
+}
+
+/**
+ * Один черновик из выбранных заказов в точном порядке `1..N`.
+ *
+ * Всё в одной транзакции: маршрут, состав, аудит и событие появляются вместе.
+ * Ничего не подтверждается — подтверждение остаётся отдельным действием
+ * человека.
+ *
+ * Гонка двух логистов разрешается базой: уникальный индекс активного участия
+ * пропускает одного, второй получает `409` со списком ставших недоступными
+ * заказов. Маршрут при этом не остаётся пустым — транзакция откатывается
+ * целиком.
+ */
+export async function createDraftFromSelection(
+  deps: RoutingDeps,
+  actor: AuthenticatedActor,
+  input: SelectionDraftInput,
+  context: RequestContext,
+): Promise<{ id: string; number: string; version: number; positions: number; repeated: boolean }> {
+  if (!isCalendarDate(input.deliveryDate)) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'invalid calendar date',
+      publicMessage: 'Указана несуществующая дата доставки.',
+    });
+  }
+
+  const orderIds = unique(input.orderIds);
+  if (orderIds.length !== input.orderIds.length) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'duplicate order ids',
+      publicMessage: 'В выборе есть повторяющиеся заказы.',
+    });
+  }
+  if (orderIds.length === 0) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'empty selection',
+      publicMessage: 'Выберите хотя бы один заказ.',
+    });
+  }
+  if (orderIds.length > MAX_SELECTION_SIZE) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'selection too large',
+      publicMessage: `За один раз можно распределить не больше ${MAX_SELECTION_SIZE} заказов.`,
+    });
+  }
+
+  try {
+    return await deps.db.$transaction(async (tx) => {
+      const orders = await lockOrders(tx, orderIds);
+      assertAllFound(orders, orderIds);
+      assertEligible(orders, input.deliveryDate);
+      await assertSelectable(tx, orderIds);
+      await assertOrdersAreFree(tx, orderIds);
+
+      const number = await nextRouteNumber(tx, input.deliveryDate);
+      const route = await tx.deliveryRoute.create({
+        data: {
+          number,
+          deliveryDate: toDateColumn(input.deliveryDate),
+          vehicleType: input.vehicleType,
+          createdById: actor.userId,
+        },
+        select: { id: true, number: true, version: true },
+      });
+
+      // Порядок выбора и есть порядок остановок: логист расставил номера
+      // на карте, и менять их «на своё усмотрение» нельзя.
+      let position = 0;
+      for (const orderId of orderIds) {
+        position += 1;
+        await tx.routeOrder.create({
+          data: { routeId: route.id, orderId, position, addedById: actor.userId },
+        });
+      }
+
+      await grantLease(tx, route.id, actor, clockOf(deps)());
+
+      await auditRoute(tx, 'ROUTE_CREATED', route.id, actor, context, {
+        number: route.number,
+        deliveryDate: input.deliveryDate,
+        vehicleType: input.vehicleType,
+        state: 'DRAFT',
+        totalOrders: orderIds.length,
+      });
+      await publishRoute(tx, 'route.created', route.id, orderIds);
+
+      return { ...route, positions: orderIds.length, repeated: false };
+    });
+  } catch (error) {
+    if (isActiveParticipationConflict(error)) {
+      // Потерянный ответ: тот же состав уже стал черновиком — возвращаем его.
+      const existing = await existingDraftFor(deps.db, orderIds);
+      if (existing !== null) {
+        return { ...existing, positions: orderIds.length, repeated: true };
+      }
+      return conflictForOrders(deps.db, orderIds);
+    }
+    if (error instanceof AppError && error.conflict?.kind === 'ORDER_ALREADY_IN_ROUTE') {
+      const existing = await existingDraftFor(deps.db, orderIds);
+      if (existing !== null) {
+        return { ...existing, positions: orderIds.length, repeated: true };
+      }
+    }
+    throw error;
+  }
+}

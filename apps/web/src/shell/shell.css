@@ -168,3 +168,85 @@
     max-width: none;
   }
 }
+
+/* --- Раздел «Логистика»: вложенные горизонтальные вкладки ------------------ */
+
+.logistics {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/*
+ * Одна строка вкладок. На узком экране она прокручивается по горизонтали,
+ * а не сворачивается в список: список прячет соседние вкладки и превращает
+ * переключение в два действия вместо одного.
+ */
+.logistics__tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-bottom: 1px solid var(--border, #d9d9d9);
+}
+
+.logistics__tab {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  color: var(--text-muted, #666);
+  text-decoration: none;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+
+.logistics__tab--active {
+  color: var(--text, #111);
+  font-weight: 600;
+  border-bottom-color: currentColor;
+}
+
+.logistics__content {
+  min-width: 0;
+}
+
+/* --- Сворачиваемое меню ---------------------------------------------------- */
+
+/*
+ * Скрытое меню исчезает полностью: узкой полосы с иконками не остаётся —
+ * решение владельца. Поэтому колонка сетки схлопывается, а не сужается.
+ */
+.shell--collapsed .shell__sidebar {
+  display: none;
+}
+
+.shell__menu-button {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: none;
+  border: 1px solid var(--border, #d9d9d9);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* Подложка overlay нужна только там, где меню перекрывает содержимое. */
+.shell__scrim {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .shell__sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: min(80vw, 320px);
+  }
+
+  .shell__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: rgb(0 0 0 / 35%);
+    border: 0;
+  }
+}

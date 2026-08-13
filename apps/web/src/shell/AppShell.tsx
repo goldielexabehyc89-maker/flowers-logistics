@@ -8,21 +8,42 @@
  * пока сессия проверяется, показывается экран ожидания, а не пустой каркас с меню.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import { ROLE_LABELS } from '@fl/shared';
 import { useAuth } from '../auth/AuthContext';
-import { splitMobileNavigation, visibleSections } from '../navigation/navigation';
+import { LOGISTICS_TABS, splitMobileNavigation, visibleSections } from '../navigation/navigation';
 import { Button, Modal } from '../ui/components';
 import { useRealtime } from '../realtime/useRealtime';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import './shell.css';
+
+/**
+ * Перекрывает ли меню содержимое.
+ *
+ * Порог совпадает с точкой в `shell.css`: одно правило в двух местах разошлось
+ * бы, и меню закрывалось бы там, где оно ничего не перекрывает.
+ */
+const OVERLAY_QUERY = '(max-width: 900px)';
+
+function isOverlayViewport(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia(OVERLAY_QUERY).matches;
+}
 
 export function AppShell(): React.JSX.Element {
   const { user, client, logout, logoutEverywhere } = useAuth();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  /**
+   * Раскрыто ли боковое меню.
+   *
+   * Начальное значение — «раскрыто», и оно НЕ запоминается: ни в профиле,
+   * ни в local/session storage. Решение владельца: каждый новый вход и каждое
+   * обновление страницы начинаются с раскрытого меню, поэтому состояние живёт
+   * ровно столько, сколько живёт эта страница.
+   */
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   // Один канал обновлений на всё приложение.
   const realtime = useRealtime();
 
@@ -30,12 +51,46 @@ export function AppShell(): React.JSX.Element {
   const sections = visibleSections(roles);
   const mobile = splitMobileNavigation(roles);
 
+  // Внутри «Логистики» заголовок страницы называет ОТКРЫТУЮ ВКЛАДКУ, а не
+  // раздел: человек находится в «Сделках», и заголовок «Логистика» ничего
+  // ему не сообщал бы.
   const currentTitle =
-    sections.find((section) => location.pathname.startsWith(section.path))?.title ?? 'Логистика';
+    LOGISTICS_TABS.find((tab) => location.pathname.startsWith(tab.path))?.title ??
+    sections.find((section) => location.pathname.startsWith(section.path))?.title ??
+    'Логистика';
+
+  // На телефоне меню — overlay поверх страницы: после перехода в раздел оно
+  // закрывается само, иначе пользователь остаётся смотреть на меню вместо
+  // экрана, который только что выбрал.
+  //
+  // На широком экране меню НЕ закрывается: там оно занимает свою колонку и
+  // ничего не перекрывает, а самопроизвольное схлопывание после каждого
+  // перехода означало бы, что до соседнего раздела нужно два действия вместо
+  // одного.
+  useEffect(() => {
+    if (isOverlayViewport()) {
+      setSidebarOpen(false);
+    }
+  }, [location.pathname]);
+
+  // Escape закрывает overlay. Это доступность, а не новый смысл: без клавиатуры
+  // выход из меню оставался бы только мышью.
+  useEffect(() => {
+    if (!sidebarOpen) {
+      return undefined;
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setSidebarOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOpen]);
 
   return (
-    <div className="shell">
-      <aside className="shell__sidebar">
+    <div className={sidebarOpen ? 'shell' : 'shell shell--collapsed'}>
+      <aside className="shell__sidebar" id="shell-sidebar" hidden={!sidebarOpen}>
         <div className="shell__brand">Логистика</div>
         <nav aria-label="Основные разделы">
           <ul className="shell__nav">
@@ -55,7 +110,35 @@ export function AppShell(): React.JSX.Element {
         </nav>
       </aside>
 
+      {/*
+        Подложка overlay: закрывает меню кликом мимо него. На широком экране
+        она не показывается — там меню занимает свою колонку, а не перекрывает
+        содержимое.
+      */}
+      {sidebarOpen && (
+        <button
+          type="button"
+          className="shell__scrim"
+          aria-label="Закрыть меню"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       <header className="shell__topbar">
+        {/*
+          Кнопка открытия доступна ВСЕГДА, а не только в свёрнутом состоянии:
+          иначе меню, скрытое полностью, оставляло бы пользователя без входа
+          обратно. Узкой полосы с иконками при этом не остаётся.
+        */}
+        <button
+          type="button"
+          className="shell__menu-button"
+          aria-expanded={sidebarOpen}
+          aria-controls="shell-sidebar"
+          onClick={() => setSidebarOpen((open) => !open)}
+        >
+          {sidebarOpen ? 'Скрыть меню' : 'Показать меню'}
+        </button>
         <h1 className="shell__title">{currentTitle}</h1>
         <div className="row">
           <ConnectionIndicator client={client} realtime={realtime} />

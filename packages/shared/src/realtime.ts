@@ -25,6 +25,8 @@ export const REALTIME_TOPICS = [
   'order.scope_changed',
   // Геоданные: payload несёт идентификатор и состояние, но не координаты.
   'order.geo_changed',
+  // Локальный адрес: payload несёт идентификатор и вид изменения, но не адрес.
+  'order.address_changed',
   // Маршруты. Тоже только ADMIN и LOGISTICIAN. В payload — идентификаторы и вид
   // события: ни номера маршрута, ни адресов, ни денег там быть не должно.
   'route.created',
