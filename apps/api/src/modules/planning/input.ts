@@ -150,7 +150,28 @@ export interface OrderWindow {
  * Это ответ, а не отказ считать: логист увидит конкретный заказ и решит, что
  * с ним делать, вместо того чтобы чинить его вслепую до запуска.
  */
-export function orderWindow(order: PlanningOrderRow): OrderWindow | null | OrderProblem {
+/**
+ * Всё, из чего вычисляется окно доставки, и ничего больше.
+ *
+ * Отдельный минимальный тип нужен ровно для одного: чтобы окно считалось
+ * ОДНИМ кодом и для строки базы, и для внешнего снимка. Пока у снимка был
+ * собственный адаптер, он потерял `intervalKind` и скопировал точное время
+ * как `start=t, end=null`. Решателю такое окно не отправлялось вовсе,
+ * а строгая проверка видела неполное представление и закрывалась — обещание
+ * клиенту молча превратилось в другое обещание.
+ *
+ * `PlanningOrderRow` этому типу соответствует структурно, поэтому боевой путь
+ * не меняется.
+ */
+export interface OrderIntervalSource {
+  intervalKind: string;
+  intervalStartMinute: number | null;
+  intervalEndMinute: number | null;
+  manualIntervalStartMinute: number | null;
+  manualIntervalEndMinute: number | null;
+}
+
+export function orderWindow(order: OrderIntervalSource): OrderWindow | null | OrderProblem {
   if (order.manualIntervalStartMinute !== null && order.manualIntervalEndMinute !== null) {
     return {
       startMinute: order.manualIntervalStartMinute,
