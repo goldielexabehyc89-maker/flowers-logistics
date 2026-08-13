@@ -937,11 +937,10 @@ test('Сделки: точный выбор → расчёт → превью �
   await expect(unassignedBlock).toBeVisible();
   await expect(unassignedBlock.getByRole('listitem')).toHaveCount(1);
 
-  // Посторонний заказ дня в превью не попал: ни в маршруты, ни в
-  // неразмещённые. Проверяется именно карточка запуска, а не вся страница:
+  // Посторонний заказ дня в неразмещённые не попал: расчёт видел ровно
+  // выбранное множество. Проверяется именно блок превью, а не вся страница —
   // «Маршрутизация» рядом честно показывает все заказы дня, включая его.
-  const runCard = page.locator('.routes__card').filter({ hasText: 'Неразмещённые' });
-  await expect(runCard).not.toContainText(foreignNumber);
+  await expect(unassignedBlock).not.toContainText(foreignNumber);
 
   // 3. Применение требует отдельного подтверждения: заказ, который никто
   //    не повезёт, не должен уехать в черновики молча.
