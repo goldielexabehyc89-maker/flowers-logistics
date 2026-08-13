@@ -11,6 +11,9 @@ import {
   APP_SECTIONS,
   firstAvailablePath,
   isSectionVisible,
+  legacyRedirect,
+  LOGISTICS_DEFAULT_TAB,
+  LOGISTICS_TABS,
   splitMobileNavigation,
   visibleSections,
   MOBILE_PRIMARY_LIMIT,
@@ -26,9 +29,10 @@ describe('видимость разделов', () => {
 
     expect(keys).toContain('settings');
     expect(keys).toContain('couriers');
-    expect(keys).toEqual(
-      expect.arrayContaining(['deals', 'routing', 'route-sheets', 'active', 'history', 'reports']),
-    );
+    // Логистика теперь один пункт меню: её вкладки живут внутри раздела,
+    // а не отдельными строками левого меню.
+    expect(keys).toEqual(expect.arrayContaining(['logistics', 'active']));
+    expect(keys).not.toContain('planning');
   });
 
   it('логист не видит настройки', () => {
@@ -38,7 +42,7 @@ describe('видимость разделов', () => {
     expect(isSectionVisible(['LOGISTICIAN'], '/settings')).toBe(false);
     // Но операционные разделы и курьеры ему доступны.
     expect(keys).toContain('couriers');
-    expect(keys).toContain('deals');
+    expect(keys).toContain('logistics');
   });
 
   it('курьер видит только активные доставки и историю', () => {
@@ -131,8 +135,8 @@ describe('видимость разделов', () => {
 
   it('первый доступный раздел зависит от ролей', () => {
     // Домашние пути существующих ролей не сдвинулись от появления новых разделов.
-    expect(firstAvailablePath(['ADMIN'])).toBe('/deals');
-    expect(firstAvailablePath(['LOGISTICIAN'])).toBe('/deals');
+    expect(firstAvailablePath(['ADMIN'])).toBe('/logistics');
+    expect(firstAvailablePath(['LOGISTICIAN'])).toBe('/logistics');
     expect(firstAvailablePath(['COURIER'])).toBe('/active');
 
     // Роль производственного контура попадает в СВОЙ раздел, а не в чужой
@@ -158,16 +162,10 @@ describe('видимость разделов', () => {
     for (const key of placeholderKeys) {
       expect(sectionKeys).toContain(key);
     }
-    // «Флорист» (6.2–6.3), «Склад» (6.5), «Активные» и «История» (6.6)
-    // и «Самовывоз» (6.7) получили рабочие экраны и заглушками больше
-    // не являются: заглушка перехватывала бы тот же адрес и показывала
-    // «раздел не реализован» поверх работающего экрана. Оставшийся раздел
-    // по-прежнему честно говорит о неготовности.
-    for (const key of ['reports']) {
-      expect(placeholderKeys).toContain(key);
-    }
-    for (const key of ['florist', 'warehouse', 'pickup', 'active', 'history']) {
-      expect(placeholderKeys).not.toContain(key);
+    // Заглушек верхнего уровня не осталось вовсе: «Отчёты» и «История»
+    // переехали во вкладки раздела «Логистика» и живут своими заглушками там.
+    expect(placeholderKeys).toEqual([]);
+    for (const key of ['florist', 'warehouse', 'pickup', 'active']) {
       expect(sectionKeys).toContain(key);
     }
   });
@@ -199,5 +197,40 @@ describe('видимость разделов', () => {
     const courier = splitMobileNavigation(['COURIER']);
     expect(courier.primary).toHaveLength(2);
     expect(courier.extra).toHaveLength(0);
+  });
+});
+
+describe('раздел «Логистика»', () => {
+  it('вкладки идут строго в утверждённом порядке', () => {
+    expect(LOGISTICS_TABS.map((tab) => tab.title)).toEqual([
+      'Сделки',
+      'Маршрутизация',
+      'Маршрутные листы',
+      'История',
+      'Отчёты',
+    ]);
+  });
+
+  it('по умолчанию открываются «Сделки»', () => {
+    expect(LOGISTICS_DEFAULT_TAB).toBe('/logistics/deals');
+    expect(LOGISTICS_TABS[0]?.path).toBe(LOGISTICS_DEFAULT_TAB);
+  });
+
+  it('прежние адреса ведут в точный новый эквивалент', () => {
+    expect(legacyRedirect('/deals')).toBe('/logistics/deals');
+    expect(legacyRedirect('/routing')).toBe('/logistics/routing');
+    expect(legacyRedirect('/route-sheets')).toBe('/logistics/route-sheets');
+    expect(legacyRedirect('/reports')).toBe('/logistics/reports');
+    // Отдельной вкладки «Планирование» больше нет, но её адрес не обрывается:
+    // функция переехала в «Маршрутизацию», туда и ведёт ссылка.
+    expect(legacyRedirect('/planning')).toBe('/logistics/routing');
+    // Незнакомый адрес не выдумывается.
+    expect(legacyRedirect('/unknown')).toBeNull();
+  });
+
+  it('«Активные» и «Сотрудники и курьеры» остаются отдельными пунктами', () => {
+    const keys = visibleSections(['ADMIN']).map((section) => section.key);
+    expect(keys).toContain('active');
+    expect(keys).toContain('couriers');
   });
 });

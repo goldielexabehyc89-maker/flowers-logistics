@@ -8,9 +8,20 @@
 
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { useAuth } from './auth/AuthContext';
-import { firstAvailablePath, isSectionVisible } from './navigation/navigation';
+import {
+  firstAvailablePath,
+  isSectionVisible,
+  LEGACY_PATHS,
+  LOGISTICS_DEFAULT_TAB,
+} from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
-import { NoSectionsScreen, PLACEHOLDERS, PlaceholderScreen } from './screens/PlaceholderScreen';
+import {
+  LOGISTICS_HISTORY,
+  LOGISTICS_REPORTS,
+  NoSectionsScreen,
+  PLACEHOLDERS,
+  PlaceholderScreen,
+} from './screens/PlaceholderScreen';
 import { WarehouseScreen } from './screens/warehouse/WarehouseScreen';
 import { ActiveScreen } from './screens/delivery/ActiveScreen';
 import { HistoryScreen } from './screens/delivery/HistoryScreen';
@@ -19,7 +30,7 @@ import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
 import { RoutingScreen } from './screens/routing/RoutingScreen';
 import { RouteSheetsScreen } from './screens/routing/RouteSheetsScreen';
-import { PlanningScreen } from './screens/planning/PlanningScreen';
+import { LogisticsLayout } from './shell/LogisticsLayout';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { UsersScreen } from './screens/users/UsersScreen';
 import { AppShell } from './shell/AppShell';
@@ -112,14 +123,31 @@ export function App(): React.JSX.Element {
             }
           />
         ))}
+        {/*
+          Раздел «Логистика»: один пункт меню и пять вложенных вкладок.
+          Прежняя отдельная вкладка «Планирование» из навигации убрана,
+          её функция живёт в «Маршрутизации», а домен и история расчётов
+          остались нетронутыми.
+        */}
         <Route
-          path="/deals"
+          path="/logistics"
           element={
             <SectionRoute>
-              <DealsScreen />
+              <LogisticsLayout />
             </SectionRoute>
           }
-        />
+        >
+          <Route index element={<Navigate to={LOGISTICS_DEFAULT_TAB} replace />} />
+          <Route path="deals" element={<DealsScreen />} />
+          <Route path="routing" element={<RoutingScreen />} />
+          <Route path="route-sheets" element={<RouteSheetsScreen />} />
+          <Route path="history" element={<PlaceholderScreen {...LOGISTICS_HISTORY} />} />
+          <Route path="reports" element={<PlaceholderScreen {...LOGISTICS_REPORTS} />} />
+        </Route>
+        {/* Прежние адреса верхнего уровня ведут в точный новый эквивалент. */}
+        {Object.entries(LEGACY_PATHS).map(([from, to]) => (
+          <Route key={from} path={from} element={<Navigate to={to} replace />} />
+        ))}
         <Route
           path="/florist"
           element={
@@ -133,30 +161,6 @@ export function App(): React.JSX.Element {
           element={
             <SectionRoute>
               <PickupScreen />
-            </SectionRoute>
-          }
-        />
-        <Route
-          path="/routing"
-          element={
-            <SectionRoute>
-              <RoutingScreen />
-            </SectionRoute>
-          }
-        />
-        <Route
-          path="/planning"
-          element={
-            <SectionRoute>
-              <PlanningScreen />
-            </SectionRoute>
-          }
-        />
-        <Route
-          path="/route-sheets"
-          element={
-            <SectionRoute>
-              <RouteSheetsScreen />
             </SectionRoute>
           }
         />

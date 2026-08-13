@@ -19,31 +19,10 @@ export interface AppSection {
 /** Операционные разделы логистики и администрирование. */
 export const APP_SECTIONS: readonly AppSection[] = [
   {
-    key: 'deals',
-    path: '/deals',
-    title: 'Сделки',
-    shortTitle: 'Сделки',
-    roles: ['ADMIN', 'LOGISTICIAN'],
-  },
-  {
-    key: 'routing',
-    path: '/routing',
-    title: 'Маршрутизация',
-    shortTitle: 'Маршруты',
-    roles: ['ADMIN', 'LOGISTICIAN'],
-  },
-  {
-    key: 'planning',
-    path: '/planning',
-    title: 'Планирование',
-    shortTitle: 'План',
-    roles: ['ADMIN', 'LOGISTICIAN'],
-  },
-  {
-    key: 'route-sheets',
-    path: '/route-sheets',
-    title: 'Маршрутные листы',
-    shortTitle: 'Листы',
+    key: 'logistics',
+    path: '/logistics',
+    title: 'Логистика',
+    shortTitle: 'Логистика',
     roles: ['ADMIN', 'LOGISTICIAN'],
   },
   {
@@ -56,16 +35,9 @@ export const APP_SECTIONS: readonly AppSection[] = [
   {
     key: 'history',
     path: '/history',
-    title: 'История',
+    title: 'История доставок',
     shortTitle: 'История',
-    roles: ['ADMIN', 'LOGISTICIAN', 'COURIER'],
-  },
-  {
-    key: 'reports',
-    path: '/reports',
-    title: 'Отчёты',
-    shortTitle: 'Отчёты',
-    roles: ['ADMIN', 'LOGISTICIAN'],
+    roles: ['COURIER'],
   },
   {
     key: 'couriers',
@@ -77,9 +49,8 @@ export const APP_SECTIONS: readonly AppSection[] = [
   // Разделы производственного контура. Каждая роль видит ровно свой раздел
   // и не видит соседние: флорист не попадает на склад, кладовщик — в самовывоз.
   //
-  // Порядок важен: новые разделы стоят ПОСЛЕ логистических, поэтому первый
-  // доступный путь администратора и логиста остаётся `/deals`, а курьера —
-  // `/active`. Перестановка молча сменила бы им домашнюю страницу.
+  // Порядок важен: логистика стоит первой, поэтому первый доступный путь
+  // администратора и логиста — `/logistics`, а курьера — `/active`.
   {
     key: 'florist',
     path: '/florist',
@@ -109,6 +80,50 @@ export const APP_SECTIONS: readonly AppSection[] = [
     roles: ['ADMIN'],
   },
 ];
+
+/**
+ * Вкладки внутри раздела «Логистика».
+ *
+ * Горизонтальные и в этом порядке — решение владельца. По умолчанию всегда
+ * открываются «Сделки»: логист начинает рабочий день с них, а не с пустого
+ * выбора раздела.
+ */
+export interface LogisticsTab {
+  key: string;
+  path: string;
+  title: string;
+}
+
+export const LOGISTICS_TABS: readonly LogisticsTab[] = [
+  { key: 'deals', path: '/logistics/deals', title: 'Сделки' },
+  { key: 'routing', path: '/logistics/routing', title: 'Маршрутизация' },
+  { key: 'route-sheets', path: '/logistics/route-sheets', title: 'Маршрутные листы' },
+  { key: 'history', path: '/logistics/history', title: 'История' },
+  { key: 'reports', path: '/logistics/reports', title: 'Отчёты' },
+];
+
+export const LOGISTICS_DEFAULT_TAB = '/logistics/deals';
+
+/**
+ * Прежние адреса верхнего уровня и их точный новый эквивалент.
+ *
+ * Существующие ссылки, закладки и история браузера обязаны продолжать
+ * работать: пустой экран вместо знакомого раздела выглядит как поломка,
+ * а не как переезд. Отдельная вкладка «Планирование» удалена, но её функция
+ * переехала в «Маршрутизацию» — туда и ведёт прежний адрес.
+ */
+export const LEGACY_PATHS: Readonly<Record<string, string>> = Object.freeze({
+  '/deals': '/logistics/deals',
+  '/routing': '/logistics/routing',
+  '/planning': '/logistics/routing',
+  '/route-sheets': '/logistics/route-sheets',
+  '/reports': '/logistics/reports',
+});
+
+/** Новый адрес для прежнего, если он известен. */
+export function legacyRedirect(path: string): string | null {
+  return LEGACY_PATHS[path] ?? null;
+}
 
 /**
  * Разделы, доступные набору ролей. При нескольких ролях берётся объединение:
