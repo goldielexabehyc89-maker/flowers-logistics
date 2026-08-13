@@ -28,6 +28,7 @@ import {
 } from '../../orders/attention.js';
 import { recordOrderConflicts } from '../../routing/conflicts.js';
 import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
+import { isSourceConflict } from '../../orders/address.js';
 import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
@@ -70,6 +71,10 @@ interface StoredOrder {
   /// Ручной интервал логиста: синхронизация обязана его учитывать и не затирать.
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
+  /// Локальная правка адреса: синхронизация её тоже не затирает.
+  localAddress: string | null;
+  sourceAddressAtLocalEdit: string | null;
+  addressConflict: boolean;
 }
 
 /**
@@ -124,7 +129,8 @@ async function lockByExternalId(
   const rows = await tx.$queryRaw<StoredOrder[]>`
     SELECT "id", "version", "inScope", "fulfillmentInScope", "sourceMissing",
            "manualIntervalStartMinute", "manualIntervalEndMinute",
-           "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration"
+           "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration",
+           "localAddress", "sourceAddressAtLocalEdit", "addressConflict"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
     FOR UPDATE
@@ -211,6 +217,8 @@ async function createOrder(
       {
         id: created.id,
         address: snapshot.address,
+        // Новый заказ локальной правки ещё не имеет по определению.
+        localAddress: null,
         inScope: snapshot.inScope,
         sourceArchived: snapshot.sourceArchived,
         sourceMissing: false,
@@ -278,12 +286,42 @@ async function updateOrder(
     startMinute: existing.manualIntervalStartMinute,
     endMinute: existing.manualIntervalEndMinute,
   };
-  const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual);
+  // Исходный адрес изменился при действующей локальной правке: значение логиста
+  // не затирается, а заказ получает явный конфликт и блокирующую причину.
+  // Выбор между двумя адресами делает человек — молча взять один из них нельзя,
+  // потому что правильными могут быть оба.
+  const conflictDetected = isSourceConflict(existing, snapshot.address);
+  const address = {
+    corrected: existing.localAddress !== null,
+    conflict: existing.addressConflict || conflictDetected,
+  };
+  const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual, address);
 
   await tx.deliveryOrder.update({
     where: { id: existing.id },
-    data: { ...orderData(snapshot, now, manual), version: existing.version + 1 },
+    data: {
+      ...orderData(snapshot, now, manual),
+      version: existing.version + 1,
+      ...(conflictDetected ? { addressConflict: true, addressConflictDetectedAt: now } : {}),
+    },
   });
+
+  if (conflictDetected) {
+    // История адреса живёт отдельно от общего аудита: адрес — персональные
+    // данные, и в журнал, который читают все административные экраны, он
+    // не дублируется.
+    await tx.orderAddressHistory.create({
+      data: {
+        orderId: existing.id,
+        action: 'SOURCE_CONFLICT_DETECTED',
+        occurredAt: now,
+        oldAddress: existing.sourceAddressAtLocalEdit,
+        newAddress: existing.localAddress,
+        sourceAddress: snapshot.address,
+        actorUserId: null,
+      },
+    });
+  }
 
   const reason = restoring
     ? 'SOURCE_RESTORED'
@@ -322,7 +360,9 @@ async function updateOrder(
   // Адрес изменился — прежняя точка больше не относится к этому заказу.
   // Оставить её пригодной опаснее, чем потерять: координата от старого адреса
   // выглядит как нормальные данные и молча отправит курьера не туда.
-  if (changedFields.includes('address')) {
+  // Пока действует локальная правка, изменение источника РАБОЧИЙ адрес
+  // не меняет: точка относится к адресу логиста и остаётся пригодной.
+  if (changedFields.includes('address') && existing.localAddress === null) {
     const invalidated = await invalidateGeoOnAddressChange(tx, existing.id, {
       geoState: existing.geoState,
       latMicro: existing.geoLatMicro,
@@ -339,6 +379,7 @@ async function updateOrder(
         {
           id: existing.id,
           address: snapshot.address,
+          localAddress: existing.localAddress,
           inScope: snapshot.inScope,
           sourceArchived: snapshot.sourceArchived,
           sourceMissing: false,
