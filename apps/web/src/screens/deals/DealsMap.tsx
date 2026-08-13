@@ -46,12 +46,12 @@ interface DealsMapProps {
  */
 const CLUSTER_STEP = 0.01;
 
-interface Cluster {
+export interface Cluster {
   key: string;
   points: DealPoint[];
 }
 
-function clusterize(points: readonly DealPoint[]): Cluster[] {
+export function clusterize(points: readonly DealPoint[]): Cluster[] {
   const buckets = new Map<string, DealPoint[]>();
   for (const point of points) {
     const key = `${Math.round(Number(point.lat) / CLUSTER_STEP)}:${Math.round(
@@ -60,6 +60,48 @@ function clusterize(points: readonly DealPoint[]): Cluster[] {
     buckets.set(key, [...(buckets.get(key) ?? []), point]);
   }
   return [...buckets.entries()].map(([key, items]) => ({ key, points: items }));
+}
+
+/**
+ * Состояние маркера.
+ *
+ * Различается и цветом, и формой: одного цвета мало тому, кто его не различает,
+ * а маркер без различий превращает карту в набор одинаковых точек.
+ */
+export type MarkerState = 'DEPOT' | 'FREE' | 'PICKED' | 'DRAFT';
+
+export interface MarkerLook {
+  color: string;
+  shape: 'diamond' | 'circle' | 'square' | 'triangle';
+}
+
+export const MARKER_LOOKS: Record<MarkerState, MarkerLook> = {
+  DEPOT: { color: '#333', shape: 'diamond' },
+  FREE: { color: '#6b7280', shape: 'circle' },
+  PICKED: { color: 'hsl(210 70% 45%)', shape: 'square' },
+  DRAFT: { color: '#9ca3af', shape: 'triangle' },
+};
+
+/**
+ * Разделяет точки на выбранные и кластеризуемые.
+ *
+ * Выбранная точка в кластер не попадает никогда: её номер — часть маршрута,
+ * который человек уже спланировал, и прятать его в безымянную группу нельзя.
+ */
+export function splitForMap(
+  points: readonly DealPoint[],
+  selected: readonly string[],
+  zoomedOut: boolean,
+): { chosen: DealPoint[]; clusters: Cluster[] } {
+  const selectedSet = new Set(selected);
+  const chosen = points.filter((point) => selectedSet.has(point.orderId));
+  const rest = points.filter((point) => !selectedSet.has(point.orderId));
+  return {
+    chosen,
+    clusters: zoomedOut
+      ? clusterize(rest)
+      : rest.map((point) => ({ key: point.orderId, points: [point] })),
+  };
 }
 
 export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
@@ -72,16 +114,8 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
   });
 
   const points = useMemo(() => query.data?.points ?? [], [query.data]);
-  const selectedSet = useMemo(() => new Set(selected), [selected]);
 
-  const unselected = points.filter((point) => !selectedSet.has(point.orderId));
-  const chosen = points.filter((point) => selectedSet.has(point.orderId));
-  const clusters = zoomedOut
-    ? clusterize(unselected)
-    : unselected.map((point) => ({
-        key: point.orderId,
-        points: [point],
-      }));
+  const { chosen, clusters } = splitForMap(points, selected, zoomedOut);
 
   if (query.isPending) {
     return <LoadingState title="Загружаем карту…" />;

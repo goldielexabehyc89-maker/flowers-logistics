@@ -50,6 +50,40 @@ const ACTION_LABELS: Record<string, string> = {
 const MIN_QUERY = 3;
 const DEBOUNCE_MS = 350;
 
+/**
+ * Точка, которую можно сохранить вместе с адресом.
+ *
+ * Только точная привязка: неточная в автоматику не допускается, заказ уходит
+ * на проверку и остаётся в «Требует внимания» (`GEO-002`). Правило вынесено
+ * отдельно, потому что от него зависит, поедет ли курьер по догадке.
+ */
+export function suggestionPoint(
+  chosen: { latMicro: number | null; lonMicro: number | null; exact: boolean } | null,
+): { latMicro: number; lonMicro: number } | null {
+  if (chosen === null || !chosen.exact || chosen.latMicro === null || chosen.lonMicro === null) {
+    return null;
+  }
+  return { latMicro: chosen.latMicro, lonMicro: chosen.lonMicro };
+}
+
+/**
+ * Адрес нашего эндпоинта подсказок.
+ *
+ * Браузер обращается ТОЛЬКО сюда: ни ключа DaData, ни её адреса он не знает.
+ * Функция существует ради этой проверки — иначе однажды кто-нибудь позвал бы
+ * провайдера напрямую «для скорости».
+ */
+export function suggestionsUrl(query: string): string {
+  return `/api/orders/address-suggestions?query=${encodeURIComponent(query.trim())}`;
+}
+
+/** Подпись под полем: подсказки доступны или адрес сохранится без точки. */
+export function availabilityHint(available: boolean): string {
+  return available
+    ? 'Выберите подсказку, чтобы сохранить точку сразу'
+    : 'Подсказки недоступны: адрес сохранится, точка будет запрошена позже';
+}
+
 interface AddressDialogProps {
   order: DealCard;
   onClose: () => void;
@@ -76,10 +110,7 @@ export function AddressDialog({
   const suggestions = useQuery({
     queryKey: ['address-suggestions', query],
     enabled: query.trim().length >= MIN_QUERY,
-    queryFn: () =>
-      client.get<SuggestResponse>(
-        `/api/orders/address-suggestions?query=${encodeURIComponent(query.trim())}`,
-      ),
+    queryFn: () => client.get<SuggestResponse>(suggestionsUrl(query)),
   });
 
   const history = useQuery({
@@ -93,10 +124,7 @@ export function AddressDialog({
         address: chosen?.value ?? draft.trim(),
         // Точка принимается только из точной подсказки: неточная привязка
         // в автоматику не допускается и уходит на проверку.
-        point:
-          chosen !== null && chosen.exact && chosen.latMicro !== null && chosen.lonMicro !== null
-            ? { latMicro: chosen.latMicro, lonMicro: chosen.lonMicro }
-            : null,
+        point: suggestionPoint(chosen),
       }),
     onSuccess: onChanged,
   });
@@ -144,14 +172,7 @@ export function AddressDialog({
           </div>
         )}
 
-        <Field
-          label="Новый адрес"
-          hint={
-            available
-              ? 'Выберите подсказку, чтобы сохранить точку сразу'
-              : 'Подсказки недоступны: адрес сохранится, точка будет запрошена позже'
-          }
-        >
+        <Field label="Новый адрес" hint={availabilityHint(available)}>
           {(props) => (
             <TextInput
               {...props}
