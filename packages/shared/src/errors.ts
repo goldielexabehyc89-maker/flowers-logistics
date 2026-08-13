@@ -155,6 +155,10 @@ export const CONFLICT_KINDS = [
   'ORDER_ASSIGNMENT_SHIFT_CLOSED',
   /** Задание печати уже завершено: повторная отметка ничего не меняет. */
   'PRINT_JOB_ALREADY_COMPLETED',
+  /** Заказ доставляется курьером: выдавать его покупателю нельзя. */
+  'ORDER_NOT_PICKUP',
+  /** Самовывозный заказ уже выдан покупателю. */
+  'PICKUP_ALREADY_ISSUED',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

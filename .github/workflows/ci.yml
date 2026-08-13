@@ -424,6 +424,20 @@ jobs:
             echo "order2=$(get 'заказ' 2)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Создать фикстуру самовывоза
+        id: seed-pickup
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Заказ со способом получения «Самовывоз» и ячейка хранения: маршрут
+          # такому заказу не нужен, а раздел выдачи покупателю без него пуст.
+          output="$(npm run --silent seed:e2e-pickup)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n 1p; }
+          {
+            echo "order=$(get 'заказ самовывоза')"
+            echo "cell=$(get 'ячейка самовывоза')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Браузерный smoke
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
@@ -435,6 +449,8 @@ jobs:
           E2E_WH_ROUTE: ${{ steps.seed-warehouse.outputs.route }}
           E2E_WH_ORDER_1: ${{ steps.seed-warehouse.outputs.order1 }}
           E2E_WH_ORDER_2: ${{ steps.seed-warehouse.outputs.order2 }}
+          E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
+          E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
         run: npm run test:e2e
 
   secrets-scan:

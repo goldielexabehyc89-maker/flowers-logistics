@@ -36,6 +36,7 @@
     "seed:e2e-order": "tsx apps/api/src/scripts/seed-e2e-order.ts",
     "seed:e2e-plan": "tsx apps/api/src/scripts/seed-e2e-plan.ts",
     "seed:e2e-warehouse": "tsx apps/api/src/scripts/seed-e2e-warehouse.ts",
+    "seed:e2e-pickup": "tsx apps/api/src/scripts/seed-e2e-pickup.ts",
     "snapshot:import": "node apps/api/dist/scripts/snapshot-import.js",
     "snapshot:import:dev": "tsx apps/api/src/scripts/snapshot-import.ts",
     "snapshot:retire": "node apps/api/dist/scripts/snapshot-retire.js",

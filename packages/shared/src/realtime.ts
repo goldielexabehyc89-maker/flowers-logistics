@@ -69,6 +69,9 @@ export const REALTIME_TOPICS = [
   // заказа, ни кода ячейки, ни адреса там нет.
   'warehouse.placement_changed',
   'warehouse.route_flow_changed',
+  // Выдача самовывоза (этап 6.7). Адресуется ADMIN и MANAGER. В payload
+  // только идентификатор заказа: номер, ячейка и получатель туда не уходят.
+  'pickup.issued',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;

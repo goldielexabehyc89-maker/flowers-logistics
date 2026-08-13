@@ -158,27 +158,28 @@ describe('видимость разделов', () => {
     for (const key of placeholderKeys) {
       expect(sectionKeys).toContain(key);
     }
-    // Разделы «Флорист» (6.2–6.3) и «Склад» (6.5) получили рабочие экраны
-    // и заглушками больше не являются: заглушка перехватывала бы тот же адрес
-    // и показывала «раздел не реализован» поверх работающего экрана. Остальные
-    // производственные разделы по-прежнему честно говорят о неготовности.
-    for (const key of ['pickup', 'active', 'history', 'reports']) {
+    // Разделы «Флорист» (6.2–6.3), «Склад» (6.5) и «Самовывоз» (6.7) получили
+    // рабочие экраны и заглушками больше не являются: заглушка перехватывала бы
+    // тот же адрес и показывала «раздел не реализован» поверх работающего
+    // экрана. Остальные разделы по-прежнему честно говорят о неготовности.
+    for (const key of ['active', 'history', 'reports']) {
       expect(placeholderKeys).toContain(key);
     }
-    for (const key of ['florist', 'warehouse']) {
+    for (const key of ['florist', 'warehouse', 'pickup']) {
       expect(placeholderKeys).not.toContain(key);
       expect(sectionKeys).toContain(key);
     }
   });
 
   it('заглушки честно называют неготовность и не выдумывают данные', () => {
-    // `pickup` — единственная оставшаяся заглушка с точным номером подэтапа;
-    // у остальных плановый этап назван целиком («6», «6–7», «7»).
-    for (const key of ['pickup']) {
+    // Проверяются ВСЕ оставшиеся заглушки, а не выбранный список: новая
+    // заглушка без честного этапа проскочила бы мимо перечисления.
+    for (const key of Object.keys(PLACEHOLDERS)) {
       const placeholder = PLACEHOLDERS[key];
 
       expect(placeholder).toBeDefined();
-      expect(placeholder?.stage).toMatch(/^6\./);
+      // Плановый этап назван: точным подэтапом либо этапом целиком.
+      expect(placeholder?.stage).toMatch(/^[6-9]/);
       expect(placeholder?.upcoming.length).toBeGreaterThan(0);
       // Только описание будущего: ни одного числа, которое можно принять
       // за настоящий счётчик заказов, ячеек или остатков.

@@ -129,6 +129,9 @@ export const AUDIT_ACTIONS = [
   'ORDER_PRINT_JOB_CREATED',
   'ORDER_PRINT_JOB_RETRIED',
   'ORDER_PRINT_JOB_PRINTED',
+  // Выдача самовывоза покупателю (этап 6.7). В записи — идентификаторы заказа,
+  // размещения и ячейки: ни номера заказа, ни кода полки, ни получателя.
+  'PICKUP_ORDER_ISSUED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
