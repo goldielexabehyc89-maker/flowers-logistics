@@ -118,6 +118,23 @@ async function logout(page: Page): Promise<void> {
  * черновика — и заказы уезжают не туда, а тест падает на следующем шаге,
  * сообщая про количество остановок вместо настоящей причины.
  */
+
+/**
+ * Раскрывает черновик по номеру и дожидается именно раскрытия.
+ *
+ * Заголовок работает переключателем: повторное нажатие сворачивает. Без явного
+ * ожидания `data-expanded` проверка иногда утверждала бы про свёрнутую
+ * карточку, и «ноль остановок» означало бы не пустой состав, а закрытый блок.
+ */
+async function openDraft(page: Page, number: string): Promise<void> {
+  const draft = page.locator('.routes__draft', { hasText: number });
+  await expect(draft).toHaveCount(1);
+  if ((await draft.getAttribute('data-expanded')) !== 'true') {
+    await draft.locator('button').first().click();
+  }
+  await expect(draft).toHaveAttribute('data-expanded', 'true');
+}
+
 async function selectRouteByNumber(select: Locator, number: string): Promise<void> {
   const option = select.locator(`option:has-text("${number}")`);
   await expect(option).toHaveCount(1);
@@ -759,7 +776,7 @@ test('маршрут: черновик → состав → порядок → �
 
   // Перенос из списка: аренда обоих черновиков берётся клиентом.
   // В первом черновике два собственных заказа, во втором — один.
-  await page.locator('.routes__draft', { hasText: routeNumber }).locator('button').first().click();
+  await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
   await card.getByLabel(`Выбрать заказ ${first}`).check();
   await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), secondCardNumber);
@@ -773,11 +790,7 @@ test('маршрут: черновик → состав → порядок → �
   await expect(card.locator('.routes__stop')).toHaveCount(1);
 
   // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
-  await page
-    .locator('.routes__draft', { hasText: secondCardNumber })
-    .locator('button')
-    .first()
-    .click();
+  await openDraft(page, secondCardNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
   await card.getByLabel(`Выбрать заказ ${first}`).check();
   await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), routeNumber);
@@ -788,7 +801,7 @@ test('маршрут: черновик → состав → порядок → �
     '/routes/move',
   );
 
-  await page.locator('.routes__draft', { hasText: routeNumber }).locator('button').first().click();
+  await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
 
   // Подтверждение с назначением курьера в том же окне.
@@ -836,7 +849,9 @@ test('перехват блокировки переводит прежнего 
   await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
   const drafts = page.locator('.routes__draft');
   test.skip((await drafts.count()) === 0, 'черновиков дня нет');
-  await drafts.first().locator('button').first().click();
+  const draftNumber = (await drafts.first().getAttribute('data-draft-number')) ?? '';
+  expect(draftNumber).not.toBe('');
+  await openDraft(page, draftNumber);
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
@@ -848,11 +863,7 @@ test('перехват блокировки переводит прежнего 
   const secondPage = await secondContext.newPage();
   await login(secondPage, ADMIN_PHONE, ADMIN_PIN);
   await secondPage.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await secondPage
-    .locator('.routes__draft', { hasText: routeNumber })
-    .locator('button')
-    .first()
-    .click();
+  await openDraft(secondPage, routeNumber);
 
   const secondCard = secondPage.locator('.routes__card');
   await expect(secondCard.getByRole('button', { name: 'Перехватить' })).toBeVisible();
