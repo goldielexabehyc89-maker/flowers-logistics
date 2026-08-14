@@ -767,6 +767,20 @@ require_photon_artifacts() {
   PHOTON_CANONICAL_BEFORE="$(photon_canonical_checksum)"
   [ -n "${PHOTON_CANONICAL_BEFORE}" ] || fail "не удалось посчитать сумму состава канонического индекса"
 
+  # 4. Адрес геокодера обязан указывать на эндпоинт поиска, а не на корень.
+  #
+  # Клиент дописывает параметры к ЭТОМУ адресу. Корневой адрес отвечает 404
+  # на каждый запрос, очередь трактует это как отказ сервиса и уходит в паузу —
+  # геокодер при этом исправен и простаивает. Отказ выглядит как неисправность
+  # Photon, а причина в одной строке конфигурации.
+  local photon_url
+  photon_url="$(remote "grep -oE 'PHOTON_URL:[[:space:]]*[^[:space:]]+' '${REMOTE_DIR}/docker-compose.deploy.yml' | head -1 | awk '{print \$2}'")"
+  [ -n "${photon_url}" ] || fail "в составе окружения не задан PHOTON_URL"
+  case "${photon_url}" in
+    */api|*/api/) ;;
+    *) fail "PHOTON_URL «${photon_url}» указывает на корень: клиент дописывает параметры к этому адресу, и корень отвечает 404 на каждый запрос" ;;
+  esac
+
   log "геокодер: файлов индекса ${files}, версия Photon ${PHOTON_VERSION}"
 }
 
