@@ -52,7 +52,15 @@ export interface TestContext {
 }
 
 export async function createTestContext(): Promise<TestContext> {
-  const config = testConfig();
+  /*
+   * Приложение проверок поднимается с подменным решателем.
+   *
+   * HTTP-слою планирования нужен решатель, который отвечает: настоящий требует
+   * дорожного графа и отдельного сервиса, которых в проверках нет. Флаг живёт
+   * здесь, а не в `testConfig`: тем же помощником собираются конфигурации
+   * production и staging, где подмена запрещена и обязана ронять загрузку.
+   */
+  const config = testConfig({ PLANNING_TEST_SOLVER: 'true' });
   const db = createDatabase(config, silentLogger());
   const app = await buildServer({
     config,

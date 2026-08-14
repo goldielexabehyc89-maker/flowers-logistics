@@ -67,6 +67,7 @@ const DAY_SEVEN = '2026-12-07';
 const DAY_EIGHT = '2026-12-08';
 const DAY_NINE = '2026-12-09';
 const DAY_TEN = '2026-12-10';
+const DAY_ELEVEN = '2026-12-11';
 
 const SHIFT = { startMinute: 9 * 60, endMinute: 21 * 60 };
 
@@ -1389,6 +1390,44 @@ describe('параметры машин приходят от логиста', (
     // Число машин не выводится из количества заказов: заказ один, машин три.
     expect(slots).toHaveLength(3);
     expect(slots.map((item) => item.capacityOrders)).toEqual([7, 7, 7]);
+
+    await clearQueue();
+  });
+
+  it('выбор логиста доходит до расчёта через HTTP, а не теряется в обработчике', async () => {
+    /*
+     * Схема принимала `orderIds`, а обработчик их не передавал: расчёт молча
+     * брал весь пригодный день. Сервисная проверка этого не видела — она зовёт
+     * `requestPlan` напрямую, минуя HTTP.
+     *
+     * Здесь берётся ровно один заказ из двух пригодных, и доказывается, что
+     * в снимок входа попал только он.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const chosen = await seedOrder({ day: DAY_ELEVEN });
+    await seedOrder({ day: DAY_ELEVEN });
+
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/route-plans',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        deliveryDate: DAY_ELEVEN,
+        orderIds: [chosen],
+        slots: [{ vehicleType: 'CAR', capacityOrders: 10 }],
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    const runId = (response.json() as { id: string }).id;
+
+    const snapshot = await ctx.db.routePlanInputSnapshot.findUniqueOrThrow({
+      where: { runId },
+      select: { payload: true },
+    });
+    const orders = (snapshot.payload as unknown as PlanInputSnapshot).orders;
+
+    expect(orders.map((order) => order.orderId)).toEqual([chosen]);
 
     await clearQueue();
   });
