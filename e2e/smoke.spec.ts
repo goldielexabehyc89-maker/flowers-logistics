@@ -274,6 +274,9 @@ test('Сделки: день, поиск, выбор из списка и руч
 
 const EMPTY_STYLE = JSON.stringify({ version: 8, sources: {}, layers: [] });
 
+/** Метка окна: переживает любые перерисовки и не переживает перезагрузку. */
+const RELOAD_SENTINEL = 'e2e-deals-map-no-reload';
+
 test('карта не настроена: интерфейс говорит честно, а список продолжает работать', async ({
   page,
 }: {
@@ -2117,6 +2120,11 @@ test('карта «Сделок»: подложка Москвы при нуле
   await expect(page.getByTestId('deals-list')).toBeVisible();
   await expect(page.getByTestId('deals-map-legend')).toBeVisible();
 
+  // Метка живёт в самом окне: перезагрузка страницы её сбросила бы.
+  await page.evaluate((value: string) => {
+    (globalThis as { name?: string }).name = value;
+  }, RELOAD_SENTINEL);
+
   // 2. Координаты появились. Перезагрузки страницы НЕТ: приходит новый ответ
   //    того же экрана, и карта дорисовывает отметку на месте.
   const drafts = page.getByTestId('deals-include-drafts');
@@ -2125,7 +2133,10 @@ test('карта «Сделок»: подложка Москвы при нуле
   await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(1, { timeout: 15_000 });
   await expect(page.getByTestId('deals-map-empty')).toHaveCount(0);
   await expect(page.getByTestId('deals-map-zoom')).toBeEnabled();
-  // Холст тот же самый: карта не пересоздавалась.
+  // Страница та же самая: метка, поставленная до появления координат, жива.
+  // Это и есть доказательство отсутствия перезагрузки — оно не зависит
+  // ни от MapLibre, ни от разметки карты.
+  expect(await page.evaluate(() => (globalThis as { name?: string }).name)).toBe(RELOAD_SENTINEL);
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
 
   // И обратно: точка ушла — отметка исчезла, сообщение вернулось. Всё так же
@@ -2133,4 +2144,5 @@ test('карта «Сделок»: подложка Москвы при нуле
   await drafts.click();
   await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
   await expect(page.getByTestId('deals-map-empty')).toBeVisible();
+  expect(await page.evaluate(() => (globalThis as { name?: string }).name)).toBe(RELOAD_SENTINEL);
 });

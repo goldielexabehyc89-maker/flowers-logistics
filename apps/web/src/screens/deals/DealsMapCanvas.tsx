@@ -205,8 +205,21 @@ export function DealsMapCanvas({
         attributionControl: attribution === null ? false : { customAttribution: attribution },
       });
       map.addControl(new NavigationControl({ showCompass: false }), 'top-right');
-      map.on('error', () => loadErrorRef.current());
+
+      // Отказом считается только то, что помешало карте подняться.
+      //
+      // MapLibre шлёт `error` и по мелочам: оборванный запрос тайла при
+      // прокрутке, отсутствующий глиф. Заменять по такому поводу работающую
+      // карту панелью отказа — значит терять её на ровном месте, и логист
+      // увидит «подложка не загрузилась» там, где всё в порядке.
+      let everLoaded = false;
+      map.on('error', () => {
+        if (!everLoaded) {
+          loadErrorRef.current();
+        }
+      });
       map.once('load', () => {
+        everLoaded = true;
         if (!cancelled) {
           setMapReady(true);
         }
