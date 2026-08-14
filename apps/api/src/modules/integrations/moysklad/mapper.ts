@@ -165,15 +165,11 @@ export interface MapOrderResult {
 /**
  * Строит снимок заказа.
  *
- * Адрес берётся из `shipmentAddress` либо, когда это явно включено, из
- * разобранного `shipmentAddressFull`; получатель — только из «Получатель»,
+ * Адрес берётся только из `shipmentAddress`, получатель — только из «Получатель»,
  * комментарий — только из «Комментарий по доставке», интервал — только из
  * «Время доставки». Резервных источников нет: подстановка «похожего» поля
  * молча подменила бы ошибку заполнения правдоподобной догадкой.
  */
-/** Откуда собирать адрес заказа. */
-export type AddressSource = 'shipmentAddress' | 'shipmentAddressFull';
-
 /**
  * Собирает адрес из разобранных частей МоегоСклада.
  *
@@ -217,11 +213,7 @@ export function composeStructuredAddress(
   return parts.length === 0 ? null : parts.join(', ');
 }
 
-export function mapOrder(
-  order: MoyskladOrderDto,
-  ids: Ids,
-  addressSource: AddressSource = 'shipmentAddress',
-): MapOrderResult {
+export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
   const storeId = idFromHref(order.store?.meta.href);
   const deliveryMethod = attribute(order, ids.deliveryMethodAttribute);
   const paymentType = attribute(order, ids.paymentTypeAttribute);
@@ -261,12 +253,11 @@ export function mapOrder(
   }
 
   const deliveryDate = parseDeliveryDate(order.deliveryPlannedMoment);
-  // Источник адреса выбирается конфигурацией окружения. Умолчание сохраняет
-  // прежнее поведение до единого символа.
-  const address =
-    addressSource === 'shipmentAddressFull'
-      ? composeStructuredAddress(order.shipmentAddressFull)
-      : text(order.shipmentAddress);
+  // Адрес заказа — операционный: его читают логист и курьер, и квартира,
+  // подъезд и домофон в нём обязаны остаться. Запрос к геокодеру собирается
+  // отдельно (`composeStructuredAddress`) и хранить его пока негде: свободного
+  // поля в модели нет. См. отчёт о минимальной расширяющей миграции.
+  const address = text(order.shipmentAddress);
   const recipient = attribute(order, ids.recipientAttribute).text;
   const comment = attribute(order, ids.commentAttribute).text;
 
