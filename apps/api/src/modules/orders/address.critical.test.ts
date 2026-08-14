@@ -19,8 +19,15 @@ import {
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../integrations/moysklad/mapper.js';
-import { addressState, effectiveAddress, geocodingAddress, isSourceConflict } from './address.js';
+import {
+  addressState,
+  automaticGeocodingAddress,
+  effectiveAddress,
+  geocodingAddress,
+  isSourceConflict,
+} from './address.js';
 import { effectiveAttentionReasons } from './attention.js';
+import { setLocalAddress } from './address-service.js';
 
 let ctx: TestContext;
 const IDS = MOYSKLAD_IDS;
@@ -69,6 +76,13 @@ function snapshotOf(overrides: Record<string, unknown> = {}): OrderSnapshot {
 
 async function apply(snapshot: OrderSnapshot): Promise<void> {
   await ctx.db.$transaction((tx) => applyOrderSnapshot(tx, snapshot, new Date()));
+}
+
+/** Импорт с включённой постановкой в очередь: так работает production. */
+async function applyWithQueue(snapshot: OrderSnapshot): Promise<void> {
+  await ctx.db.$transaction((tx) =>
+    applyOrderSnapshot(tx, snapshot, new Date(), { geocoding: true }),
+  );
 }
 
 /** Заказ с действующей локальной правкой. Правка ставится напрямую: сервис правки — следующий срез. */
@@ -411,7 +425,7 @@ describe('запрос к геокодеру: импорт и повторы', (
 
   it('запрос сохраняется отдельно, а адрес заказа остаётся операционным', async () => {
     const snapshot = structured();
-    await apply(snapshot);
+    await applyWithQueue(snapshot);
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { externalId: snapshot.externalId },
@@ -430,7 +444,7 @@ describe('запрос к геокодеру: импорт и повторы', (
 
   it('повторный импорт того же снимка не создаёт вторую ревизию', async () => {
     const snapshot = structured();
-    await apply(snapshot);
+    await applyWithQueue(snapshot);
 
     const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { externalId: snapshot.externalId },
@@ -475,7 +489,7 @@ describe('запрос к геокодеру: импорт и повторы', (
 
   it('смена одной лишь квартиры запрос не меняет и ревизии не создаёт', async () => {
     const snapshot = structured();
-    await apply(snapshot);
+    await applyWithQueue(snapshot);
 
     const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { externalId: snapshot.externalId },
@@ -501,6 +515,246 @@ describe('запрос к геокодеру: импорт и повторы', (
     expect(after.geocodeAddress).toBe(order.geocodeAddress);
     expect(await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } })).toBe(
       revisionsBefore,
+    );
+  });
+});
+
+describe('автоматический источник геокодирования', () => {
+  const FULL = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+  };
+
+  const structured = (overrides: Record<string, unknown> = {}): OrderSnapshot =>
+    mapOrder(
+      source({ shipmentAddressFull: FULL, ...overrides }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+
+  async function jobsOf(orderId: string): Promise<number> {
+    return ctx.db.orderGeocodeJob.count({ where: { orderId } });
+  }
+
+  it('старый address источником не является ни при каких условиях', () => {
+    // Главное правило: по строке произвольного формата геокодер подбирает
+    // похожий дом, а не находит нужный.
+    expect(
+      automaticGeocodingAddress({
+        address: SOURCE_ADDRESS,
+        geocodeAddress: null,
+        localAddress: null,
+      }),
+    ).toBeNull();
+
+    // А правка логиста и разобранный адрес — являются.
+    expect(
+      automaticGeocodingAddress({
+        address: SOURCE_ADDRESS,
+        geocodeAddress: null,
+        localAddress: LOCAL_ADDRESS,
+      }),
+    ).toBe(LOCAL_ADDRESS);
+    expect(
+      automaticGeocodingAddress({
+        address: SOURCE_ADDRESS,
+        geocodeAddress: 'Тверская улица, 13',
+        localAddress: null,
+      }),
+    ).toBe('Тверская улица, 13');
+
+    // Правка логиста сильнее разобранного адреса: он подтверждал конкретный.
+    expect(
+      automaticGeocodingAddress({
+        address: SOURCE_ADDRESS,
+        geocodeAddress: 'Тверская улица, 13',
+        localAddress: LOCAL_ADDRESS,
+      }),
+    ).toBe(LOCAL_ADDRESS);
+  });
+
+  it('мутация: возврат ?? address в автоматический источник ломает правило', () => {
+    // Проверка с зубами. Если кто-то вернёт запасной вариант, первое же
+    // утверждение выше перестанет выполняться — здесь это показано явно.
+    const withFallback = (order: {
+      address: string | null;
+      geocodeAddress: string | null;
+      localAddress: string | null;
+    }): string | null => order.localAddress ?? order.geocodeAddress ?? order.address;
+
+    const order = { address: SOURCE_ADDRESS, geocodeAddress: null, localAddress: null };
+    expect(withFallback(order)).toBe(SOURCE_ADDRESS);
+    expect(automaticGeocodingAddress(order)).toBeNull();
+    expect(automaticGeocodingAddress(order)).not.toBe(withFallback(order));
+  });
+
+  it('новый заказ с разобранным адресом получает ровно одно задание', async () => {
+    const snapshot = structured();
+    await applyWithQueue(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(await jobsOf(order.id)).toBe(1);
+    expect(order.attentionReasons).not.toContain('GEOCODING_ADDRESS_INCOMPLETE');
+  });
+
+  it('новый заказ без разобранного адреса задания НЕ получает', async () => {
+    // Строка `address` у него непустая — и всё равно основанием не служит.
+    const snapshot = mapOrder(source() as never, IDS, 'shipmentAddressFull').snapshot;
+    expect(snapshot.address).not.toBeNull();
+    expect(snapshot.geocodeAddress).toBeNull();
+    await applyWithQueue(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(await jobsOf(order.id)).toBe(0);
+    expect(order.attentionReasons).toContain('GEOCODING_ADDRESS_INCOMPLETE');
+    expect(order.needsAttention).toBe(true);
+  });
+
+  it('повторный импорт задним числом задания не создаёт', async () => {
+    const snapshot = snapshotOf();
+    await applyWithQueue(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    await applyWithQueue(snapshot);
+    expect(await jobsOf(order.id)).toBe(0);
+  });
+
+  it('пустой адрес даёт только MISSING_ADDRESS, без второй причины', async () => {
+    // Состояния взаимоисключающие: «адреса нет» и «адреса мало» вместе
+    // запутали бы того, кто разбирает список.
+    const snapshot = snapshotOf({ shipmentAddress: '' });
+    expect(snapshot.address).toBeNull();
+    await applyWithQueue(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(order.attentionReasons).toContain('MISSING_ADDRESS');
+    expect(order.attentionReasons).not.toContain('GEOCODING_ADDRESS_INCOMPLETE');
+    expect(await jobsOf(order.id)).toBe(0);
+  });
+
+  it('ручная правка создаёт задание по localAddress и снимает причину', async () => {
+    const snapshot = mapOrder(source() as never, IDS, 'shipmentAddressFull').snapshot;
+    await applyWithQueue(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(order.attentionReasons).toContain('GEOCODING_ADDRESS_INCOMPLETE');
+
+    const actor = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    await setLocalAddress(
+      { db: ctx.db, config: ctx.config },
+      { userId: actor.id, roles: ['LOGISTICIAN'] },
+      order.id,
+      { address: LOCAL_ADDRESS, point: null },
+      { ip: null, userAgent: null },
+    );
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    // Ровно одно задание, и его источник — адрес логиста.
+    expect(await jobsOf(order.id)).toBe(1);
+
+    // Ложной записи «прежняя точка снята» не появилось: точки не было никогда.
+    const invalidations = await ctx.db.orderGeoHistory.count({
+      where: { orderId: order.id, kind: 'INVALIDATED_ADDRESS_CHANGED' },
+    });
+    expect(invalidations, 'записана инвалидация несуществующей точки').toBe(0);
+
+    // Аудит правки при этом сохранён: событие произошло и должно быть видно.
+    expect(
+      await ctx.db.orderAddressHistory.count({
+        where: { orderId: order.id, action: 'LOCAL_ADDRESS_SET' },
+      }),
+    ).toBe(1);
+    expect(automaticGeocodingAddress(after)).toBe(LOCAL_ADDRESS);
+    // Причина снята: данных теперь достаточно.
+    expect(after.attentionReasons).not.toContain('GEOCODING_ADDRESS_INCOMPLETE');
+
+    // При выключенном обработчике задание просто ждёт.
+    const job = await ctx.db.orderGeocodeJob.findFirstOrThrow({ where: { orderId: order.id } });
+    expect(job.attempts).toBe(0);
+    expect(job.status).toBe('PENDING');
+  });
+  it('при существующей точке инвалидация записывается ровно одна', async () => {
+    // Прежнее поведение обязано сохраниться: точка была, она снята,
+    // и в истории это видно — иначе прошлое не восстановить.
+    const snapshot = structured();
+    await applyWithQueue(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        geoState: 'RESOLVED',
+        geoSource: 'PHOTON',
+        geoPrecision: 'EXACT_HOUSE',
+        geoLatMicro: 55_928_900,
+        geoLonMicro: 37_751_900,
+        geoResolvedAt: new Date(),
+      },
+    });
+
+    const actor = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    await setLocalAddress(
+      { db: ctx.db, config: ctx.config },
+      { userId: actor.id, roles: ['LOGISTICIAN'] },
+      order.id,
+      { address: LOCAL_ADDRESS, point: null },
+      { ip: null, userAgent: null },
+    );
+
+    const invalidations = await ctx.db.orderGeoHistory.findMany({
+      where: { orderId: order.id, kind: 'INVALIDATED_ADDRESS_CHANGED' },
+    });
+    expect(invalidations).toHaveLength(1);
+    // И в ней сохранены прежние координаты: без них запись бессмысленна.
+    expect(invalidations[0]?.previousLatMicro).toBe(55_928_900);
+    expect(invalidations[0]?.previousLonMicro).toBe(37_751_900);
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.geoLatMicro).toBeNull();
+  });
+
+  it('отказ внутри правки откатывает всё: транзакция атомарна', async () => {
+    const snapshot = snapshotOf();
+    await applyWithQueue(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    const jobsBefore = await jobsOf(order.id);
+    const historyBefore = await ctx.db.orderAddressHistory.count({ where: { orderId: order.id } });
+
+    // Несуществующий автор: внешний ключ отклонит запись истории, и вся
+    // правка обязана откатиться целиком.
+    await expect(
+      setLocalAddress(
+        { db: ctx.db, config: ctx.config },
+        { userId: '00000000-0000-4000-8000-000000000000', roles: ['LOGISTICIAN'] },
+        order.id,
+        { address: LOCAL_ADDRESS, point: null },
+        { ip: null, userAgent: null },
+      ),
+    ).rejects.toThrow();
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.localAddress).toBeNull();
+    expect(await jobsOf(order.id)).toBe(jobsBefore);
+    expect(await ctx.db.orderAddressHistory.count({ where: { orderId: order.id } })).toBe(
+      historyBefore,
     );
   });
 });

@@ -353,6 +353,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   assertMoyskladEnvironment(parsed.data);
   assertDadataEnvironment(parsed.data);
+  assertGeocodingSource(parsed.data);
 
   return Object.freeze({
     ...parsed.data,
@@ -488,6 +489,27 @@ function assertDadataEnvironment(data: z.infer<typeof configSchema>): void {
   // экран обещал бы подсказки, которых не будет.
   if (data.DADATA_GEOCODING_ENABLED && data.DADATA_API_KEY === undefined) {
     throw new Error('DADATA_GEOCODING_ENABLED=true требует DADATA_API_KEY');
+  }
+}
+
+/**
+ * Настроенный геокодер обязан иметь источник, который для него что-то даёт.
+ *
+ * Автоматический путь берёт только `localAddress ?? geocodeAddress`. При
+ * источнике `shipmentAddress` разобранный адрес не собирается вовсе, поэтому
+ * `geocodeAddress` пуст у всех заказов, и ни одного задания не появится
+ * никогда. Молча считаться готовым в таком виде приложение не должно:
+ * геокодирование выглядело бы включённым и не работало.
+ */
+function assertGeocodingSource(data: z.infer<typeof configSchema>): void {
+  const photonConfigured = data.PHOTON_URL !== undefined && data.PHOTON_URL.trim() !== '';
+  if (photonConfigured && data.MOYSKLAD_GEOCODING_ADDRESS_SOURCE !== 'shipmentAddressFull') {
+    throw new Error(
+      'PHOTON_URL задан, а MOYSKLAD_GEOCODING_ADDRESS_SOURCE=shipmentAddress: ' +
+        'автоматическое геокодирование не создаст ни одного задания, потому что ' +
+        'разобранный адрес не собирается, а старый address источником не является. ' +
+        'Задайте MOYSKLAD_GEOCODING_ADDRESS_SOURCE=shipmentAddressFull либо уберите PHOTON_URL.',
+    );
   }
 }
 

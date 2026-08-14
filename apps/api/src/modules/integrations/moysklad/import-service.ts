@@ -29,7 +29,11 @@ import {
 } from '../../orders/attention.js';
 import { recordOrderConflicts } from '../../routing/conflicts.js';
 import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
-import { geocodingAddress, isSourceConflict } from '../../orders/address.js';
+import {
+  automaticGeocodingAddress,
+  geocodingAddress,
+  isSourceConflict,
+} from '../../orders/address.js';
 import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
@@ -219,7 +223,19 @@ async function createOrder(
   // Адрес нового заказа сразу отправляется на разрешение — в той же транзакции.
   // Отдельная постановка «потом» дала бы состояние «заказ есть, задания нет»,
   // и такой заказ навсегда остался бы без точки.
-  if (options.geocoding === true) {
+  //
+  // Но только если автоматический источник вообще есть. Строка `address`
+  // произвольного формата основанием не служит: по ней геокодер подбирает
+  // похожий дом, а не находит нужный. Заказ без разобранного адреса уходит
+  // в «Требует внимания» с причиной GEOCODING_ADDRESS_INCOMPLETE и ждёт
+  // человека — задание появится после его правки.
+  const automaticSource = automaticGeocodingAddress({
+    address: snapshot.address,
+    geocodeAddress: snapshot.geocodeAddress,
+    localAddress: null,
+  });
+
+  if (options.geocoding === true && automaticSource !== null) {
     await enqueueGeocoding(
       tx,
       {

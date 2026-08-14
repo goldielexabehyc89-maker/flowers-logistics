@@ -73,6 +73,26 @@ export function effectiveAddress(order: AddressSource): string | null {
  * Порядок тот же: правка логиста сильнее всего — он подтверждал конкретный
  * адрес, и подменять его разобранным нельзя.
  */
+/**
+ * Источник АВТОМАТИЧЕСКОГО геокодирования.
+ *
+ * Только правка логиста и разобранный адрес. Старое поле `address` сюда
+ * не входит намеренно: по строке произвольного формата геокодер не находит
+ * нужный дом, а подбирает похожий — измерено, 2 точных дома из 20 запросов.
+ * Показывать `address` человеку по-прежнему нужно, а спрашивать по нему
+ * геокодер автоматически — нет.
+ *
+ * Отдельная функция, а не флаг у `geocodingAddress`: флагом старую цепочку
+ * однажды вернут в событийный путь, и заметить это будет нечем. Явная
+ * операторская команда исторического прохода пользуется `geocodingAddress`
+ * с прежним запасным вариантом — там выбор делает человек.
+ */
+export function automaticGeocodingAddress(
+  order: AddressSource & { geocodeAddress?: string | null },
+): string | null {
+  return normalize(order.localAddress) ?? normalize(order.geocodeAddress);
+}
+
 export function geocodingAddress(order: AddressSource): string | null {
   return (
     normalize(order.localAddress) ?? normalize(order.geocodeAddress) ?? normalize(order.address)
