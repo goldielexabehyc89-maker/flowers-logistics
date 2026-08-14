@@ -719,6 +719,16 @@ PHOTON_JAR_SHA256='a89707c0045e4807b2a1180e132e68e108d998709f48b6c94b98a6e281f57
 PHOTON_JAR_NAME='photon-1.3.0.jar'
 PHOTON_VERSION='1.3.0'
 
+# Контрольная сумма СОСТАВА канонического каталога.
+#
+# Считается по именам и содержимому всех файлов сразу: одна сумма архива
+# не поймала бы ни подмену отдельного файла, ни появление лишнего. Порядок
+# фиксирован сортировкой, иначе сумма менялась бы от порядка обхода каталога.
+photon_canonical_checksum() {
+  remote "cd '${REMOTE_DIR}/photon/current' && find photon_data -type f -print0 \
+    | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1"
+}
+
 # Проверяет исполняемый файл и индекс геокодера на сервере.
 #
 # Fail closed. Отсутствующий или повреждённый индекс НЕ должен выдаваться
@@ -752,7 +762,94 @@ require_photon_artifacts() {
   remote "test -f '${target}/manifest.md'" \
     || fail "рядом с индексом нет manifest.md: происхождение набора неизвестно"
 
+  # Сумма состава запоминается ДО запуска сервиса: после запуска она обязана
+  # совпасть. Это и есть доказательство, что канонический каталог не тронут.
+  PHOTON_CANONICAL_BEFORE="$(photon_canonical_checksum)"
+  [ -n "${PHOTON_CANONICAL_BEFORE}" ] || fail "не удалось посчитать сумму состава канонического индекса"
+
   log "геокодер: файлов индекса ${files}, версия Photon ${PHOTON_VERSION}"
+}
+
+# Готовит РАБОЧУЮ копию индекса.
+#
+# Photon пишет в каталог данных, поэтому монтировать ему канонический набор
+# нельзя. Рабочая копия делается один раз на версию и живёт постоянно:
+# при обычном перезапуске контейнера копирование не повторяется — это сотни
+# мегабайт и минуты на каждом рестарте.
+#
+# Копия — расходный материал. Её можно удалить целиком, и следующая выкатка
+# восстановит её из канонического источника.
+activate_photon_runtime() {
+  if is_dry_run; then
+    log "сухой прогон: рабочая копия индекса не готовится"
+    return 0
+  fi
+
+  local version
+  version="$(remote "basename \"\$(readlink -f '${REMOTE_DIR}/photon/current')\"")"
+  [ -n "${version}" ] || fail "не удалось определить версию канонического индекса"
+
+  local runtime="${REMOTE_DIR}/photon/runtime"
+
+  if remote "test -d '${runtime}/${version}/photon_data'"; then
+    # Копия этой версии уже есть: обычный перезапуск ничего не копирует.
+    log "рабочая копия ${version} уже готова: копирование не требуется"
+  else
+    log "рабочей копии ${version} нет: копирую из канонического каталога"
+    # Копирование идёт во ВРЕМЕННОЕ имя. Оборванное копирование не должно
+    # оставить каталог, который выглядит готовым: следующий запуск принял бы
+    # обрезанный индекс за рабочий.
+    remote "set -e
+      mkdir -p '${runtime}'
+      rm -rf '${runtime}/.incoming'
+      mkdir -p '${runtime}/.incoming'
+      cp -a '${REMOTE_DIR}/photon/current/photon_data' '${runtime}/.incoming/photon_data'
+      mv -T '${runtime}/.incoming' '${runtime}/${version}'"
+
+    local copied canonical
+    copied="$(remote "find '${runtime}/${version}/photon_data' -type f | wc -l")"
+    canonical="$(remote "find '${REMOTE_DIR}/photon/current/photon_data' -type f | wc -l")"
+    [ "${copied}" = "${canonical}" ] \
+      || fail "рабочая копия неполна: ${copied} файлов против ${canonical} в каноническом каталоге"
+    log "рабочая копия создана: ${copied} файлов"
+  fi
+
+  # Активация — подмена символьной ссылки одним rename(2). `ln -sfn` для этого
+  # не годится: он снимает старую ссылку и создаёт новую, и между этими
+  # действиями каталога не существует вовсе.
+  remote "set -e
+    ln -sfn '${version}' '${runtime}/current.new'
+    mv -T '${runtime}/current.new' '${runtime}/current'"
+
+  local active
+  active="$(remote "readlink '${runtime}/current'")"
+  [ "${active}" = "${version}" ] || fail "активной оказалась рабочая копия «${active}», а не ${version}"
+  log "активирована рабочая копия ${version}"
+}
+
+# Доказывает, что канонический каталог не изменился после запуска сервиса.
+#
+# Photon пишет в рабочую копию — и только в неё. Если сумма состава разошлась,
+# значит смонтирован не тот каталог, и выкатка обязана остановиться: дальше
+# канонический набор перестал бы быть источником восстановления.
+require_photon_canonical_unchanged() {
+  if is_dry_run; then
+    log "сухой прогон: неизменность канонического индекса не проверяется"
+    return 0
+  fi
+
+  [ -n "${PHOTON_CANONICAL_BEFORE:-}" ] \
+    || fail "сумма канонического индекса до запуска не была посчитана"
+
+  local after
+  after="$(photon_canonical_checksum)"
+  [ "${after}" = "${PHOTON_CANONICAL_BEFORE}" ] \
+    || fail "канонический индекс изменился после запуска геокодера: смонтирован не тот каталог"
+
+  # И состав, и права: запись могла бы не изменить содержимое, но добавить файл.
+  local files
+  files="$(remote "find '${REMOTE_DIR}/photon/current/photon_data' -type f | wc -l")"
+  log "канонический индекс не изменился: ${files} файлов, сумма состава совпала"
 }
 
 # Ждёт готовности геокодера и проверяет его настоящим запросом.

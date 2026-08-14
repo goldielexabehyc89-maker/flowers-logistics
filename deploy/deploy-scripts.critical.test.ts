@@ -1877,20 +1877,27 @@ describe('геокодер в составе окружения', () => {
     expect(photon).toMatch(/image: eclipse-temurin:21-jre@sha256:[0-9a-f]{64}/);
   });
 
-  it('индекс и исполняемый файл монтируются только на чтение', async () => {
+  it('геокодеру монтируется РАБОЧАЯ копия, а канонический каталог — никогда', async () => {
     const compose = await readFile(COMPOSE_FILE, 'utf8');
     const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
 
-    // Распаковка поверх работающей базы повреждает её — об этом прямо
-    // предупреждает документация Photon.
+    // Photon пишет в каталог данных: встроенный OpenSearch ведёт журналы
+    // и берёт блокировку Lucene. На read-only каталоге он падает в цикле
+    // перезапуска. Поэтому монтируется копия — и только копия.
+    expect(photon).toContain('source: ./photon/runtime/current');
+
+    // Канонический каталог геокодеру не достаётся вовсе: он источник
+    // восстановления, а не рабочее место.
     const mounts = photon.split('- type: bind').slice(1);
     expect(mounts).toHaveLength(2);
     for (const mount of mounts) {
-      expect(mount).toContain('read_only: true');
+      expect(mount).not.toContain('source: ./photon/current');
     }
-    // Каталог индекса — символьная ссылка на версионный: переключение версии
-    // выполняется её подменой, а не распаковкой на месте.
-    expect(photon).toContain('source: ./photon/current');
+
+    // Исполняемый файл Photon не пишет — он остаётся только на чтение.
+    const lib = mounts.find((mount) => mount.includes('./photon/lib'));
+    expect(lib).toBeDefined();
+    expect(lib).toContain('read_only: true');
   });
 
   it('healthcheck проверяет /status', async () => {
@@ -1926,6 +1933,49 @@ describe('геокодер в составе окружения', () => {
     expect(app).toContain('- geocoder');
   });
 
+  it('рабочая копия готовится до запуска и активируется атомарно', async () => {
+    const lib = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+
+    // Копирование идёт во ВРЕМЕННОЕ имя: оборванная копия не должна выглядеть
+    // готовой, иначе следующий запуск примет обрезанный индекс за рабочий.
+    expect(lib).toContain(".incoming'");
+    expect(lib).toMatch(/mv -T '\$\{runtime\}\/\.incoming'/);
+
+    // Активация — один rename(2). `ln -sfn` снимает старую ссылку и создаёт
+    // новую: между этими действиями каталога не существует вовсе.
+    expect(lib).toMatch(/mv -T '\$\{runtime\}\/current\.new' '\$\{runtime\}\/current'/);
+
+    // Полнота копии доказывается сравнением числа файлов с каноническим.
+    expect(lib).toContain('рабочая копия неполна');
+  });
+
+  it('обычный перезапуск не копирует индекс заново', async () => {
+    const lib = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+    const fn = lib.slice(
+      lib.indexOf('activate_photon_runtime() {'),
+      lib.indexOf('# Доказывает, что канонический'),
+    );
+
+    // Копия живёт постоянно: сотни мегабайт и минуты на каждом рестарте —
+    // это не то, что можно платить за перезапуск контейнера.
+    expect(fn).toContain("test -d '${runtime}/${version}/photon_data'");
+    expect(fn).toContain('копирование не требуется');
+  });
+
+  it('неизменность канонического каталога доказывается после запуска', async () => {
+    const lib = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+
+    // Сумма считается по именам И содержимому всех файлов: сумма архива
+    // не поймала бы ни подмену отдельного файла, ни появление лишнего.
+    expect(lib).toContain('photon_canonical_checksum()');
+    expect(lib).toContain('find photon_data -type f -print0');
+    expect(lib).toContain('sort -z');
+
+    // Сумма снимается ДО запуска и сверяется ПОСЛЕ.
+    expect(lib).toContain('PHOTON_CANONICAL_BEFORE=');
+    expect(lib).toContain('канонический индекс изменился после запуска геокодера');
+  });
+
   it('выкатка проверяет геокодер до миграций и до приложения', async () => {
     const full = await readFile(path.join(REPO_ROOT, 'deploy/scripts/deploy-staging.sh'), 'utf8');
 
@@ -1934,15 +1984,24 @@ describe('геокодер в составе окружения', () => {
     const script = full.slice(full.indexOf('require_clean_worktree'));
 
     const artifacts = script.indexOf('require_photon_artifacts');
+    const activate = script.indexOf('activate_photon_runtime');
+    const up = script.indexOf('up -d --no-build photon');
     const ready = script.indexOf('require_photon_ready');
+    const unchanged = script.indexOf('require_photon_canonical_unchanged');
     const migrate = script.indexOf('prisma migrate deploy');
     const app = script.indexOf('up -d --no-build app');
 
     // Порядок не косметический: при отказе геокодера схема остаётся прежней,
     // а работающая версия продолжает работать.
     expect(artifacts).toBeGreaterThan(0);
-    expect(ready).toBeGreaterThan(artifacts);
-    expect(migrate).toBeGreaterThan(ready);
+    // Копия готовится до запуска: монтировать нечего, пока её нет.
+    expect(activate).toBeGreaterThan(artifacts);
+    expect(up).toBeGreaterThan(activate);
+    expect(ready).toBeGreaterThan(up);
+    // Неизменность канонического каталога проверяется, когда сервис уже
+    // поработал: до запуска доказывать нечего.
+    expect(unchanged).toBeGreaterThan(ready);
+    expect(migrate).toBeGreaterThan(unchanged);
     expect(app).toBeGreaterThan(migrate);
   });
 
