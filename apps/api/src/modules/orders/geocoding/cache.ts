@@ -29,7 +29,10 @@ type Client = Database | TransactionClient;
  * `undefined` — записи нет, нужно спрашивать геокодер. `null` внутри
  * `PhotonAnswer | null` означает «геокодер уже отвечал, что не нашёл».
  */
-export async function readCache(db: Client, address: string): Promise<PhotonAnswer | null | undefined> {
+export async function readCache(
+  db: Client,
+  address: string,
+): Promise<PhotonAnswer | null | undefined> {
   const key = normalizeAddress(address);
   if (key === '') {
     return undefined;

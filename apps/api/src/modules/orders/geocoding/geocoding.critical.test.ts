@@ -27,11 +27,7 @@ import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../../integrations/moysklad/config.js';
 import { applyOrderSnapshot } from '../../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../../integrations/moysklad/mapper.js';
-import {
-  PhotonError,
-  precisionOf,
-  type PhotonAnswer,
-} from '../../integrations/photon/client.js';
+import { PhotonError, precisionOf, type PhotonAnswer } from '../../integrations/photon/client.js';
 import { isDadataAllowed, isPhotonConfigured, shouldGeocodeAutomatically } from './enabled.js';
 import { normalizeAddress } from './normalize.js';
 import { backfillGeocoding, isGeocodable, retryDelayMs, RETRY_DELAYS_MS } from './queue.js';

@@ -19,11 +19,7 @@
  * (лимит, баланс, отзыв прав) убраны: недостижимая ветка обработки ошибок
  * выглядит как защита, но никогда не проверяется и потому не защищает.
  */
-export type DadataErrorCode =
-  | 'BAD_REQUEST'
-  | 'SERVER_ERROR'
-  | 'TRANSPORT_ERROR'
-  | 'BAD_RESPONSE';
+export type DadataErrorCode = 'BAD_REQUEST' | 'SERVER_ERROR' | 'TRANSPORT_ERROR' | 'BAD_RESPONSE';
 
 const MESSAGES: Record<DadataErrorCode, string> = {
   BAD_REQUEST: 'DaData отклонила запрос',

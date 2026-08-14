@@ -107,7 +107,12 @@ describe('запрет публичных серверов', () => {
     expect(isPermanentPhotonFailure('NOT_CONFIGURED')).toBe(true);
     expect(isPermanentPhotonFailure('PUBLIC_ENDPOINT_FORBIDDEN')).toBe(true);
 
-    for (const code of ['SERVER_ERROR', 'TRANSPORT_ERROR', 'BAD_RESPONSE', 'BAD_REQUEST'] as const) {
+    for (const code of [
+      'SERVER_ERROR',
+      'TRANSPORT_ERROR',
+      'BAD_RESPONSE',
+      'BAD_REQUEST',
+    ] as const) {
       expect(isPermanentPhotonFailure(code), code).toBe(false);
     }
   });
@@ -176,7 +181,7 @@ describe('запрос', () => {
   it('неожиданный формат не превращается в координаты неизвестного качества', async () => {
     for (const body of [
       { features: [{ geometry: { coordinates: ['37.6', '55.7'] }, properties: {} }] },
-      { features: [{ geometry: {} , properties: {} }] },
+      { features: [{ geometry: {}, properties: {} }] },
       { features: [{ geometry: { coordinates: [37.6] }, properties: {} }] },
       { results: [] },
       'не json-объект',

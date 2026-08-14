@@ -73,12 +73,11 @@ export async function geocodingReport(db: Database): Promise<GeocodingReport> {
     }),
   ]);
 
-  const states = (
-    state: string,
-    reason?: string,
-  ): number =>
+  const states = (state: string, reason?: string): number =>
     byState
-      .filter((row) => row.geoState === state && (reason === undefined || row.geoReviewReason === reason))
+      .filter(
+        (row) => row.geoState === state && (reason === undefined || row.geoReviewReason === reason),
+      )
       .reduce((sum, row) => sum + row._count._all, 0);
 
   const sources = (source: string): number =>
