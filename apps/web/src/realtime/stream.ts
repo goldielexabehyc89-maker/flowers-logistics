@@ -120,7 +120,12 @@ export function invalidationKeysFor(topic: string): string[][] {
   // логистический список от изменения состава не зависит, а очередь флориста
   // обязана обновиться точечно, а не перезапросить всё подряд.
   if (topic.startsWith('order.fulfillment')) {
-    return [['florist-queue'], ['florist-card'], ['florist-print-jobs']];
+    // `florist-shift` здесь ради счётчика активных заказов: производственное
+    // событие способно добавить работу или снять её (переназначение админом,
+    // изменившийся состав, чужой возврат в очередь), а счётчик серверный и сам
+    // о себе не узнает. Без этого ключа число оставалось бы верным только до
+    // первого чужого действия.
+    return [['florist-queue'], ['florist-card'], ['florist-print-jobs'], ['florist-shift']];
   }
   if (topic === 'florist.shift_changed') {
     return [['florist-shift'], ['florist-shifts'], ['florist-queue']];

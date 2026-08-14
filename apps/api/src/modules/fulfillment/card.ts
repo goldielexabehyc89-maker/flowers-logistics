@@ -28,7 +28,7 @@ import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { effectiveMinutes } from './queue.js';
 import { visiblePositions } from './visibility.js';
-import type { FulfillmentAssortmentKind } from './composition.js';
+import { shortUnitLabel, type FulfillmentAssortmentKind } from './composition.js';
 
 export interface CardComponent {
   name: string | null;
@@ -194,14 +194,18 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
     positions: visible.map((position) => ({
       name: position.name,
       quantity: quantityText(position.quantity),
-      uomName: position.uomName,
+      // Сокращение применяется и здесь, а не только на импорте: снимки прошлых
+      // проходов уже лежат в базе с полным названием, и без этого шага заказ,
+      // прочитанный вчера, продолжал бы показывать «штука» до следующего
+      // изменения в МоемСкладе. Миграция ради этого не нужна.
+      uomName: shortUnitLabel(position.uomName),
       characteristicLabel: position.characteristicLabel,
       isBundle: position.assortmentKind === 'BUNDLE',
       assortmentId: position.assortmentId,
       components: position.components.map((component) => ({
         name: component.name,
         quantity: quantityText(component.quantity),
-        uomName: component.uomName,
+        uomName: shortUnitLabel(component.uomName),
       })),
     })),
     process: {

@@ -37,6 +37,7 @@ import {
 import {
   assortmentKindFrom,
   quantityToDecimalString,
+  shortUnitLabel,
   type FulfillmentComponentSnapshot,
   type FulfillmentPositionSnapshot,
   type FulfillmentSnapshot,
@@ -120,8 +121,10 @@ export class CompositionSource {
       this.requests += 1;
       for (const unit of (await this.client.listUnitsOfMeasure()).rows) {
         // Обозначение («шт», «м») короче названия и именно оно печатается рядом
-        // с числом; название берётся только когда обозначения нет.
-        const label = text(unit.description) ?? text(unit.name);
+        // с числом; название берётся только когда обозначения нет. Полное
+        // название, попавшее сюда запасным путём, сокращается по утверждённой
+        // владельцем таблице — иначе рядом с количеством встаёт «штука».
+        const label = shortUnitLabel(text(unit.description) ?? text(unit.name));
         if (label !== null) {
           names.set(unit.id, label);
         }
