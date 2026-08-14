@@ -10,11 +10,20 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
-import { EmptyState, ErrorState, LoadingState } from '../../ui/components';
+import { ErrorState, LoadingState } from '../../ui/components';
+import type { MapConfig } from '../routing/geo';
 import { formatMinutes } from './deals';
 import { selectionNumber } from './selection';
+
+/**
+ * Карта грузится отдельным куском: MapLibre и разбор тайлов — сотни килобайт,
+ * и остальным экранам они не нужны.
+ */
+const DealsMapCanvas = lazy(() =>
+  import('./DealsMapCanvas').then((module) => ({ default: module.DealsMapCanvas })),
+);
 
 export interface DealPoint {
   orderId: string;
@@ -107,15 +116,33 @@ export function splitForMap(
 export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
   const [zoomedOut, setZoomedOut] = useState(true);
+  const [basemapFailed, setBasemapFailed] = useState(false);
 
   const query = useQuery({
     queryKey: ['deals-map', scopeKey],
     queryFn: () => client.get<MapResponse>(`/api/deals/map?${scopeKey}`),
   });
 
+  // Подложка своя: адрес стиля приходит из нашей конфигурации, публичные тайлы
+  // не используются.
+  const config = useQuery({
+    queryKey: ['map-config'],
+    queryFn: () => client.get<MapConfig>('/api/map/config'),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const points = useMemo(() => query.data?.points ?? [], [query.data]);
 
   const { chosen, clusters } = splitForMap(points, selected, zoomedOut);
+
+  // Номер выбранного заказа подписью на отметке. Пусто — заказ не выбран.
+  const numberOf = useCallback(
+    (orderId: string): string | null => {
+      const number = selectionNumber(selected, orderId);
+      return number === null ? null : String(number);
+    },
+    [selected],
+  );
 
   if (query.isPending) {
     return <LoadingState title="Загружаем карту…" />;
@@ -123,6 +150,9 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
   if (query.isError) {
     return <ErrorState title="Не удалось загрузить карту" onRetry={() => void query.refetch()} />;
   }
+
+  const styleUrl = config.data?.styleUrl ?? '';
+  const empty = points.length === 0;
 
   return (
     <section className="deals-map" data-testid="deals-map">
@@ -132,6 +162,9 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
           type="button"
           className="deals__link"
           data-testid="deals-map-zoom"
+          // Приближать нечего, пока точек нет: кнопка не должна обещать
+          // действие, которое ничего не изменит.
+          disabled={empty}
           onClick={() => setZoomedOut((value) => !value)}
         >
           {zoomedOut ? 'Приблизить' : 'Отдалить'}
@@ -158,9 +191,43 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
         </li>
       </ul>
 
-      {points.length === 0 ? (
-        <EmptyState title="Точек на карте нет" />
-      ) : (
+      {/*
+        Карта показывается ВСЕГДА, даже когда точек ноль. Пустой день — обычное
+        дело, и подложка Москвы в этот момент нужна не меньше: логист видит,
+        где он работает, а не серый прямоугольник. Сообщение об отсутствии
+        координат лежит поверх карты и её не заменяет.
+      */}
+      <div className="deals-map__surface">
+        {styleUrl === '' ? (
+          <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
+            Карта не настроена
+          </p>
+        ) : basemapFailed ? (
+          <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
+            Подложка карты не загрузилась. Список и выбор работают как обычно.
+          </p>
+        ) : (
+          <Suspense fallback={<LoadingState title="Готовим карту…" />}>
+            <DealsMapCanvas
+              styleUrl={styleUrl}
+              attribution={config.data?.attribution ?? null}
+              chosen={chosen}
+              clusters={clusters}
+              numberOf={numberOf}
+              onToggle={onToggle}
+              onLoadError={() => setBasemapFailed(true)}
+            />
+          </Suspense>
+        )}
+
+        {empty && !basemapFailed && styleUrl !== '' && (
+          <p className="deals-map__notice" role="status" data-testid="deals-map-empty">
+            В выбранном дне нет заказов с координатами
+          </p>
+        )}
+      </div>
+
+      {points.length === 0 ? null : (
         <ul className="deals-map__points">
           {chosen.map((point) => (
             <li key={point.orderId} data-testid="map-point" data-order-number={point.number}>

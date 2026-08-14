@@ -288,3 +288,76 @@
   align-items: flex-end;
   padding-top: 6px;
 }
+
+/*
+ * Настоящая карта «Сделок».
+ *
+ * Холст показывается всегда, даже когда точек ноль: пустой день — обычное
+ * дело, и подложка Москвы нужна логисту не меньше. Сообщение лежит ПОВЕРХ
+ * карты и её не заменяет.
+ */
+.deals-map__surface {
+  position: relative;
+  min-height: 320px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-muted, #f2f2f2);
+}
+
+.deals-map__canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.deals-map__notice {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 92%);
+  color: var(--text-muted, #555);
+  font-size: 0.85rem;
+  /* Ненавязчиво: сообщение не перехватывает клики по карте. */
+  pointer-events: none;
+  z-index: 1;
+}
+
+.deals-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+}
+
+/* Состояния различаются и цветом, и формой: одного цвета мало тому, кто его
+   не различает. Форму задаёт скругление и рамка. */
+.deals-marker--free {
+  background: #2f6fed;
+}
+
+.deals-marker--picked {
+  background: #1b7f3b;
+  border-radius: 6px;
+}
+
+.deals-marker--draft {
+  background: #b26a00;
+  border-style: dashed;
+}
+
+.deals-marker--cluster {
+  background: #444;
+  border-radius: 4px;
+  cursor: default;
+}

@@ -2057,3 +2057,80 @@ test('склад с камеры: приёмка, комплектование �
   );
   expect(await cameraRunning()).toBe(false);
 });
+
+test('карта «Сделок»: подложка Москвы при нуле точек и появление маркера без перезагрузки', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const styleUrl = 'https://maps.local.test/style.json';
+  await page.route('**/api/map/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true, styleUrl, attribution: '© Проверка' }),
+    }),
+  );
+  // Пустой валидный стиль: публичные тайлы не запрашиваются вовсе.
+  await page.route(styleUrl, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: EMPTY_STYLE }),
+  );
+
+  // Первый ответ — ни одной точки. Со второго появляется одна: так выглядит
+  // заказ, у которого только что появились координаты.
+  let mapRequests = 0;
+  await page.route('**/api/deals/map*', (route) => {
+    mapRequests += 1;
+    const points =
+      mapRequests === 1
+        ? []
+        : [
+            {
+              orderId: '00000000-0000-4000-8000-000000000001',
+              number: 'E2E-МАРКЕР',
+              lat: '55.755800',
+              lon: '37.617300',
+              startMinute: null,
+              endMinute: null,
+              needsAttention: false,
+            },
+          ];
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ points, deliveryDate: '2026-08-14' }),
+    });
+  });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+
+  // 1. Нуль точек: карта ВСЁ РАВНО показана — подложка Москвы, а не пустой блок.
+  await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
+  await expect(page.getByTestId('deals-map-empty')).toHaveText(
+    'В выбранном дне нет заказов с координатами',
+  );
+  // Приближать нечего: кнопка не обещает действие, которое ничего не изменит.
+  await expect(page.getByTestId('deals-map-zoom')).toBeDisabled();
+  // Отметок нет ни одной.
+  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
+  // Список и легенда продолжают работать.
+  await expect(page.getByTestId('deals-list')).toBeVisible();
+  await expect(page.getByTestId('deals-map-legend')).toBeVisible();
+
+  // 2. Координаты появились. Перезагрузки страницы НЕТ: обновляется тот же
+  //    запрос, и карта перерисовывается вместе со списком.
+  const drafts = page.getByTestId('deals-include-drafts');
+  await drafts.click();
+  await drafts.click();
+
+  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.getByTestId('deals-map-empty')).toHaveCount(0);
+  await expect(page.getByTestId('deals-map-zoom')).toBeEnabled();
+  // Холст тот же самый: карта не пересоздавалась.
+  await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
+});

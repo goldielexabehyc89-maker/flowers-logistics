@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { planMarkers, type DealMapPoint } from './DealsMapCanvas';
 import { moscowCalendarDate } from '@fl/shared';
 import { intervalProblem, parseTimeFilter, type DealCard } from './selection';
 import { clusterize, MARKER_LOOKS, splitForMap, type DealPoint } from './DealsMap';
@@ -164,5 +165,84 @@ describe('московский день не зависит от пояса ус
     // Текущий пояс процесса на результат не влияет — он лишь фиксируется
     // здесь, чтобы отчёт называл, под каким поясом проверка прошла.
     expect(typeof process.env['TZ']).toBe('string');
+  });
+});
+
+describe('отметки настоящей карты', () => {
+  const point = (orderId: string, number: string, over = {}): DealMapPoint => ({
+    orderId,
+    number,
+    lat: '55.7558',
+    lon: '37.6173',
+    needsAttention: false,
+    ...over,
+  });
+
+  it('выбранный заказ получает свой номер и не попадает в кластер', () => {
+    const plans = planMarkers(
+      [point('a', 'A-1')],
+      [{ key: 'k', points: [point('b', 'A-2'), point('c', 'A-3')] }],
+      (orderId) => (orderId === 'a' ? '1' : null),
+    );
+
+    const picked = plans.find((plan) => plan.orderId === 'a');
+    expect(picked?.label).toBe('1');
+    expect(picked?.className).toContain('picked');
+
+    // Кластер остался кластером и номера выбранного не поглотил.
+    const cluster = plans.find((plan) => plan.key.startsWith('cluster:'));
+    expect(cluster?.label).toBe('2');
+  });
+
+  it('кластер кликом ничего не выбирает', () => {
+    // Непонятно, какой именно заказ имел в виду человек.
+    const plans = planMarkers(
+      [],
+      [{ key: 'k', points: [point('b', 'A-2'), point('c', 'A-3')] }],
+      () => null,
+    );
+    expect(plans[0]?.orderId).toBeNull();
+  });
+
+  it('одиночная точка кликабельна и различает требующие внимания', () => {
+    const plans = planMarkers(
+      [],
+      [
+        { key: 'b', points: [point('b', 'A-2')] },
+        { key: 'c', points: [point('c', 'A-3', { needsAttention: true })] },
+      ],
+      () => null,
+    );
+
+    expect(plans.find((plan) => plan.orderId === 'b')?.className).toContain('free');
+    expect(plans.find((plan) => plan.orderId === 'c')?.className).toContain('draft');
+  });
+
+  it('непригодная координата отметки не создаёт', () => {
+    // Придуманная точка выглядит как настоящая и отправит курьера не туда.
+    const plans = planMarkers(
+      [],
+      [{ key: 'x', points: [point('x', 'A-9', { lat: 'нет', lon: 'нет' })] }],
+      () => null,
+    );
+    expect(plans).toHaveLength(0);
+  });
+
+  it('появившаяся точка добавляет отметку к прежним', () => {
+    // Перезагрузка страницы для этого не нужна: список и карта берут одни
+    // и те же данные, и обновление запроса перерисовывает обе части.
+    const before = planMarkers([], [{ key: 'b', points: [point('b', 'A-2')] }], () => null);
+    const after = planMarkers(
+      [],
+      [
+        { key: 'b', points: [point('b', 'A-2')] },
+        { key: 'n', points: [point('n', 'A-7')] },
+      ],
+      () => null,
+    );
+
+    expect(before).toHaveLength(1);
+    expect(after).toHaveLength(2);
+    expect(after.map((plan) => plan.orderId)).toContain('n');
   });
 });
