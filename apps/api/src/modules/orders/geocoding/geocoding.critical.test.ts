@@ -30,6 +30,7 @@ import { mapOrder, type OrderSnapshot } from '../../integrations/moysklad/mapper
 import { PhotonError, precisionOf, type PhotonAnswer } from '../../integrations/photon/client.js';
 import { isDadataAllowed, isPhotonConfigured, shouldGeocodeAutomatically } from './enabled.js';
 import { normalizeAddress } from './normalize.js';
+import { geocodingReport } from './report.js';
 import { backfillGeocoding, isGeocodable, retryDelayMs, RETRY_DELAYS_MS } from './queue.js';
 import {
   createGeocodeWorker,
@@ -1632,6 +1633,61 @@ describe('кэш по нормализованному адресу', () => {
         ].sort(),
       );
     }
+  });
+});
+
+describe('сводка для отчёта', () => {
+  it('разрешённый Photon заказ виден в сводке, и знаменатель не сдвигается', async () => {
+    const { order } = await seedOrder();
+    await isolateJobs([order.id]);
+    // Сводка снимается ПОСЛЕ сброса: он чистит кэш, и снимок до него сравнивал
+    // бы разные состояния.
+    await resetProviderState();
+    const before = await geocodingReport(ctx.db);
+
+    await processGeocodingOnce(workerDeps(fakeGeocoder(() => EXACT)));
+    const after = await geocodingReport(ctx.db);
+
+    // Заказ переходит из «в очереди» в «найдено». Знаменатель при этом
+    // не растёт: адрес был и остался одним и тем же.
+    expect(after.exactByPhoton).toBe(before.exactByPhoton + 1);
+    expect(after.pending).toBe(before.pending - 1);
+    expect(after.totalAddresses).toBe(before.totalAddresses);
+    expect(after.cachedAddresses).toBe(before.cachedAddresses + 1);
+    // Точку поставил Photon, а не человек: ручные счётчики не сдвинулись.
+    expect(after.correctedViaDadata).toBe(before.correctedViaDadata);
+    expect(after.correctedManually).toBe(before.correctedManually);
+  });
+
+  it('ненайденный адрес попадает в свою строку, а не теряется', async () => {
+    const { order } = await seedOrder();
+    await isolateJobs([order.id]);
+    await resetProviderState();
+    const before = await geocodingReport(ctx.db);
+
+    await processGeocodingOnce(workerDeps(fakeGeocoder(() => null)));
+    const after = await geocodingReport(ctx.db);
+
+    // «Не найдено» видно и в кэше, и среди требующих человека заказов.
+    expect(after.notFound).toBe(before.notFound + 1);
+    expect(after.ambiguous).toBe(before.ambiguous + 1);
+    expect(after.exactByPhoton).toBe(before.exactByPhoton);
+  });
+
+  it('в сводку не попадает ни одной строки: только числа', async () => {
+    const report = await geocodingReport(ctx.db);
+
+    // Эта сводка идёт в отчёт владельцу. Одно строковое поле — и однажды в нём
+    // окажется адрес.
+    for (const [key, value] of Object.entries(report)) {
+      expect(typeof value, key).toBe('number');
+      expect(Number.isInteger(value), key).toBe(true);
+      expect(value, key).toBeGreaterThanOrEqual(0);
+    }
+
+    const text = JSON.stringify(report);
+    expect(text).not.toContain(ADDRESS);
+    expect(text).not.toContain('улица');
   });
 });
 
