@@ -1,11 +1,15 @@
 /**
  * Критические проверки геокодирования: очередь, обработчик и защита от устаревшего результата.
  *
- * Настоящих обращений к DaData здесь нет: клиент подменён функцией. Проверяются
- * свойства, нарушение которых опасно, — отсутствие запросов вне production,
- * транзакционность постановки, дедупликация, аренда заданий, ограниченный
- * backoff и то, что ответ, вернувшийся после изменения заказа, не перезаписывает
- * ни новый адрес, ни решение человека.
+ * Автоматический геокодер — собственный Photon, и настоящих сетевых обращений
+ * здесь нет: клиент подменён функцией. Проверяются свойства, нарушение которых
+ * опасно, — транзакционность постановки, дедупликация, аренда заданий,
+ * ограниченный backoff, кэш по нормализованному адресу и то, что ответ,
+ * вернувшийся после изменения заказа, не перезаписывает ни новый адрес,
+ * ни решение человека.
+ *
+ * Отдельно закреплено разделение сервисов: DaData допускается только подсказками
+ * в ручной правке и не участвует в автоматическом проходе вовсе.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -23,9 +27,13 @@ import { resolveTestDatabaseUrl } from '../../../platform/testing/test-database.
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../../integrations/moysklad/config.js';
 import { applyOrderSnapshot } from '../../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../../integrations/moysklad/mapper.js';
-import { DadataError } from '../../integrations/dadata/client.js';
-import type { DadataAddress } from '../../integrations/dadata/dto.js';
-import { isDadataAllowed, shouldGeocodeAutomatically } from './enabled.js';
+import {
+  PhotonError,
+  precisionOf,
+  type PhotonAnswer,
+} from '../../integrations/photon/client.js';
+import { isDadataAllowed, isPhotonConfigured, shouldGeocodeAutomatically } from './enabled.js';
+import { normalizeAddress } from './normalize.js';
 import { backfillGeocoding, isGeocodable, retryDelayMs, RETRY_DELAYS_MS } from './queue.js';
 import {
   createGeocodeWorker,
@@ -36,7 +44,7 @@ import {
   type GeocodeWorkerDeps,
   type Geocoder,
 } from './worker.js';
-import { DADATA_PROVIDER } from './status.js';
+import { GEOCODER_PROVIDER } from './status.js';
 import {
   MIN_REQUEST_INTERVAL_MS,
   PROVIDER_STATE_ID,
@@ -58,9 +66,24 @@ const NOW = new Date();
 
 /** Синтетический адрес: настоящих адресов клиентов в тестах нет. */
 const ADDRESS = 'Москва, синтетическая улица, дом 1';
+
+/**
+ * Уникальный синтетический адрес для каждого заказа.
+ *
+ * Кэш геокодирования работает по нормализованному адресу, и одинаковый адрес
+ * у соседних заказов означал бы, что запрос уходит один раз на всех. Это верное
+ * поведение кэша, но оно скрывало бы всё остальное: проверки перестали бы
+ * видеть обращения. Кэш проверяется отдельно и явно.
+ */
+let addressCounter = 0;
+function uniqueAddress(): string {
+  addressCounter += 1;
+  return `${ADDRESS}, квартира ${addressCounter}`;
+}
 const OTHER_ADDRESS = 'Москва, другая синтетическая улица, дом 2';
 
-const EXACT: DadataAddress = { geo_lat: '55.751244', geo_lon: '37.618423', qc_geo: '0' };
+/** Точный дом. Координаты синтетические и в отчёты не выходят. */
+const EXACT: PhotonAnswer = { lat: 55.751244, lon: 37.618423, precision: 'HOUSE' };
 
 const logger = pino({ level: 'silent' });
 
@@ -77,7 +100,7 @@ function source(overrides: Record<string, unknown> = {}): Record<string, unknown
     id: randomUUID(),
     name: `Q-${process.hrtime.bigint() % 1_000_000n}`,
     updated: '2026-08-12 10:00:00.000',
-    shipmentAddress: ADDRESS,
+    shipmentAddress: uniqueAddress(),
     deliveryPlannedMoment: '2026-08-12 12:00:00.000',
     sum: 499000,
     payedSum: 0,
@@ -150,7 +173,7 @@ interface FakeGeocoder extends Geocoder {
 
 /** Поддельный геокодер. Настоящих сетевых обращений в тестах не бывает. */
 function fakeGeocoder(
-  handler: (address: string, call: number) => Promise<DadataAddress> | DadataAddress,
+  handler: (address: string, call: number) => Promise<PhotonAnswer | null> | PhotonAnswer | null,
 ): FakeGeocoder {
   const calls: string[] = [];
   let inFlight = 0;
@@ -161,7 +184,7 @@ function fakeGeocoder(
     get maxInFlight() {
       return state.maxInFlight;
     },
-    async cleanAddress(address: string) {
+    async search(address: string) {
       calls.push(address);
       inFlight += 1;
       state.maxInFlight = Math.max(state.maxInFlight, inFlight);
@@ -207,6 +230,11 @@ async function resetProviderState(): Promise<void> {
       nextRequestAllowedAt: new Date(Date.now() - 60_000),
     },
   });
+
+  // Кэш тоже общий и переживает отдельный тест — как и в production. Проверки,
+  // считающие обращения, начинают с чистого кэша: иначе они измеряли бы порядок
+  // запуска тестов, а не поведение обработчика.
+  await ctx.db.geocodeCacheEntry.deleteMany({});
 }
 
 async function jobOf(orderId: string) {
@@ -218,7 +246,7 @@ async function jobOf(orderId: string) {
 
 // ---------------------------------------------------------------------------
 
-describe('окружение: живой DaData только там, где он разрешён', () => {
+describe('окружение: свой Photon и чужая DaData подчиняются разным правилам', () => {
   const base = {
     DATABASE_URL: resolveTestDatabaseUrl(),
     NODE_ENV: 'test',
@@ -232,7 +260,7 @@ describe('окружение: живой DaData только там, где он
     DADATA_GEOCODING_ENABLED: 'true',
   };
 
-  it('оба разрешённых окружения включаются только при совпавших маркерах, ключах и флаге', () => {
+  it('подсказки DaData включаются только при совпавших маркерах, ключах и флаге', () => {
     // Владелец разрешил staging наравне с production: адреса настоящие,
     // расход квоты принят. Прежний абсолютный запрет вне production заменён.
     for (const env of ['production', 'staging'] as const) {
@@ -243,7 +271,6 @@ describe('окружение: живой DaData только там, где он
         ...withKeys,
       });
       expect(isDadataAllowed(config), env).toBe(true);
-      expect(shouldGeocodeAutomatically(config), env).toBe(true);
     }
 
     // Разрешённое окружение без ключей и без флага никуда не обращается:
@@ -252,6 +279,50 @@ describe('окружение: живой DaData только там, где он
       const bare = loadConfig({ ...base, APP_ENV: env, APP_ENVIRONMENT_MARKER: env });
       expect(isDadataAllowed(bare), env).toBe(false);
     }
+  });
+
+  it('ключи DaData автоматического геокодирования НЕ включают', () => {
+    // Главное разделение задания: платный сервис не геокодирует ничего сам.
+    // Полный комплект ключей в разрешённом окружении — этого мало.
+    for (const env of ['production', 'staging'] as const) {
+      const config = loadConfig({
+        ...base,
+        APP_ENV: env,
+        APP_ENVIRONMENT_MARKER: env,
+        ...withKeys,
+      });
+      expect(isDadataAllowed(config), env).toBe(true);
+      expect(shouldGeocodeAutomatically(config), env).toBe(false);
+      expect(isPhotonConfigured(config), env).toBe(false);
+    }
+  });
+
+  it('автоматическое геокодирование включает адрес Photon, и только он', () => {
+    // Свой сервис не тратит чужих денег и не отдаёт адреса наружу, поэтому
+    // окружение здесь не участвует: он одинаково допустим и в local, и в
+    // production. Условие ровно одно — он настроен.
+    for (const env of ['local', 'production'] as const) {
+      const config = loadConfig({
+        ...base,
+        APP_ENV: env,
+        APP_ENVIRONMENT_MARKER: env,
+        PHOTON_URL: 'http://photon.internal:2322/api',
+      });
+      expect(isPhotonConfigured(config), env).toBe(true);
+      expect(shouldGeocodeAutomatically(config), env).toBe(true);
+      // И при этом ни одна подсказка DaData не разрешена: ключей нет.
+      expect(isDadataAllowed(config), env).toBe(false);
+    }
+
+    // Пустое значение — это «не настроен», а не «настроен пустотой».
+    const blank = loadConfig({
+      ...base,
+      APP_ENV: 'local',
+      APP_ENVIRONMENT_MARKER: 'local',
+      PHOTON_URL: '   ',
+    });
+    expect(isPhotonConfigured(blank)).toBe(false);
+    expect(shouldGeocodeAutomatically(blank)).toBe(false);
   });
 
   it('local и CI остаются запрещёнными: ключи там не размещаются вовсе', () => {
@@ -303,10 +374,12 @@ describe('окружение: живой DaData только там, где он
     }
   });
 
-  it('тестовая конфигурация живой DaData не включает', () => {
+  it('тестовая конфигурация не включает ни один живой сервис', () => {
     expect(isDadataAllowed(ctx.config)).toBe(false);
     expect(shouldGeocodeAutomatically(ctx.config)).toBe(false);
+    expect(isPhotonConfigured(ctx.config)).toBe(false);
     expect(ctx.config.DADATA_API_KEY).toBeUndefined();
+    expect(ctx.config.PHOTON_URL).toBeUndefined();
   });
 });
 
@@ -470,11 +543,11 @@ describe('обработка задания', () => {
 
     expect(result.skippedBusy).toBe(false);
     expect(result.resolved).toBe(1);
-    expect(client.calls).toEqual([ADDRESS]);
+    expect(client.calls).toEqual([order.address]);
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
     expect(stored.geoState).toBe('RESOLVED');
-    expect(stored.geoSource).toBe('DADATA');
+    expect(stored.geoSource).toBe('PHOTON');
     expect(stored.geoPrecision).toBe('EXACT_HOUSE');
     expect(stored.geoLatMicro).toBe(55_751_244);
     expect(stored.geoLonMicro).toBe(37_618_423);
@@ -502,7 +575,7 @@ describe('обработка задания', () => {
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(() => ({ geo_lat: '55.7', geo_lon: '37.6', qc_geo: '1' }));
+    const client = fakeGeocoder(() => ({ lat: 55.7, lon: 37.6, precision: 'STREET' }));
     const result = await processGeocodingOnce(workerDeps(client));
 
     expect(result.lowPrecision).toBe(1);
@@ -518,36 +591,75 @@ describe('обработка задания', () => {
     expect(history.map((entry) => entry.kind)).toContain('GEOCODE_LOW_PRECISION');
   });
 
-  it('точкой считается только qc_geo = 0', () => {
+  it('точкой считается только точный дом', () => {
     expect(decideResult(EXACT)).toMatchObject({ kind: 'RESOLVED' });
-    expect(decideResult({ ...EXACT, qc_geo: 0 })).toMatchObject({ kind: 'RESOLVED' });
 
-    for (const qc of ['1', '2', '3', '4', '5', null, undefined, '', 'нет']) {
-      expect(decideResult({ ...EXACT, qc_geo: qc as never }), String(qc)).toMatchObject({
+    // Улица и район — это «где-то там». Курьер едет по конкретному адресу,
+    // поэтому такой ответ зовёт человека, а не становится точкой заказа.
+    for (const precision of ['STREET', 'AREA'] as const) {
+      expect(decideResult({ ...EXACT, precision }), precision).toMatchObject({
         kind: 'LOW_PRECISION',
       });
     }
 
-    // Точность заявлена, а координат нет либо они невозможны.
-    expect(decideResult({ geo_lat: null, geo_lon: null, qc_geo: '0' })).toMatchObject({
+    // Ответа нет вовсе.
+    expect(decideResult(null)).toMatchObject({ kind: 'LOW_PRECISION' });
+
+    // Точность заявлена, а координата невозможна.
+    expect(decideResult({ lat: 95, lon: 37.6, precision: 'HOUSE' })).toMatchObject({
       kind: 'LOW_PRECISION',
     });
-    expect(decideResult({ geo_lat: '95.0', geo_lon: '37.6', qc_geo: '0' })).toMatchObject({
+    expect(decideResult({ lat: 55.7, lon: 181, precision: 'HOUSE' })).toMatchObject({
       kind: 'LOW_PRECISION',
     });
-    expect(decideResult({ geo_lat: '', geo_lon: '37.6', qc_geo: '0' })).toMatchObject({
+    expect(decideResult({ lat: Number.NaN, lon: 37.6, precision: 'HOUSE' })).toMatchObject({
       kind: 'LOW_PRECISION',
     });
   });
 
-  it('сетевой отказ повторяется с ограниченным backoff', async () => {
+  it('точность определяется по ответу Photon, а не по нашему желанию', () => {
+    // Номер дома — главный признак; он важнее типа объекта.
+    expect(
+      precisionOf({
+        geometry: { coordinates: [37.6, 55.7] },
+        properties: { housenumber: '1', street: 'синтетическая', osm_key: 'place' },
+      }),
+    ).toBe('HOUSE');
+
+    // Photon сообщает дом и вторым способом — типом объекта.
+    for (const properties of [
+      { type: 'house' },
+      { osm_value: 'house' },
+      { osm_value: 'building' },
+      { osm_key: 'building' },
+    ]) {
+      expect(
+        precisionOf({ geometry: { coordinates: [37.6, 55.7] }, properties }),
+        JSON.stringify(properties),
+      ).toBe('HOUSE');
+    }
+
+    // Пустой номер дома домом не считается: это отсутствие данных.
+    expect(
+      precisionOf({
+        geometry: { coordinates: [37.6, 55.7] },
+        properties: { housenumber: '  ', street: 'синтетическая' },
+      }),
+    ).toBe('STREET');
+
+    expect(
+      precisionOf({ geometry: { coordinates: [37.6, 55.7] }, properties: { city: 'Москва' } }),
+    ).toBe('AREA');
+  });
+
+  it('отказ сервиса повторяется с ограниченным backoff', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
 
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
-      throw new DadataError('SERVER_ERROR', 500);
+      throw new PhotonError('SERVER_ERROR', 500);
     });
 
     const result = await processGeocodingOnce(workerDeps(client, { now: () => now }));
@@ -573,37 +685,46 @@ describe('обработка задания', () => {
     expect(retryDelayMs(50)).toBe(900_000);
   });
 
-  it('429 с Retry-After откладывает ровно на указанный срок', async () => {
+  it('пауза после отказа растёт вместе с попытками', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
 
+    // Третья попытка: короткий сбой уже не объясняет происходящее.
+    await ctx.db.orderGeocodeJob.updateMany({
+      where: { orderId: order.id },
+      data: { attempts: 2, maxAttempts: 5 },
+    });
+
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
-      throw new DadataError('RATE_LIMITED', 429, 42_000);
+      throw new PhotonError('SERVER_ERROR', 503);
     });
 
     await processGeocodingOnce(workerDeps(client, { now: () => now }));
 
     const job = await jobOf(order.id);
-    // Указание сервиса важнее нашей таблицы: спорить с чужим лимитом бессмысленно.
-    expect(job.nextAttemptAt.getTime()).toBe(now.getTime() + 42_000);
+    // Непрерывный опрос мёртвого сервиса не помогает никому: пауза растёт.
+    expect(job.attempts).toBe(3);
+    expect(job.nextAttemptAt.getTime()).toBe(now.getTime() + RETRY_DELAYS_MS[2]);
   });
 
-  it('429 без Retry-After откладывает на безопасную задержку из таблицы', async () => {
+  it('неразобранный ответ считается отказом сервиса, а не адреса', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const now = new Date(Date.now() + 1000);
+    // Сменившийся формат ответа — это неисправность геокодера. Объявлять из-за
+    // него адрес неразрешимым нельзя: с адресом всё в порядке.
     const client = fakeGeocoder(() => {
-      throw new DadataError('RATE_LIMITED', 429, null);
+      throw new PhotonError('BAD_RESPONSE', 200);
     });
+    const result = await processGeocodingOnce(workerDeps(client));
 
-    await processGeocodingOnce(workerDeps(client, { now: () => now }));
-
-    const job = await jobOf(order.id);
-    expect(job.nextAttemptAt.getTime()).toBe(now.getTime() + RETRY_DELAYS_MS[0]);
+    expect(result.retried).toBe(1);
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.geoState).toBe('PENDING');
+    expect(stored.geoLatMicro).toBeNull();
   });
 
   it('исчерпание повторов переводит заказ в FAILED с причиной провайдера', async () => {
@@ -618,7 +739,7 @@ describe('обработка задания', () => {
     });
 
     const client = fakeGeocoder(() => {
-      throw new DadataError('TRANSPORT_ERROR');
+      throw new PhotonError('TRANSPORT_ERROR');
     });
     const result = await processGeocodingOnce(workerDeps(client));
     expect(result.failed).toBe(1);
@@ -642,18 +763,18 @@ describe('обработка задания', () => {
     expect(JSON.stringify(audit[0]?.newValue)).not.toContain(ADDRESS);
   });
 
-  it('отказ авторизации не тратит попытки: виновата конфигурация, а не адрес', async () => {
+  it('неверная настройка не тратит попытки: виноват не адрес', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
 
     const client = fakeGeocoder(() => {
-      throw new DadataError('UNAUTHORIZED', 401);
+      throw new PhotonError('PUBLIC_ENDPOINT_FORBIDDEN');
     });
     await processGeocodingOnce(workerDeps(client));
 
-    // Задание возвращается нетронутым: причина отказа относится к ключу,
-    // а не к адресу, и живёт в общем состоянии провайдера.
+    // Задание возвращается нетронутым: причина отказа относится к настройке
+    // геокодера, а не к адресу, и живёт в общем состоянии провайдера.
     const job = await jobOf(order.id);
     expect(job.status).toBe('PENDING');
     expect(job.attempts).toBe(0);
@@ -663,10 +784,10 @@ describe('обработка задания', () => {
     expect(stored.geoState).toBe('PENDING');
 
     const state = await readProviderState(ctx.db);
-    expect(state.haltedReason).toBe('UNAUTHORIZED');
+    expect(state.haltedReason).toBe('PUBLIC_ENDPOINT_FORBIDDEN');
 
     const status = await ctx.db.integrationStatus.findUniqueOrThrow({
-      where: { provider: DADATA_PROVIDER },
+      where: { provider: GEOCODER_PROVIDER },
     });
     expect(status.state).toBe('ERROR');
   });
@@ -724,7 +845,7 @@ describe('устаревший результат и гонки', () => {
     ).toBe('MANUAL_POINT_SET');
   });
 
-  it('медленный DaData и смена адреса: результат не применяется к новому адресу', async () => {
+  it('медленный геокодер и смена адреса: результат не применяется к новому адресу', async () => {
     const { snapshot, order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
@@ -757,7 +878,7 @@ describe('устаревший результат и гонки', () => {
     expect(firstJob.lastErrorCode).toBe('GENERATION_CHANGED');
   });
 
-  it('медленный DaData и ручная точка: решение человека не перезаписывается', async () => {
+  it('медленный геокодер и ручная точка: решение человека не перезаписывается', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
@@ -793,7 +914,7 @@ describe('устаревший результат и гонки', () => {
     expect(job.lastErrorCode).toBe('MANUAL_POINT_SET');
   });
 
-  it('медленный DaData и выход заказа из области: результат отброшен', async () => {
+  it('медленный геокодер и выход заказа из области: результат отброшен', async () => {
     const { snapshot, order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
@@ -874,7 +995,7 @@ describe('устаревший результат и гонки', () => {
 });
 
 describe('аренда, конкуренция и восстановление', () => {
-  it('второй экземпляр не обращается к DaData параллельно', async () => {
+  it('второй экземпляр не обращается к геокодеру параллельно', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
@@ -995,31 +1116,28 @@ describe('аренда, конкуренция и восстановление',
 });
 
 describe('отказ провайдера останавливает пачку целиком', () => {
-  const PERMANENT: { code: 'UNAUTHORIZED' | 'FORBIDDEN'; status: number }[] = [
-    { code: 'UNAUTHORIZED', status: 401 },
-    { code: 'FORBIDDEN', status: 403 },
-  ];
+  const PERMANENT = ['NOT_CONFIGURED', 'PUBLIC_ENDPOINT_FORBIDDEN'] as const;
 
-  for (const testCase of PERMANENT) {
-    it(`${testCase.status}: ровно один запрос на всю пачку и остановка до перезапуска`, async () => {
+  for (const code of PERMANENT) {
+    it(`${code}: ровно один запрос на всю пачку и остановка до перезапуска`, async () => {
       const orders = [await seedOrder(), await seedOrder(), await seedOrder()];
       const ids = orders.map((seeded) => seeded.order.id);
       await isolateJobs(ids);
       await resetProviderState();
 
       const client = fakeGeocoder(() => {
-        throw new DadataError(testCase.code, testCase.status);
+        throw new PhotonError(code);
       });
 
       const result = await processGeocodingOnce(workerDeps(client, { batchSize: 3 }));
 
-      // Ключ неверен для всех заданий одинаково: девять лишних обращений
-      // ничего не выяснили бы, а стоили бы денег и времени.
+      // Настройка неверна для всех заданий одинаково: девять лишних обращений
+      // ничего не выяснили бы, а стоили бы времени.
       expect(client.calls).toHaveLength(1);
       expect(result.requests).toBe(1);
       expect(result.claimed).toBe(3);
       expect(result.released).toBe(2);
-      expect(result.haltedReason).toBe(testCase.code);
+      expect(result.haltedReason).toBe(code);
 
       // Ни одно задание не потратило попытку: они ни в чём не виноваты.
       const jobs = await ctx.db.orderGeocodeJob.findMany({ where: { orderId: { in: ids } } });
@@ -1037,18 +1155,18 @@ describe('отказ провайдера останавливает пачку 
       }
 
       const state = await readProviderState(ctx.db);
-      expect(state.haltedReason).toBe(testCase.code);
+      expect(state.haltedReason).toBe(code);
 
       // Следующий проход не делает ни одного обращения и заданий не берёт.
       const second = fakeGeocoder(() => EXACT);
       const again = await processGeocodingOnce(workerDeps(second, { batchSize: 3 }));
       expect(second.calls).toHaveLength(0);
       expect(again.claimed).toBe(0);
-      expect(again.haltedReason).toBe(testCase.code);
+      expect(again.haltedReason).toBe(code);
     });
   }
 
-  it('429: один запрос, общая пауза и возврат остальных заданий без попыток', async () => {
+  it('отказ сервиса: один запрос, общая пауза и возврат остальных заданий без попыток', async () => {
     const orders = [await seedOrder(), await seedOrder(), await seedOrder()];
     const ids = orders.map((seeded) => seeded.order.id);
     await isolateJobs(ids);
@@ -1056,7 +1174,7 @@ describe('отказ провайдера останавливает пачку 
 
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
-      throw new DadataError('RATE_LIMITED', 429, 42_000);
+      throw new PhotonError('SERVER_ERROR', 500);
     });
 
     const result = await processGeocodingOnce(workerDeps(client, { batchSize: 3, now: () => now }));
@@ -1077,10 +1195,10 @@ describe('отказ провайдера останавливает пачку 
       expect(job.status).toBe('PENDING');
     }
 
-    // Пауза общая: она относится к ключу, а не к одному заказу.
+    // Пауза общая: недоступен сервис целиком, а не один адрес.
     const state = await readProviderState(ctx.db);
     expect(state.haltedReason).toBeNull();
-    expect(state.nextRequestAllowedAt.getTime()).toBeGreaterThanOrEqual(now.getTime() + 42_000);
+    expect(state.nextRequestAllowedAt.getTime()).toBeGreaterThanOrEqual(now.getTime() + 30_000);
 
     // До истечения паузы обращений нет.
     const second = fakeGeocoder(() => EXACT);
@@ -1090,14 +1208,14 @@ describe('отказ провайдера останавливает пачку 
     expect(again.skippedCooldown).toBe(true);
   });
 
-  it('429 без Retry-After даёт безопасную паузу в тридцать секунд', async () => {
+  it('недоступность геокодера тоже останавливает пачку', async () => {
     const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
 
     const now = new Date(Date.now() + 1000);
     const client = fakeGeocoder(() => {
-      throw new DadataError('RATE_LIMITED', 429, null);
+      throw new PhotonError('TRANSPORT_ERROR');
     });
 
     await processGeocodingOnce(workerDeps(client, { now: () => now }));
@@ -1341,6 +1459,186 @@ describe('backfill существующих заказов', () => {
   });
 });
 
+describe('кэш по нормализованному адресу', () => {
+  it('нормализация приводит разные написания одного адреса к одному ключу', () => {
+    const canonical = normalizeAddress('Москва, улица Синтетическая, дом 1, корпус 2');
+
+    for (const variant of [
+      'москва, ул. Синтетическая, д.1, к.2',
+      'Москва,  ул.Синтетическая,  д. 1,  корп. 2',
+      'МОСКВА, УЛ СИНТЕТИЧЕСКАЯ, Д 1, К 2',
+      'Москва; ул. Синтетическая; д.1; к.2',
+    ]) {
+      expect(normalizeAddress(variant), variant).toBe(canonical);
+    }
+
+    // Ё и е в адресах пишут вперемешку, и это один и тот же адрес.
+    expect(normalizeAddress('Посёлок Берёзовый')).toBe(normalizeAddress('Поселок Березовый'));
+
+    // Разные адреса не должны сливаться: иначе кэш выдал бы чужую точку.
+    expect(normalizeAddress('улица Синтетическая, дом 1')).not.toBe(
+      normalizeAddress('улица Синтетическая, дом 2'),
+    );
+
+    // Пусто — значит ключа нет: пустой адрес не ищут и не кэшируют.
+    for (const blank of ['', '   ', ',,;', null, undefined]) {
+      expect(normalizeAddress(blank), JSON.stringify(blank)).toBe('');
+    }
+  });
+
+  it('один и тот же адрес геокодируется ровно один раз', async () => {
+    // Два разных заказа с одинаковым адресом — обычное дело: один дом,
+    // несколько букетов. Платить за это двумя обращениями незачем.
+    const address = uniqueAddress();
+    const first = await seedOrder({ shipmentAddress: address });
+    const second = await seedOrder({ shipmentAddress: `${address.toUpperCase()},` });
+    const ids = [first.order.id, second.order.id];
+
+    await isolateJobs(ids);
+    await resetProviderState();
+
+    const client = fakeGeocoder(() => EXACT);
+    const result = await processGeocodingOnce(workerDeps(client, { batchSize: 2 }));
+
+    expect(result.resolved).toBe(2);
+    // Главное утверждение: обращение ровно одно на оба заказа.
+    expect(client.calls).toHaveLength(1);
+    expect(result.requests).toBe(1);
+
+    // При этом точку получили ОБА заказа: кэш экономит запрос, а не результат.
+    for (const id of ids) {
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id } });
+      expect(stored.geoState).toBe('RESOLVED');
+      expect(stored.geoSource).toBe('PHOTON');
+      expect(stored.geoLatMicro).toBe(55_751_244);
+    }
+
+    const entry = await ctx.db.geocodeCacheEntry.findUniqueOrThrow({
+      where: { normalizedAddress: normalizeAddress(address) },
+    });
+    expect(entry.outcome).toBe('HOUSE');
+    expect(entry.source).toBe('PHOTON');
+    // Второй заказ пришёл из кэша, и это видно в счётчике.
+    expect(entry.hits).toBe(1);
+  });
+
+  it('отрицательный ответ тоже кэшируется и не повторяется', async () => {
+    // «Не найдено» — такой же ответ, как найденный дом. Повторять безнадёжный
+    // поиск на каждом проходе значит нагружать сервис ради того же ответа.
+    const address = uniqueAddress();
+    const first = await seedOrder({ shipmentAddress: address });
+    const second = await seedOrder({ shipmentAddress: address });
+    const ids = [first.order.id, second.order.id];
+
+    await isolateJobs(ids);
+    await resetProviderState();
+
+    const client = fakeGeocoder(() => null);
+    const result = await processGeocodingOnce(workerDeps(client, { batchSize: 2 }));
+
+    expect(result.lowPrecision).toBe(2);
+    expect(client.calls).toHaveLength(1);
+
+    const entry = await ctx.db.geocodeCacheEntry.findUniqueOrThrow({
+      where: { normalizedAddress: normalizeAddress(address) },
+    });
+    expect(entry.outcome).toBe('NOT_FOUND');
+    // Координат у отрицательного ответа нет и быть не может.
+    expect(entry.latMicro).toBeNull();
+    expect(entry.lonMicro).toBeNull();
+
+    for (const id of ids) {
+      const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id } });
+      expect(stored.geoState).toBe('NEEDS_REVIEW');
+      expect(stored.geoLatMicro).toBeNull();
+    }
+  });
+
+  it('неточный ответ кэшируется без координат: пригодной точкой он не станет', async () => {
+    const address = uniqueAddress();
+    const { order } = await seedOrder({ shipmentAddress: address });
+    await isolateJobs([order.id]);
+    await resetProviderState();
+
+    const client = fakeGeocoder(() => ({ lat: 55.7, lon: 37.6, precision: 'STREET' }));
+    await processGeocodingOnce(workerDeps(client));
+
+    const entry = await ctx.db.geocodeCacheEntry.findUniqueOrThrow({
+      where: { normalizedAddress: normalizeAddress(address) },
+    });
+    expect(entry.outcome).toBe('AMBIGUOUS');
+    expect(entry.latMicro).toBeNull();
+    expect(entry.lonMicro).toBeNull();
+  });
+
+  it('повторный проход по тому же заказу нового обращения не делает', async () => {
+    const address = uniqueAddress();
+    const { order } = await seedOrder({ shipmentAddress: address });
+    await isolateJobs([order.id]);
+    await resetProviderState();
+
+    const client = fakeGeocoder(() => EXACT);
+    await processGeocodingOnce(workerDeps(client));
+    expect(client.calls).toHaveLength(1);
+
+    // Заказ не менялся — значит и спрашивать нечего. Задание ставится заново
+    // только руками, и даже тогда ответ берётся из кэша.
+    await ctx.db.orderGeocodeJob.updateMany({
+      where: { orderId: order.id },
+      data: { status: 'PENDING', finishedAt: null, lockedAt: null, lockedBy: null },
+    });
+    await isolateJobs([order.id]);
+
+    const again = await processGeocodingOnce(workerDeps(client));
+    expect(again.resolved).toBe(1);
+    expect(client.calls).toHaveLength(1);
+    expect(again.requests).toBe(0);
+  });
+
+  it('смена адреса обращается заново: ключ кэша изменился вместе с адресом', async () => {
+    const { snapshot, order } = await seedOrder();
+    await isolateJobs([order.id]);
+    await resetProviderState();
+
+    const client = fakeGeocoder(() => EXACT);
+    await processGeocodingOnce(workerDeps(client));
+    expect(client.calls).toHaveLength(1);
+
+    // Правка адреса растит поколение и создаёт новое задание.
+    await apply({
+      ...snapshot,
+      address: OTHER_ADDRESS,
+      externalUpdated: '2026-08-12 15:00:00.000',
+    });
+    await isolateJobs([order.id]);
+
+    const again = await processGeocodingOnce(workerDeps(client));
+    expect(again.resolved).toBe(1);
+    // Новый адрес — новый запрос: старый ответ к нему не относится.
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls[1]).toBe(OTHER_ADDRESS);
+  });
+
+  it('в кэше нет ничего, кроме ключа, исхода и координат', async () => {
+    const entries = await ctx.db.geocodeCacheEntry.findMany({ take: 50 });
+    for (const entry of entries) {
+      // Кэш — не история: ни заказа, ни получателя, ни телефона в нём нет.
+      expect(Object.keys(entry).sort()).toEqual(
+        [
+          'createdAt',
+          'hits',
+          'latMicro',
+          'lonMicro',
+          'normalizedAddress',
+          'outcome',
+          'source',
+          'updatedAt',
+        ].sort(),
+      );
+    }
+  });
+});
+
 describe('состояние интеграции и отсутствие персональных данных', () => {
   it('публичный статус отдаёт только высокоуровневое состояние', async () => {
     const response = await ctx.app.inject({ method: 'GET', url: '/api/status' });
@@ -1349,7 +1647,7 @@ describe('состояние интеграции и отсутствие пер
     const body = response.json() as {
       integrations: { provider: string; state: string; pendingOperations?: number }[];
     };
-    const dadata = body.integrations.find((row) => row.provider === DADATA_PROVIDER);
+    const dadata = body.integrations.find((row) => row.provider === GEOCODER_PROVIDER);
     expect(dadata).toBeDefined();
     expect(dadata?.pendingOperations).toBeUndefined();
     expect(Object.keys(dadata ?? {}).sort()).toEqual(['provider', 'state', 'updatedAt']);
@@ -1361,7 +1659,7 @@ describe('состояние интеграции и отсутствие пер
     await resetProviderState();
 
     const client = fakeGeocoder(() => {
-      throw new DadataError('SERVER_ERROR', 500);
+      throw new PhotonError('SERVER_ERROR', 500);
     });
     await processGeocodingOnce(workerDeps(client));
 
@@ -1381,7 +1679,7 @@ describe('состояние интеграции и отсутствие пер
         details: unknown;
       }[];
     };
-    const dadata = body.integrations.find((row) => row.provider === DADATA_PROVIDER);
+    const dadata = body.integrations.find((row) => row.provider === GEOCODER_PROVIDER);
     expect(dadata?.state).toBe('DEGRADED');
     expect(dadata?.pendingOperations).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(dadata?.details)).toBe(JSON.stringify({ code: 'SERVER_ERROR' }));

@@ -1,10 +1,14 @@
 /**
  * Состояние интеграции геокодирования.
  *
- * Отдельный provider `dadata`, а не общая запись «карты»: подложка карты
- * и геокодер — разные сервисы с разными ключами и разными видами отказа.
- * Общая запись скрывала бы отказ одного за работоспособностью другого,
- * и дежурный видел бы «всё хорошо» при неработающем геокодировании.
+ * Отдельный provider `photon`, а не общая запись «карты»: подложка карты
+ * и геокодер — разные сервисы с разными видами отказа. Общая запись скрывала
+ * бы отказ одного за работоспособностью другого, и дежурный видел бы
+ * «всё хорошо» при неработающем геокодировании.
+ *
+ * Провайдер называется по тому, кто действительно геокодирует. Раньше здесь
+ * стояло имя DaData, и после перехода на собственный Photon это имя означало
+ * бы неправду: дежурный читал бы состояние чужого сервиса вместо своего.
  *
  * В `details` попадают только коды и числа. Ни ключей, ни адресов, ни координат,
  * ни заголовков, ни тел ответов провайдера здесь нет и быть не может: запись
@@ -14,16 +18,16 @@
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { Database } from '../../../platform/db.js';
 
-export const DADATA_PROVIDER = 'dadata';
+export const GEOCODER_PROVIDER = 'photon';
 
-export type DadataState = 'NOT_CONFIGURED' | 'CONFIGURED' | 'OK' | 'DEGRADED' | 'ERROR';
+export type GeocoderState = 'NOT_CONFIGURED' | 'CONFIGURED' | 'OK' | 'DEGRADED' | 'ERROR';
 
 /** Значения деталей: только безопасные примитивы. */
 export type StatusDetails = Record<string, string | number | boolean | null>;
 
-export async function setDadataStatus(
+export async function setGeocoderStatus(
   db: Database,
-  state: DadataState,
+  state: GeocoderState,
   details: StatusDetails,
   now: Date = new Date(),
 ): Promise<void> {
@@ -32,9 +36,9 @@ export async function setDadataStatus(
   });
 
   await db.integrationStatus.upsert({
-    where: { provider: DADATA_PROVIDER },
+    where: { provider: GEOCODER_PROVIDER },
     create: {
-      provider: DADATA_PROVIDER,
+      provider: GEOCODER_PROVIDER,
       state: state as $Enums.IntegrationState,
       pendingOperations: pending,
       details,
@@ -63,12 +67,12 @@ export async function reportGeocodingStartupStatus(
   now: Date = new Date(),
 ): Promise<void> {
   if (!config.configured) {
-    await setDadataStatus(db, 'NOT_CONFIGURED', { reason: 'no-keys' }, now);
+    await setGeocoderStatus(db, 'NOT_CONFIGURED', { reason: 'no-url' }, now);
     return;
   }
   if (!config.enabled) {
-    await setDadataStatus(db, 'CONFIGURED', { reason: 'geocoding-disabled' }, now);
+    await setGeocoderStatus(db, 'CONFIGURED', { reason: 'geocoding-disabled' }, now);
     return;
   }
-  await setDadataStatus(db, 'CONFIGURED', { reason: 'starting' }, now);
+  await setGeocoderStatus(db, 'CONFIGURED', { reason: 'starting' }, now);
 }
