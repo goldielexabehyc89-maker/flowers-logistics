@@ -12,15 +12,19 @@
 import { useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import { moscowToday } from '@fl/shared';
-import { readDay, readDraft, writeWorkspace } from './workspace-url';
+import { readDay, readDraft, readRun, writeWorkspace, RUN_PARAM } from './workspace-url';
 
 export interface Workspace {
   /** Выбранный день. Никогда не пуст: мусор в адресе даёт сегодняшний день. */
   day: string;
   /** Раскрытый черновик. Одновременно он может быть только один. */
   draftId: string | null;
+  /** Открытый расчёт: предложение, которое ещё не применено. */
+  runId: string | null;
   setDay: (day: string) => void;
   setDraftId: (draftId: string | null) => void;
+  /** Закрывает предложение, не трогая остальное состояние экрана. */
+  closeRun: () => void;
 }
 
 export function useWorkspace(): Workspace {
@@ -28,6 +32,7 @@ export function useWorkspace(): Workspace {
 
   const day = readDay(params, moscowToday());
   const draftId = readDraft(params);
+  const runId = readRun(params);
 
   const update = useCallback(
     (next: { day?: string; draftId?: string | null }): void => {
@@ -43,15 +48,28 @@ export function useWorkspace(): Workspace {
     [setParams],
   );
 
+  const closeRun = useCallback((): void => {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete(RUN_PARAM);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [setParams]);
+
   return useMemo(
     () => ({
       day,
       draftId,
+      runId,
       // Смена дня снимает активный черновик: он принадлежит другому дню,
       // и оставить его раскрытым значило бы показать состав не того дня.
       setDay: (value: string) => update({ day: value, draftId: null }),
       setDraftId: (value: string | null) => update({ draftId: value }),
+      closeRun,
     }),
-    [day, draftId, update],
+    [day, draftId, runId, update, closeRun],
   );
 }

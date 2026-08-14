@@ -167,10 +167,6 @@ export interface SplitClient {
     slots: SlotRequest[];
   }) => Promise<PlanRunView>;
   read: (runId: string) => Promise<PlanRunView>;
-  apply: (
-    runId: string,
-    body: { expectedVersion: number; allowUnassigned: boolean },
-  ) => Promise<PlanRunView>;
 }
 
 export interface SplitClock {
@@ -178,9 +174,15 @@ export interface SplitClock {
   sleep: (ms: number) => Promise<void>;
 }
 
-export type SplitOutcome =
-  | { kind: 'CONSENT'; run: PlanRunView; unassignedCount: number }
-  | { kind: 'APPLIED'; run: PlanRunView };
+/**
+ * Итог разбивки.
+ *
+ * Черновиков здесь не создаётся: расчёт доводится до готового превью, и на
+ * этом «Сделки» заканчиваются. Применить или отклонить логист решает
+ * в «Маршрутизации», глядя на предложенные маршруты, — до этого момента
+ * ничего необратимого не произошло.
+ */
+export type SplitOutcome = { kind: 'PREVIEW'; run: PlanRunView };
 
 /**
  * Весь ход разбивки одним местом.
@@ -210,20 +212,13 @@ export async function runAutoSplit(
   });
 
   const ready = await awaitPreview(client, started.id, clock);
-  const phase = splitPhase(ready);
 
-  if (phase.kind === 'FAILED') {
+  if (splitPhase(ready).kind === 'FAILED') {
     throw new Error('Расчёт не удался. Проверьте условия и повторите.');
   }
-  if (phase.kind === 'NEEDS_CONSENT') {
-    return { kind: 'CONSENT', run: ready, unassignedCount: phase.unassignedCount };
-  }
 
-  const applied = await client.apply(ready.id, {
-    expectedVersion: ready.version,
-    allowUnassigned: false,
-  });
-  return { kind: 'APPLIED', run: applied };
+  // Применение здесь НЕ выполняется: логист сначала видит, что предложено.
+  return { kind: 'PREVIEW', run: ready };
 }
 
 /**

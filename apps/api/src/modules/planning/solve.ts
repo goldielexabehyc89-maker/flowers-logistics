@@ -212,9 +212,53 @@ export interface PlannedRoute {
   distanceMeters: number | null;
 }
 
+/**
+ * Почему заказ не попал в маршрут.
+ *
+ * Решатель сообщает причину, и раньше она отбрасывалась: логист видел, ЧТО
+ * не размещено, но не понимал, почему, — и не мог решить, добавить машину,
+ * расширить смену или перенести заказ.
+ *
+ * Значения приводятся к нашим: набор кодов решателя шире и меняется от версии
+ * к версии, а показывать человеку чужой код нельзя. Незнакомая причина
+ * становится `UNKNOWN`, а не теряется.
+ */
+export type UnassignedReason = 'CAPACITY' | 'TIME_WINDOW' | 'SHIFT' | 'UNREACHABLE' | 'UNKNOWN';
+
+export interface UnassignedOrder {
+  orderId: string;
+  reason: UnassignedReason;
+}
+
 export interface PlanResult {
   routes: PlannedRoute[];
   unassignedOrderIds: string[];
+  /**
+   * Те же заказы с причинами.
+   *
+   * Список идентификаторов оставлен рядом намеренно: по нему уже написаны
+   * применение, аудит и снимки прежних расчётов, и читать старый снимок
+   * обязано быть можно.
+   */
+  unassigned: UnassignedOrder[];
+}
+
+/** Код решателя в нашу причину. Незнакомое не выдаётся за понятое. */
+export function unassignedReasonOf(raw: string | undefined): UnassignedReason {
+  switch (raw) {
+    case 'capacity':
+      return 'CAPACITY';
+    case 'time_window':
+      return 'TIME_WINDOW';
+    case 'skills':
+    case 'max_travel_time':
+    case 'max_load':
+      return 'SHIFT';
+    case 'unreachable':
+      return 'UNREACHABLE';
+    default:
+      return 'UNKNOWN';
+  }
 }
 
 /**
@@ -393,7 +437,7 @@ export function parseSolution(snapshot: PlanInputSnapshot, solution: VroomSoluti
     });
   }
 
-  const unassignedOrderIds: string[] = [];
+  const unassigned: UnassignedOrder[] = [];
 
   for (const item of solution.unassigned ?? []) {
     const order = orderByJobId.get(item.id);
@@ -404,7 +448,7 @@ export function parseSolution(snapshot: PlanInputSnapshot, solution: VroomSoluti
       throw new PlanContractError('SOLVER_DUPLICATE_ID');
     }
     seenJobs.add(item.id);
-    unassignedOrderIds.push(order.orderId);
+    unassigned.push({ orderId: order.orderId, reason: unassignedReasonOf(item.type) });
   }
 
   // Точное разбиение: пропущенный заказ означал бы, что часть дня просто
@@ -413,5 +457,9 @@ export function parseSolution(snapshot: PlanInputSnapshot, solution: VroomSoluti
     throw new PlanContractError('SOLVER_PARTITION');
   }
 
-  return { routes, unassignedOrderIds };
+  return {
+    routes,
+    unassignedOrderIds: unassigned.map((item) => item.orderId),
+    unassigned,
+  };
 }

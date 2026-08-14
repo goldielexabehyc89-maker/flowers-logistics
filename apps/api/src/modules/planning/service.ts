@@ -962,6 +962,20 @@ export interface RunView {
     shiftEndMinute: number;
   }[];
   preview: PlanResult | null;
+  /**
+   * Заказы превью по-человечески.
+   *
+   * Превью без номера и адреса проверить нельзя: обрезанный идентификатор
+   * ничего не говорит логисту, а применение необратимо создаёт черновики.
+   * Снимок при этом остаётся неизменяемым — это отдельное чтение, а не правка.
+   */
+  orders: {
+    id: string;
+    number: string;
+    address: string | null;
+    intervalStartMinute: number | null;
+    intervalEndMinute: number | null;
+  }[];
   routeIds: string[];
 }
 
@@ -997,6 +1011,34 @@ export async function readRun(db: Database, runId: string): Promise<RunView> {
     throw new AppError('NOT_FOUND', { message: 'plan run not found' });
   }
 
+  const preview = run.result === null ? null : (run.result.plan as unknown as PlanResult);
+
+  // Заказы читаются по идентификаторам плана: и остановки, и неразмещённые.
+  const orderIds =
+    preview === null
+      ? []
+      : [
+          ...preview.routes.flatMap((route) => route.stops.map((stop) => stop.orderId)),
+          ...preview.unassignedOrderIds,
+        ];
+
+  const orders =
+    orderIds.length === 0
+      ? []
+      : await db.deliveryOrder.findMany({
+          where: { id: { in: orderIds } },
+          select: {
+            id: true,
+            externalName: true,
+            address: true,
+            localAddress: true,
+            intervalStartMinute: true,
+            intervalEndMinute: true,
+            manualIntervalStartMinute: true,
+            manualIntervalEndMinute: true,
+          },
+        });
+
   return {
     id: run.id,
     deliveryDate: run.deliveryDate.toISOString().slice(0, 10),
@@ -1006,7 +1048,16 @@ export async function readRun(db: Database, runId: string): Promise<RunView> {
     createdAt: run.createdAt.toISOString(),
     appliedAt: run.appliedAt?.toISOString() ?? null,
     slots: run.slots,
-    preview: run.result === null ? null : (run.result.plan as unknown as PlanResult),
+    preview,
+    orders: orders.map((order) => ({
+      id: order.id,
+      number: order.externalName,
+      // Правка логиста сильнее исходного адреса: курьер поедет по ней.
+      address: order.localAddress ?? order.address,
+      // Ручной интервал тоже сильнее импортированного.
+      intervalStartMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
+      intervalEndMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
+    })),
     routeIds: run.routes.map((route) => route.id),
   };
 }

@@ -18,7 +18,6 @@ import { useNavigate } from 'react-router';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Button,
-  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -32,7 +31,6 @@ import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
 import {
   capacityShortfall,
-  firstDraftId,
   parseSplitParams,
   runAutoSplit,
   splitFailure,
@@ -43,7 +41,7 @@ import {
 } from './auto-split';
 import { useWorkspace } from '../logistics/useWorkspace';
 import { GeoPointDialog } from '../logistics/GeoPointDialog';
-import { workspaceHref } from '../logistics/workspace-url';
+import { previewHref, workspaceHref } from '../logistics/workspace-url';
 import {
   dropUnavailable,
   intervalProblem,
@@ -102,11 +100,6 @@ export function DealsWorkspace(): React.JSX.Element {
   const [intervalFrom, setIntervalFrom] = useState('');
   const [intervalTo, setIntervalTo] = useState('');
   const [intervalError, setIntervalError] = useState<string | null>(null);
-  /** Готовое превью, ожидающее согласия на неразмещённые заказы. */
-  const [pendingSplit, setPendingSplit] = useState<{
-    run: PlanRunView;
-    unassignedCount: number;
-  } | null>(null);
   /**
    * Параметры разбивки, которые логист вводит перед запуском.
    *
@@ -254,7 +247,6 @@ export function DealsWorkspace(): React.JSX.Element {
     () => ({
       start: (body) => client.post<PlanRunView>('/api/route-plans', body),
       read: (runId) => client.get<PlanRunView>(`/api/route-plans/${runId}`),
-      apply: (runId, body) => client.post<PlanRunView>(`/api/route-plans/${runId}/apply`, body),
     }),
     [client],
   );
@@ -278,31 +270,22 @@ export function DealsWorkspace(): React.JSX.Element {
    * нет — и слало `capacity` вместо `capacityOrders`. Оба отказа скрывал мок
    * браузерной проверки, поэтому кнопка не работала, а проверки были зелёными.
    */
-  const finishApplied = useCallback(
+  /**
+   * Расчёт готов: логист уходит смотреть предложенные маршруты.
+   *
+   * Черновиков ещё нет и не будет до явного «Применить» в «Маршрутизации».
+   * Выбор сбрасывается: заказы заморожены неизменяемым снимком расчёта,
+   * и держать их отмеченными значило бы предлагать посчитать то же ещё раз.
+   */
+  const finishPreview = useCallback(
     (run: PlanRunView): void => {
-      setPendingSplit(null);
       setSelected([]);
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
-
-      const first = firstDraftId(run);
-      if (first === null) {
-        setNotice('Расчёт применён, но ни одного черновика не создано.');
-        return;
-      }
-      // Раскрывается первый созданный черновик: логист попадает в работу,
-      // а не в общий список, где свой результат пришлось бы искать.
-      void navigate(workspaceHref('/logistics/routing', { day: date, draftId: first }));
+      void navigate(previewHref('/logistics/routing', { day: date, runId: run.id }));
     },
     [date, navigate, queryClient],
   );
 
-  /**
-   * Предупреждение о нехватке мест, пока логист ещё вводит параметры.
-   *
-   * Это не запрет: лишние заказы решатель отправит в неразмещённые, и согласие
-   * на них спрашивается отдельно. Но сказать об этом до ожидания расчёта
-   * честнее, чем после.
-   */
   const splitPreview = useMemo(() => {
     const parsed = parseSplitParams({ vehicles: vehiclesInput, capacityOrders: capacityInput });
     return parsed.ok ? { shortfall: capacityShortfall(selected.length, parsed.value) } : null;
@@ -318,7 +301,6 @@ export function DealsWorkspace(): React.JSX.Element {
    */
   const splitFailed = useCallback((error: unknown): void => {
     const effect = splitFailure(error);
-    setPendingSplit(null);
     setNotice(effect.message);
   }, []);
 
@@ -331,33 +313,7 @@ export function DealsWorkspace(): React.JSX.Element {
         { deliveryDate: date, orderIds: selected, params, vehicleType: 'CAR' },
         splitClock,
       ),
-    onSuccess: (result) => {
-      if (result.kind === 'CONSENT') {
-        // Заказ, который никто не повезёт, логист обязан увидеть ДО создания
-        // черновиков. Выбор при этом не сбрасывается: отказавшись, он остаётся
-        // ровно с тем множеством, с которого начал.
-        setPendingSplit({ run: result.run, unassignedCount: result.unassignedCount });
-        return;
-      }
-      finishApplied(result.run);
-    },
-    onError: splitFailed,
-  });
-
-  /**
-   * Применение уже посчитанного превью после согласия.
-   *
-   * Отдельная операция, а не повтор всей разбивки: расчёт уже выполнен, и
-   * второй запуск того же дня упёрся бы в уникальный `activeDateKey` — день
-   * занят собственным готовым превью.
-   */
-  const applyPending = useMutation({
-    mutationFn: (run: PlanRunView) =>
-      client.post<PlanRunView>(`/api/route-plans/${run.id}/apply`, {
-        expectedVersion: run.version,
-        allowUnassigned: true,
-      }),
-    onSuccess: finishApplied,
+    onSuccess: (result) => finishPreview(result.run),
     onError: splitFailed,
   });
 
@@ -803,31 +759,6 @@ export function DealsWorkspace(): React.JSX.Element {
           </div>
         </div>
       </Modal>
-
-      {/*
-        Согласие на неразмещённые заказы.
-
-        Спрашивается ДО создания черновиков: заказ, который никто не повезёт,
-        не должен уехать в работу молча. Отказ оставляет выбор нетронутым —
-        логист меняет состав или число машин и повторяет.
-      */}
-      <ConfirmDialog
-        open={pendingSplit !== null}
-        title="Часть заказов не размещена"
-        description={
-          `Решатель не смог разместить заказов: ${pendingSplit?.unassignedCount ?? 0}. ` +
-          'Их никто не повезёт — они останутся нераспределёнными и будут видны ' +
-          'в «Маршрутизации». Создать черновики для остальных?'
-        }
-        confirmLabel="Создать черновики"
-        busy={applyPending.isPending}
-        onConfirm={() => {
-          if (pendingSplit !== null) {
-            applyPending.mutate(pendingSplit.run);
-          }
-        }}
-        onCancel={() => setPendingSplit(null)}
-      />
 
       {editing !== null && (
         <AddressDialog

@@ -188,14 +188,10 @@ describe('отказ решателя доходит до логиста без 
         calls.read += 1;
         throw new Error('не должно вызываться');
       },
-      apply: async () => {
-        calls.apply += 1;
-        throw new Error('не должно вызываться');
-      },
     };
 
     await expect(runAutoSplit(client, input, clock())).rejects.toThrow(/решатель не настроен/);
-    expect(calls).toEqual({ read: 0, apply: 0 });
+    expect(calls.read).toBe(0);
   });
 
   it('отказ оставляет выбор, не уводит в «Маршрутизацию» и снимает ожидание', async () => {
@@ -236,9 +232,6 @@ describe('отказ решателя доходит до логиста без 
         reads += 1;
         return { id: 'run-1', state: 'QUEUED', version: 1, routeIds: [], preview: null };
       },
-      apply: async () => {
-        throw new Error('не должно вызываться');
-      },
     };
 
     await expect(runAutoSplit(client, input, clock())).rejects.toThrow(/дольше обычного/);
@@ -264,13 +257,6 @@ describe('отказ решателя доходит до логиста без 
         routeIds: [],
         preview: { unassignedOrderIds: [] },
       }),
-      apply: async () => ({
-        id: 'run-2',
-        state: 'APPLIED',
-        version: 3,
-        routeIds: ['draft-1', 'draft-2'],
-        preview: { unassignedOrderIds: [] },
-      }),
     };
 
     await expect(runAutoSplit(client, input, clock())).rejects.toThrow(/не настроен/);
@@ -278,14 +264,14 @@ describe('отказ решателя доходит до логиста без 
     broken = false;
     const outcome = await runAutoSplit(client, input, clock());
 
-    expect(outcome.kind).toBe('APPLIED');
-    if (outcome.kind === 'APPLIED') {
-      expect(firstDraftId(outcome.run)).toBe('draft-1');
-    }
+    // Черновиков ещё нет: разбивка доводит до превью и останавливается.
+    expect(outcome.kind).toBe('PREVIEW');
+    expect(outcome.run.routeIds).toEqual([]);
   });
 
-  it('частичный результат не создаёт черновиков без согласия', async () => {
-    const calls = { apply: 0 };
+  it('частичный результат тоже доводится до превью, а не до черновиков', async () => {
+    // Согласие на неразмещённые спрашивается в «Маршрутизации», когда логист
+    // уже видит, что именно предложено.
     const client: SplitClient = {
       start: async () => ({
         id: 'run-3',
@@ -301,16 +287,12 @@ describe('отказ решателя доходит до логиста без 
         routeIds: [],
         preview: { unassignedOrderIds: ['x'] },
       }),
-      apply: async () => {
-        calls.apply += 1;
-        throw new Error('не должно вызываться без согласия');
-      },
     };
 
     const outcome = await runAutoSplit(client, input, clock());
 
-    expect(outcome).toMatchObject({ kind: 'CONSENT', unassignedCount: 1 });
-    expect(calls.apply).toBe(0);
+    expect(outcome.kind).toBe('PREVIEW');
+    expect(outcome.run.routeIds).toEqual([]);
   });
 });
 

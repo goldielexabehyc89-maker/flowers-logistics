@@ -27,6 +27,7 @@ import {
   TextInput,
 } from '../../ui/components';
 import { RouteCard } from './RouteCard';
+import { PreviewPanel } from './PreviewPanel';
 import { DraftMapPanel } from './DraftMapPanel';
 import { useWorkspace } from '../logistics/useWorkspace';
 import { formatDate, ROUTE_STATE_LABELS, VEHICLE_LABELS, type RouteListResponse } from './routing';
@@ -34,7 +35,7 @@ import './routing.css';
 
 export function RoutingScreen(): React.JSX.Element {
   const { client } = useAuth();
-  const { day, draftId, setDay, setDraftId } = useWorkspace();
+  const { day, draftId, runId, setDay, setDraftId, closeRun } = useWorkspace();
 
   const routes = useQuery({
     queryKey: ['routes', day],
@@ -74,6 +75,25 @@ export function RoutingScreen(): React.JSX.Element {
           )}
         </Field>
       </header>
+
+      {/*
+        Предложенный расчёт.
+
+        Показывается ВМЕСТО работы с черновиками: пока предложение не принято,
+        черновиков из него не существует, и править нечего. Применение
+        раскрывает первый созданный черновик, отклонение просто возвращает
+        к списку.
+      */}
+      {runId !== null && (
+        <PreviewPanel
+          runId={runId}
+          onApplied={(firstDraftId) => {
+            closeRun();
+            setDraftId(firstDraftId);
+          }}
+          onDismissed={closeRun}
+        />
+      )}
 
       {missingDraft && (
         <p className="routes__hint" role="status">

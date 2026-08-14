@@ -334,6 +334,8 @@ async function main(): Promise<number> {
         },
       ],
       unassignedOrderIds: [unassigned.id],
+      // Причина, как её сообщил бы решатель при нехватке мест.
+      unassigned: [{ orderId: unassigned.id, reason: 'CAPACITY' as const }],
     };
 
     await db.routePlanInputSnapshot.create({

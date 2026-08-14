@@ -56,6 +56,29 @@ export function readDraft(params: URLSearchParams): string | null {
   return value !== null && UUID.test(value) ? value : null;
 }
 
+/**
+ * Ключ открытого расчёта.
+ *
+ * Превью — видимая стадия работы: логист смотрит предложенные маршруты
+ * и решает, применять их или отклонить. Обновление страницы и прямая ссылка
+ * обязаны вернуть тот же расчёт, а не общий список.
+ */
+export const RUN_PARAM = 'run';
+
+/** Открытый расчёт из адреса. Не-UUID трактуется как «не выбран». */
+export function readRun(params: URLSearchParams): string | null {
+  const value = params.get(RUN_PARAM);
+  return value !== null && UUID.test(value) ? value : null;
+}
+
+/** Адрес «Маршрутизации» с открытым расчётом того же дня. */
+export function previewHref(path: string, next: { day: string; runId: string }): string {
+  const params = new URLSearchParams();
+  params.set(DAY_PARAM, next.day);
+  params.set(RUN_PARAM, next.runId);
+  return `${path}?${params.toString()}`;
+}
+
 export interface WorkspaceUrl {
   day: string;
   draftId: string | null;
@@ -70,6 +93,11 @@ export interface WorkspaceUrl {
 export function writeWorkspace(current: URLSearchParams, next: WorkspaceUrl): URLSearchParams {
   const params = new URLSearchParams(current);
   params.set(DAY_PARAM, next.day);
+  // Раскрытие черновика закрывает превью: это две разные работы, и показывать
+  // их одновременно значило бы предлагать править то, чего ещё нет.
+  if (next.draftId !== null) {
+    params.delete(RUN_PARAM);
+  }
   if (next.draftId === null) {
     params.delete(DRAFT_PARAM);
   } else {

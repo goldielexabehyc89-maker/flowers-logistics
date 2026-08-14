@@ -1054,15 +1054,52 @@ test('Сделки: точный выбор → расчёт → превью �
   await page.getByTestId('split-capacity').fill('1');
   await page.getByTestId('split-submit').click();
 
-  // 4. Ожидание идёт в «Сделках», а переход происходит уже с готовыми
-  //    черновиками: технический запуск наружу не всплывает.
-  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/, { timeout: 60_000 });
+  // 4. Ожидание идёт в «Сделках», а переход ведёт в ВИДИМОЕ предложение:
+  //    черновиков ещё нет и не будет до явного «Применить».
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*run=/, { timeout: 60_000 });
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Планирование маршрутов' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Предложенный расчёт' })).toBeVisible();
 
-  // 5. Разбивка создала НЕСКОЛЬКО черновиков, и раскрыт ровно один.
   const drafts = page.getByTestId('routing-drafts').locator('.routes__draft');
-  await expect(drafts).toHaveCount(draftsBefore + 2);
+  await expect(drafts).toHaveCount(draftsBefore);
+
+  // 5. Предложение проверяемо: два маршрута, номера заказов, порядок остановок,
+  //    время и расстояние — а не обрезанные идентификаторы.
+  const previewRoutes = page.locator('[data-preview-route]');
+  await expect(previewRoutes).toHaveCount(2);
+  for (const number of chosen) {
+    await expect(page.locator('.routes__preview')).toContainText(number);
+  }
+  await expect(previewRoutes.first()).toContainText('В пути');
+  await expect(previewRoutes.first().locator('.routes__position').first()).toHaveText('1');
+
+  // 6. «Отклонить» не создаёт ни одного черновика.
+  await page.getByTestId('preview-dismiss').click();
+  await expect(page.getByRole('heading', { name: 'Предложенный расчёт' })).toHaveCount(0);
+  await expect(drafts).toHaveCount(draftsBefore);
+
+  // 7. Повторный расчёт того же выбора и применение: черновики появляются
+  //    только теперь.
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  for (const number of chosen) {
+    await page
+      .locator(`[data-testid="deal-card"][data-order-number="${number}"]`)
+      .getByTestId('deal-pick')
+      .click();
+  }
+  await page.getByTestId('deals-auto-plan').click();
+  await page.getByTestId('split-vehicles').fill('2');
+  await page.getByTestId('split-capacity').fill('1');
+  await page.getByTestId('split-submit').click();
+
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*run=/, { timeout: 60_000 });
+  await expect(page.getByTestId('preview-apply')).toBeEnabled();
+  await page.getByTestId('preview-apply').click();
+
+  await expect(page.getByTestId('routing-drafts').locator('.routes__draft')).toHaveCount(
+    draftsBefore + 2,
+  );
   await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
 
   // 6. Посторонний заказ дня в расчёт не попал и остался доступным в «Сделках».
