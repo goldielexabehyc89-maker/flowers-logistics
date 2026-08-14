@@ -81,39 +81,58 @@ export interface OrderSnapshot {
   attentionReasons: AttentionReason[];
 }
 
-/** Порядок ключей снимка. Фиксирован, чтобы хеш не зависел от порядка полей API. */
-const SNAPSHOT_KEYS: (keyof OrderSnapshot)[] = [
-  'externalId',
-  'externalName',
-  'externalUpdated',
-  'externalMoment',
-  'externalStateId',
-  'externalStateName',
-  'externalStateType',
-  'storeId',
-  'deliveryMethodId',
-  'deliveryDateRaw',
-  'deliveryDate',
-  'intervalRaw',
-  'intervalKind',
-  'intervalStartMinute',
-  'intervalEndMinute',
-  'address',
-  'recipient',
-  'comment',
-  'paymentTypeId',
-  'paymentTypeName',
-  'sumMinor',
-  'payedSumMinor',
-  'cashCollectable',
-  'cashToCollectMinor',
-  'cashAnomaly',
-  'sourceArchived',
-  'inScope',
-  'fulfillmentInScope',
-  'scopeExitReason',
-  'attentionReasons',
-];
+/**
+ * Поля снимка и их порядок.
+ *
+ * Объект, а не массив, намеренно. `satisfies Record<keyof OrderSnapshot, true>`
+ * требует ключ для КАЖДОГО поля снимка, поэтому новое поле нельзя забыть:
+ * без него код не соберётся.
+ *
+ * Забыть было чем: через этот список работают сразу три вещи — сравнение
+ * снимков, канонический JSON и хеш. Поле, добавленное в тип и в объект, но
+ * не сюда, оказывалось невидимым для всех троих: изменение не попадало
+ * в `changedFields`, хеш не менялся, и строка заказа не переписывалась
+ * никогда. Ошибка молчаливая — данные просто оставались пустыми.
+ *
+ * Порядок ключей фиксирован: по нему считается канонический JSON, и от него
+ * зависит хеш. `Object.keys` сохраняет порядок объявления строковых ключей,
+ * поэтому перестановка полей здесь изменила бы хеш у всех заказов.
+ */
+const SNAPSHOT_FIELDS = {
+  externalId: true,
+  externalName: true,
+  externalUpdated: true,
+  externalMoment: true,
+  externalStateId: true,
+  externalStateName: true,
+  externalStateType: true,
+  storeId: true,
+  deliveryMethodId: true,
+  deliveryDateRaw: true,
+  deliveryDate: true,
+  intervalRaw: true,
+  intervalKind: true,
+  intervalStartMinute: true,
+  intervalEndMinute: true,
+  address: true,
+  geocodeAddress: true,
+  recipient: true,
+  comment: true,
+  paymentTypeId: true,
+  paymentTypeName: true,
+  sumMinor: true,
+  payedSumMinor: true,
+  cashCollectable: true,
+  cashToCollectMinor: true,
+  cashAnomaly: true,
+  sourceArchived: true,
+  inScope: true,
+  fulfillmentInScope: true,
+  scopeExitReason: true,
+  attentionReasons: true,
+} satisfies Record<keyof OrderSnapshot, true>;
+
+export const SNAPSHOT_KEYS = Object.keys(SNAPSHOT_FIELDS) as (keyof OrderSnapshot)[];
 
 type Ids = typeof MOYSKLAD_IDS;
 
@@ -374,7 +393,14 @@ export function diffSnapshots(
 
   const changed: (keyof OrderSnapshot)[] = [];
   for (const key of SNAPSHOT_KEYS) {
-    if (JSON.stringify(previous[key]) !== JSON.stringify(next[key])) {
+    // Отсутствие ключа и `null` — одно и то же: «значения нет».
+    //
+    // Снимки, сохранённые до появления поля, ключа не содержат вовсе.
+    // Без приведения `undefined` и `null` разошлись бы, и первый же проход
+    // объявил бы изменившимся КАЖДЫЙ заказ — включая те, у которых нового
+    // значения нет и не будет. Это дало бы ревизию, аудит и событие на ровном
+    // месте, а история перестала бы означать «здесь что-то произошло».
+    if (JSON.stringify(previous[key] ?? null) !== JSON.stringify(next[key] ?? null)) {
       changed.push(key);
     }
   }

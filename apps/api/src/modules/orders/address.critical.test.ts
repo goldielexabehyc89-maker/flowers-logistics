@@ -389,3 +389,118 @@ describe('запрос геокодеру отличается от адреса
     expect(geocodingAddress(before)).toBe(geocodingAddress(after));
   });
 });
+
+describe('запрос к геокодеру: импорт и повторы', () => {
+  /** Разобранный адрес: синтетический, настоящих адресов тут нет. */
+  const FULL = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+  };
+
+  const structured = (overrides: Record<string, unknown> = {}): OrderSnapshot =>
+    mapOrder(
+      source({ shipmentAddressFull: FULL, ...overrides }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+
+  it('запрос сохраняется отдельно, а адрес заказа остаётся операционным', async () => {
+    const snapshot = structured();
+    await apply(snapshot);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    // Курьеру достаётся полный адрес источника — с квартирой.
+    expect(stored.address).toBe(SOURCE_ADDRESS);
+    // Геокодеру — только то, что он ищет.
+    expect(stored.geocodeAddress).toBe(
+      '141014, Россия, Московская область, Мытищи, Олимпийский проспект, 29',
+    );
+    expect(stored.geocodeAddress).not.toContain('137');
+    expect(geocodingAddress(stored)).toBe(stored.geocodeAddress);
+    expect(effectiveAddress(stored)).toBe(SOURCE_ADDRESS);
+  });
+
+  it('повторный импорт того же снимка не создаёт вторую ревизию', async () => {
+    const snapshot = structured();
+    await apply(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    const revisionsBefore = await ctx.db.deliveryOrderRevision.count({
+      where: { orderId: order.id },
+    });
+
+    // Тот же снимок в overlap-окне: ни ревизии, ни изменения версии.
+    await apply(snapshot);
+
+    expect(
+      await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } }),
+      'повтор создал лишнюю ревизию',
+    ).toBe(revisionsBefore);
+    const again = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(again.version).toBe(order.version);
+    expect(again.geocodeAddress).toBe(order.geocodeAddress);
+  });
+
+  it('появление запроса у существующего заказа переписывает строку', async () => {
+    // Так выглядит первый проход после включения разобранного источника.
+    const plain = snapshotOf();
+    await apply(plain);
+
+    const before = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: plain.externalId },
+    });
+    expect(before.geocodeAddress).toBeNull();
+
+    await apply({
+      ...structured(),
+      externalId: plain.externalId,
+      externalName: plain.externalName,
+    });
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: before.id } });
+    expect(after.geocodeAddress).not.toBeNull();
+    // Адрес для человека при этом не пострадал.
+    expect(after.address).toBe(SOURCE_ADDRESS);
+  });
+
+  it('смена одной лишь квартиры запрос не меняет и ревизии не создаёт', async () => {
+    const snapshot = structured();
+    await apply(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    const revisionsBefore = await ctx.db.deliveryOrderRevision.count({
+      where: { orderId: order.id },
+    });
+
+    // Для геокодера это тот же дом: повторно искать его незачем.
+    await apply({
+      ...mapOrder(
+        source({
+          id: snapshot.externalId,
+          name: snapshot.externalName,
+          shipmentAddressFull: { ...FULL, apartment: '999' },
+        }) as never,
+        IDS,
+        'shipmentAddressFull',
+      ).snapshot,
+    });
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.geocodeAddress).toBe(order.geocodeAddress);
+    expect(await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } })).toBe(
+      revisionsBefore,
+    );
+  });
+});

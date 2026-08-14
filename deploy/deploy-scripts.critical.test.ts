@@ -2001,6 +2001,20 @@ describe('геокодер в составе окружения', () => {
     expect(lib).toContain('канонический индекс изменился после запуска геокодера');
   });
 
+  it('пересоздание приложения требует сверки работающей версии', async () => {
+    const lib = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+
+    // Обёртки строят команду Compose со своим IMAGE_TAG. Значение, оставшееся
+    // от прошлой выкатки, молча пересоздаёт контейнер на прежнем образе —
+    // окружение откатывается, и заметно это только по отсутствию новых полей.
+    expect(lib).toContain('require_running_revision()');
+    expect(lib).toContain('org.opencontainers.image.revision');
+    expect(lib).toContain('пересоздание откатило бы окружение');
+
+    // Незапущенное приложение — не повод считать версию совпавшей.
+    expect(lib).toContain('приложение не запущено: сверять версию не с чем');
+  });
+
   it('выкатка проверяет геокодер до миграций и до приложения', async () => {
     const full = await readFile(path.join(REPO_ROOT, 'deploy/scripts/deploy-staging.sh'), 'utf8');
 
