@@ -31,7 +31,16 @@ import { expect, test, type Browser, type Locator, type Page } from '@playwright
  * всем остальным.
  */
 function seedOrders(count: number, options: { withPoint: boolean }): string[] {
-  const args = ['run', '--silent', 'seed:e2e-order', '--', `--count=${count}`];
+  // Интервал распознан всегда: иначе заказ остаётся в «Требует внимания»
+  // по чужой причине, и сценарий доказывал бы не то, что заявляет.
+  const args = [
+    'run',
+    '--silent',
+    'seed:e2e-order',
+    '--',
+    `--count=${count}`,
+    '--recognized-interval',
+  ];
   if (options.withPoint) {
     args.push('--with-point');
   }
@@ -357,8 +366,8 @@ test('Сделки: ручная точка выводит заказ из «Т�
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
   // Собственный заказ БЕЗ точки: ровно то, что чинит этот сценарий.
-  const [number] = seedOrders(1, { withPoint: false });
-  expect(number).toBeTruthy();
+  const number = seedOrders(1, { withPoint: false })[0] ?? '';
+  expect(number).not.toBe('');
 
   const styleUrl = 'https://maps.local.test/style.json';
   await page.route('**/api/map/config', (route) =>
@@ -686,10 +695,11 @@ test('маршрут: черновик → состав → порядок → �
    * Три собственных заказа: два в первый черновик и один во второй, чтобы
    * было куда переносить. Чужие заказы сценарий не трогает.
    */
-  const [first, second, third] = seedOrders(3, { withPoint: true });
-  expect(first).toBeTruthy();
-  expect(second).toBeTruthy();
-  expect(third).toBeTruthy();
+  const seeded = seedOrders(3, { withPoint: true });
+  const first = seeded[0] ?? '';
+  const second = seeded[1] ?? '';
+  const third = seeded[2] ?? '';
+  expect([first, second, third].every((number) => number !== '')).toBe(true);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   await page.getByRole('link', { name: 'Логистика' }).first().click();
@@ -930,10 +940,11 @@ test('Сделки: точный выбор → расчёт → превью �
   requiredEnv('E2E_PLAN_SELECTED_NUMBERS');
 
   // Три собственных заказа: два уходят в расчёт, третий остаётся посторонним.
-  const [firstChosen, secondChosen, foreignNumber] = seedOrders(3, { withPoint: true });
-  const chosen = [firstChosen ?? '', secondChosen ?? ''];
+  const seededForSplit = seedOrders(3, { withPoint: true });
+  const chosen = [seededForSplit[0] ?? '', seededForSplit[1] ?? ''];
+  const foreignNumber = seededForSplit[2] ?? '';
   expect(chosen.every((number) => number !== '')).toBe(true);
-  expect(foreignNumber).toBeTruthy();
+  expect(foreignNumber).not.toBe('');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
