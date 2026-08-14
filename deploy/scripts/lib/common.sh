@@ -710,6 +710,101 @@ require_solver_ready() {
   log "решатель готов: версия ${VROOM_VERSION}, время обслуживания по типу машины учитывается"
 }
 
+# --- Геокодер ------------------------------------------------------------
+
+# Ожидаемые контрольные суммы. Обе относятся к ВЕРСИИ, а не к серверу, поэтому
+# заданы здесь, а не в конфигурации окружения: приложение и его геокодер должны
+# быть одинаковыми во всех окружениях.
+PHOTON_JAR_SHA256='a89707c0045e4807b2a1180e132e68e108d998709f48b6c94b98a6e281f571a5'
+PHOTON_JAR_NAME='photon-1.3.0.jar'
+PHOTON_VERSION='1.3.0'
+
+# Проверяет исполняемый файл и индекс геокодера на сервере.
+#
+# Fail closed. Отсутствующий или повреждённый индекс НЕ должен выдаваться
+# за работающий геокодер: молча пустой Photon отвечал бы «не найдено» на каждый
+# адрес, и все заказы уходили бы в «Требует внимания» без всякого объяснения.
+require_photon_artifacts() {
+  if is_dry_run; then
+    log "сухой прогон: проверка геокодера пропущена (нужен доступ к серверу)"
+    return 0
+  fi
+
+  # 1. Исполняемый файл. Сумма пересчитывается на сервере: доверять имени файла
+  #    нельзя, а размер и время подмену не ловят.
+  local jar_actual
+  jar_actual="$(remote "sha256sum '${REMOTE_DIR}/photon/lib/photon.jar' 2>/dev/null | cut -d' ' -f1")"
+  [ -n "${jar_actual}" ] || fail "на сервере нет ${REMOTE_DIR}/photon/lib/photon.jar"
+  [ "${jar_actual}" = "${PHOTON_JAR_SHA256}" ] \
+    || fail "контрольная сумма ${PHOTON_JAR_NAME} не совпала: индекс и код обязаны быть одной версии"
+
+  # 2. Индекс. Символьная ссылка `current` обязана указывать на существующий
+  #    версионный каталог с непустым photon_data.
+  local target
+  target="$(remote "readlink -f '${REMOTE_DIR}/photon/current' 2>/dev/null || true")"
+  [ -n "${target}" ] || fail "символьная ссылка ${REMOTE_DIR}/photon/current не указывает никуда"
+
+  local files
+  files="$(remote "find '${target}/photon_data' -type f 2>/dev/null | wc -l")"
+  [ "${files:-0}" -gt 0 ] || fail "индекс геокодера пуст: ${target}/photon_data не содержит файлов"
+
+  # 3. Манифест рядом с индексом: он объясняет, ЧТО это за набор.
+  remote "test -f '${target}/manifest.md'" \
+    || fail "рядом с индексом нет manifest.md: происхождение набора неизвестно"
+
+  log "геокодер: файлов индекса ${files}, версия Photon ${PHOTON_VERSION}"
+}
+
+# Ждёт готовности геокодера и проверяет его настоящим запросом.
+#
+# Одного `/status` мало: он отвечает и на пустом индексе. Поэтому проверяется
+# ещё и поиск публичного ориентира — если геокодер ничего не находит, значит
+# развёрнут не тот набор, и выкатка обязана остановиться здесь, до приложения.
+require_photon_ready() {
+  if is_dry_run; then
+    log "сухой прогон: готовность геокодера не проверяется"
+    return 0
+  fi
+
+  local attempts="${PHOTON_CHECK_ATTEMPTS:-30}"
+  local delay="${PHOTON_CHECK_DELAY:-5}"
+
+  local ready=0 attempt
+  for attempt in $(seq 1 "${attempts}"); do
+    if remote "$(compose_command) exec -T photon curl -fsS http://127.0.0.1:2322/status > /dev/null 2>&1"; then
+      ready=1
+      break
+    fi
+    sleep "${delay}"
+  done
+  [ "${ready}" -eq 1 ] || fail "геокодер не ответил на /status"
+
+  # Версия и дата набора — из самого сервиса, а не из наших предположений.
+  local status
+  status="$(remote "$(compose_command) exec -T photon curl -fsS http://127.0.0.1:2322/status")"
+  case "${status}" in
+    *'"status":"Ok"'*) ;;
+    *) fail "геокодер отвечает, но состояние не Ok" ;;
+  esac
+  case "${status}" in
+    *"\"version\":\"${PHOTON_VERSION}\""*) ;;
+    *) fail "версия геокодера не совпала с ожидаемой ${PHOTON_VERSION}" ;;
+  esac
+
+  # Настоящий поиск. Публичный ориентир, а не адрес клиента.
+  local found
+  found="$(remote "$(compose_command) exec -T photon curl -fsS --get \
+    --data-urlencode 'q=Москва, Тверская улица, 13' \
+    --data 'limit=1' --data 'lang=ru' \
+    http://127.0.0.1:2322/api | head -c 400")"
+  case "${found}" in
+    *'"features":[{'*) ;;
+    *) fail "геокодер не нашёл публичный ориентир: развёрнут пустой или не тот индекс" ;;
+  esac
+
+  log "геокодер готов: состояние Ok, версия ${PHOTON_VERSION}, поиск отвечает"
+}
+
 require_image_revision() {
   local actual
   actual="$(remote "docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' '$(image_reference)'")"

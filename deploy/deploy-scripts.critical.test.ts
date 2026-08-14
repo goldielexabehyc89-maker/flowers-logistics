@@ -1821,3 +1821,141 @@ describe('операторские команды', () => {
     }
   });
 });
+
+describe('геокодер в составе окружения', () => {
+  it('порт геокодера наружу не публикуется', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+
+    // Открытый в интернет геокодер — это чужой бесплатный вычислитель
+    // и заодно способ узнать, куда мы возим.
+    expect(photon).not.toContain('ports:');
+    expect(photon).not.toContain('2322:2322');
+    expect(compose).not.toContain("'127.0.0.1:2322");
+  });
+
+  it('геокодер живёт во внутренней сети без выхода наружу', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    // Это не удобство, а гарантия: даже ошибочно настроенный Photon физически
+    // не сможет обратиться к публичному photon.komoot.io или nominatim.
+    expect(compose).toMatch(/geocoder:\s*\n\s*internal: true/);
+
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+    expect(photon).toContain('- geocoder');
+    // И только к ней: общая сеть имеет выход в интернет.
+    expect(photon).not.toMatch(/networks:\s*\n\s*- default/);
+  });
+
+  it('память и куча ограничены явно', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+
+    // Без -Xmx JVM берёт четверть памяти машины: на сервере с 11.7 ГБ это
+    // почти 3 ГБ вместо измеренных достаточных 768 МБ.
+    expect(photon).toContain('-Xmx768m');
+    expect(photon).toContain('mem_limit: 1536m');
+    // Без memswap_limit контейнер уходит в своп вместо честного отказа.
+    expect(photon).toContain('memswap_limit: 1536m');
+  });
+
+  it('геокодер слушает 0.0.0.0 внутри контейнера', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+
+    // По умолчанию Photon слушает 127.0.0.1 внутри своего пространства имён,
+    // и другие контейнеры до него не дойдут вовсе.
+    expect(photon).toContain('-listen-ip');
+    expect(photon).toContain('0.0.0.0');
+  });
+
+  it('образ закреплён digest, а не тегом', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+
+    // Тег переезжает, digest — нет.
+    expect(photon).toMatch(/image: eclipse-temurin:21-jre@sha256:[0-9a-f]{64}/);
+  });
+
+  it('индекс и исполняемый файл монтируются только на чтение', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+
+    // Распаковка поверх работающей базы повреждает её — об этом прямо
+    // предупреждает документация Photon.
+    const mounts = photon.split('- type: bind').slice(1);
+    expect(mounts).toHaveLength(2);
+    for (const mount of mounts) {
+      expect(mount).toContain('read_only: true');
+    }
+    // Каталог индекса — символьная ссылка на версионный: переключение версии
+    // выполняется её подменой, а не распаковкой на месте.
+    expect(photon).toContain('source: ./photon/current');
+  });
+
+  it('healthcheck проверяет /status', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+    const photon = compose.slice(compose.indexOf('  photon:'), compose.indexOf('networks:\n  #'));
+
+    // Отсутствующий или повреждённый каталог оставит контейнер unhealthy,
+    // а не выдаст его за рабочий геокодер.
+    expect(photon).toContain('healthcheck:');
+    expect(photon).toContain('http://127.0.0.1:2322/status');
+  });
+
+  it('приложение обращается к геокодеру по внутреннему имени', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    expect(compose).toContain('PHOTON_URL: http://photon:2322');
+
+    // Публичные адреса не появляются ни в одном ЗНАЧЕНИИ. Комментарии
+    // исключаются намеренно: в них эти адреса и должны упоминаться —
+    // как то, что запрещено.
+    const values = compose
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    for (const host of ['photon.komoot.io', 'nominatim.openstreetmap.org']) {
+      expect(values, host).not.toContain(host);
+    }
+    // И приложение подключено к сети геокодера, иначе имя не разрешится.
+    const app = compose.slice(
+      compose.indexOf('  app:'),
+      compose.indexOf('  # Собственный маршрутизатор'),
+    );
+    expect(app).toContain('- geocoder');
+  });
+
+  it('выкатка проверяет геокодер до миграций и до приложения', async () => {
+    const full = await readFile(path.join(REPO_ROOT, 'deploy/scripts/deploy-staging.sh'), 'utf8');
+
+    // Сравниваются ФАКТИЧЕСКИЕ шаги, а не текст плана сухого прогона: в плане
+    // те же слова перечислены раньше, и порядок там ничего не доказывает.
+    const script = full.slice(full.indexOf('require_clean_worktree'));
+
+    const artifacts = script.indexOf('require_photon_artifacts');
+    const ready = script.indexOf('require_photon_ready');
+    const migrate = script.indexOf('prisma migrate deploy');
+    const app = script.indexOf('up -d --no-build app');
+
+    // Порядок не косметический: при отказе геокодера схема остаётся прежней,
+    // а работающая версия продолжает работать.
+    expect(artifacts).toBeGreaterThan(0);
+    expect(ready).toBeGreaterThan(artifacts);
+    expect(migrate).toBeGreaterThan(ready);
+    expect(app).toBeGreaterThan(migrate);
+  });
+
+  it('проверка геокодера не довольствуется ответом /status', async () => {
+    const lib = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+
+    // Пустой индекс тоже отвечает Ok. Поэтому проверяется настоящий поиск
+    // публичного ориентира, а сумма исполняемого файла пересчитывается
+    // на сервере: доверять имени файла нельзя.
+    expect(lib).toContain('sha256sum');
+    expect(lib).toContain('PHOTON_JAR_SHA256=');
+    expect(lib).toMatch(/PHOTON_JAR_SHA256='[0-9a-f]{64}'/);
+    expect(lib).toContain('не нашёл публичный ориентир');
+    expect(lib).toContain('manifest.md');
+  });
+});
