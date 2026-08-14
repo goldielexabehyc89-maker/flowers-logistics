@@ -161,10 +161,19 @@ describe('запрос', () => {
 
     // Photon отдаёт GeoJSON: сначала долгота, потом широта. Перепутанный порядок
     // увёз бы курьера в другое полушарие, поэтому он закреплён проверкой.
-    await expect(client.search(ADDRESS)).resolves.toEqual({
+    await expect(client.search(ADDRESS)).resolves.toMatchObject({
       lat: 55.751244,
       lon: 37.618423,
       precision: 'HOUSE',
+    });
+
+    // Описание места выходит наружу целиком: по нему ответ сверяется
+    // с исходным адресом, и без него «дом» — утверждение без доказательства.
+    const answer = await client.search(ADDRESS);
+    expect(answer?.place).toMatchObject({
+      housenumber: '1',
+      street: 'синтетическая',
+      city: 'Москва',
     });
   });
 

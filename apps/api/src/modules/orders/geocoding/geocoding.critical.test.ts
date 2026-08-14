@@ -81,7 +81,36 @@ function uniqueAddress(): string {
 const OTHER_ADDRESS = 'Москва, другая синтетическая улица, дом 2';
 
 /** Точный дом. Координаты синтетические и в отчёты не выходят. */
-const EXACT: PhotonAnswer = { lat: 55.751244, lon: 37.618423, precision: 'HOUSE' };
+const EXACT: PhotonAnswer = {
+  lat: 55.751244,
+  lon: 37.618423,
+  precision: 'HOUSE',
+  place: {
+    housenumber: '1',
+    street: 'синтетическая улица',
+    city: 'Москва',
+    countrycode: 'RU',
+  },
+};
+
+/**
+ * Ответ, согласованный с запрошенным адресом.
+ *
+ * Обработчик сверяет ответ геокодера с исходным адресом (`verify.ts`), поэтому
+ * поддельный геокодер обязан отвечать про ТОТ ЖЕ адрес, о котором спросили.
+ * Ответ «всегда один и тот же дом» проверял бы не очередь, а защиту от подмены,
+ * и она у него самого же и срабатывала бы.
+ */
+function exactAnswerFor(address: string): PhotonAnswer {
+  const street = /Москва, ([^,]+), дом/.exec(address)?.[1] ?? 'синтетическая улица';
+  const housenumber = /дом (\d+)/.exec(address)?.[1] ?? '1';
+  return {
+    lat: 55.751244,
+    lon: 37.618423,
+    precision: 'HOUSE',
+    place: { housenumber, street, city: 'Москва', countrycode: 'RU' },
+  };
+}
 
 const logger = pino({ level: 'silent' });
 
@@ -550,7 +579,7 @@ describe('обработка задания', () => {
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     const result = await processGeocodingOnce(workerDeps(client));
 
     expect(result.skippedBusy).toBe(false);
@@ -604,27 +633,27 @@ describe('обработка задания', () => {
   });
 
   it('точкой считается только точный дом', () => {
-    expect(decideResult(EXACT)).toMatchObject({ kind: 'RESOLVED' });
+    expect(decideResult(EXACT, ADDRESS)).toMatchObject({ kind: 'RESOLVED' });
 
     // Улица и район — это «где-то там». Курьер едет по конкретному адресу,
     // поэтому такой ответ зовёт человека, а не становится точкой заказа.
     for (const precision of ['STREET', 'AREA'] as const) {
-      expect(decideResult({ ...EXACT, precision }), precision).toMatchObject({
+      expect(decideResult({ ...EXACT, precision }, ADDRESS), precision).toMatchObject({
         kind: 'LOW_PRECISION',
       });
     }
 
     // Ответа нет вовсе.
-    expect(decideResult(null)).toMatchObject({ kind: 'LOW_PRECISION' });
+    expect(decideResult(null, ADDRESS)).toMatchObject({ kind: 'LOW_PRECISION' });
 
     // Точность заявлена, а координата невозможна.
-    expect(decideResult({ lat: 95, lon: 37.6, precision: 'HOUSE' })).toMatchObject({
+    expect(decideResult({ ...EXACT, lat: 95, lon: 37.6 }, ADDRESS)).toMatchObject({
       kind: 'LOW_PRECISION',
     });
-    expect(decideResult({ lat: 55.7, lon: 181, precision: 'HOUSE' })).toMatchObject({
+    expect(decideResult({ ...EXACT, lat: 55.7, lon: 181 }, ADDRESS)).toMatchObject({
       kind: 'LOW_PRECISION',
     });
-    expect(decideResult({ lat: Number.NaN, lon: 37.6, precision: 'HOUSE' })).toMatchObject({
+    expect(decideResult({ ...EXACT, lat: Number.NaN, lon: 37.6 }, ADDRESS)).toMatchObject({
       kind: 'LOW_PRECISION',
     });
   });
@@ -812,11 +841,11 @@ describe('обработка задания', () => {
     await isolateJobs(ids);
     await resetProviderState();
 
-    const client = fakeGeocoder(async () => {
+    const client = fakeGeocoder(async (address) => {
       // Уступаем управление: при параллельной обработке счётчик это заметит.
       await Promise.resolve();
       await new Promise((resolve) => setImmediate(resolve));
-      return EXACT;
+      return exactAnswerFor(address);
     });
 
     const result = await processGeocodingOnce(workerDeps(client));
@@ -862,14 +891,14 @@ describe('устаревший результат и гонки', () => {
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(async () => {
+    const client = fakeGeocoder(async (address) => {
       // Пока запрос «летит», приходит новая версия заказа с другим адресом.
       await apply({
         ...snapshot,
         address: OTHER_ADDRESS,
         externalUpdated: '2026-08-12 15:00:00.000',
       });
-      return EXACT;
+      return exactAnswerFor(address);
     });
 
     const result = await processGeocodingOnce(workerDeps(client));
@@ -897,7 +926,7 @@ describe('устаревший результат и гонки', () => {
 
     const token = await tokenFor(['LOGISTICIAN']);
 
-    const client = fakeGeocoder(async () => {
+    const client = fakeGeocoder(async (address) => {
       // Логист успевает поставить точку руками, пока идёт запрос.
       const fresh = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
       const response = await ctx.app.inject({
@@ -912,7 +941,7 @@ describe('устаревший результат и гонки', () => {
         },
       });
       expect(response.statusCode).toBe(200);
-      return EXACT;
+      return exactAnswerFor(address);
     });
 
     const result = await processGeocodingOnce(workerDeps(client));
@@ -931,7 +960,7 @@ describe('устаревший результат и гонки', () => {
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(async () => {
+    const client = fakeGeocoder(async (address) => {
       await apply({
         ...snapshot,
         storeId: '33333333-3333-4333-8333-333333333333',
@@ -939,7 +968,7 @@ describe('устаревший результат и гонки', () => {
         scopeExitReason: 'STORE_CHANGED',
         externalUpdated: '2026-08-12 16:00:00.000',
       });
-      return EXACT;
+      return exactAnswerFor(address);
     });
 
     const result = await processGeocodingOnce(workerDeps(client));
@@ -960,7 +989,7 @@ describe('устаревший результат и гонки', () => {
 
     let updatedDuringRequest = false;
 
-    const client = fakeGeocoder(async () => {
+    const client = fakeGeocoder(async (address) => {
       // Короткий lock_timeout: если бы worker держал строку заказа под
       // FOR UPDATE, этот запрос не дождался бы и упал.
       await ctx.db.$transaction(async (tx) => {
@@ -968,7 +997,7 @@ describe('устаревший результат и гонки', () => {
         await tx.$executeRaw`UPDATE "DeliveryOrder" SET "updatedAt" = now() WHERE "id" = ${order.id}::uuid`;
       });
       updatedDuringRequest = true;
-      return EXACT;
+      return exactAnswerFor(address);
     });
 
     await processGeocodingOnce(workerDeps(client));
@@ -997,7 +1026,7 @@ describe('устаревший результат и гонки', () => {
     await isolateJobs([order.id]);
 
     await resetProviderState();
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     await processGeocodingOnce(workerDeps(client));
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
@@ -1013,12 +1042,12 @@ describe('аренда, конкуренция и восстановление',
     await resetProviderState();
 
     let started = 0;
-    const slow = fakeGeocoder(async () => {
+    const slow = fakeGeocoder(async (address) => {
       started += 1;
       await new Promise((resolve) => setTimeout(resolve, 150));
-      return EXACT;
+      return exactAnswerFor(address);
     });
-    const second = fakeGeocoder(() => EXACT);
+    const second = fakeGeocoder((address) => exactAnswerFor(address));
 
     const [first, other] = await Promise.all([
       processGeocodingOnce(workerDeps(slow)),
@@ -1041,8 +1070,8 @@ describe('аренда, конкуренция и восстановление',
     await resetProviderState();
 
     // Разные ключи замка: проверяется именно захват заданий через SKIP LOCKED.
-    const clientA = fakeGeocoder(() => EXACT);
-    const clientB = fakeGeocoder(() => EXACT);
+    const clientA = fakeGeocoder((address) => exactAnswerFor(address));
+    const clientB = fakeGeocoder((address) => exactAnswerFor(address));
 
     const [resultA, resultB] = await Promise.all([
       processGeocodingOnce(
@@ -1081,7 +1110,7 @@ describe('аренда, конкуренция и восстановление',
       },
     });
 
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     const result = await processGeocodingOnce(workerDeps(client));
 
     expect(result.resolved).toBe(1);
@@ -1095,13 +1124,13 @@ describe('аренда, конкуренция и восстановление',
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(async () => {
+    const client = fakeGeocoder(async (address) => {
       // Пока идёт запрос, аренду перехватил другой экземпляр.
       await ctx.db.orderGeocodeJob.updateMany({
         where: { orderId: order.id },
         data: { lockedBy: 'другой-экземпляр' },
       });
-      return EXACT;
+      return exactAnswerFor(address);
     });
 
     const result = await processGeocodingOnce(workerDeps(client));
@@ -1118,7 +1147,7 @@ describe('аренда, конкуренция и восстановление',
   });
 
   it('планировщик останавливается корректно и не начинает новых проходов', async () => {
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     const worker = createGeocodeWorker(workerDeps(client), 10_000);
     worker.start();
     await worker.stop();
@@ -1170,7 +1199,7 @@ describe('отказ провайдера останавливает пачку 
       expect(state.haltedReason).toBe(code);
 
       // Следующий проход не делает ни одного обращения и заданий не берёт.
-      const second = fakeGeocoder(() => EXACT);
+      const second = fakeGeocoder((address) => exactAnswerFor(address));
       const again = await processGeocodingOnce(workerDeps(second, { batchSize: 3 }));
       expect(second.calls).toHaveLength(0);
       expect(again.claimed).toBe(0);
@@ -1213,7 +1242,7 @@ describe('отказ провайдера останавливает пачку 
     expect(state.nextRequestAllowedAt.getTime()).toBeGreaterThanOrEqual(now.getTime() + 30_000);
 
     // До истечения паузы обращений нет.
-    const second = fakeGeocoder(() => EXACT);
+    const second = fakeGeocoder((address) => exactAnswerFor(address));
     const again = await processGeocodingOnce(workerDeps(second, { batchSize: 3, now: () => now }));
     expect(second.calls).toHaveLength(0);
     expect(again.claimed).toBe(0);
@@ -1291,15 +1320,15 @@ describe('общий интервал между запросами', () => {
     };
 
     // Два разных экземпляра: каждый со своим клиентом и своим worker id.
-    const clientA = fakeGeocoder(() => {
+    const clientA = fakeGeocoder((address) => {
       track();
-      return EXACT;
+      return exactAnswerFor(address);
     });
     await processGeocodingOnce(workerDeps(clientA, { batchSize: 1, slot, now: () => frozen }));
 
-    const clientB = fakeGeocoder(() => {
+    const clientB = fakeGeocoder((address) => {
       track();
-      return EXACT;
+      return exactAnswerFor(address);
     });
     await processGeocodingOnce(workerDeps(clientB, { batchSize: 1, slot, now: () => frozen }));
 
@@ -1509,7 +1538,7 @@ describe('кэш по нормализованному адресу', () => {
     await isolateJobs(ids);
     await resetProviderState();
 
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     const result = await processGeocodingOnce(workerDeps(client, { batchSize: 2 }));
 
     expect(result.resolved).toBe(2);
@@ -1589,7 +1618,7 @@ describe('кэш по нормализованному адресу', () => {
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     await processGeocodingOnce(workerDeps(client));
     expect(client.calls).toHaveLength(1);
 
@@ -1612,7 +1641,7 @@ describe('кэш по нормализованному адресу', () => {
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     await processGeocodingOnce(workerDeps(client));
     expect(client.calls).toHaveLength(1);
 
@@ -1686,7 +1715,7 @@ describe('сводка для отчёта', () => {
     await resetProviderState();
     const before = await geocodingReport(ctx.db);
 
-    await processGeocodingOnce(workerDeps(fakeGeocoder(() => EXACT)));
+    await processGeocodingOnce(workerDeps(fakeGeocoder((address) => exactAnswerFor(address))));
     const after = await geocodingReport(ctx.db);
 
     // Заказ переходит из «в очереди» в «найдено». Знаменатель при этом
@@ -1787,7 +1816,7 @@ describe('состояние интеграции и отсутствие пер
     await isolateJobs([order.id]);
     await resetProviderState();
 
-    const client = fakeGeocoder(() => EXACT);
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
     await processGeocodingOnce(workerDeps(client));
 
     const audit = await ctx.db.auditLog.findMany({
