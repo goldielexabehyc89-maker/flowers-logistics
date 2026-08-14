@@ -172,8 +172,12 @@ async function main(): Promise<void> {
   // Расчёты планирования выполняет фоновый исполнитель со своим владельцем
   // аренды: HTTP-запрос столько ждать не может, а без отдельного владельца
   // два экземпляра приложения считали бы аренду друг друга своей.
+  //
+  // Подменный решатель адреса не имеет, но считать обязан: иначе браузерная
+  // приёмка ставила бы запуск, который никто не берёт, и он навсегда оставался
+  // бы в очереди.
   const planningRunner =
-    config.VROOM_URL === undefined
+    config.VROOM_URL === undefined && !config.PLANNING_TEST_SOLVER
       ? null
       : createPlanningRunner(
           createPlanningDeps({ db, config, logger, workerId: newPlanningWorkerId() }),
