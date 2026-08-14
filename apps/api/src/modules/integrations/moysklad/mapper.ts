@@ -165,12 +165,63 @@ export interface MapOrderResult {
 /**
  * Строит снимок заказа.
  *
- * Адрес берётся только из `shipmentAddress`, получатель — только из «Получатель»,
+ * Адрес берётся из `shipmentAddress` либо, когда это явно включено, из
+ * разобранного `shipmentAddressFull`; получатель — только из «Получатель»,
  * комментарий — только из «Комментарий по доставке», интервал — только из
  * «Время доставки». Резервных источников нет: подстановка «похожего» поля
  * молча подменила бы ошибку заполнения правдоподобной догадкой.
  */
-export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
+/** Откуда собирать адрес заказа. */
+export type AddressSource = 'shipmentAddress' | 'shipmentAddressFull';
+
+/**
+ * Собирает адрес из разобранных частей МоегоСклада.
+ *
+ * В строку входят ТОЛЬКО те части, которые ищет геокодер: индекс, страна,
+ * регион, город, улица и дом. Квартира, подъезд, этаж и комментарии
+ * не входят намеренно — геокодер ищет дом, а не квартиру в нём, и лишние
+ * слова только уводят поиск.
+ *
+ * Без улицы или дома адреса нет. Возвращается `null`, и заказ уходит к человеку:
+ * подставлять вместо этого строку `shipmentAddress` нельзя — ради её замены
+ * источник и включали, а тихий откат к ней превратил бы проверку источника
+ * в проверку неизвестно чего.
+ */
+export function composeStructuredAddress(
+  full: MoyskladOrderDto['shipmentAddressFull'],
+): string | null {
+  if (full === undefined || full === null) {
+    return null;
+  }
+
+  const street = text(full.street);
+  const house = text(full.house);
+  if (street === null || house === null) {
+    return null;
+  }
+
+  const name = (value: unknown): string | null =>
+    typeof value === 'object' && value !== null && 'name' in value
+      ? text((value as { name?: unknown }).name)
+      : null;
+
+  const parts = [
+    text(full.postalCode),
+    name(full.country),
+    name(full.region),
+    text(full.city),
+    street,
+    house,
+  ].filter((part): part is string => part !== null);
+
+  return parts.length === 0 ? null : parts.join(', ');
+}
+
+export function mapOrder(
+  order: MoyskladOrderDto,
+  ids: Ids,
+  addressSource: AddressSource = 'shipmentAddress',
+): MapOrderResult {
   const storeId = idFromHref(order.store?.meta.href);
   const deliveryMethod = attribute(order, ids.deliveryMethodAttribute);
   const paymentType = attribute(order, ids.paymentTypeAttribute);
@@ -210,7 +261,12 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
   }
 
   const deliveryDate = parseDeliveryDate(order.deliveryPlannedMoment);
-  const address = text(order.shipmentAddress);
+  // Источник адреса выбирается конфигурацией окружения. Умолчание сохраняет
+  // прежнее поведение до единого символа.
+  const address =
+    addressSource === 'shipmentAddressFull'
+      ? composeStructuredAddress(order.shipmentAddressFull)
+      : text(order.shipmentAddress);
   const recipient = attribute(order, ids.recipientAttribute).text;
   const comment = attribute(order, ids.commentAttribute).text;
 

@@ -45,8 +45,29 @@ export const moyskladOrderSchema = z.looseObject({
   name: z.string().min(1),
   updated: z.string().min(1),
   moment: z.string().min(1).optional(),
-  /** Адрес одной строкой — единственный источник адреса. */
+  /** Адрес одной строкой — источник по умолчанию. */
   shipmentAddress: z.string().optional(),
+  /**
+   * Разобранный адрес по составляющим.
+   *
+   * Используется временно и только там, где явно включён источник
+   * `shipmentAddressFull`: строка произвольного формата находится геокодером
+   * заметно хуже, чем разобранные части. Поля необязательны все до одного —
+   * МойСклад заполняет их как придётся.
+   */
+  shipmentAddressFull: z
+    .looseObject({
+      postalCode: z.string().optional(),
+      country: z.looseObject({}).optional(),
+      region: z.looseObject({}).optional(),
+      city: z.string().optional(),
+      street: z.string().optional(),
+      house: z.string().optional(),
+      apartment: z.string().optional(),
+      addInfo: z.string().optional(),
+      comment: z.string().optional(),
+    })
+    .optional(),
   /** Комментарий документа. Наш комментарий берётся не отсюда, но поле валидируем. */
   description: z.string().optional(),
   deliveryPlannedMoment: z.string().optional(),

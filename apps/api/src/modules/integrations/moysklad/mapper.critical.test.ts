@@ -20,6 +20,7 @@ import {
 import {
   attentionReasonsFor,
   canonicalJson,
+  composeStructuredAddress,
   diffSnapshots,
   mapOrder,
   snapshotHash,
@@ -684,5 +685,103 @@ describe('плановая дата — календарная дата Моск
 
   it('дата без времени принимается', () => {
     expect(parseDeliveryDate('2026-08-07').date).toBe('2026-08-07');
+  });
+});
+
+describe('источник адреса', () => {
+  /** Разобранный адрес МоегоСклада. Синтетический: настоящих адресов тут нет. */
+  const full = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+    addInfo: 'код домофона 1234',
+    comment: 'позвонить за час',
+  };
+
+  it('без настройки адрес берётся из shipmentAddress, как прежде', () => {
+    const mapped = mapOrder(order({ shipmentAddressFull: full } as never), IDS);
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+  });
+
+  it('shipmentAddressFull собирается только из частей, нужных геокодеру', () => {
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: full } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+
+    expect(mapped.snapshot.address).toBe(
+      '141014, Россия, Московская область, Мытищи, Олимпийский проспект, 29',
+    );
+
+    // Квартира, домофон и комментарий не входят: геокодер ищет дом,
+    // а не квартиру в нём, и лишние слова только уводят поиск.
+    for (const excluded of ['137', 'домофон', '1234', 'позвонить']) {
+      expect(mapped.snapshot.address, excluded).not.toContain(excluded);
+    }
+  });
+
+  it('без улицы или дома адреса нет, и запасной вариант не подставляется', () => {
+    // Подставить сюда shipmentAddress значило бы проверять неизвестно что:
+    // ради замены этой строки источник и включали.
+    for (const missing of [{ street: undefined }, { house: undefined }]) {
+      const mapped = mapOrder(
+        order({ shipmentAddressFull: { ...full, ...missing } } as never),
+        IDS,
+        'shipmentAddressFull',
+      );
+      expect(mapped.snapshot.address, JSON.stringify(missing)).toBeNull();
+    }
+
+    // Разобранного адреса нет вовсе — тот же ответ.
+    expect(mapOrder(order(), IDS, 'shipmentAddressFull').snapshot.address).toBeNull();
+  });
+
+  it('пропущенные необязательные части просто не попадают в строку', () => {
+    const mapped = mapOrder(
+      order({
+        shipmentAddressFull: { street: 'Тверская улица', house: '13' },
+      } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.address).toBe('Тверская улица, 13');
+  });
+
+  it('изменение разобранного адреса меняет строку источника', () => {
+    // На этом и держится устаревание: адрес заказа меняется, поколение растёт,
+    // и задание с прежним адресом координат уже не присвоит.
+    const before = mapOrder(
+      order({ shipmentAddressFull: full } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    const after = mapOrder(
+      order({ shipmentAddressFull: { ...full, house: '31' } } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+
+    expect(before.snapshot.address).not.toBe(after.snapshot.address);
+    // А смена одной только квартиры источник НЕ меняет: для геокодера
+    // это тот же дом.
+    const sameHouse = mapOrder(
+      order({ shipmentAddressFull: { ...full, apartment: '999' } } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(sameHouse.snapshot.address).toBe(before.snapshot.address);
+  });
+
+  it('чистая функция сборки доступна отдельно и отвечает тем же', () => {
+    expect(composeStructuredAddress(full as never)).toBe(
+      '141014, Россия, Московская область, Мытищи, Олимпийский проспект, 29',
+    );
+    expect(composeStructuredAddress(undefined)).toBeNull();
+    expect(composeStructuredAddress({ street: 'Тверская улица' } as never)).toBeNull();
   });
 });
