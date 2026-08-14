@@ -16,8 +16,14 @@ import {
   MAX_CAPACITY,
   MAX_SLOTS,
   parseSplitParams,
+  runAutoSplit,
+  SPLIT_POLL_MS,
+  SPLIT_TIMEOUT_MS,
+  splitFailure,
   splitPhase,
   type PlanRunView,
+  type SplitClient,
+  type SplitClock,
 } from './auto-split';
 
 function run(patch: Partial<PlanRunView>): PlanRunView {
@@ -143,6 +149,168 @@ describe('стадия разбивки', () => {
   it('отказ и снятое превью — это отказ, а не ожидание', () => {
     expect(splitPhase(run({ state: 'FAILED' }))).toEqual({ kind: 'FAILED' });
     expect(splitPhase(run({ state: 'EXPIRED' }))).toEqual({ kind: 'FAILED' });
+  });
+});
+
+describe('отказ решателя доходит до логиста без потерь', () => {
+  /** Управляемые часы: ожидание проверяется без настоящих пауз. */
+  function clock(): SplitClock & { elapsed: number } {
+    const state = { elapsed: 0 };
+    return {
+      get elapsed() {
+        return state.elapsed;
+      },
+      now: () => state.elapsed,
+      sleep: async (ms: number) => {
+        state.elapsed += ms;
+      },
+    };
+  }
+
+  const input = {
+    deliveryDate: '2026-08-14',
+    orderIds: ['a', 'b'],
+    params: { vehicles: 2, capacityOrders: 10 },
+    vehicleType: 'CAR' as const,
+  };
+
+  it('503 показывается сообщением сервера и не превращается в частичный успех', async () => {
+    // Сервер отвечает 503, когда решатель не настроен. Ни превью, ни
+    // применения быть не должно — иначе логист уехал бы в пустую вкладку.
+    const calls = { read: 0, apply: 0 };
+    const client: SplitClient = {
+      start: async () => {
+        throw Object.assign(new Error('Автоматический расчёт недоступен: решатель не настроен.'), {
+          status: 503,
+        });
+      },
+      read: async () => {
+        calls.read += 1;
+        throw new Error('не должно вызываться');
+      },
+      apply: async () => {
+        calls.apply += 1;
+        throw new Error('не должно вызываться');
+      },
+    };
+
+    await expect(runAutoSplit(client, input, clock())).rejects.toThrow(/решатель не настроен/);
+    expect(calls).toEqual({ read: 0, apply: 0 });
+  });
+
+  it('отказ оставляет выбор, не уводит в «Маршрутизацию» и снимает ожидание', async () => {
+    const effect = splitFailure(
+      new Error('Автоматический расчёт недоступен: решатель не настроен.'),
+    );
+
+    expect(effect.message).toBe('Автоматический расчёт недоступен: решатель не настроен.');
+    // Выбор — это работа логиста. Снять его «на всякий случай» значит
+    // заставить набирать заказы заново из-за чужой поломки.
+    expect(effect.keepSelection).toBe(true);
+    // Черновиков не создано, вести некуда.
+    expect(effect.navigate).toBe(false);
+    // Кнопка обязана вернуться в рабочее состояние: вечное ожидание
+    // неотличимо от зависшего приложения.
+    expect(effect.busy).toBe(false);
+  });
+
+  it('отказ без внятного текста подменяется понятной причиной', () => {
+    // Пустое сообщение и техническая строка одинаково бесполезны человеку.
+    expect(splitFailure(new Error('')).message).toMatch(/проверьте выбор и настройки/i);
+    expect(splitFailure(undefined).message).toMatch(/проверьте выбор и настройки/i);
+  });
+
+  it('бесконечного ожидания нет: расчёт, который не завершается, обрывается', async () => {
+    let reads = 0;
+    const client: SplitClient = {
+      start: async () => ({
+        id: 'run-1',
+        state: 'QUEUED',
+        version: 1,
+        routeIds: [],
+        preview: null,
+      }),
+      // Запуск навсегда остаётся в очереди — ровно так вёл себя день,
+      // занятый расчётом при невзведённом решателе.
+      read: async () => {
+        reads += 1;
+        return { id: 'run-1', state: 'QUEUED', version: 1, routeIds: [], preview: null };
+      },
+      apply: async () => {
+        throw new Error('не должно вызываться');
+      },
+    };
+
+    await expect(runAutoSplit(client, input, clock())).rejects.toThrow(/дольше обычного/);
+    // Число обращений конечно: цикл ограничен сроком, а не надеждой.
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThanOrEqual(SPLIT_TIMEOUT_MS / SPLIT_POLL_MS + 1);
+  });
+
+  it('после исправления конфигурации тот же выбор считается повторно', async () => {
+    // Повтор возможен именно потому, что выбор не был сброшен отказом.
+    let broken = true;
+    const client: SplitClient = {
+      start: async () => {
+        if (broken) {
+          throw new Error('Автоматический расчёт недоступен: решатель не настроен.');
+        }
+        return { id: 'run-2', state: 'QUEUED', version: 1, routeIds: [], preview: null };
+      },
+      read: async () => ({
+        id: 'run-2',
+        state: 'PREVIEW',
+        version: 2,
+        routeIds: [],
+        preview: { unassignedOrderIds: [] },
+      }),
+      apply: async () => ({
+        id: 'run-2',
+        state: 'APPLIED',
+        version: 3,
+        routeIds: ['draft-1', 'draft-2'],
+        preview: { unassignedOrderIds: [] },
+      }),
+    };
+
+    await expect(runAutoSplit(client, input, clock())).rejects.toThrow(/не настроен/);
+
+    broken = false;
+    const outcome = await runAutoSplit(client, input, clock());
+
+    expect(outcome.kind).toBe('APPLIED');
+    if (outcome.kind === 'APPLIED') {
+      expect(firstDraftId(outcome.run)).toBe('draft-1');
+    }
+  });
+
+  it('частичный результат не создаёт черновиков без согласия', async () => {
+    const calls = { apply: 0 };
+    const client: SplitClient = {
+      start: async () => ({
+        id: 'run-3',
+        state: 'QUEUED',
+        version: 1,
+        routeIds: [],
+        preview: null,
+      }),
+      read: async () => ({
+        id: 'run-3',
+        state: 'PREVIEW',
+        version: 2,
+        routeIds: [],
+        preview: { unassignedOrderIds: ['x'] },
+      }),
+      apply: async () => {
+        calls.apply += 1;
+        throw new Error('не должно вызываться без согласия');
+      },
+    };
+
+    const outcome = await runAutoSplit(client, input, clock());
+
+    expect(outcome).toMatchObject({ kind: 'CONSENT', unassignedCount: 1 });
+    expect(calls.apply).toBe(0);
   });
 });
 

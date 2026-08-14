@@ -31,12 +31,14 @@ import { attentionLabel, formatMinutes } from './deals';
 import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
 import {
-  buildSlots,
   capacityShortfall,
   firstDraftId,
   parseSplitParams,
-  splitPhase,
+  runAutoSplit,
+  splitFailure,
   type PlanRunView,
+  type SplitClient,
+  type SplitClock,
   type SplitParams,
 } from './auto-split';
 import { useWorkspace } from '../logistics/useWorkspace';
@@ -65,10 +67,6 @@ interface DealsResponse {
 }
 
 const PAGE_SIZE = 50;
-
-/** Как часто спрашивать готовность расчёта и сколько всего его ждать. */
-const SPLIT_POLL_MS = 1500;
-const SPLIT_TIMEOUT_MS = 120_000;
 
 /** Минуты от полуночи в строку `ЧЧ:ММ` для поля формы. */
 function minutesToText(minute: number | null): string {
@@ -243,29 +241,27 @@ export function DealsWorkspace(): React.JSX.Element {
   });
 
   /**
-   * Ожидание готового превью.
+   * Обращения разбивки к серверу.
    *
-   * Расчёт выполняет фоновый исполнитель, поэтому ответ приходит не сразу.
-   * Ожидание ограничено по времени: висящая без объяснения кнопка хуже
-   * честного отказа, а запуск при этом остаётся в истории расчётов.
+   * Сам ход разбивки живёт в `auto-split.ts` и проверяется без браузера:
+   * отказ решателя, ограниченное ожидание и согласие на частичный результат —
+   * это правила, а не разметка. Здесь остаётся только связывание с клиентом.
    */
-  const awaitPreview = useCallback(
-    async (runId: string): Promise<PlanRunView> => {
-      const deadline = Date.now() + SPLIT_TIMEOUT_MS;
-      for (;;) {
-        const run = await client.get<PlanRunView>(`/api/route-plans/${runId}`);
-        if (splitPhase(run).kind !== 'RUNNING') {
-          return run;
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(
-            'Расчёт идёт дольше обычного. Он не потерян: откройте его позже или повторите.',
-          );
-        }
-        await new Promise((resolve) => globalThis.setTimeout(resolve, SPLIT_POLL_MS));
-      }
-    },
+  const splitClient: SplitClient = useMemo(
+    () => ({
+      start: (body) => client.post<PlanRunView>('/api/route-plans', body),
+      read: (runId) => client.get<PlanRunView>(`/api/route-plans/${runId}`),
+      apply: (runId, body) => client.post<PlanRunView>(`/api/route-plans/${runId}/apply`, body),
+    }),
     [client],
+  );
+
+  const splitClock: SplitClock = useMemo(
+    () => ({
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((resolve) => globalThis.setTimeout(resolve, ms)),
+    }),
+    [],
   );
 
   /**
@@ -309,39 +305,29 @@ export function DealsWorkspace(): React.JSX.Element {
     return parsed.ok ? { shortfall: capacityShortfall(selected.length, parsed.value) } : null;
   }, [vehiclesInput, capacityInput, selected.length]);
 
+  /**
+   * Отказ разбивки.
+   *
+   * Правило целиком в `splitFailure`: выбор остаётся за логистом, перехода
+   * в «Маршрутизацию» не происходит, ожидание снимается. Здесь только
+   * применение готового решения — иначе каждую из этих частей легко нарушить
+   * незаметно.
+   */
   const splitFailed = useCallback((error: unknown): void => {
+    const effect = splitFailure(error);
     setPendingSplit(null);
-    setNotice(
-      (error as { message?: string }).message ?? 'Расчёт не запущен: проверьте выбор и настройки.',
-    );
+    setNotice(effect.message);
   }, []);
 
   const autoPlan = useMutation({
-    mutationFn: async (params: SplitParams) => {
-      const started = await client.post<PlanRunView>('/api/route-plans', {
-        deliveryDate: date,
-        orderIds: selected,
+    mutationFn: (params: SplitParams) =>
+      runAutoSplit(
+        splitClient,
         // Ровно столько машин, сколько указал логист. Число не выводится
         // из размера выбора: это было бы решение, принятое за человека.
-        slots: buildSlots({ ...params, vehicleType: 'CAR' }),
-      });
-
-      const ready = await awaitPreview(started.id);
-      const phase = splitPhase(ready);
-
-      if (phase.kind === 'FAILED') {
-        throw new Error('Расчёт не удался. Проверьте условия и повторите.');
-      }
-      if (phase.kind === 'NEEDS_CONSENT') {
-        return { kind: 'CONSENT' as const, run: ready, unassignedCount: phase.unassignedCount };
-      }
-
-      const applied = await client.post<PlanRunView>(`/api/route-plans/${ready.id}/apply`, {
-        expectedVersion: ready.version,
-        allowUnassigned: false,
-      });
-      return { kind: 'APPLIED' as const, run: applied };
-    },
+        { deliveryDate: date, orderIds: selected, params, vehicleType: 'CAR' },
+        splitClock,
+      ),
     onSuccess: (result) => {
       if (result.kind === 'CONSENT') {
         // Заказ, который никто не повезёт, логист обязан увидеть ДО создания

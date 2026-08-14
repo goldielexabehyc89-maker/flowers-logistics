@@ -154,6 +154,134 @@ export function splitPhase(run: PlanRunView): SplitPhase {
   }
 }
 
+// --- Ход разбивки -----------------------------------------------------------
+
+/** Как часто спрашивать готовность расчёта и сколько всего его ждать. */
+export const SPLIT_POLL_MS = 1500;
+export const SPLIT_TIMEOUT_MS = 120_000;
+
+export interface SplitClient {
+  start: (body: {
+    deliveryDate: string;
+    orderIds: string[];
+    slots: SlotRequest[];
+  }) => Promise<PlanRunView>;
+  read: (runId: string) => Promise<PlanRunView>;
+  apply: (
+    runId: string,
+    body: { expectedVersion: number; allowUnassigned: boolean },
+  ) => Promise<PlanRunView>;
+}
+
+export interface SplitClock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+export type SplitOutcome =
+  | { kind: 'CONSENT'; run: PlanRunView; unassignedCount: number }
+  | { kind: 'APPLIED'; run: PlanRunView };
+
+/**
+ * Весь ход разбивки одним местом.
+ *
+ * Вынесен из компонента, чтобы поведение можно было доказать без браузера:
+ * отказ сервера, ограниченное ожидание и согласие на частичный результат —
+ * это правила, а не разметка.
+ *
+ * Отказ на любом шаге пробрасывается как есть и НЕ превращается в частичный
+ * успех: черновики создаёт только явный `apply`. Поэтому упавший расчёт
+ * не может увести логиста в «Маршрутизацию».
+ */
+export async function runAutoSplit(
+  client: SplitClient,
+  input: {
+    deliveryDate: string;
+    orderIds: string[];
+    params: SplitParams;
+    vehicleType: VehicleType;
+  },
+  clock: SplitClock,
+): Promise<SplitOutcome> {
+  const started = await client.start({
+    deliveryDate: input.deliveryDate,
+    orderIds: input.orderIds,
+    slots: buildSlots({ ...input.params, vehicleType: input.vehicleType }),
+  });
+
+  const ready = await awaitPreview(client, started.id, clock);
+  const phase = splitPhase(ready);
+
+  if (phase.kind === 'FAILED') {
+    throw new Error('Расчёт не удался. Проверьте условия и повторите.');
+  }
+  if (phase.kind === 'NEEDS_CONSENT') {
+    return { kind: 'CONSENT', run: ready, unassignedCount: phase.unassignedCount };
+  }
+
+  const applied = await client.apply(ready.id, {
+    expectedVersion: ready.version,
+    allowUnassigned: false,
+  });
+  return { kind: 'APPLIED', run: applied };
+}
+
+/**
+ * Ожидание готового превью.
+ *
+ * Ограничено по времени намеренно: висящая без объяснения кнопка хуже честного
+ * отказа. Запуск при этом не теряется — он остаётся в истории расчётов.
+ */
+export async function awaitPreview(
+  client: Pick<SplitClient, 'read'>,
+  runId: string,
+  clock: SplitClock,
+): Promise<PlanRunView> {
+  const deadline = clock.now() + SPLIT_TIMEOUT_MS;
+
+  for (;;) {
+    const run = await client.read(runId);
+    if (splitPhase(run).kind !== 'RUNNING') {
+      return run;
+    }
+    if (clock.now() >= deadline) {
+      throw new Error(
+        'Расчёт идёт дольше обычного. Он не потерян: откройте его позже или повторите.',
+      );
+    }
+    await clock.sleep(SPLIT_POLL_MS);
+  }
+}
+
+/**
+ * Что делать с отказом разбивки.
+ *
+ * Правило вынесено отдельно, потому что все четыре его части легко нарушить
+ * незаметно: снять выбор «на всякий случай», увести на пустую «Маршрутизацию»,
+ * оставить кнопку в вечном ожидании или показать техническую строку вместо
+ * причины.
+ */
+export interface SplitFailureEffect {
+  /** Текст для человека. Сообщение сервера сохраняется, если оно есть. */
+  message: string;
+  /** Выбор остаётся: логист исправляет условия и повторяет с тем же набором. */
+  keepSelection: true;
+  /** Переход в «Маршрутизацию» не происходит: черновиков не создано. */
+  navigate: false;
+  /** Ожидание закончено, кнопка снова доступна. */
+  busy: false;
+}
+
+export function splitFailure(error: unknown): SplitFailureEffect {
+  const message =
+    typeof (error as { message?: unknown })?.message === 'string' &&
+    (error as { message: string }).message.trim() !== ''
+      ? (error as { message: string }).message
+      : 'Расчёт не запущен: проверьте выбор и настройки.';
+
+  return { message, keepSelection: true, navigate: false, busy: false };
+}
+
 /**
  * Куда вести после применения.
  *
