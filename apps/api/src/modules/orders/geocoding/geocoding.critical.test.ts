@@ -579,7 +579,9 @@ describe('постановка в очередь', () => {
     expect(stored.geoGeneration).toBe(1);
   });
 
-  it('смена адреса растит поколение и создаёт новое задание', async () => {
+  it('смена адреса снимает точку, но нового поколения и задания не создаёт', async () => {
+    // Обновление заказа в МоемСкладе событием геокодирования не является:
+    // обращаться к геокодеру за исторический заказ никто не просил.
     const { snapshot, order } = await seedOrder();
 
     await apply({
@@ -589,14 +591,18 @@ describe('постановка в очередь', () => {
     });
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
-    expect(stored.geoGeneration).toBe(2);
-    expect(stored.geoState).toBe('PENDING');
+    // Поколение прежнее: новую версию адреса на разрешение не отправляли.
+    expect(stored.geoGeneration).toBe(1);
+    // Но прежняя точка снята — она относилась к другому адресу и молча
+    // увела бы курьера.
+    expect(stored.geoLatMicro).toBeNull();
+    expect(stored.geoSource).toBeNull();
 
     const jobs = await ctx.db.orderGeocodeJob.findMany({
       where: { orderId: order.id },
       orderBy: { geoGeneration: 'asc' },
     });
-    expect(jobs.map((job) => job.geoGeneration)).toEqual([1, 2]);
+    expect(jobs.map((job) => job.geoGeneration)).toEqual([1]);
   });
 
   it('дедупликацию держит база: одно поколение — одно задание', async () => {
@@ -979,16 +985,21 @@ describe('устаревший результат и гонки', () => {
 
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
     // Точка от прежнего адреса не досталась новому.
-    expect(stored.geoState).toBe('PENDING');
     expect(stored.geoLatMicro).toBeNull();
-    expect(stored.geoGeneration).toBe(2);
+    // Поколение прежнее: обновление заказа новую версию на разрешение
+    // не отправляет. Защита держится не на нём, а на сравнении АДРЕСА.
+    expect(stored.geoGeneration).toBe(1);
 
     const firstJob = await ctx.db.orderGeocodeJob.findFirstOrThrow({
       where: { orderId: order.id, geoGeneration: 1 },
     });
     expect(firstJob.status).toBe('DONE');
     expect(firstJob.staleResults).toBe(1);
-    expect(firstJob.lastErrorCode).toBe('GENERATION_CHANGED');
+    expect(firstJob.lastErrorCode).toBe('ADDRESS_CHANGED');
+
+    // Автоматического повторного задания не появилось: событием смена адреса
+    // в МоемСкладе не является.
+    expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: order.id } })).toBe(1);
   });
 
   it('медленный геокодер и ручная точка: решение человека не перезаписывается', async () => {
@@ -1511,16 +1522,22 @@ describe('backfill существующих заказов', () => {
     expect(result.exhaustedBatches).toBe(true);
   });
 
-  it('остановка приложения дожидается наполнения', async () => {
-    // Наполнение работает с базой, которую остановка вот-вот закроет. Проверка
-    // читает исходный код точки входа: поднимать процесс ради этого незачем,
-    // а пропущенное ожидание проявилось бы только в редком сбое при деплое.
+  it('запуск приложения историю не сканирует и ждать при остановке нечего', async () => {
+    // Проверка читает исходный код точки входа: поднимать процесс ради этого
+    // незачем, а вернувшееся стартовое наполнение проявилось бы только
+    // на реальной базе — 685 заданий за минуту, как это и случилось.
     const { readFile } = await import('node:fs/promises');
     const code = await readFile(new URL('../../../index.ts', import.meta.url), 'utf8');
 
-    expect(code).toContain('backfillStopping = true;');
-    expect(code).toContain('backfill ?? Promise.resolve(),');
-    expect(code).toContain('shouldStop: () => backfillStopping');
+    // Массового прохода по истории при старте нет вовсе.
+    expect(code).not.toContain('backfillGeocoding');
+    expect(code).not.toContain('backfillStopping');
+    // И останавливать при завершении тоже нечего.
+    expect(code).not.toContain('backfill ?? Promise.resolve()');
+
+    // Создание заданий и обращение к геокодеру — разные решения.
+    expect(code).toContain('enqueueOnImport');
+    expect(code).toContain('shouldGeocodeAutomatically');
   });
 
   it('остановка процесса прекращает наполнение между пачками', async () => {
@@ -1569,6 +1586,105 @@ describe('backfill существующих заказов', () => {
     const before = await ctx.db.orderGeocodeJob.count({ where: { orderId: order.id } });
     await backfillGeocoding(ctx.db, { batchSize: 20, maxBatches: 100 });
     expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: order.id } })).toBe(before);
+  });
+});
+
+describe('очередь наполняется событиями, а не состоянием', () => {
+  /**
+   * Разобранный адрес: синтетический, настоящих адресов тут нет.
+   *
+   * Прежде приложение при каждом запуске ставило в очередь ВСЕ исторические
+   * заказы без координат — 685 заданий за минуту на staging. Геокодировать
+   * надо событие, а не состояние: отсутствие координат у старого заказа
+   * событием не является.
+   */
+  const FULL = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+  };
+
+  async function jobsOf(orderId: string): Promise<number> {
+    return ctx.db.orderGeocodeJob.count({ where: { orderId } });
+  }
+
+  it('первый импорт нового заказа создаёт ровно одно задание с geocodeAddress', async () => {
+    const snapshot = mapOrder(
+      source({ shipmentAddressFull: FULL }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(await jobsOf(order.id)).toBe(1);
+    expect(order.geocodeAddress).not.toBeNull();
+    // Источником запроса стал разобранный адрес, а не строка источника.
+    expect(order.geoState).toBe('PENDING');
+  });
+
+  it('повторный импорт того же снимка второго задания не создаёт', async () => {
+    const snapshot = mapOrder(
+      source({ shipmentAddressFull: FULL }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply(snapshot);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+
+    await apply(snapshot);
+    expect(await jobsOf(order.id)).toBe(1);
+  });
+
+  it('обычное обновление существующего заказа в очередь его НЕ ставит', async () => {
+    const first = mapOrder(
+      source({ shipmentAddressFull: FULL }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply(first);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: first.externalId },
+    });
+    const before = await jobsOf(order.id);
+
+    // Адрес в МоемСкладе изменился — но это не событие геокодирования.
+    const changed = mapOrder(
+      source({
+        id: first.externalId,
+        name: first.externalName,
+        shipmentAddressFull: { ...FULL, house: '31' },
+        updated: '2026-08-12 15:00:00.000',
+      }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply({ ...changed, externalUpdated: '2026-08-12 15:00:00.000' });
+
+    // Нового задания нет.
+    expect(await jobsOf(order.id)).toBe(before);
+    // Но прежняя точка снята: она относилась к другому адресу и молча
+    // увела бы курьера.
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.geoLatMicro).toBeNull();
+  });
+
+  it('без включённого создания заданий импорт очередь не трогает', async () => {
+    const snapshot = snapshotOf();
+    await ctx.db.$transaction((tx) => applyOrderSnapshot(tx, snapshot, NOW, { geocoding: false }));
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+    });
+    expect(await jobsOf(order.id)).toBe(0);
   });
 });
 
@@ -1708,8 +1824,8 @@ describe('кэш по нормализованному адресу', () => {
     expect(again.requests).toBe(0);
   });
 
-  it('смена адреса обращается заново: ключ кэша изменился вместе с адресом', async () => {
-    const { snapshot, order } = await seedOrder();
+  it('ручная правка адреса обращается заново: ключ кэша изменился вместе с адресом', async () => {
+    const { order } = await seedOrder();
     await isolateJobs([order.id]);
     await resetProviderState();
 
@@ -1717,12 +1833,18 @@ describe('кэш по нормализованному адресу', () => {
     await processGeocodingOnce(workerDeps(client));
     expect(client.calls).toHaveLength(1);
 
-    // Правка адреса растит поколение и создаёт новое задание.
-    await apply({
-      ...snapshot,
-      address: OTHER_ADDRESS,
-      externalUpdated: '2026-08-12 15:00:00.000',
+    // Правку делает логист — это событие, и оно создаёт новое задание.
+    // Правка идёт настоящим путём логиста: у локального адреса есть инварианты
+    // базы — автор и время, — и обходить их в проверке значило бы проверять
+    // не тот путь, которым пользуются.
+    const token = await tokenFor(['LOGISTICIAN']);
+    const edit = await ctx.app.inject({
+      method: 'PUT',
+      url: `/api/orders/${order.id}/address`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { address: OTHER_ADDRESS },
     });
+    expect(edit.statusCode).toBe(200);
     await isolateJobs([order.id]);
 
     const again = await processGeocodingOnce(workerDeps(client));
