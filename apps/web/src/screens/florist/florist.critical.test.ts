@@ -258,6 +258,7 @@ describe('показ значений', () => {
             createdAt: '2027-03-10T09:00:00.000Z',
             completedAt: null,
             lastErrorCode: 'PRINTER_OFFLINE',
+            lastErrorMessage: 'Принтер не отвечает.',
           },
           {
             id: 'job-2',
@@ -266,6 +267,7 @@ describe('показ значений', () => {
             createdAt: '2027-03-10T09:05:00.000Z',
             completedAt: null,
             lastErrorCode: null,
+            lastErrorMessage: null,
           },
         ],
       },

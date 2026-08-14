@@ -302,7 +302,13 @@ describe('код привязки', () => {
       redeemPairingCode(
         ctx.db,
         ctx.config,
-        { code: first.code, deviceName: 'Старый', os: null, agentVersion: null, defaultPrinterName: null },
+        {
+          code: first.code,
+          deviceName: 'Старый',
+          os: null,
+          agentVersion: null,
+          defaultPrinterName: null,
+        },
         CONTEXT,
       ),
     ).rejects.toBeInstanceOf(AppError);
@@ -311,7 +317,13 @@ describe('код привязки', () => {
     const paired = await redeemPairingCode(
       ctx.db,
       ctx.config,
-      { code: second.code, deviceName: 'Новый', os: null, agentVersion: null, defaultPrinterName: null },
+      {
+        code: second.code,
+        deviceName: 'Новый',
+        os: null,
+        agentVersion: null,
+        defaultPrinterName: null,
+      },
       CONTEXT,
     );
     expect(paired.deviceId).toBeTruthy();
@@ -334,7 +346,13 @@ describe('код привязки', () => {
       redeemPairingCode(
         ctx.db,
         ctx.config,
-        { code: issued.code, deviceName: 'Опоздавший', os: null, agentVersion: null, defaultPrinterName: null },
+        {
+          code: issued.code,
+          deviceName: 'Опоздавший',
+          os: null,
+          agentVersion: null,
+          defaultPrinterName: null,
+        },
         CONTEXT,
       ),
     ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
@@ -348,7 +366,13 @@ describe('код привязки', () => {
     const first = await redeemPairingCode(
       ctx.db,
       ctx.config,
-      { code: issued.code, deviceName: 'Первый', os: null, agentVersion: null, defaultPrinterName: null },
+      {
+        code: issued.code,
+        deviceName: 'Первый',
+        os: null,
+        agentVersion: null,
+        defaultPrinterName: null,
+      },
       CONTEXT,
     );
     expect(first.token.startsWith(DEVICE_TOKEN_PREFIX)).toBe(true);
@@ -358,7 +382,13 @@ describe('код привязки', () => {
       redeemPairingCode(
         ctx.db,
         ctx.config,
-        { code: issued.code, deviceName: 'Второй', os: null, agentVersion: null, defaultPrinterName: null },
+        {
+          code: issued.code,
+          deviceName: 'Второй',
+          os: null,
+          agentVersion: null,
+          defaultPrinterName: null,
+        },
         CONTEXT,
       ),
     ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
@@ -376,7 +406,13 @@ describe('код привязки', () => {
         redeemPairingCode(
           ctx.db,
           ctx.config,
-          { code: issued.code, deviceName: name, os: null, agentVersion: null, defaultPrinterName: null },
+          {
+            code: issued.code,
+            deviceName: name,
+            os: null,
+            agentVersion: null,
+            defaultPrinterName: null,
+          },
           CONTEXT,
         ),
       ),
@@ -409,7 +445,13 @@ describe('код привязки', () => {
         await redeemPairingCode(
           ctx.db,
           ctx.config,
-          { code: wrong, deviceName: 'Перебор', os: null, agentVersion: null, defaultPrinterName: null },
+          {
+            code: wrong,
+            deviceName: 'Перебор',
+            os: null,
+            agentVersion: null,
+            defaultPrinterName: null,
+          },
           attacker,
         );
       } catch (error) {
@@ -431,7 +473,13 @@ describe('код привязки', () => {
     const paired = await redeemPairingCode(
       ctx.db,
       ctx.config,
-      { code: reissued.code, deviceName: 'Рабочее место', os: null, agentVersion: null, defaultPrinterName: null },
+      {
+        code: reissued.code,
+        deviceName: 'Рабочее место',
+        os: null,
+        agentVersion: null,
+        defaultPrinterName: null,
+      },
       workstation,
     );
     expect(paired.deviceId).toBeTruthy();
@@ -442,7 +490,13 @@ describe('код привязки', () => {
       redeemPairingCode(
         ctx.db,
         ctx.config,
-        { code: wrong, deviceName: 'Перебор', os: null, agentVersion: null, defaultPrinterName: null },
+        {
+          code: wrong,
+          deviceName: 'Перебор',
+          os: null,
+          agentVersion: null,
+          defaultPrinterName: null,
+        },
         attacker,
       ),
     ).rejects.toMatchObject({ code: 'RATE_LIMITED' });

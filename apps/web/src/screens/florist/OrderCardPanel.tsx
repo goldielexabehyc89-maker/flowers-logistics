@@ -298,8 +298,21 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
 
       {job !== null && (
         <p className="muted text-sm" data-testid="card-print-state">
-          Печать: {printStateLabel(job.state)} · попытка {job.attempt}
-          {job.lastErrorCode === null ? '' : ` · код ошибки ${job.lastErrorCode}`}
+          Печать: {printStateLabel(job.state)}
+          {job.attempt === null ? '' : ` · попытка ${job.attempt}`}
+        </p>
+      )}
+
+      {/*
+       * Причина отказа — словами и отдельной строкой.
+       *
+       * Флорист не управляет устройствами и не должен, но обязан понять,
+       * почему его бланк не вышел. «Принтер выключен» он исправит сам;
+       * «код PRINTER_OFFLINE» отправит его искать администратора.
+       */}
+      {job !== null && job.lastErrorMessage !== null && (
+        <p className="text-sm" data-testid="card-print-error">
+          {job.lastErrorMessage}
         </p>
       )}
 
