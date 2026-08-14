@@ -316,6 +316,12 @@ jobs:
       AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
       AUTH_REFRESH_REPLAY_KEY: Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0=
       E2E_ADMIN_PHONE: '+79990000001'
+      # Подменные решатель и матрица вместо VROOM и Valhalla: браузерная проверка
+      # обязана идти через настоящий серверный контракт, а не подменять
+      # HTTP-ответ в браузере. Настоящий расчёт требует дорожного графа
+      # и отдельных сервисов, которых здесь нет. Конфигурация не позволяет
+      # включить это вне APP_ENV=local.
+      PLANNING_TEST_SOLVER: 'true'
 
     steps:
       - uses: actions/checkout@v4
