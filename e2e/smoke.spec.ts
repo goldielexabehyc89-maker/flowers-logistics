@@ -652,26 +652,35 @@ test('маршрут: черновик → состав → порядок → �
   page: Page;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
-  const second = process.env['E2E_ORDER_NUMBER_2'] ?? '';
-  test.skip(first === '' || second === '', 'нужны два проверочных заказа');
-
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
   /*
    * Черновики создаются в «Сделках», а редактируются и подтверждаются
    * в «Маршрутизации». Кнопки создания на «Маршрутизации» нет намеренно:
    * рабочее место работает с уже созданными черновиками.
+   *
+   * Заказы берутся не по номеру из окружения, а по признаку «сейчас доступен»:
+   * файл выполняется последовательно, и соседние сценарии успевают увести
+   * конкретные номера в свои черновики.
    */
   await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
 
-  for (const number of [first, second]) {
-    const deal = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
-    await expect(deal).toBeVisible();
-    await deal.getByTestId('deal-pick').click();
-  }
+  const free = page.locator('[data-testid="deal-card"][data-selectable="yes"]');
+  test.skip((await free.count()) < 2, 'нужны два свободных заказа дня');
+
+  const first = (await free.nth(0).getAttribute('data-order-number')) ?? '';
+  const second = (await free.nth(1).getAttribute('data-order-number')) ?? '';
+  expect(first).not.toBe('');
+  expect(second).not.toBe('');
+
+  await free.nth(0).getByTestId('deal-pick').click();
+  await page
+    .locator(`[data-testid="deal-card"][data-order-number="${second}"]`)
+    .getByTestId('deal-pick')
+    .click();
   await page.getByTestId('deals-manual-draft').click();
 
   // Переход ведёт в созданный черновик: он раскрыт, а не потерян в списке.
@@ -700,14 +709,13 @@ test('маршрут: черновик → состав → порядок → �
   await page.reload();
   await expect(page.locator('.routes__card .routes__stop').first()).toHaveText(afterReorder);
 
-  // Второй черновик — из второго заказа, чтобы было куда переносить.
+  // Второй черновик — из любого ещё свободного заказа, чтобы было куда
+  // переносить: конкретный номер к этому моменту мог уйти в чужой черновик.
   await page.getByRole('link', { name: 'Сделки' }).first().click();
-  const secondDeal = page.locator(`[data-testid="deal-card"][data-order-number="${second}"]`);
-  test.skip(
-    (await secondDeal.getAttribute('data-selectable')) !== 'yes',
-    'второй заказ уже занят черновиком',
-  );
-  await secondDeal.getByTestId('deal-pick').click();
+  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
+  const stillFree = page.locator('[data-testid="deal-card"][data-selectable="yes"]');
+  test.skip((await stillFree.count()) === 0, 'свободных заказов для второго черновика нет');
+  await stillFree.first().getByTestId('deal-pick').click();
   await page.getByTestId('deals-manual-draft').click();
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
   const secondCardNumber = (
