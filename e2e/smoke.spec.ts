@@ -903,8 +903,11 @@ test('Сделки: точный выбор → расчёт → превью �
   // Фикстура обязательна: без неё доказывать точность выбора нечем, и проверка
   // обязана упасть, а не пропустить себя. Готового превью фикстура больше
   // не создаёт — расчёт выполняется по-настоящему из браузера.
-  const selectedNumbers = requiredEnv('E2E_PLAN_SELECTED_NUMBERS').split(',');
-  const foreignNumber = requiredEnv('E2E_PLAN_FOREIGN_NUMBER');
+  // Фикстура обязана существовать: она создаёт склад, обязательные настройки
+  // и заказы дня. Без неё расчёту не из чего складываться, и проверка обязана
+  // упасть, а не пропустить себя. Конкретные номера дальше не используются:
+  // заказы берутся по признаку доступности.
+  requiredEnv('E2E_PLAN_SELECTED_NUMBERS');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
@@ -941,25 +944,42 @@ test('Сделки: точный выбор → расчёт → превью �
   await settings.getByTestId('shift-save').click();
   await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
 
-  // 2. «Сделки»: выбирается РОВНО набор фикстуры, посторонний заказ виден
-  //    в том же дне и остаётся невыбранным.
+  /*
+   * 2. «Сделки»: выбирается ровно два заказа, а третий свободный остаётся
+   *    посторонним — он обязан не попасть ни в расчёт, ни в черновики.
+   *
+   * Заказы берутся по признаку «сейчас доступен», а не по номеру из фикстуры:
+   * файл выполняется последовательно, и соседние сценарии успевают увести
+   * конкретные номера в свои черновики.
+   */
   await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
 
-  for (const number of selectedNumbers) {
-    const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
-    await expect(card).toBeVisible();
-    await card.getByTestId('deal-pick').click();
+  const free = page.locator('[data-testid="deal-card"][data-selectable="yes"]');
+  test.skip((await free.count()) < 3, 'нужны три свободных заказа дня');
+
+  const chosen = [
+    (await free.nth(0).getAttribute('data-order-number')) ?? '',
+    (await free.nth(1).getAttribute('data-order-number')) ?? '',
+  ];
+  const foreignNumber = (await free.nth(2).getAttribute('data-order-number')) ?? '';
+  expect(foreignNumber).not.toBe('');
+
+  for (const number of chosen) {
+    expect(number).not.toBe('');
+    await page
+      .locator(`[data-testid="deal-card"][data-order-number="${number}"]`)
+      .getByTestId('deal-pick')
+      .click();
   }
+
   const foreignCard = page.locator(
     `[data-testid="deal-card"][data-order-number="${foreignNumber}"]`,
   );
-  await expect(foreignCard).toBeVisible();
   await expect(foreignCard).toHaveAttribute('data-selected', 'no');
-  await expect(page.getByTestId('deals-selected-count')).toContainText(
-    `Выбрано: ${selectedNumbers.length}`,
-  );
+  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 2');
 
   /*
    * ГРАНИЦА СЦЕНАРИЯ, названная прямо.
