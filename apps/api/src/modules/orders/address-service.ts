@@ -214,17 +214,31 @@ async function applyPoint(
       geoResolvedAt: null,
     },
   });
-  await tx.orderGeoHistory.create({
-    data: {
-      orderId: order.id,
-      kind: 'INVALIDATED_ADDRESS_CHANGED',
-      occurredAt: now,
-      state: 'NEEDS_REVIEW',
-      reviewReason: 'ADDRESS_CHANGED',
-      previousLatMicro: order.geoLatMicro,
-      previousLonMicro: order.geoLonMicro,
-    },
-  });
+  // Запись об инвалидации пишется, ТОЛЬКО если было что инвалидировать.
+  //
+  // Заказ мог не иметь точки никогда: без разобранного адреса задание
+  // не создаётся, и он ждёт человека в «Требует внимания» с состоянием
+  // UNRESOLVED. Запись «прежняя точка снята» для него была бы неправдой —
+  // и база это ловит ограничением `OrderGeoHistory_invalidation_shape`,
+  // которое требует прежних координат у события инвалидации.
+  //
+  // Ограничение не ослабляется и ошибка не подавляется: не нужно писать
+  // событие, которого не происходило. История геоданных обязана означать
+  // «здесь что-то произошло», иначе по ней нельзя восстановить прошлое.
+  const hadPoint = order.geoLatMicro !== null && order.geoLonMicro !== null;
+  if (hadPoint) {
+    await tx.orderGeoHistory.create({
+      data: {
+        orderId: order.id,
+        kind: 'INVALIDATED_ADDRESS_CHANGED',
+        occurredAt: now,
+        state: 'NEEDS_REVIEW',
+        reviewReason: 'ADDRESS_CHANGED',
+        previousLatMicro: order.geoLatMicro,
+        previousLonMicro: order.geoLonMicro,
+      },
+    });
+  }
 }
 
 /** Фактическое состояние точки после всех записей транзакции. */

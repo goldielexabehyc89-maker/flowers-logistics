@@ -68,7 +68,11 @@ export function effectiveAttentionReasons(
   // внимания» после того, как человек уже вписал адрес, значит не давать
   // разгрести список.
   if (address?.corrected === true) {
-    reasons = reasons.filter((reason) => reason !== 'MISSING_ADDRESS');
+    reasons = reasons.filter(
+      // Та же правка снимает и «геокодеру адреса мало»: автоматическим
+      // источником становится адрес логиста, и данных теперь достаточно.
+      (reason) => reason !== 'MISSING_ADDRESS' && reason !== 'GEOCODING_ADDRESS_INCOMPLETE',
+    );
   }
 
   // Конфликт источника, наоборот, добавляет БЛОКИРУЮЩУЮ причину: пока человек
