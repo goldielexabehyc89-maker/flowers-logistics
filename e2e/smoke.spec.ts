@@ -999,7 +999,13 @@ test('Сделки: точный выбор → расчёт → превью �
    * 2. «Сделки»: выбираются два собственных заказа, а третий остаётся
    *    посторонним — он обязан не попасть ни в расчёт, ни в черновики.
    */
+  // Сколько черновиков уже есть у дня: разбивка обязана добавить ровно два,
+  // а не «сделать так, чтобы их стало два» — соседние сценарии оставляют свои.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
+  const draftsBefore = await page.getByTestId('routing-drafts').locator('.routes__draft').count();
+
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -1053,7 +1059,7 @@ test('Сделки: точный выбор → расчёт → превью �
 
   // 5. Разбивка создала НЕСКОЛЬКО черновиков, и раскрыт ровно один.
   const drafts = page.getByTestId('routing-drafts').locator('.routes__draft');
-  await expect(drafts).toHaveCount(2);
+  await expect(drafts).toHaveCount(draftsBefore + 2);
   await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
 
   // 6. Посторонний заказ дня в расчёт не попал и остался доступным в «Сделках».
