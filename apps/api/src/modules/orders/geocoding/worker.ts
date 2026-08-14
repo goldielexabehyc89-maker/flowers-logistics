@@ -38,7 +38,8 @@ import {
   type PhotonAnswer,
   type PhotonErrorCode,
 } from '../../integrations/photon/client.js';
-import { readCache, writeCache } from './cache.js';
+import { readCache, writeCache, type GeocodeDecision } from './cache.js';
+import { verifyPhotonMatch } from './verify.js';
 import { MAX_LAT_MICRO, MAX_LON_MICRO, toMicro } from '../geo.js';
 import { retryDelayMs } from './queue.js';
 import { setGeocoderStatus } from './status.js';
@@ -275,17 +276,25 @@ export function staleReason(
 /**
  * Переводит ответ провайдера в решение.
  *
- * Точкой доставки считается только `qc_geo = 0`. Любое другое значение,
- * отсутствие координат или координата, которую не удалось разобрать, — повод
- * позвать человека, а не сохранить «примерно верную» точку: она выглядела бы
- * как обычная и увела бы курьера, ничем себя не выдав.
+ * Признака «Photon вернул дом» НЕДОСТАТОЧНО. Геокодер не отказывается, а
+ * подбирает ближайшее по звучанию: измеренный пример — «Санкт-Петербург,
+ * Невский проспект, 1» возвращает дом «Ленинградский проспект, 74к1» в Москве.
+ * Точность там «дом», координаты выглядят обычными, и без сверки заказ уехал бы
+ * в другой город молча. Поэтому ответ дополнительно сверяется с исходным
+ * адресом (`verify.ts`), и любое противоречие означает «позвать человека».
+ *
+ * Отсутствие координат, координата вне планеты и найденное «примерно» — то же
+ * самое: точки нет. Везти по улице без дома нельзя.
  */
-export function decideResult(
-  answer: PhotonAnswer | null,
-): { kind: 'RESOLVED'; latMicro: number; lonMicro: number } | { kind: 'LOW_PRECISION' } {
-  // Ничего не найдено и найдено «примерно» — для нас одно и то же: точки нет,
-  // и заказ обязан попасть к человеку. Везти по улице без дома нельзя.
+export function decideResult(answer: PhotonAnswer | null, address: string): GeocodeDecision {
   if (answer === null || answer.precision !== 'HOUSE') {
+    return { kind: 'LOW_PRECISION' };
+  }
+
+  // Сверка запроса и ответа. Строгость здесь намеренно избыточна: сомнительный
+  // адрес стоит минуты логиста, а принятая неверная точка — несостоявшейся
+  // доставки и поездки курьера в другой конец города.
+  if (!verifyPhotonMatch(address, answer).accepted) {
     return { kind: 'LOW_PRECISION' };
   }
 
@@ -512,13 +521,16 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
   // приходит десятками заказов, и платить обращением за каждое повторение
   // незачем. Попадание в кэш не считается запросом к провайдеру.
   const cached = await readCache(deps.db, address);
-  let answer: PhotonAnswer | null;
+  let decision: GeocodeDecision;
   let fromCache = false;
 
   if (cached !== undefined) {
-    answer = cached;
+    // В кэше лежит уже сверенное решение: повторно проверять нечего, а обходить
+    // сверку кэшем — нельзя.
+    decision = cached;
     fromCache = true;
   } else {
+    let answer: PhotonAnswer | null;
     try {
       // Никакой транзакции здесь нет и быть не может: запрос длится сотни
       // миллисекунд, а строка заказа всё это время должна оставаться свободной.
@@ -526,10 +538,10 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
     } catch (error) {
       return handleFailure(deps, job, error);
     }
-    await writeCache(deps.db, address, answer);
+    decision = decideResult(answer, address);
+    await writeCache(deps.db, address, decision, answer);
   }
 
-  const decision = decideResult(answer);
   try {
     const outcome = await applyResult(deps, job, address, decision);
     // Ответ из кэша запросом не считается: отчёт о расходе обязан показывать

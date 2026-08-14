@@ -9,30 +9,30 @@
  * и найденный дом: повторять безнадёжный поиск на каждом проходе значит
  * тратить время и нагружать сервис ради того же самого ответа. Исправляет
  * такой адрес человек, и его правка меняет строку, а значит и ключ.
+ *
+ * В кэше лежит РЕШЕНИЕ, а не сырой ответ геокодера. Иначе попадание в кэш
+ * обходило бы сверку ответа с адресом (`verify.ts`), и однажды принятая
+ * по ошибке точка возвращалась бы снова и снова, уже без всякой проверки.
  */
 
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { Database } from '../../../platform/db.js';
 import type { TransactionClient } from '../../auth/sessions.js';
 import type { PhotonAnswer } from '../../integrations/photon/client.js';
-import { MAX_LAT_MICRO, MAX_LON_MICRO, toMicro } from '../geo.js';
 import { normalizeAddress } from './normalize.js';
-
-/** Микроградусы обратно в градусы: в кэше координата хранится целой. */
-const MICRO = 1_000_000;
 
 type Client = Database | TransactionClient;
 
+/** Решение по адресу — то же самое, что применяется к заказу. */
+export type GeocodeDecision =
+  { kind: 'RESOLVED'; latMicro: number; lonMicro: number } | { kind: 'LOW_PRECISION' };
+
 /**
- * Ответ из кэша.
+ * Решение из кэша.
  *
- * `undefined` — записи нет, нужно спрашивать геокодер. `null` внутри
- * `PhotonAnswer | null` означает «геокодер уже отвечал, что не нашёл».
+ * `undefined` — записи нет, нужно спрашивать геокодер.
  */
-export async function readCache(
-  db: Client,
-  address: string,
-): Promise<PhotonAnswer | null | undefined> {
+export async function readCache(db: Client, address: string): Promise<GeocodeDecision | undefined> {
   const key = normalizeAddress(address);
   if (key === '') {
     return undefined;
@@ -54,33 +54,41 @@ export async function readCache(
   });
 
   if (entry.outcome !== 'HOUSE' || entry.latMicro === null || entry.lonMicro === null) {
-    return null;
+    return { kind: 'LOW_PRECISION' };
   }
-  return {
-    lat: entry.latMicro / MICRO,
-    lon: entry.lonMicro / MICRO,
-    precision: 'HOUSE',
-  };
-}
-
-/** Исход поиска в терминах кэша. */
-export function outcomeOf(answer: PhotonAnswer | null): $Enums.GeocodeOutcome {
-  if (answer === null) {
-    return 'NOT_FOUND';
-  }
-  return answer.precision === 'HOUSE' ? 'HOUSE' : 'AMBIGUOUS';
+  return { kind: 'RESOLVED', latMicro: entry.latMicro, lonMicro: entry.lonMicro };
 }
 
 /**
- * Записывает ответ геокодера.
+ * Исход в терминах кэша.
  *
- * Строка заменяется целиком: это кэш, а не история. Доказательством
- * изменений служат `OrderGeoHistory` и `OrderAddressHistory`, где записи
- * неизменяемы.
+ * «Не найдено» и «найдено, но не принято» различаются намеренно: это разные
+ * проблемы. Первую решает исправление адреса, вторую — человек, который смотрит
+ * на несоответствие между запросом и ответом.
+ */
+export function outcomeOf(
+  decision: GeocodeDecision,
+  answer: PhotonAnswer | null,
+): $Enums.GeocodeOutcome {
+  if (decision.kind === 'RESOLVED') {
+    return 'HOUSE';
+  }
+  return answer === null ? 'NOT_FOUND' : 'AMBIGUOUS';
+}
+
+/**
+ * Записывает принятое решение.
+ *
+ * Строка заменяется целиком: это кэш, а не история. Доказательством изменений
+ * служат `OrderGeoHistory` и `OrderAddressHistory`, где записи неизменяемы.
+ *
+ * Координаты сохраняются только у ПРИНЯТОГО дома — то же правило закреплено
+ * ограничением базы, поэтому непринятая привязка не может выглядеть пригодной.
  */
 export async function writeCache(
   db: Client,
   address: string,
+  decision: GeocodeDecision,
   answer: PhotonAnswer | null,
 ): Promise<void> {
   const key = normalizeAddress(address);
@@ -88,29 +96,20 @@ export async function writeCache(
     return;
   }
 
-  const outcome = outcomeOf(answer);
-  // Координаты сохраняются ТОЛЬКО у точного дома — это же правило закреплено
-  // ограничением базы, поэтому неточная привязка не может выглядеть пригодной.
-  let point: { latMicro: number; lonMicro: number } | null = null;
-  if (outcome === 'HOUSE' && answer !== null) {
-    try {
-      point = {
-        latMicro: toMicro(answer.lat, MAX_LAT_MICRO, 'lat'),
-        lonMicro: toMicro(answer.lon, MAX_LON_MICRO, 'lon'),
-      };
-    } catch {
-      // Координата вне планеты кэшируется как «не найдено»: хранить заведомо
-      // непригодную точку опаснее, чем не хранить ничего.
-      point = null;
-    }
-  }
-
-  const data = {
-    outcome: point === null && outcome === 'HOUSE' ? ('NOT_FOUND' as const) : outcome,
-    latMicro: point?.latMicro ?? null,
-    lonMicro: point?.lonMicro ?? null,
-    source: 'PHOTON' as const,
-  };
+  const data =
+    decision.kind === 'RESOLVED'
+      ? {
+          outcome: 'HOUSE' as const,
+          latMicro: decision.latMicro,
+          lonMicro: decision.lonMicro,
+          source: 'PHOTON' as const,
+        }
+      : {
+          outcome: outcomeOf(decision, answer),
+          latMicro: null,
+          lonMicro: null,
+          source: 'PHOTON' as const,
+        };
 
   await db.geocodeCacheEntry.upsert({
     where: { normalizedAddress: key },

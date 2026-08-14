@@ -111,11 +111,20 @@ const featureSchema = z.object({
     .object({
       osm_key: z.string().optional(),
       osm_value: z.string().optional(),
+      type: z.string().optional(),
+      // Поля, по которым ответ сверяется с исходным адресом. Без них
+      // «Photon вернул дом» — это утверждение без доказательства.
       housenumber: z.string().optional(),
       street: z.string().optional(),
+      name: z.string().optional(),
       city: z.string().optional(),
+      district: z.string().optional(),
+      locality: z.string().optional(),
+      county: z.string().optional(),
       state: z.string().optional(),
-      type: z.string().optional(),
+      postcode: z.string().optional(),
+      countrycode: z.string().optional(),
+      country: z.string().optional(),
     })
     .default({}),
 });
@@ -150,10 +159,33 @@ export function precisionOf(feature: PhotonFeature): PhotonPrecision {
   return 'AREA';
 }
 
+/**
+ * Что Photon рассказал о найденном месте.
+ *
+ * Возвращается наружу целиком, потому что решение «принимать ли точку» нельзя
+ * принять по одной лишь точности: дом с подходящим номером может оказаться
+ * в другом городе. Сверку выполняет `verifyPhotonMatch`.
+ */
+export interface PhotonPlace {
+  housenumber?: string | undefined;
+  street?: string | undefined;
+  name?: string | undefined;
+  city?: string | undefined;
+  district?: string | undefined;
+  locality?: string | undefined;
+  county?: string | undefined;
+  state?: string | undefined;
+  postcode?: string | undefined;
+  countrycode?: string | undefined;
+  country?: string | undefined;
+}
+
 export interface PhotonAnswer {
   lat: number;
   lon: number;
   precision: PhotonPrecision;
+  /** Описание найденного места. Нужно, чтобы сверить ответ с запросом. */
+  place: PhotonPlace;
 }
 
 export interface PhotonClientDeps {
@@ -251,6 +283,37 @@ export class PhotonClient {
     }
 
     const [lon, lat] = feature.geometry.coordinates;
-    return { lat, lon, precision: precisionOf(feature) };
+    const {
+      housenumber,
+      street,
+      name,
+      city,
+      district,
+      locality,
+      county,
+      state,
+      postcode,
+      countrycode,
+      country,
+    } = feature.properties;
+
+    return {
+      lat,
+      lon,
+      precision: precisionOf(feature),
+      place: {
+        housenumber,
+        street,
+        name,
+        city,
+        district,
+        locality,
+        county,
+        state,
+        postcode,
+        countrycode,
+        country,
+      },
+    };
   }
 }
