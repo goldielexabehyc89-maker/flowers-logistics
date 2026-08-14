@@ -2078,29 +2078,24 @@ test('карта «Сделок»: подложка Москвы при нуле
     route.fulfill({ status: 200, contentType: 'application/json', body: EMPTY_STYLE }),
   );
 
-  // Первый ответ — ни одной точки. Со второго появляется одна: так выглядит
-  // заказ, у которого только что появились координаты.
-  let mapRequests = 0;
+  // Ответ зависит от запроса, а не от счётчика вызовов: пока координат нет,
+  // точек ноль; как только они появились — точка приходит. Так проверка
+  // не зависит от того, обновит ли клиент кэш сама по себе.
+  const POINT = {
+    orderId: '00000000-0000-4000-8000-000000000001',
+    number: 'E2E-МАРКЕР',
+    lat: '55.755800',
+    lon: '37.617300',
+    startMinute: null,
+    endMinute: null,
+    needsAttention: false,
+  };
   await page.route('**/api/deals/map*', (route) => {
-    mapRequests += 1;
-    const points =
-      mapRequests === 1
-        ? []
-        : [
-            {
-              orderId: '00000000-0000-4000-8000-000000000001',
-              number: 'E2E-МАРКЕР',
-              lat: '55.755800',
-              lon: '37.617300',
-              startMinute: null,
-              endMinute: null,
-              needsAttention: false,
-            },
-          ];
+    const geocoded = new URL(route.request().url()).searchParams.get('includeDrafts') === 'true';
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ points, deliveryDate: '2026-08-14' }),
+      body: JSON.stringify({ points: geocoded ? [POINT] : [], deliveryDate: '2026-08-14' }),
     });
   });
 
@@ -2122,10 +2117,9 @@ test('карта «Сделок»: подложка Москвы при нуле
   await expect(page.getByTestId('deals-list')).toBeVisible();
   await expect(page.getByTestId('deals-map-legend')).toBeVisible();
 
-  // 2. Координаты появились. Перезагрузки страницы НЕТ: обновляется тот же
-  //    запрос, и карта перерисовывается вместе со списком.
+  // 2. Координаты появились. Перезагрузки страницы НЕТ: приходит новый ответ
+  //    того же экрана, и карта дорисовывает отметку на месте.
   const drafts = page.getByTestId('deals-include-drafts');
-  await drafts.click();
   await drafts.click();
 
   await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(1, { timeout: 15_000 });
@@ -2133,4 +2127,10 @@ test('карта «Сделок»: подложка Москвы при нуле
   await expect(page.getByTestId('deals-map-zoom')).toBeEnabled();
   // Холст тот же самый: карта не пересоздавалась.
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
+
+  // И обратно: точка ушла — отметка исчезла, сообщение вернулось. Всё так же
+  // без перезагрузки.
+  await drafts.click();
+  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
+  await expect(page.getByTestId('deals-map-empty')).toBeVisible();
 });
