@@ -25,6 +25,7 @@ import { MAX_SEARCH_LENGTH, countActiveAssignments, readQueue } from './queue-se
 import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from './paging.js';
 import { requirePhoto } from './photo.js';
 import {
+  cancelPrint,
   listPrintJobs,
   markPrinted,
   renderJobDocument,
@@ -97,6 +98,11 @@ const assembleSchema = z.object({
 const printQuerySchema = z.object({
   filter: z.enum(['attention', 'printed', 'all']).default('attention'),
   ...pageQueryShape,
+});
+
+/** Ключ идемпотентности повтора: одно нажатие — один ключ, один бланк. */
+const retrySchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(120).optional(),
 });
 
 export interface FloristRouteDeps {
@@ -308,10 +314,27 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     });
   });
 
+  /**
+   * Повтор печати.
+   *
+   * Ключ идемпотентности необязателен намеренно: клиенты прежней версии его не
+   * присылают, и отказывать им значило бы сломать работающую кнопку. Клиент,
+   * который ключ присылает, получает защиту от двойного нажатия.
+   */
   app.post('/api/florist/print-jobs/:id/retry', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
-    return { job: await retryPrint(deps.db, actor, id, contextOf(request)) };
+    const body = retrySchema.parse(request.body ?? {});
+    return {
+      job: await retryPrint(deps.db, actor, id, contextOf(request), body.idempotencyKey ?? null),
+    };
+  });
+
+  /** Снятие задания, которое печатать не будут. */
+  app.post('/api/florist/print-jobs/:id/cancel', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return { job: await cancelPrint(deps.db, actor, id, contextOf(request)) };
   });
 
   app.post('/api/florist/print-jobs/:id/printed', async (request) => {

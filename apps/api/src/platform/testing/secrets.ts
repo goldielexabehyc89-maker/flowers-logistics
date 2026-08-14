@@ -12,4 +12,6 @@ export const TEST_SECRETS = {
   AUTH_PIN_PEPPER: 'test-only-pin-pepper-000000000000000000',
   /** 32 байта в base64 — ключ AES-256-GCM. */
   AUTH_REFRESH_REPLAY_KEY: Buffer.alloc(32, 7).toString('base64'),
+  /** Pepper кода привязки обработчика печати: отдельный контур, отдельный секрет. */
+  PRINT_AGENT_PAIRING_PEPPER: 'test-only-print-agent-pepper-0000000000',
 } as const;

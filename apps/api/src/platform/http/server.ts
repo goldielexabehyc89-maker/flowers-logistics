@@ -31,6 +31,7 @@ import { registerDeliveryRoutes } from '../../modules/delivery/routes.js';
 import { registerFloristRoutes } from '../../modules/fulfillment/routes.js';
 import { registerPickupRoutes } from '../../modules/pickup/routes.js';
 import { registerSettingsRoutes } from '../../modules/settings/routes.js';
+import { registerPrintAgentRoutes } from '../../modules/print-agent/routes.js';
 import { registerPlanningRoutes } from '../../modules/planning/routes.js';
 import { createPlanningDeps } from '../../modules/planning/deps.js';
 import { registerBasemapRoutes } from '../../modules/geo/basemap/routes.js';
@@ -155,6 +156,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   // и не выдаёт — у него собственная пара ролей.
   await registerPickupRoutes(app, { db, config });
   await registerSettingsRoutes(app, { db, config });
+  await registerPrintAgentRoutes(app, { db, config });
   // HTTP-слой планирования аренд не берёт и в сеть не ходит: расчёт выполняет
   // фоновый исполнитель со своим владельцем аренды (см. index.ts).
   await registerPlanningRoutes(app, {

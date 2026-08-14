@@ -57,6 +57,7 @@ describe('единственный источник предела матриц�
       AUTH_ACCESS_TOKEN_SECRET: 'a'.repeat(64),
       AUTH_PIN_PEPPER: 'b'.repeat(64),
       AUTH_REFRESH_REPLAY_KEY: Buffer.alloc(32, 7).toString('base64'),
+      PRINT_AGENT_PAIRING_PEPPER: 'c'.repeat(64),
     } as NodeJS.ProcessEnv);
 
     expect(config.MATRIX_MAX_POINTS).toBe(MAX_MATRIX_POINTS);

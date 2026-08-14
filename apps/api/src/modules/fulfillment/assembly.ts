@@ -776,12 +776,30 @@ async function publishPersonalProcessEvent(
   });
 }
 
-/** Событие печати. Ни PDF, ни номера заказа. */
+/**
+ * Событие печати. Ни PDF, ни номера заказа.
+ *
+ * `orderId` допускает `null`: у тестовой страницы заказа нет вовсе. Подставлять
+ * туда идентификатор задания было бы дешевле, но клиент, сбрасывающий кеш
+ * карточки по этому полю, ходил бы за несуществующим заказом.
+ *
+ * Виды событий перечислены полностью, включая машинные. Клиент по ним лишь
+ * перезапрашивает списки, но различать «взято обработчиком» и «напечатано»
+ * он обязан: первое ещё ничего не гарантирует.
+ */
 export async function publishPrintEvent(
   tx: TransactionClient,
   jobId: string,
-  orderId: string,
-  kind: 'CREATED' | 'RETRIED' | 'PRINTED',
+  orderId: string | null,
+  kind:
+    | 'CREATED'
+    | 'RETRIED'
+    | 'PRINTED'
+    | 'CLAIMED'
+    | 'PRINTING'
+    | 'FAILED'
+    | 'NEEDS_REVIEW'
+    | 'CANCELLED',
 ): Promise<void> {
   await publishRealtimeEvent(tx, {
     topic: 'print_job.changed',

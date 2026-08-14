@@ -81,6 +81,7 @@ services:
       AUTH_PIN_PEPPER: dev-only-pin-pepper-not-for-any-real-environment
       # 32 байта в base64 (ключ AES-256-GCM), тоже dev-only.
       AUTH_REFRESH_REPLAY_KEY: ZGV2LW9ubHkta2V5LTMyLWJ5dGVzLTAwMDAwMDAwMDA=
+      PRINT_AGENT_PAIRING_PEPPER: dev-only-print-agent-pairing-pepper-not-for-any-real-environment
     ports:
       - '3000:3000'
       - '5173:5173'
