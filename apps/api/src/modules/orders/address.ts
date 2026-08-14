@@ -23,6 +23,13 @@ export interface AddressSource {
    * передавать заказ без неё, и это должно означать «правки нет», а не отказ.
    */
   localAddress?: string | null;
+  /**
+   * Запрос к геокодеру, собранный из разобранного адреса источника.
+   *
+   * Тоже необязательно: прежний код его не передаёт, и это означает
+   * «отдельного запроса нет» — геокодер берёт адрес заказа.
+   */
+  geocodeAddress?: string | null;
 }
 
 /** Состояние локальной правки для карточки и правил внимания. */
@@ -54,6 +61,22 @@ function normalize(value: string | null | undefined): string | null {
  */
 export function effectiveAddress(order: AddressSource): string | null {
   return normalize(order.localAddress) ?? normalize(order.address);
+}
+
+/**
+ * Строка, которая уходит в геокодер.
+ *
+ * Отличается от адреса для человека намеренно. Курьеру нужен операционный
+ * адрес целиком — с квартирой, подъездом и домофоном. Геокодеру они мешают:
+ * он ищет дом, а не квартиру в нём.
+ *
+ * Порядок тот же: правка логиста сильнее всего — он подтверждал конкретный
+ * адрес, и подменять его разобранным нельзя.
+ */
+export function geocodingAddress(order: AddressSource): string | null {
+  return (
+    normalize(order.localAddress) ?? normalize(order.geocodeAddress) ?? normalize(order.address)
+  );
 }
 
 /** Полное состояние адреса для карточки. */

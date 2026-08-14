@@ -29,7 +29,7 @@ import {
 } from '../../orders/attention.js';
 import { recordOrderConflicts } from '../../routing/conflicts.js';
 import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
-import { isSourceConflict } from '../../orders/address.js';
+import { geocodingAddress, isSourceConflict } from '../../orders/address.js';
 import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
@@ -73,6 +73,10 @@ interface StoredOrder {
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
   /// Локальная правка адреса: синхронизация её тоже не затирает.
+  /// Адрес заказа и запрос к геокодеру: по их паре решается, изменился ли
+  /// фактический запрос, а значит — нужно ли геокодировать заново.
+  address: string | null;
+  geocodeAddress: string | null;
   localAddress: string | null;
   sourceAddressAtLocalEdit: string | null;
   addressConflict: boolean;
@@ -131,6 +135,7 @@ async function lockByExternalId(
     SELECT "id", "version", "inScope", "fulfillmentInScope", "sourceMissing",
            "manualIntervalStartMinute", "manualIntervalEndMinute",
            "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration",
+           "address", "geocodeAddress",
            "localAddress", "sourceAddressAtLocalEdit", "addressConflict"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
@@ -170,6 +175,7 @@ function orderData(
     intervalStartMinute: snapshot.intervalStartMinute,
     intervalEndMinute: snapshot.intervalEndMinute,
     address: snapshot.address,
+    geocodeAddress: snapshot.geocodeAddress,
     recipient: snapshot.recipient,
     comment: snapshot.comment,
     paymentTypeId: snapshot.paymentTypeId,
@@ -219,6 +225,7 @@ async function createOrder(
       {
         id: created.id,
         address: snapshot.address,
+        geocodeAddress: snapshot.geocodeAddress,
         // Новый заказ локальной правки ещё не имеет по определению.
         localAddress: null,
         inScope: snapshot.inScope,
@@ -359,12 +366,24 @@ async function updateOrder(
     reasons,
   );
 
-  // Адрес изменился — прежняя точка больше не относится к этому заказу.
-  // Оставить её пригодной опаснее, чем потерять: координата от старого адреса
-  // выглядит как нормальные данные и молча отправит курьера не туда.
-  // Пока действует локальная правка, изменение источника РАБОЧИЙ адрес
-  // не меняет: точка относится к адресу логиста и остаётся пригодной.
-  if (changedFields.includes('address') && existing.localAddress === null) {
+  // Изменился ЗАПРОС К ГЕОКОДЕРУ — прежняя точка больше не относится к этому
+  // заказу. Оставить её пригодной опаснее, чем потерять: координата от старого
+  // адреса выглядит как нормальные данные и молча отправит курьера не туда.
+  //
+  // Сравнивается именно запрос, а не показываемый адрес. Смена одной лишь
+  // квартиры или домофона меняет операционный адрес, но не дом: повторно
+  // геокодировать его незачем, а сбрасывать корректную точку — вредно.
+  //
+  // Пока действует локальная правка, запрос равен ей и не меняется вовсе:
+  // точка относится к адресу логиста и остаётся пригодной.
+  const geocodeQueryBefore = geocodingAddress(existing);
+  const geocodeQueryAfter = geocodingAddress({
+    localAddress: existing.localAddress,
+    geocodeAddress: snapshot.geocodeAddress,
+    address: snapshot.address,
+  });
+
+  if (geocodeQueryBefore !== geocodeQueryAfter) {
     const invalidated = await invalidateGeoOnAddressChange(tx, existing.id, {
       geoState: existing.geoState,
       latMicro: existing.geoLatMicro,
@@ -381,6 +400,7 @@ async function updateOrder(
         {
           id: existing.id,
           address: snapshot.address,
+          geocodeAddress: snapshot.geocodeAddress,
           localAddress: existing.localAddress,
           inScope: snapshot.inScope,
           sourceArchived: snapshot.sourceArchived,

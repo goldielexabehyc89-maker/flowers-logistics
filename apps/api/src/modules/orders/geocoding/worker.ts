@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { effectiveAddress } from '../address.js';
+import { geocodingAddress } from '../address.js';
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { Database } from '../../../platform/db.js';
 import type { AppLogger } from '../../../platform/logging/logger.js';
@@ -131,6 +131,8 @@ interface ClaimedJob {
 interface OrderSnapshot {
   id: string;
   address: string | null;
+  /** Запрос к геокодеру. Пусто — берётся адрес заказа. */
+  geocodeAddress: string | null;
   localAddress: string | null;
   inScope: boolean;
   sourceArchived: boolean;
@@ -218,6 +220,7 @@ async function readOrder(db: Database, orderId: string): Promise<OrderSnapshot |
     select: {
       id: true,
       address: true,
+      geocodeAddress: true,
       localAddress: true,
       inScope: true,
       sourceArchived: true,
@@ -232,7 +235,7 @@ async function readOrder(db: Database, orderId: string): Promise<OrderSnapshot |
 
 async function lockOrder(tx: TransactionClient, orderId: string): Promise<OrderSnapshot | null> {
   const rows = await tx.$queryRaw<OrderSnapshot[]>`
-    SELECT "id", "address", "localAddress", "inScope", "sourceArchived", "sourceMissing",
+    SELECT "id", "address", "geocodeAddress", "localAddress", "inScope", "sourceArchived", "sourceMissing",
            "geoState", "geoSource", "geoGeneration", "version"
     FROM "DeliveryOrder"
     WHERE "id" = ${orderId}::uuid
@@ -264,7 +267,7 @@ export function staleReason(
   }
   // Сравнивается РАБОЧИЙ адрес: локальная правка меняет то, что отправляли,
   // ровно так же, как изменение источника.
-  if ((effectiveAddress(order) ?? '') !== addressAtRequest) {
+  if ((geocodingAddress(order) ?? '') !== addressAtRequest) {
     return 'ADDRESS_CHANGED';
   }
   if (!order.inScope || order.sourceArchived || order.sourceMissing) {
@@ -482,7 +485,7 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
   // Заказ мог измениться ещё до запроса — незачем тратить платное обращение.
   // Адрес сравнивается сам с собой намеренно: здесь проверяются поколение,
   // область и ручная точка, а «прежнего» адреса ещё не существует.
-  const address = order === null ? '' : (effectiveAddress(order) ?? '');
+  const address = order === null ? '' : (geocodingAddress(order) ?? '');
   const before = staleReason(order, job, address);
   if (before !== null || address.trim() === '') {
     await finishStale(deps, job, before ?? 'OUT_OF_SCOPE');

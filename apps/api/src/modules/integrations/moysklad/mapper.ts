@@ -50,6 +50,8 @@ export interface OrderSnapshot {
   intervalStartMinute: number | null;
   intervalEndMinute: number | null;
   address: string | null;
+  /** Запрос к геокодеру. Пусто — отдельного запроса нет, берётся `address`. */
+  geocodeAddress: string | null;
   recipient: string | null;
   comment: string | null;
   paymentTypeId: string | null;
@@ -213,7 +215,14 @@ export function composeStructuredAddress(
   return parts.length === 0 ? null : parts.join(', ');
 }
 
-export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
+/** Откуда собирать запрос к геокодеру. Адрес заказа этим не управляется. */
+export type AddressSource = 'shipmentAddress' | 'shipmentAddressFull';
+
+export function mapOrder(
+  order: MoyskladOrderDto,
+  ids: Ids,
+  addressSource: AddressSource = 'shipmentAddress',
+): MapOrderResult {
   const storeId = idFromHref(order.store?.meta.href);
   const deliveryMethod = attribute(order, ids.deliveryMethodAttribute);
   const paymentType = attribute(order, ids.paymentTypeAttribute);
@@ -254,10 +263,16 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
 
   const deliveryDate = parseDeliveryDate(order.deliveryPlannedMoment);
   // Адрес заказа — операционный: его читают логист и курьер, и квартира,
-  // подъезд и домофон в нём обязаны остаться. Запрос к геокодеру собирается
-  // отдельно (`composeStructuredAddress`) и хранить его пока негде: свободного
-  // поля в модели нет. См. отчёт о минимальной расширяющей миграции.
+  // подъезд и домофон в нём обязаны остаться. Он не зависит от источника
+  // запроса к геокодеру.
   const address = text(order.shipmentAddress);
+
+  // Запрос к геокодеру — отдельное значение. Пусто означает «отдельного
+  // запроса нет»: геокодер возьмёт адрес заказа, как и раньше.
+  const geocodeAddress =
+    addressSource === 'shipmentAddressFull'
+      ? composeStructuredAddress(order.shipmentAddressFull)
+      : null;
   const recipient = attribute(order, ids.recipientAttribute).text;
   const comment = attribute(order, ids.commentAttribute).text;
 
@@ -278,6 +293,7 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
     intervalStartMinute: interval.startMinute,
     intervalEndMinute: interval.endMinute,
     address,
+    geocodeAddress,
     recipient,
     comment,
     paymentTypeId: paymentType.id,

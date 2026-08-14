@@ -688,6 +688,62 @@ describe('плановая дата — календарная дата Моск
   });
 });
 
+describe('адрес курьеру и запрос геокодеру — разные значения', () => {
+  const full = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+    addInfo: 'код домофона 1234',
+    comment: 'позвонить за час',
+  };
+
+  it('без настройки отдельного запроса нет, адрес прежний', () => {
+    const mapped = mapOrder(order({ shipmentAddressFull: full } as never), IDS);
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+    expect(mapped.snapshot.geocodeAddress).toBeNull();
+  });
+
+  it('при включённом источнике адрес курьеру НЕ меняется', () => {
+    // Главное свойство: что бы ни делал геокодер, курьеру нужен операционный
+    // адрес целиком — с квартирой, подъездом и домофоном.
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: full } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+  });
+
+  it('запрос геокодеру собирается только из нужных частей', () => {
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: full } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.geocodeAddress).toBe(
+      '141014, Россия, Московская область, Мытищи, Олимпийский проспект, 29',
+    );
+    for (const excluded of ['137', 'домофон', '1234', 'позвонить']) {
+      expect(mapped.snapshot.geocodeAddress, excluded).not.toContain(excluded);
+    }
+  });
+
+  it('без улицы или дома запроса нет, и адрес заказа его не подменяет', () => {
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: { ...full, house: undefined } } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.geocodeAddress).toBeNull();
+    // Адрес курьеру при этом на месте.
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+  });
+});
+
 describe('сборка адреса для геокодера', () => {
   /**
    * Разобранный адрес МоегоСклада. Синтетический: настоящих адресов тут нет.

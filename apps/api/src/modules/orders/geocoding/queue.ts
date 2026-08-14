@@ -12,7 +12,7 @@
  * смены адреса, невозможно применить к новому адресу по ошибке.
  */
 
-import { effectiveAddress } from '../address.js';
+import { geocodingAddress } from '../address.js';
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { TransactionClient } from '../../auth/sessions.js';
 import type { Database } from '../../../platform/db.js';
@@ -39,6 +39,9 @@ export function retryDelayMs(attempts: number): number {
 export interface EnqueueCandidate {
   id: string;
   address: string | null;
+  /// Запрос к геокодеру, собранный из разобранного адреса.
+  /// Необязателен: пусто означает «отдельного запроса нет», берётся `address`.
+  geocodeAddress?: string | null;
   /// Локальная правка логиста: рабочим считается именно она.
   /// Необязательна: прежний код её не передаёт, и это значит «правки нет».
   localAddress?: string | null;
@@ -60,8 +63,9 @@ export interface EnqueueCandidate {
  * не переспрашивается: решение человека автоматика не пересматривает.
  */
 export function isGeocodable(order: EnqueueCandidate): boolean {
-  // Провайдеру уходит РАБОЧИЙ адрес: исправленный логистом сильнее исходного.
-  const address = effectiveAddress(order);
+  // Провайдеру уходит ЗАПРОС, а не показываемый адрес: правка логиста сильнее
+  // всего, затем разобранный запрос, затем адрес заказа.
+  const address = geocodingAddress(order);
   if (address === null) {
     return false;
   }
