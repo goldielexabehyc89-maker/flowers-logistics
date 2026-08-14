@@ -65,6 +65,8 @@ const DAY_FIVE = '2026-12-05';
 const DAY_SIX = '2026-12-06';
 const DAY_SEVEN = '2026-12-07';
 const DAY_EIGHT = '2026-12-08';
+const DAY_NINE = '2026-12-09';
+const DAY_TEN = '2026-12-10';
 
 const SHIFT = { startMinute: 9 * 60, endMinute: 21 * 60 };
 
@@ -1359,6 +1361,77 @@ describe('истечение превью', () => {
     // День снова свободен.
     const third = await requestPlan(deps, actor, { deliveryDate: day, slots: [slot()] }, CONTEXT);
     expect(third.state).toBe('QUEUED');
+  });
+});
+
+// --- Параметры машин --------------------------------------------------------
+
+describe('параметры машин приходят от логиста', () => {
+  it('сколько машин указано, столько слотов и попадает в снимок входа', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    await seedOrder({ day: DAY_NINE });
+
+    const started = await requestPlan(
+      planningDeps({ solver: fakeSolver() }),
+      actor,
+      {
+        deliveryDate: DAY_NINE,
+        slots: [slot(7), slot(7), slot(7)],
+      },
+      CONTEXT,
+    );
+
+    const slots = await ctx.db.routePlanVehicleSlot.findMany({
+      where: { runId: started.id },
+      orderBy: { slotIndex: 'asc' },
+    });
+
+    // Число машин не выводится из количества заказов: заказ один, машин три.
+    expect(slots).toHaveLength(3);
+    expect(slots.map((item) => item.capacityOrders)).toEqual([7, 7, 7]);
+
+    await clearQueue();
+  });
+
+  it('невалидные параметры отклоняются HTTP-слоем и не создают расчёт', async () => {
+    // Сервер проверяет параметры заново: клиентская проверка — удобство,
+    // а не защита. Отклонённый запрос не должен оставить ни запуска, ни
+    // занятого дня.
+    const token = await tokenFor(['LOGISTICIAN']);
+    // Считается прирост, а не абсолютное число: файл работает в общей базе,
+    // и чужие запуски к этой проверке отношения не имеют.
+    const before = await ctx.db.routePlanRun.count();
+
+    const invalid = [
+      { title: 'ноль машин', slots: [] },
+      { title: 'нулевая вместимость', slots: [{ vehicleType: 'CAR', capacityOrders: 0 }] },
+      { title: 'отрицательная вместимость', slots: [{ vehicleType: 'CAR', capacityOrders: -5 }] },
+      { title: 'дробная вместимость', slots: [{ vehicleType: 'CAR', capacityOrders: 2.5 }] },
+      { title: 'вместимость не числом', slots: [{ vehicleType: 'CAR', capacityOrders: 'много' }] },
+      // Прежний клиент слал именно это поле, и запрос отвергался до расчёта.
+      {
+        title: 'поле capacity вместо capacityOrders',
+        slots: [{ vehicleType: 'CAR', capacity: 10 }],
+      },
+      {
+        title: 'машин больше предела',
+        slots: Array.from({ length: 51 }, () => ({ vehicleType: 'CAR', capacityOrders: 10 })),
+      },
+    ];
+
+    for (const variant of invalid) {
+      const response = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/route-plans',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { deliveryDate: DAY_TEN, slots: variant.slots },
+      });
+
+      expect(response.statusCode, variant.title).toBe(400);
+    }
+
+    // Ни один отклонённый запрос не оставил после себя запуска.
+    expect(await ctx.db.routePlanRun.count()).toBe(before);
   });
 });
 

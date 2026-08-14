@@ -1,9 +1,14 @@
 /**
  * Автоматическая разбивка выбранных сделок на несколько черновиков.
  *
- * Здесь только правила, без React и без сети: сколько машин заказать у
- * решателя и что означает очередное состояние запуска. Их видно целиком,
- * и они проверяются без браузера.
+ * Здесь только правила, без React и без сети: как разобрать введённые логистом
+ * параметры, каким получится запрос к решателю и что означает очередное
+ * состояние запуска.
+ *
+ * Число машин и вместимость логист указывает сам, перед запуском. Значения
+ * по умолчанию здесь нет намеренно: подставленное «сколько-нибудь» — это
+ * скрытое бизнес-решение, принятое за человека, и план вышел бы из числа,
+ * которого никто не выбирал.
  *
  * Расчёт остаётся двухфазным на сервере — превью, затем применение, — но
  * логист этих стадий не видит. Он выбирает заказы и получает готовые
@@ -19,40 +24,90 @@ export interface SlotRequest {
   capacityOrders: number;
 }
 
-/** Верхняя граница слотов на запуск. Совпадает с серверной. */
+/** Верхние границы. Совпадают с серверными: отказ после ожидания расчёта хуже. */
 export const MAX_SLOTS = 50;
+export const MAX_CAPACITY = 500;
 
-/** Сколько заказов приходится на машину, если логист не указал иное. */
-export const DEFAULT_CAPACITY = 20;
-
-/**
- * Сколько машин заказать.
- *
- * Одна машина на весь выбор — это не разбивка, а один длинный маршрут:
- * ровно так вело себя прежнее обращение, посылавшее `capacity` размером
- * со всё выделение. Число машин считается от вместимости и ограничивается
- * серверным пределом, иначе запрос отвергается уже после ожидания.
- */
-export function vehicleCount(orderCount: number, capacityOrders: number): number {
-  if (orderCount <= 0 || capacityOrders <= 0) {
-    return 1;
-  }
-  return Math.min(MAX_SLOTS, Math.ceil(orderCount / capacityOrders));
+export interface SplitParams {
+  vehicles: number;
+  capacityOrders: number;
 }
 
-export function buildSlots(input: {
-  orderCount: number;
-  capacityOrders: number;
-  vehicleType: VehicleType;
-}): SlotRequest[] {
-  const count = vehicleCount(input.orderCount, input.capacityOrders);
-  return Array.from({ length: count }, () => ({
+export type SplitParamsResult =
+  | { ok: true; value: SplitParams }
+  | { ok: false; vehicles: string | null; capacityOrders: string | null };
+
+/**
+ * Разбор одного поля.
+ *
+ * Отклоняются пустое, ноль, отрицательное и дробное. Дробное — отдельный
+ * случай: `Number('2.5')` даёт число, и без явной проверки «две с половиной
+ * машины» ушли бы на сервер.
+ */
+function parseCount(raw: string, max: number, unit: string): { value: number } | { error: string } {
+  const text = raw.trim();
+  if (text === '') {
+    return { error: 'Укажите значение.' };
+  }
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) {
+    return { error: 'Введите целое число.' };
+  }
+  if (!Number.isInteger(parsed)) {
+    return { error: 'Введите целое число, без дробной части.' };
+  }
+  if (parsed < 1) {
+    return { error: 'Значение должно быть больше нуля.' };
+  }
+  if (parsed > max) {
+    return { error: `Не больше ${max} ${unit}.` };
+  }
+  return { value: parsed };
+}
+
+/** Разбирает оба поля сразу: логист должен увидеть все ошибки, а не первую. */
+export function parseSplitParams(input: {
+  vehicles: string;
+  capacityOrders: string;
+}): SplitParamsResult {
+  const vehicles = parseCount(input.vehicles, MAX_SLOTS, 'машин');
+  const capacity = parseCount(input.capacityOrders, MAX_CAPACITY, 'заказов');
+
+  if ('value' in vehicles && 'value' in capacity) {
+    return { ok: true, value: { vehicles: vehicles.value, capacityOrders: capacity.value } };
+  }
+
+  return {
+    ok: false,
+    vehicles: 'error' in vehicles ? vehicles.error : null,
+    capacityOrders: 'error' in capacity ? capacity.error : null,
+  };
+}
+
+/**
+ * Слоты машин для решателя.
+ *
+ * Ровно столько машин, сколько указал логист, — число не выводится из размера
+ * выбора и ниоткуда больше. Поле называется `capacityOrders`, а не `capacity`:
+ * прежний клиент слал второе, и сервер отвергал запрос ещё до расчёта.
+ */
+export function buildSlots(input: SplitParams & { vehicleType: VehicleType }): SlotRequest[] {
+  return Array.from({ length: input.vehicles }, () => ({
     courierUserId: null,
     vehicleType: input.vehicleType,
-    // Поле называется `capacityOrders`, а не `capacity`: прежний клиент слал
-    // второе, и сервер отвергал запрос ещё до расчёта.
     capacityOrders: input.capacityOrders,
   }));
+}
+
+/**
+ * Хватит ли указанной вместимости на выбранные заказы.
+ *
+ * Это предупреждение, а не запрет: решатель сам отправит лишние заказы
+ * в неразмещённые, и отдельное согласие на них уже спрашивается. Но сказать
+ * об этом до ожидания расчёта честнее, чем после.
+ */
+export function capacityShortfall(orderCount: number, params: SplitParams): number {
+  return Math.max(0, orderCount - params.vehicles * params.capacityOrders);
 }
 
 export type PlanRunState = 'QUEUED' | 'COMPUTING' | 'PREVIEW' | 'APPLIED' | 'FAILED' | 'EXPIRED';

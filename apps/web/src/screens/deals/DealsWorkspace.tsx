@@ -23,6 +23,7 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  Modal,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
@@ -31,10 +32,12 @@ import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
 import {
   buildSlots,
-  DEFAULT_CAPACITY,
+  capacityShortfall,
   firstDraftId,
+  parseSplitParams,
   splitPhase,
   type PlanRunView,
+  type SplitParams,
 } from './auto-split';
 import { useWorkspace } from '../logistics/useWorkspace';
 import { workspaceHref } from '../logistics/workspace-url';
@@ -103,6 +106,20 @@ export function DealsWorkspace(): React.JSX.Element {
     run: PlanRunView;
     unassignedCount: number;
   } | null>(null);
+  /**
+   * Параметры разбивки, которые логист вводит перед запуском.
+   *
+   * Пустые по умолчанию намеренно. Сохранённых значений в настройках
+   * планирования нет — там живут только смена и время обслуживания, — а
+   * подставить «сколько-нибудь» значило бы принять бизнес-решение за человека.
+   */
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [vehiclesInput, setVehiclesInput] = useState('');
+  const [capacityInput, setCapacityInput] = useState('');
+  const [splitErrors, setSplitErrors] = useState<{
+    vehicles: string | null;
+    capacityOrders: string | null;
+  }>({ vehicles: null, capacityOrders: null });
 
   /** Ровно те параметры, которыми пользуются список, карта и «выбрать все». */
   const scope = useMemo(() => {
@@ -280,6 +297,18 @@ export function DealsWorkspace(): React.JSX.Element {
     [date, navigate, queryClient],
   );
 
+  /**
+   * Предупреждение о нехватке мест, пока логист ещё вводит параметры.
+   *
+   * Это не запрет: лишние заказы решатель отправит в неразмещённые, и согласие
+   * на них спрашивается отдельно. Но сказать об этом до ожидания расчёта
+   * честнее, чем после.
+   */
+  const splitPreview = useMemo(() => {
+    const parsed = parseSplitParams({ vehicles: vehiclesInput, capacityOrders: capacityInput });
+    return parsed.ok ? { shortfall: capacityShortfall(selected.length, parsed.value) } : null;
+  }, [vehiclesInput, capacityInput, selected.length]);
+
   const splitFailed = useCallback((error: unknown): void => {
     setPendingSplit(null);
     setNotice(
@@ -288,15 +317,13 @@ export function DealsWorkspace(): React.JSX.Element {
   }, []);
 
   const autoPlan = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (params: SplitParams) => {
       const started = await client.post<PlanRunView>('/api/route-plans', {
         deliveryDate: date,
         orderIds: selected,
-        slots: buildSlots({
-          orderCount: selected.length,
-          capacityOrders: DEFAULT_CAPACITY,
-          vehicleType: 'CAR',
-        }),
+        // Ровно столько машин, сколько указал логист. Число не выводится
+        // из размера выбора: это было бы решение, принятое за человека.
+        slots: buildSlots({ ...params, vehicleType: 'CAR' }),
       });
 
       const ready = await awaitPreview(started.id);
@@ -673,12 +700,106 @@ export function DealsWorkspace(): React.JSX.Element {
             data-testid="deals-auto-plan"
             loading={autoPlan.isPending}
             disabled={autoPlan.isPending}
-            onClick={() => autoPlan.mutate()}
+            onClick={() => {
+              // Тот же единственный сценарий: кнопка спрашивает параметры
+              // и запускает тот же расчёт. Второго входа в разбивку нет.
+              setSplitErrors({ vehicles: null, capacityOrders: null });
+              setSplitOpen(true);
+            }}
           >
             {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
           </Button>
         </div>
       )}
+
+      {/*
+        Параметры разбивки.
+
+        Оба значения обязательны и вводятся логистом. Значения по умолчанию
+        здесь нет: план, собранный из подставленного числа машин, выглядел бы
+        как решение системы, которого никто не принимал.
+      */}
+      <Modal
+        open={splitOpen}
+        title="Автоматическая разбивка"
+        onClose={() => setSplitOpen(false)}
+        dismissible={!autoPlan.isPending}
+      >
+        <div className="stack">
+          <p className="text-sm muted">
+            Выбрано заказов: {selected.length}. Укажите, сколько машин выйдет на маршруты и сколько
+            заказов помещается в одну.
+          </p>
+
+          <Field label="Количество машин" error={splitErrors.vehicles ?? undefined}>
+            {(props) => (
+              <TextInput
+                {...props}
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                data-testid="split-vehicles"
+                value={vehiclesInput}
+                disabled={autoPlan.isPending}
+                onChange={(event) => setVehiclesInput(event.target.value)}
+              />
+            )}
+          </Field>
+
+          <Field label="Заказов на одну машину" error={splitErrors.capacityOrders ?? undefined}>
+            {(props) => (
+              <TextInput
+                {...props}
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                data-testid="split-capacity"
+                value={capacityInput}
+                disabled={autoPlan.isPending}
+                onChange={(event) => setCapacityInput(event.target.value)}
+              />
+            )}
+          </Field>
+
+          {splitPreview !== null && splitPreview.shortfall > 0 && (
+            <p className="text-sm" data-testid="split-shortfall">
+              Мест хватит не всем: {splitPreview.shortfall} заказ(ов) останутся неразмещёнными.
+              Согласие на них будет запрошено отдельно.
+            </p>
+          )}
+
+          <div className="modal__footer">
+            <Button onClick={() => setSplitOpen(false)} disabled={autoPlan.isPending}>
+              Отмена
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="split-submit"
+              disabled={autoPlan.isPending}
+              onClick={() => {
+                const parsed = parseSplitParams({
+                  vehicles: vehiclesInput,
+                  capacityOrders: capacityInput,
+                });
+                if (!parsed.ok) {
+                  setSplitErrors({
+                    vehicles: parsed.vehicles,
+                    capacityOrders: parsed.capacityOrders,
+                  });
+                  return;
+                }
+                setSplitErrors({ vehicles: null, capacityOrders: null });
+                setSplitOpen(false);
+                autoPlan.mutate(parsed.value);
+              }}
+            >
+              Рассчитать
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/*
         Согласие на неразмещённые заказы.
