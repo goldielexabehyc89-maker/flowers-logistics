@@ -209,6 +209,11 @@ function fakeMatrix(): MatrixDeps['valhalla'] {
 interface FakeSolver {
   requests: VroomRequest[];
   solve: (request: VroomRequest) => Promise<VroomSolution>;
+  /**
+   * Настроен ли решатель. Постановка запуска читает это ДО создания записи:
+   * ненастроенный решатель обязан ответить отказом, а не оставить `QUEUED`.
+   */
+  configured: boolean;
 }
 
 /**
@@ -223,6 +228,7 @@ function fakeSolver(
   const requests: VroomRequest[] = [];
   return {
     requests,
+    configured: true,
     async solve(request) {
       requests.push(request);
       if (handler !== undefined) {
@@ -378,6 +384,46 @@ describe('условия планирования', () => {
     }
 
     expect((await findDefaultDepot(ctx.db))?.id).toBe(depotId);
+  });
+
+  it('ненастроенный решатель отказывает 503 и НЕ создаёт запись расчёта', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    // Заказ нужен второй половине проверки: она ставит настоящий запуск на тот
+    // же день и тем доказывает, что отказ не занял дату.
+    await seedOrder({ day: DAY_THREE });
+
+    // Фоновый исполнитель поднимается только при заданном адресе решателя.
+    // Принятый в таких условиях запуск остался бы `QUEUED` навсегда и держал бы
+    // день уникальным `activeDateKey`: следующий расчёт получал бы «уже идёт
+    // расчёт», хотя не считает никто.
+    const deps = planningDeps({ solver: { ...fakeSolver(), configured: false } });
+
+    await expect(
+      requestPlan(deps, actor, { deliveryDate: DAY_THREE, slots: [slot()] }, CONTEXT),
+    ).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+
+    // Проверяется именно отсутствие записи, а не текст отказа: вечный `QUEUED`
+    // и был той поломкой, ради которой добавлена проверка.
+    expect(
+      await ctx.db.routePlanRun.count({
+        where: { deliveryDate: new Date(`${DAY_THREE}T00:00:00Z`) },
+      }),
+    ).toBe(0);
+
+    // День остался свободным: настроенный решатель ставит запуск на ту же дату.
+    // Если бы отказ всё-таки создал запись, уникальный `activeDateKey` ответил бы
+    // здесь конфликтом «день уже считается».
+    const ok = await requestPlan(
+      planningDeps({ solver: fakeSolver() }),
+      actor,
+      { deliveryDate: DAY_THREE, slots: [slot()] },
+      CONTEXT,
+    );
+    expect(ok.state).toBe('QUEUED');
+
+    // Запуск не досчитывается: очередь общая, и брошенный `QUEUED` поймала бы
+    // чужая проверка аренды.
+    await clearQueue();
   });
 
   it('заказ без подтверждённой точки останавливает весь расчёт и назван поимённо', async () => {
