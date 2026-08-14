@@ -42,6 +42,7 @@ import {
   type SplitParams,
 } from './auto-split';
 import { useWorkspace } from '../logistics/useWorkspace';
+import { GeoPointDialog } from '../logistics/GeoPointDialog';
 import { workspaceHref } from '../logistics/workspace-url';
 import {
   dropUnavailable,
@@ -93,6 +94,8 @@ export function DealsWorkspace(): React.JSX.Element {
   const [selected, setSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<DealCard | null>(null);
+  /** Заказ, которому ставят точку вручную. */
+  const [pointFor, setPointFor] = useState<DealCard | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   /** Заказ, у которого сейчас правят интервал, и черновик значений. */
   const [intervalFor, setIntervalFor] = useState<DealCard | null>(null);
@@ -569,6 +572,20 @@ export function DealsWorkspace(): React.JSX.Element {
                       <Button variant="ghost" onClick={() => setEditing(item)}>
                         Исправить адрес
                       </Button>
+                      {/*
+                        Точка и адрес — одна проблема одного заказа, поэтому
+                        действия стоят рядом. Заказу с пригодной точкой кнопка
+                        не нужна: он уже готов к распределению.
+                      */}
+                      {item.geoState !== 'RESOLVED' && (
+                        <Button
+                          variant="ghost"
+                          data-testid="deal-set-point"
+                          onClick={() => setPointFor(item)}
+                        >
+                          Указать точку на карте
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         data-testid="deal-edit-interval"
@@ -820,6 +837,23 @@ export function DealsWorkspace(): React.JSX.Element {
             setEditing(null);
             void queryClient.invalidateQueries({ queryKey: ['deals'] });
           }}
+        />
+      )}
+
+      {/*
+        Отмена ничего не записывает: окно просто закрывается, и заказ остаётся
+        в «Требует внимания» ровно в прежнем состоянии.
+      */}
+      {pointFor !== null && (
+        <GeoPointDialog
+          order={{
+            id: pointFor.id,
+            number: pointFor.number,
+            version: pointFor.version,
+            address: pointFor.address,
+          }}
+          onClose={() => setPointFor(null)}
+          onSaved={() => setPointFor(null)}
         />
       )}
     </section>

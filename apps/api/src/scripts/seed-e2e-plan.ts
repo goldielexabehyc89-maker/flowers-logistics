@@ -106,6 +106,13 @@ async function main(): Promise<number> {
   const config = loadConfig();
   const logger = createLogger(config);
 
+  /**
+   * Создать только предпосылки: склад, настройки и заказы дня.
+   *
+   * Нужно браузерной проверке, которая ставит расчёт сама через настоящий API.
+   */
+  const withoutRun = process.argv.includes('--without-run');
+
   if (config.APP_ENV !== 'local' || config.APP_ENVIRONMENT_MARKER !== 'local') {
     logger.error('проверочное превью создаётся только в локальном окружении');
     return 2;
@@ -210,6 +217,27 @@ async function main(): Promise<number> {
     // доказательство: расчёт берёт ровно выбранное, а посторонний заказ
     // не попадает ни в превью, ни в созданные черновики.
     const foreign = await seedOrder(db, day, 3, POINTS[1] ?? DEPOT);
+
+    /*
+     * Только предпосылки, без готового превью.
+     *
+     * Браузерная проверка считает по-настоящему: она сама ставит запуск через
+     * `/api/route-plans`. Готовое превью удерживало бы день уникальным
+     * `activeDateKey`, и настоящий расчёт упёрся бы в «день уже считается» —
+     * фикстура мешала бы доказывать ровно то, ради чего создана.
+     */
+    if (withoutRun) {
+      logger.info('предпосылки расчёта созданы, готовое превью не создавалось');
+      process.stdout.write(`неразмещённый: ${unassigned.number}\n`);
+      process.stdout.write(`неразмещённый id: ${unassigned.id}\n`);
+      for (const order of assigned) {
+        process.stdout.write(`в маршруте: ${order.number}\n`);
+        process.stdout.write(`в маршруте id: ${order.id}\n`);
+      }
+      process.stdout.write(`посторонний: ${foreign.number}\n`);
+      process.stdout.write(`посторонний id: ${foreign.id}\n`);
+      return 0;
+    }
 
     const run = await db.routePlanRun.create({
       data: {
