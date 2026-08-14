@@ -23,6 +23,7 @@ import {
   composeStructuredAddress,
   diffSnapshots,
   mapOrder,
+  SNAPSHOT_KEYS,
   snapshotHash,
   type OrderSnapshot,
 } from './mapper.js';
@@ -805,5 +806,71 @@ describe('сборка адреса для геокодера', () => {
     expect(composeStructuredAddress({ ...full, house: '31' } as never)).not.toBe(base);
     // Для геокодера это тот же дом, и повторный запрос ничего не изменил бы.
     expect(composeStructuredAddress({ ...full, apartment: '999' } as never)).toBe(base);
+  });
+});
+
+describe('полнота списка полей снимка', () => {
+  /** Разобранный адрес: синтетический, настоящих адресов тут нет. */
+  const FULL = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+  };
+
+  const withQuery = (): OrderSnapshot =>
+    mapOrder(order({ shipmentAddressFull: FULL } as never), IDS, 'shipmentAddressFull').snapshot;
+  const withoutQuery = (): OrderSnapshot => mapOrder(order(), IDS).snapshot;
+
+  it('запрос к геокодеру входит в список полей снимка', () => {
+    // Через этот список работают сравнение снимков, канонический JSON и хеш.
+    // Поле, добавленное в тип, но не сюда, было бы невидимо для всех троих.
+    expect(SNAPSHOT_KEYS).toContain('geocodeAddress');
+    expect(SNAPSHOT_KEYS).toContain('address');
+  });
+
+  it('изменение ОДНОГО лишь запроса геокодера видно в changedFields', () => {
+    const before = withoutQuery();
+    const after = withQuery();
+
+    // Отличаются ровно одним полем — и оно названо.
+    expect(diffSnapshots(before, after)).toEqual(['geocodeAddress']);
+  });
+
+  it('вместе с полем меняются канонический JSON и хеш', () => {
+    const before = withoutQuery();
+    const after = withQuery();
+
+    expect(canonicalJson(before)).not.toBe(canonicalJson(after));
+    expect(snapshotHash(before)).not.toBe(snapshotHash(after));
+    // Именно на хеше держится дедупликация: без его изменения повтор
+    // в overlap-окне считался бы той же версией, и строка не переписалась бы.
+    expect(canonicalJson(after)).toContain('geocodeAddress');
+  });
+
+  it('одинаковое значение изменением не считается', () => {
+    const a = withQuery();
+    const b = withQuery();
+
+    expect(diffSnapshots(a, b)).toEqual([]);
+    expect(snapshotHash(a)).toBe(snapshotHash(b));
+  });
+
+  it('отсутствующий ключ старого снимка и null — одно и то же', () => {
+    // Снимки, сохранённые до появления поля, ключа не содержат вовсе.
+    // Если считать это отличием от `null`, первый же проход объявит
+    // изменившимся КАЖДЫЙ заказ — включая те, у которых значения нет и не будет.
+    const legacy: Record<string, unknown> = { ...withoutQuery() };
+    delete legacy['geocodeAddress'];
+
+    expect(diffSnapshots(legacy as unknown as OrderSnapshot, withoutQuery())).toEqual([]);
+
+    // А появление настоящего значения изменением быть обязано.
+    expect(diffSnapshots(legacy as unknown as OrderSnapshot, withQuery())).toEqual([
+      'geocodeAddress',
+    ]);
   });
 });

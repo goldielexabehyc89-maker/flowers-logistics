@@ -950,6 +950,24 @@ require_ready() {
 # целиком даже для `run app`. Пропущенная переменная превращается в пустую
 # строку — и получается сервис без образа и bind mount из пустого пути,
 # то есть отказ на ровном месте или, хуже, монтирование не того каталога.
+# Проверяет, что на сервере работает ИМЕННО ожидаемая версия приложения.
+#
+# Обёртки и разовые команды строят `compose_command` со своим значением
+# `IMAGE_TAG`. Значение, оставшееся от прошлой выкатки, молча пересоздаёт
+# контейнер на прежнем образе — staging откатывается, и заметить это можно
+# только по отсутствию новых полей. Поэтому перед любым пересозданием
+# приложения ожидаемая версия сверяется с фактической.
+require_running_revision() {
+  local expected="$1"
+  local actual
+  actual="$(remote "docker inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' \
+    \"\$(docker compose -f '${REMOTE_DIR}/${COMPOSE_FILE}' -p '${COMPOSE_PROJECT}' ps -q app | head -1)\" 2>/dev/null || true")"
+
+  [ -n "${actual}" ] || fail "приложение не запущено: сверять версию не с чем"
+  [ "${actual}" = "${expected}" ] \
+    || fail "на сервере работает ${actual}, а ожидалась ${expected}: пересоздание откатило бы окружение"
+}
+
 compose_command() {
   printf "cd '%s' && IMAGE_REPOSITORY='%s' IMAGE_TAG='%s' APP_HOST_PORT='%s' APP_ENV_NAME='%s' ENV_FILE='%s' DB_VOLUME='%s' COMPOSE_PROJECT='%s' MAP_ARTIFACTS_DIR='%s' VALHALLA_GRAPH_DIR='%s' VALHALLA_GRAPH_SHA256='%s' VALHALLA_IMAGE='%s' VROOM_IMAGE='%s' VROOM_VERSION='%s' MOYSKLAD_READ_ONLY='%s' docker compose -f '%s' -p '%s'" \
     "${REMOTE_DIR}" "${IMAGE_REPOSITORY}" "${VERSION}" "${APP_HOST_PORT}" "${ENVIRONMENT_MARKER}" \
