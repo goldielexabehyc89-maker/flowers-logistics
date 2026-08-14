@@ -324,9 +324,6 @@ test('Сделки: ручная точка выводит заказ из «Т�
   page: Page;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
-  test.skip(first === '', 'нужен проверочный заказ');
-
   const styleUrl = 'https://maps.local.test/style.json';
   await page.route('**/api/map/config', (route) =>
     route.fulfill({
@@ -344,18 +341,32 @@ test('Сделки: ручная точка выводит заказ из «Т�
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
-  const card = page.locator(`[data-testid="deal-card"][data-order-number="${first}"]`);
-  await expect(card).toBeVisible();
+  /*
+   * Берётся заказ, которому мешает ИМЕННО отсутствие точки.
+   *
+   * Файл выполняется последовательно и делит состояние: соседние сценарии
+   * успевают увести заказы в черновики, а «Требует внимания» бывает и по другим
+   * причинам. Проверять переход в пригодные можно только там, где точка —
+   * единственное препятствие, иначе утверждение доказывало бы не то.
+   */
+  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
+  const card = page
+    .locator('[data-testid="deal-card"]')
+    .filter({ hasText: 'Нет подтверждённой точки на карте' })
+    .first();
+  test.skip((await card.count()) === 0, 'нет заказа, которому мешает только отсутствие точки');
 
-  // Без точки заказ распределить нельзя — он остаётся в «Требует внимания».
+  const number = (await card.getAttribute('data-order-number')) ?? '';
+  expect(number).not.toBe('');
   await expect(card).toHaveAttribute('data-selectable', 'no');
 
   // 1. Отмена ничего не записывает.
   await card.getByTestId('deal-set-point').click();
-  await expect(page.getByRole('heading', { name: `Точка заказа ${first}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Точка заказа ${number}` })).toBeVisible();
   await page.getByRole('button', { name: 'Отмена' }).click();
-  await expect(page.getByRole('heading', { name: `Точка заказа ${first}` })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: `Точка заказа ${number}` })).toHaveCount(0);
   await expect(card).toHaveAttribute('data-selectable', 'no');
+  await expect(card).toContainText('Нет подтверждённой точки на карте');
 
   // 2. Причина обязательна: без неё сохранить нельзя.
   await card.getByTestId('deal-set-point').click();
@@ -377,7 +388,9 @@ test('Сделки: ручная точка выводит заказ из «Т�
   await page.getByTestId('geo-point-save').click();
   await expect(page.locator('.toast-region').getByText(/Точка сохранена|уже стояла/)).toBeVisible();
 
-  // 4. Заказ вышел из «Требует внимания» и стал пригоден для черновика.
+  // 4. Заказ вышел из состояния «нет точки» и стал пригоден для черновика.
+  await expect(card).not.toContainText('Нет подтверждённой точки на карте');
+  await expect(card.getByTestId('deal-set-point')).toHaveCount(0);
   await expect(card).toHaveAttribute('data-selectable', 'yes');
   await card.getByTestId('deal-pick').click();
   await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 1');
