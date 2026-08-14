@@ -7,9 +7,10 @@
  *
  * Три границы держатся здесь и нигде больше:
  *
- * 1. **Ключи не покидают сервер.** Браузер не получает ни ключа, ни адреса
+ * 1. **Ключ не покидает сервер.** Браузер не получает ни ключа, ни адреса
  *    DaData: он обращается только к нашему API. Иначе ключ утёк бы в первую же
- *    вкладку с открытой консолью.
+ *    вкладку с открытой консолью. Ключ ровно один — `Authorization: Token`;
+ *    секретный ключ требовался платному Clean API, которого больше нет.
  * 2. **Наружу отдаётся только нужное.** Сырой ответ провайдера не пересылается:
  *    он содержит десятки полей, включая те, которых мы не обещали хранить,
  *    и его форма может измениться без предупреждения.
@@ -40,6 +41,15 @@ export interface AddressSuggestion {
   /** Координаты, если DaData их привязала. */
   latMicro: number | null;
   lonMicro: number | null;
+  /**
+   * Код точности привязки как его вернула DaData, либо `null`, если его нет.
+   *
+   * Отдаётся наружу вместе с готовым решением `exact`, а не вместо него:
+   * решение принимает сервер, но человек должен видеть, ПОЧЕМУ подсказка
+   * не годится в маршрут. Это технический код качества, а не персональные
+   * данные.
+   */
+  qcGeo: number | null;
   /** Точна ли привязка. Только точная попадает в маршрут без проверки человеком. */
   exact: boolean;
 }
@@ -95,8 +105,8 @@ export async function suggestAddresses(
   if (trimmed.length < MIN_QUERY_LENGTH) {
     return [];
   }
-  if (deps.credentials.apiKey === null || deps.credentials.secretKey === null) {
-    // Незаданные ключи — это «не настраивали», а не ошибка запроса.
+  if (deps.credentials.apiKey === null) {
+    // Незаданный ключ — это «не настраивали», а не ошибка запроса.
     return [];
   }
 
@@ -139,7 +149,7 @@ export async function suggestAddresses(
       const latMicro = toMicro(item.data?.geo_lat, 90 * MICRO);
       const lonMicro = toMicro(item.data?.geo_lon, 180 * MICRO);
       const exact = qc === QC_GEO_EXACT && latMicro !== null && lonMicro !== null;
-      return { value: item.value, latMicro, lonMicro, exact };
+      return { value: item.value, latMicro, lonMicro, qcGeo: qc, exact };
     });
   } finally {
     clearTimeout(timer);

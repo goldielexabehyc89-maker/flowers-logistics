@@ -124,7 +124,11 @@ function fakeSuggest(payload: unknown, status = 200): typeof globalThis.fetch {
     })) as unknown as typeof globalThis.fetch;
 }
 
-const CREDENTIALS = { apiKey: 'test-only-key', secretKey: 'test-only-secret' };
+/**
+ * Учётные данные подсказок. Ключ здесь ровно один: секретный требовался платному
+ * Clean API, которого в проекте нет (`docs/OWNER_DECISIONS.md`, `GEO-005`).
+ */
+const CREDENTIALS = { apiKey: 'test-only-key' };
 
 // ---------------------------------------------------------------------------
 
@@ -147,7 +151,16 @@ describe('подсказки адреса', () => {
     );
 
     expect(suggestions).toEqual([
-      { value: LOCAL_ADDRESS, latMicro: POINT.latMicro, lonMicro: POINT.lonMicro, exact: true },
+      {
+        value: LOCAL_ADDRESS,
+        latMicro: POINT.latMicro,
+        lonMicro: POINT.lonMicro,
+        // Код качества уходит наружу вместе с готовым решением, а не вместо
+        // него: решает сервер, но человек должен видеть, ПОЧЕМУ подсказка
+        // не годится в маршрут.
+        qcGeo: 0,
+        exact: true,
+      },
     ]);
     // Полей провайдера, которых мы не обещали хранить, в ответе нет.
     expect(JSON.stringify(suggestions)).not.toContain('fias_id');
@@ -170,6 +183,39 @@ describe('подсказки адреса', () => {
       'Москва, улица',
     );
     expect(first?.exact).toBe(false);
+    // Код качества виден: человек понимает, что привязка не точная, а не просто
+    // «почему-то нельзя».
+    expect(first?.qcGeo).toBe(2);
+  });
+
+  it('подсказкам достаточно одного ключа, и уходит только он', async () => {
+    let sentHeaders: Record<string, string> = {};
+    const capture: typeof globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      sentHeaders = init.headers as Record<string, string>;
+      return new Response(
+        JSON.stringify({
+          suggestions: [
+            { value: LOCAL_ADDRESS, data: { geo_lat: '55.7', geo_lon: '37.6', qc_geo: '0' } },
+          ],
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof globalThis.fetch;
+
+    const suggestions = await suggestAddresses(
+      { credentials: { apiKey: 'test-only-key' }, fetch: capture },
+      'Москва, исправ',
+    );
+
+    // Один ключ — полная настройка: подсказки работают.
+    expect(suggestions).toHaveLength(1);
+
+    // Наружу уходит ровно `Authorization: Token`. Заголовка `X-Secret` нет:
+    // он принадлежал платному Clean API, которого в проекте нет.
+    expect(sentHeaders['authorization']).toBe('Token test-only-key');
+    const names = Object.keys(sentHeaders).map((name) => name.toLowerCase());
+    expect(names).not.toContain('x-secret');
+    expect(names.sort()).toEqual(['accept', 'authorization', 'content-type']);
   });
 
   it('короткий запрос и незаданные ключи в сеть не уходят', async () => {
@@ -181,10 +227,7 @@ describe('подсказки адреса', () => {
 
     expect(await suggestAddresses({ credentials: CREDENTIALS, fetch: counting }, 'Мо')).toEqual([]);
     expect(
-      await suggestAddresses(
-        { credentials: { apiKey: null, secretKey: null }, fetch: counting },
-        'Москва, улица',
-      ),
+      await suggestAddresses({ credentials: { apiKey: null }, fetch: counting }, 'Москва, улица'),
     ).toEqual([]);
     expect(called).toBe(0);
   });

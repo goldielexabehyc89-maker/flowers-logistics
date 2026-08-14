@@ -8,18 +8,18 @@
  *
  * Отсюда три вещи:
  *   - минимальный интервал между началами запросов;
- *   - пауза после 429, относящаяся ко всему ключу;
+ *   - пауза после отказа геокодера, относящаяся ко всему сервису;
  *   - полная остановка обращений при неверном ключе или отозванных правах.
  */
 
 import type { Database } from '../../../platform/db.js';
 
-export const PROVIDER_STATE_ID = 'dadata';
+export const PROVIDER_STATE_ID = 'photon';
 
 /** Минимальный интервал между началами запросов. Строже официального предела. */
 export const MIN_REQUEST_INTERVAL_MS = 1000;
 
-/** Пауза после 429 без корректного Retry-After. */
+/** Базовая общая пауза после отказа геокодера. */
 export const DEFAULT_COOLDOWN_MS = 30_000;
 
 /**
@@ -136,7 +136,7 @@ export async function haltProvider(db: Database, reason: string, now: Date): Pro
   });
 }
 
-/** Общая пауза после 429: она относится к ключу, а не к одному заказу. */
+/** Общая пауза: недоступен сервис целиком, а не один адрес. */
 export async function startCooldown(db: Database, until: Date, now: Date): Promise<void> {
   await db.$executeRaw`
     UPDATE "GeocodingProviderState"

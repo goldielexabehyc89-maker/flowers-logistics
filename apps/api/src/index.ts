@@ -22,14 +22,17 @@ import {
   reportStartupStatus,
   shouldRunAutomatically,
 } from './modules/integrations/moysklad/worker.js';
-import { DadataClient } from './modules/integrations/dadata/client.js';
+import { PhotonClient } from './modules/integrations/photon/client.js';
 import { createGeocodeWorker, GEOCODE_LOCK_KEY } from './modules/orders/geocoding/worker.js';
 import { reportGeocodingStartupStatus } from './modules/orders/geocoding/status.js';
 import { backfillGeocoding } from './modules/orders/geocoding/queue.js';
 import { clearHalt } from './modules/orders/geocoding/provider-state.js';
 import { ValhallaClient } from './modules/integrations/valhalla/client.js';
 import { probeRouting } from './modules/geo/routing-status.js';
-import { shouldGeocodeAutomatically } from './modules/orders/geocoding/enabled.js';
+import {
+  isPhotonConfigured,
+  shouldGeocodeAutomatically,
+} from './modules/orders/geocoding/enabled.js';
 import { VroomClient } from './modules/integrations/vroom/client.js';
 import { probeSolver } from './modules/planning/solver-status.js';
 import { createPlanningDeps } from './modules/planning/deps.js';
@@ -89,11 +92,12 @@ async function main(): Promise<void> {
     : null;
   syncWorker?.start();
 
-  // Геокодирование адресов. Ключи существуют только в production, поэтому
-  // в остальных окружениях клиент и worker не создаются вовсе: ни одного
-  // обращения к DaData оттуда произойти не может, даже если заказы есть.
+  // Геокодирование адресов выполняет собственный Photon. Без адреса Photon
+  // worker не создаётся вовсе: геокодер честно остаётся ненастроенным, заказы
+  // остаются в «Требует внимания», и точку ставит человек. Ни одного обращения
+  // к внешнему платному сервису отсюда не происходит.
   await reportGeocodingStartupStatus(db, {
-    configured: config.DADATA_API_KEY !== undefined && config.DADATA_SECRET_KEY !== undefined,
+    configured: isPhotonConfigured(config),
     enabled: geocodingEnabled,
   });
 
@@ -101,12 +105,8 @@ async function main(): Promise<void> {
     ? createGeocodeWorker({
         db,
         logger,
-        client: new DadataClient({
-          credentials: {
-            apiKey: config.DADATA_API_KEY ?? null,
-            secretKey: config.DADATA_SECRET_KEY ?? null,
-          },
-        }),
+        // Собственный Photon: ключей у него нет, наружу адреса не уходят.
+        client: new PhotonClient({ url: config.PHOTON_URL ?? null }),
         lock: { connectionString: config.DATABASE_URL, key: GEOCODE_LOCK_KEY },
       })
     : null;

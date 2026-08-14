@@ -8,6 +8,21 @@
 import { z } from 'zod';
 import { MAX_MATRIX_POINTS } from '../modules/geo/limits.js';
 
+/**
+ * Необязательное значение, у которого пустая строка означает «не задано».
+ *
+ * Шаблон конфигурации перечисляет такие переменные пустыми, и файлы окружения
+ * доносят их до процесса именно пустой строкой, а не отсутствием. Без этого
+ * приведения скопированный без правок шаблон ронял бы запуск сообщением
+ * «слишком короткая строка» — вместо честного «не настроено», ради которого
+ * переменная и объявлена необязательной.
+ */
+const optionalText = (): z.ZodType<string | undefined> =>
+  z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.string().min(1).optional(),
+  );
+
 const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   /** Логическое окружение: local | staging | production. */
@@ -81,18 +96,42 @@ const configSchema = z.object({
   /** Перекрытие окна delta-синхронизации. Стартовое значение — пять минут. */
   MOYSKLAD_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
 
-  // --- DaData: геокодирование адресов ---
-  // Ключи существуют ТОЛЬКО в production. Ключ даёт доступ к платному балансу
-  // организации, а каждый запрос содержит адрес клиента: обращение из staging,
-  // CI или локальной разработки означало бы и трату чужих денег, и отправку
-  // персональных данных наружу из окружения, где их быть не должно.
-  DADATA_API_KEY: z.string().min(1).optional(),
-  DADATA_SECRET_KEY: z.string().min(1).optional(),
-  /** Автоматическое фоновое геокодирование. По умолчанию выключено везде. */
+  // --- DaData: ТОЛЬКО подсказки адреса в ручной правке ---
+  // Ключ даёт доступ к платному балансу организации, а каждый запрос содержит
+  // адрес клиента: обращение из local, CI или смешанной конфигурации означало
+  // бы и трату чужих денег, и отправку персональных данных наружу из окружения,
+  // где их быть не должно.
+  //
+  // Ключ ровно один. Подсказки авторизуются заголовком `Authorization: Token`
+  // и ничего кроме него не отправляют. Секретный ключ (`X-Secret`) требовался
+  // платному Clean API, которого в проекте больше нет, и здесь его нет тоже:
+  // хранить на сервере секрет, который никуда не уходит, — лишний риск без
+  // единой причины.
+  DADATA_API_KEY: optionalText(),
+  /**
+   * Серверные подсказки адреса в ручной правке.
+   *
+   * Автоматическое геокодирование этим флагом НЕ включается: его включает
+   * только `PHOTON_URL`.
+   */
   DADATA_GEOCODING_ENABLED: z
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+
+  /**
+   * Адрес СОБСТВЕННОГО Photon — единственного автоматического геокодера.
+   *
+   * Пусто — геокодер не настроен, и ни одного обращения не выполняется:
+   * новые адреса просто остаются в «Требует внимания». Публичные
+   * `photon.komoot.io` и `nominatim.openstreetmap.org` отвергаются до сети
+   * (`modules/integrations/photon/client.ts`): они не рассчитаны на рабочую
+   * нагрузку и увозят адреса клиентов третьей стороне.
+   *
+   * Ключей здесь нет и быть не может: это внутренний адрес нашего же
+   * контейнера.
+   */
+  PHOTON_URL: optionalText(),
 
   /**
    * Адрес стиля карты MapLibre. Пусто — карта честно не настроена.
@@ -395,13 +434,11 @@ export function dadataEnvironment(data: {
 function assertDadataEnvironment(data: z.infer<typeof configSchema>): void {
   const environment = dadataEnvironment(data);
 
-  const hasKey = data.DADATA_API_KEY !== undefined || data.DADATA_SECRET_KEY !== undefined;
-
-  if (hasKey && environment === 'denied') {
+  if (data.DADATA_API_KEY !== undefined && environment === 'denied') {
     throw new Error(
-      'DADATA_API_KEY и DADATA_SECRET_KEY допустимы только при совпавших маркерах ' +
-        'production либо staging: рабочие ключи не размещаются в local, CI и в смешанной ' +
-        'конфигурации, где APP_ENV и APP_ENVIRONMENT_MARKER расходятся',
+      'DADATA_API_KEY допустим только при совпавших маркерах production либо staging: ' +
+        'рабочий ключ не размещается в local, CI и в смешанной конфигурации, где ' +
+        'APP_ENV и APP_ENVIRONMENT_MARKER расходятся',
     );
   }
 
@@ -412,13 +449,10 @@ function assertDadataEnvironment(data: z.infer<typeof configSchema>): void {
     );
   }
 
-  // Оба ключа обязательны вместе: запрос к DaData требует и Authorization,
-  // и X-Secret, а половина пары означает ошибку развёртывания.
-  if (
-    data.DADATA_GEOCODING_ENABLED &&
-    (data.DADATA_API_KEY === undefined || data.DADATA_SECRET_KEY === undefined)
-  ) {
-    throw new Error('DADATA_GEOCODING_ENABLED=true требует и DADATA_API_KEY, и DADATA_SECRET_KEY');
+  // Включённые подсказки без ключа — ошибка развёртывания, а не «пока без ключа»:
+  // экран обещал бы подсказки, которых не будет.
+  if (data.DADATA_GEOCODING_ENABLED && data.DADATA_API_KEY === undefined) {
+    throw new Error('DADATA_GEOCODING_ENABLED=true требует DADATA_API_KEY');
   }
 }
 

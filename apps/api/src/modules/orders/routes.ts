@@ -742,10 +742,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
 
     const suggestions = await suggestAddresses(
       {
-        credentials: {
-          apiKey: deps.config.DADATA_API_KEY ?? null,
-          secretKey: deps.config.DADATA_SECRET_KEY ?? null,
-        },
+        credentials: { apiKey: deps.config.DADATA_API_KEY ?? null },
         ...(deps.suggestFetch === undefined ? {} : { fetch: deps.suggestFetch }),
       },
       query,

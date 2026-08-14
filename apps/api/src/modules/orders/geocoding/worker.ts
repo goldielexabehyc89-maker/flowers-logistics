@@ -2,7 +2,7 @@
  * Обработчик очереди геокодирования.
  *
  * Главное правило модуля: сетевой запрос выполняется СТРОГО вне транзакции.
- * Обращение к DaData длится сотни миллисекунд, а иногда секунды таймаута;
+ * Обращение к геокодеру длится сотни миллисекунд, а иногда секунды таймаута;
  * транзакция, открытая всё это время, держала бы соединение с базой и строку
  * заказа, и логист не смог бы поставить точку руками, пока провайдер думает.
  *
@@ -33,14 +33,15 @@ import { writeAudit } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
 import { acquireSyncLock, type LockDeps } from '../../integrations/moysklad/sync-lock.js';
 import {
-  DadataError,
-  isPermanentDadataFailure,
-  type DadataErrorCode,
-} from '../../integrations/dadata/client.js';
-import { parseQcGeo, QC_GEO_EXACT, type DadataAddress } from '../../integrations/dadata/dto.js';
+  isPermanentPhotonFailure,
+  PhotonError,
+  type PhotonAnswer,
+  type PhotonErrorCode,
+} from '../../integrations/photon/client.js';
+import { readCache, writeCache } from './cache.js';
 import { MAX_LAT_MICRO, MAX_LON_MICRO, toMicro } from '../geo.js';
 import { retryDelayMs } from './queue.js';
-import { setDadataStatus } from './status.js';
+import { setGeocoderStatus } from './status.js';
 import {
   DEFAULT_COOLDOWN_MS,
   haltProvider,
@@ -55,10 +56,10 @@ import type { Role } from '@fl/shared';
 const ORDER_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
 
 /**
- * Ключ session advisory-lock на обращения к DaData.
+ * Ключ session advisory-lock на обращения к геокодеру.
  *
- * Экземпляров приложения может быть несколько, а лимит и баланс у провайдера
- * общие. Без единого замка два процесса удвоили бы темп и счёт.
+ * Экземпляров приложения может быть несколько, а Photon один. Без единого замка
+ * два процесса удвоили бы темп обращений к нему.
  * Ключ отличается от ключа синхронизации: это разные сервисы.
  */
 export const GEOCODE_LOCK_KEY = 730_205n;
@@ -83,16 +84,23 @@ export interface GeocodePassResult {
   released: number;
   /** Сколько раз обращались к провайдеру за проход. */
   requests: number;
-  /** Проход не состоялся: обращения к DaData уже выполняет другой процесс. */
+  /** Проход не состоялся: обращения к геокодеру уже выполняет другой процесс. */
   skippedBusy: boolean;
   /** Проход не состоялся: обращения остановлены до исправления конфигурации. */
   haltedReason: string | null;
-  /** Проход не состоялся: действует общая пауза после 429. */
+  /** Проход не состоялся: действует общая пауза после отказа геокодера. */
   skippedCooldown: boolean;
 }
 
+/**
+ * Геокодер очереди.
+ *
+ * Контракт нейтрален к провайдеру: очередь не должна знать, чей это ответ.
+ * Сейчас его выполняет собственный Photon; DaData здесь нет вовсе —
+ * её платный Clean API не вызывается ни одним фоновым проходом.
+ */
 export interface Geocoder {
-  cleanAddress: (address: string) => Promise<DadataAddress>;
+  search: (address: string) => Promise<PhotonAnswer | null>;
 }
 
 export interface GeocodeWorkerDeps {
@@ -273,23 +281,19 @@ export function staleReason(
  * как обычная и увела бы курьера, ничем себя не выдав.
  */
 export function decideResult(
-  answer: DadataAddress,
+  answer: PhotonAnswer | null,
 ): { kind: 'RESOLVED'; latMicro: number; lonMicro: number } | { kind: 'LOW_PRECISION' } {
-  if (parseQcGeo(answer.qc_geo) !== QC_GEO_EXACT) {
-    return { kind: 'LOW_PRECISION' };
-  }
-
-  const lat = answer.geo_lat;
-  const lon = answer.geo_lon;
-  if (lat === null || lat === undefined || lon === null || lon === undefined) {
+  // Ничего не найдено и найдено «примерно» — для нас одно и то же: точки нет,
+  // и заказ обязан попасть к человеку. Везти по улице без дома нельзя.
+  if (answer === null || answer.precision !== 'HOUSE') {
     return { kind: 'LOW_PRECISION' };
   }
 
   try {
     return {
       kind: 'RESOLVED',
-      latMicro: toMicro(lat, MAX_LAT_MICRO, 'lat'),
-      lonMicro: toMicro(lon, MAX_LON_MICRO, 'lon'),
+      latMicro: toMicro(answer.lat, MAX_LAT_MICRO, 'lat'),
+      lonMicro: toMicro(answer.lon, MAX_LON_MICRO, 'lon'),
     };
   } catch {
     // Координата вне планеты или в неожиданном формате — это не точка.
@@ -306,7 +310,7 @@ interface JobOutcome {
   /** Запрос к провайдеру действительно выполнялся. */
   requested: boolean;
   /** Код последней ошибки провайдера. Нужен для состояния интеграции. */
-  errorCode: DadataErrorCode | null;
+  errorCode: PhotonErrorCode | null;
   /** Проход обязан прекратиться: отказ относится ко всему провайдеру. */
   stop: PassStop | null;
 }
@@ -325,20 +329,21 @@ const EMPTY_OUTCOME: JobOutcome = {
 /**
  * Почему проход прекращён досрочно.
  *
- * Отказ ключа и лимит относятся ко всему провайдеру, а не к одному заданию:
+ * Неверная настройка и недоступность относятся ко всему провайдеру, а не к одному заданию:
  * продолжать пачку после них значит гарантированно получить тот же ответ
  * ещё девять раз, потратив обращения и время.
  */
-type PassStop = { kind: 'HALT'; reason: DadataErrorCode } | { kind: 'COOLDOWN'; until: Date };
+type PassStop = { kind: 'HALT'; reason: PhotonErrorCode } | { kind: 'COOLDOWN'; until: Date };
 
 /**
  * Один проход очереди.
  *
- * Обращения к DaData защищены session advisory-lock: если проход уже идёт
+ * Обращения к Photon защищены session advisory-lock: если проход уже идёт
  * в другом экземпляре приложения, этот честно ничего не делает, а не удваивает
- * темп и счёт.
+ * темп и нагрузку на геокодер.
  *
- * Проход прекращается досрочно при отказе ключа и при 429. В обоих случаях
+ * Проход прекращается досрочно при неверной настройке и при отказе сервиса.
+ * В обоих случаях
  * оставшиеся захваченные задания возвращаются в очередь БЕЗ расходования
  * попыток: они ни в чём не виноваты и ни одного запроса не получили.
  */
@@ -390,7 +395,7 @@ export async function processGeocodingOnce(deps: GeocodeWorkerDeps): Promise<Geo
     }, deps.leaseRenewIntervalMs ?? LEASE_RENEW_INTERVAL_MS);
     keeper.unref();
 
-    let lastError: DadataErrorCode | null = null;
+    let lastError: PhotonErrorCode | null = null;
     let anySuccess = false;
     let stop: PassStop | null = null;
 
@@ -492,7 +497,7 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
         ...EMPTY_OUTCOME,
         stop: {
           kind: 'HALT',
-          reason: (state.haltedReason ?? 'NOT_CONFIGURED') as DadataErrorCode,
+          reason: (state.haltedReason ?? 'NOT_CONFIGURED') as PhotonErrorCode,
         },
       };
     }
@@ -503,19 +508,33 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
     };
   }
 
-  let answer: DadataAddress;
-  try {
-    // Никакой транзакции здесь нет и быть не может: запрос длится сотни
-    // миллисекунд, а строка заказа всё это время должна оставаться свободной.
-    answer = await deps.client.cleanAddress(address);
-  } catch (error) {
-    return handleFailure(deps, job, error);
+  // Кэш по нормализованному адресу проверяется ДО сети: один и тот же адрес
+  // приходит десятками заказов, и платить обращением за каждое повторение
+  // незачем. Попадание в кэш не считается запросом к провайдеру.
+  const cached = await readCache(deps.db, address);
+  let answer: PhotonAnswer | null;
+  let fromCache = false;
+
+  if (cached !== undefined) {
+    answer = cached;
+    fromCache = true;
+  } else {
+    try {
+      // Никакой транзакции здесь нет и быть не может: запрос длится сотни
+      // миллисекунд, а строка заказа всё это время должна оставаться свободной.
+      answer = await deps.client.search(address);
+    } catch (error) {
+      return handleFailure(deps, job, error);
+    }
+    await writeCache(deps.db, address, answer);
   }
 
   const decision = decideResult(answer);
   try {
     const outcome = await applyResult(deps, job, address, decision);
-    return { ...outcome, requested: true };
+    // Ответ из кэша запросом не считается: отчёт о расходе обязан показывать
+    // фактическое число обращений к геокодеру, а не число заказов.
+    return { ...outcome, requested: !fromCache };
   } catch (error) {
     if (error instanceof LeaseLostError) {
       // Задание уже довёл до конца другой владелец: наша транзакция откачена,
@@ -558,7 +577,7 @@ async function applyResult(
         where: { id: job.orderId },
         data: {
           geoState: 'RESOLVED',
-          geoSource: 'DADATA',
+          geoSource: 'PHOTON',
           geoPrecision: 'EXACT_HOUSE',
           geoLatMicro: decision.latMicro,
           geoLonMicro: decision.lonMicro,
@@ -631,7 +650,7 @@ async function applyResult(
       // Ни адреса, ни координат: они живут в заказе и его защищённой истории.
       newValue:
         decision.kind === 'RESOLVED'
-          ? { geoState: 'RESOLVED', geoSource: 'DADATA', version }
+          ? { geoState: 'RESOLVED', geoSource: 'PHOTON', version }
           : { geoState: 'NEEDS_REVIEW', geoReviewReason: 'LOW_PRECISION', version },
     });
 
@@ -639,7 +658,7 @@ async function applyResult(
       topic: 'order.geo_changed',
       payload:
         decision.kind === 'RESOLVED'
-          ? { orderId: job.orderId, geoState: 'RESOLVED', geoSource: 'DADATA' }
+          ? { orderId: job.orderId, geoState: 'RESOLVED', geoSource: 'PHOTON' }
           : { orderId: job.orderId, geoState: 'NEEDS_REVIEW', reviewReason: 'LOW_PRECISION' },
       audienceRoles: [...ORDER_AUDIENCE],
     });
@@ -720,7 +739,7 @@ async function finishJob(
 /**
  * Обрабатывает отказ провайдера.
  *
- * Отказ авторизации и прав сам не пройдёт: повторять его бессмысленно, задание
+ * Отказ настройки сам не пройдёт: повторять его бессмысленно, задание
  * возвращается в очередь с длинной паузой и не тратит попытки — виновата
  * конфигурация, а не адрес. Остальные отказы считаются попытками; когда они
  * исчерпаны, заказ переходит в FAILED и ждёт человека.
@@ -731,15 +750,15 @@ async function handleFailure(
   error: unknown,
 ): Promise<JobOutcome> {
   const now = clockOf(deps);
-  const code: DadataErrorCode = error instanceof DadataError ? error.code : 'TRANSPORT_ERROR';
+  const code: PhotonErrorCode = error instanceof PhotonError ? error.code : 'TRANSPORT_ERROR';
 
-  // Неверный ключ, отозванные права, отсутствие ключей.
+  // Геокодер не настроен либо настроен на публичный сервер.
   //
   // Отказ относится ко всему провайдеру, а не к адресу: попытка не тратится,
   // задание возвращается нетронутым, а проход прекращается. Продолжать пачку
   // здесь означало бы получить тот же ответ ещё девять раз — и повторять это
   // каждые несколько минут до вмешательства человека.
-  if (isPermanentDadataFailure(code)) {
+  if (isPermanentPhotonFailure(code)) {
     await releaseJobs(deps, [job.id]);
     return {
       ...EMPTY_OUTCOME,
@@ -749,14 +768,19 @@ async function handleFailure(
     };
   }
 
-  const retryAfter = error instanceof DadataError ? error.retryAfterMs : null;
-
-  // Превышение лимита. Попытку тратит только тот заказ, который получил 429;
-  // пауза при этом общая, потому что лимит относится к ключу целиком.
-  if (code === 'RATE_LIMITED') {
-    const cooldownMs = retryAfter ?? DEFAULT_COOLDOWN_MS;
+  // Photon недоступен или отвечает ошибкой.
+  //
+  // Это отказ сервиса, а не адреса: остальные задания пачки получили бы ровно
+  // тот же ответ. Попытку тратит только заказ, наткнувшийся на отказ, а пауза
+  // общая — она даёт своему же контейнеру подняться. Продолжать пачку значило
+  // бы за минуту израсходовать попытки десятка заказов из-за одного перезапуска.
+  if (code === 'SERVER_ERROR' || code === 'TRANSPORT_ERROR' || code === 'BAD_RESPONSE') {
     const attempts = job.attempts + 1;
     const exhausted = attempts >= job.maxAttempts;
+    // Общая пауза не короче обычной, но с каждой попыткой растёт: короткий сбой
+    // проходит быстро, а долгая недоступность не превращается в непрерывный
+    // опрос мёртвого сервиса.
+    const cooldownMs = Math.max(DEFAULT_COOLDOWN_MS, retryDelayMs(attempts));
     const until = new Date(now.getTime() + cooldownMs);
 
     if (exhausted) {
@@ -812,7 +836,7 @@ async function handleFailure(
 async function failOrder(
   deps: GeocodeWorkerDeps,
   job: ClaimedJob,
-  code: DadataErrorCode,
+  code: PhotonErrorCode,
   attempts: number,
   now: Date,
 ): Promise<JobOutcome> {
@@ -891,12 +915,12 @@ async function failOrder(
 /** Отражает итог прохода в состоянии интеграции. Ключей и адресов там нет. */
 async function reportPassStatus(
   deps: GeocodeWorkerDeps,
-  outcome: { anySuccess: boolean; lastError: DadataErrorCode | null },
+  outcome: { anySuccess: boolean; lastError: PhotonErrorCode | null },
 ): Promise<void> {
   if (outcome.lastError !== null) {
-    await setDadataStatus(
+    await setGeocoderStatus(
       deps.db,
-      isPermanentDadataFailure(outcome.lastError) ? 'ERROR' : 'DEGRADED',
+      isPermanentPhotonFailure(outcome.lastError) ? 'ERROR' : 'DEGRADED',
       { code: outcome.lastError },
       clockOf(deps),
     );
@@ -904,7 +928,7 @@ async function reportPassStatus(
   }
 
   if (outcome.anySuccess) {
-    await setDadataStatus(deps.db, 'OK', {}, clockOf(deps));
+    await setGeocoderStatus(deps.db, 'OK', {}, clockOf(deps));
   }
 }
 
