@@ -70,7 +70,13 @@ export interface SyncDeps {
    * Ставить ли адреса импортированных заказов в очередь геокодирования.
    * Включается только там, где очередь кто-то обрабатывает, — в production.
    */
-  geocodingEnabled?: boolean;
+  /**
+   * Создавать ли задание геокодирования при ПЕРВОМ импорте заказа.
+   *
+   * Это не разрешение обращаться к геокодеру: обработку включает отдельный
+   * флаг. Здесь решается только, фиксировать ли событие.
+   */
+  enqueueOnImport?: boolean;
   /**
    * Сколько заказов дочитывает очередь состава за проход.
    *
@@ -319,7 +325,7 @@ async function applyRows(
 
     const applied = await deps.db.$transaction(async (tx: TransactionClient) => {
       const orderResult = await applyOrderSnapshot(tx, snapshot, now, {
-        geocoding: deps.geocodingEnabled === true,
+        geocoding: deps.enqueueOnImport === true,
       });
 
       if (composition === null) {

@@ -256,7 +256,7 @@ async function updateOrder(
   existing: StoredOrder,
   snapshot: OrderSnapshot,
   now: Date,
-  options: ApplyOptions,
+  _options: ApplyOptions,
 ): Promise<ApplyResult> {
   const previous = await previousSnapshot(tx, existing.id);
   const changedFields = diffSnapshots(previous, snapshot);
@@ -390,28 +390,17 @@ async function updateOrder(
       lonMicro: existing.geoLonMicro,
     });
 
-    // Новый адрес отправляется на разрешение заново. Прежняя точка к нему
-    // не относится — в том числе поставленная человеком: он подтверждал другой
-    // адрес. Поколение растёт, поэтому ответ по старому адресу, если он ещё
-    // летит от провайдера, будет распознан как устаревший и отброшен.
-    if (options.geocoding === true) {
-      await enqueueGeocoding(
-        tx,
-        {
-          id: existing.id,
-          address: snapshot.address,
-          geocodeAddress: snapshot.geocodeAddress,
-          localAddress: existing.localAddress,
-          inScope: snapshot.inScope,
-          sourceArchived: snapshot.sourceArchived,
-          sourceMissing: false,
-          geoState: invalidated ? 'NEEDS_REVIEW' : existing.geoState,
-          geoSource: invalidated ? null : existing.geoSource,
-          geoGeneration: existing.geoGeneration,
-        },
-        now,
-      );
-    }
+    // Задание здесь НЕ создаётся, и это правило, а не упущение.
+    //
+    // Обычное обновление заказа в МоемСкладе событием геокодирования не
+    // является. Прежняя точка снята выше — она относилась к другому адресу
+    // и молча увела бы курьера, — но обращаться к геокодеру за исторический
+    // заказ никто не просил. Заказ виден в «Требует внимания», и решение
+    // принимает человек: правкой адреса либо явной операторской командой.
+    //
+    // Автоматически в очередь попадают ровно два события: первый импорт
+    // нового заказа и ручная правка адреса логистом.
+    void invalidated;
   }
 
   // Заказ мог уже лежать в маршруте. Из маршрута он НЕ удаляется: участие и история
