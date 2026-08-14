@@ -11,7 +11,39 @@
  * и в отчёт не печатаются.
  */
 
+import { execFileSync } from 'node:child_process';
 import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
+
+/**
+ * Собственные заказы сценария.
+ *
+ * Раньше логистические сценарии делили заказы фикстуры и брали «любой
+ * доступный». Такой выбор скрывает взаимное влияние: сценарий проходил
+ * не потому, что верен, а потому, что сосед ещё не успел занять номер, —
+ * и повторный прогон набора давал другой результат.
+ *
+ * Теперь каждый сценарий создаёт СВОИ заказы и работает ровно с ними.
+ * Заказы создаются напрямую в базе: токена МоегоСклада в проверках нет,
+ * и ни одного обращения к нему быть не должно.
+ *
+ * `withPoint` ставит подтверждённую точку. Без неё заказ непригоден
+ * к распределению — это нужно сценарию ручной установки точки и мешает
+ * всем остальным.
+ */
+function seedOrders(count: number, options: { withPoint: boolean }): string[] {
+  const args = ['run', '--silent', 'seed:e2e-order', '--', `--count=${count}`];
+  if (options.withPoint) {
+    args.push('--with-point');
+  }
+
+  const output = execFileSync('npm', args, { encoding: 'utf8' });
+  const numbers = [...output.matchAll(/^номер:\s*(.+)$/gm)].map((match) => match[1]?.trim() ?? '');
+
+  if (numbers.length !== count) {
+    throw new Error(`сеялка вернула ${numbers.length} заказов вместо ${count}`);
+  }
+  return numbers;
+}
 
 const ADMIN_PHONE = process.env['E2E_ADMIN_PHONE'] ?? '+79990000001';
 const ADMIN_CODE = process.env['E2E_ADMIN_CODE'] ?? '';
@@ -324,6 +356,10 @@ test('Сделки: ручная точка выводит заказ из «Т�
   page: Page;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Собственный заказ БЕЗ точки: ровно то, что чинит этот сценарий.
+  const [number] = seedOrders(1, { withPoint: false });
+  expect(number).toBeTruthy();
+
   const styleUrl = 'https://maps.local.test/style.json';
   await page.route('**/api/map/config', (route) =>
     route.fulfill({
@@ -341,24 +377,14 @@ test('Сделки: ручная точка выводит заказ из «Т�
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
-  /*
-   * Берётся заказ, которому мешает ИМЕННО отсутствие точки.
-   *
-   * Файл выполняется последовательно и делит состояние: соседние сценарии
-   * успевают увести заказы в черновики, а «Требует внимания» бывает и по другим
-   * причинам. Проверять переход в пригодные можно только там, где точка —
-   * единственное препятствие, иначе утверждение доказывало бы не то.
-   */
+  // Собственный заказ сценария, намеренно без точки.
   await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
-  const card = page
-    .locator('[data-testid="deal-card"]')
-    .filter({ hasText: 'Нет подтверждённой точки на карте' })
-    .first();
-  test.skip((await card.count()) === 0, 'нет заказа, которому мешает только отсутствие точки');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+  await expect(card).toBeVisible();
 
-  const number = (await card.getAttribute('data-order-number')) ?? '';
-  expect(number).not.toBe('');
+  // Без точки заказ распределить нельзя, и причина названа прямо.
   await expect(card).toHaveAttribute('data-selectable', 'no');
+  await expect(card).toContainText('Нет подтверждённой точки на карте');
 
   // 1. Отмена ничего не записывает.
   await card.getByTestId('deal-set-point').click();
@@ -652,35 +678,29 @@ test('маршрут: черновик → состав → порядок → �
   page: Page;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  await login(page, ADMIN_PHONE, ADMIN_PIN);
-
   /*
    * Черновики создаются в «Сделках», а редактируются и подтверждаются
    * в «Маршрутизации». Кнопки создания на «Маршрутизации» нет намеренно:
    * рабочее место работает с уже созданными черновиками.
    *
-   * Заказы берутся не по номеру из окружения, а по признаку «сейчас доступен»:
-   * файл выполняется последовательно, и соседние сценарии успевают увести
-   * конкретные номера в свои черновики.
+   * Три собственных заказа: два в первый черновик и один во второй, чтобы
+   * было куда переносить. Чужие заказы сценарий не трогает.
    */
+  const [first, second, third] = seedOrders(3, { withPoint: true });
+  expect(first).toBeTruthy();
+  expect(second).toBeTruthy();
+  expect(third).toBeTruthy();
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
   await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
-  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
 
-  const free = page.locator('[data-testid="deal-card"][data-selectable="yes"]');
-  test.skip((await free.count()) < 2, 'нужны два свободных заказа дня');
-
-  const first = (await free.nth(0).getAttribute('data-order-number')) ?? '';
-  const second = (await free.nth(1).getAttribute('data-order-number')) ?? '';
-  expect(first).not.toBe('');
-  expect(second).not.toBe('');
-
-  await free.nth(0).getByTestId('deal-pick').click();
-  await page
-    .locator(`[data-testid="deal-card"][data-order-number="${second}"]`)
-    .getByTestId('deal-pick')
-    .click();
+  for (const number of [first, second]) {
+    const deal = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(deal).toHaveAttribute('data-selectable', 'yes');
+    await deal.getByTestId('deal-pick').click();
+  }
   await page.getByTestId('deals-manual-draft').click();
 
   // Переход ведёт в созданный черновик: он раскрыт, а не потерян в списке.
@@ -715,13 +735,12 @@ test('маршрут: черновик → состав → порядок → �
   await page.reload();
   await expect(page.locator('.routes__card .routes__stop').first()).toContainText(second);
 
-  // Второй черновик — из любого ещё свободного заказа, чтобы было куда
-  // переносить: конкретный номер к этому моменту мог уйти в чужой черновик.
+  // Второй черновик — из третьего собственного заказа, чтобы было куда
+  // переносить.
   await page.getByRole('link', { name: 'Сделки' }).first().click();
-  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
-  const stillFree = page.locator('[data-testid="deal-card"][data-selectable="yes"]');
-  test.skip((await stillFree.count()) === 0, 'свободных заказов для второго черновика нет');
-  await stillFree.first().getByTestId('deal-pick').click();
+  const thirdDeal = page.locator(`[data-testid="deal-card"][data-order-number="${third}"]`);
+  await expect(thirdDeal).toHaveAttribute('data-selectable', 'yes');
+  await thirdDeal.getByTestId('deal-pick').click();
   await page.getByTestId('deals-manual-draft').click();
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
   const secondCardNumber = (
@@ -729,8 +748,9 @@ test('маршрут: черновик → состав → порядок → �
   ).replace(/[^R\d-]/g, '');
 
   // Перенос из списка: аренда обоих черновиков берётся клиентом.
+  // В первом черновике два собственных заказа, во втором — один.
   await page.locator('.routes__draft', { hasText: routeNumber }).locator('button').first().click();
-  await expect(card.locator('.routes__stop')).toHaveCount(1);
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
   await card.getByLabel(`Выбрать заказ ${first}`).check();
   await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), secondCardNumber);
   await clickAndAwait(
@@ -739,9 +759,10 @@ test('маршрут: черновик → состав → порядок → �
     'POST',
     '/routes/move',
   );
-  await expect(card.locator('.routes__stop')).toHaveCount(0);
+  // Заказ ушёл: перенос выполнен, а не отклонён блокировкой.
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
 
-  // Возвращаем заказ обратно, чтобы подтвердить маршрут непустым составом.
+  // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
   await page
     .locator('.routes__draft', { hasText: secondCardNumber })
     .locator('button')
@@ -758,7 +779,7 @@ test('маршрут: черновик → состав → порядок → �
   );
 
   await page.locator('.routes__draft', { hasText: routeNumber }).locator('button').first().click();
-  await expect(card.locator('.routes__stop')).toHaveCount(1);
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
 
   // Подтверждение с назначением курьера в том же окне.
   await card.getByRole('button', { name: 'Подтвердить маршрут' }).click();
@@ -779,7 +800,7 @@ test('маршрут: черновик → состав → порядок → �
 
   const sheet = page.locator('.sheet');
   await expect(sheet).toContainText(routeNumber);
-  await expect(sheet.locator('.sheet__stop')).toHaveCount(1);
+  await expect(sheet.locator('.sheet__stop')).toHaveCount(2);
   await expect(sheet).toContainText('К получению');
   // В листе есть адрес и получатель, но нет служебных технических полей.
   await expect(sheet).toContainText('Москва, проверочный адрес 1');
@@ -903,11 +924,16 @@ test('Сделки: точный выбор → расчёт → превью �
   // Фикстура обязательна: без неё доказывать точность выбора нечем, и проверка
   // обязана упасть, а не пропустить себя. Готового превью фикстура больше
   // не создаёт — расчёт выполняется по-настоящему из браузера.
-  // Фикстура обязана существовать: она создаёт склад, обязательные настройки
-  // и заказы дня. Без неё расчёту не из чего складываться, и проверка обязана
-  // упасть, а не пропустить себя. Конкретные номера дальше не используются:
-  // заказы берутся по признаку доступности.
+  // Фикстура обязана существовать: она создаёт склад и обязательные настройки,
+  // без которых расчёту не из чего складываться. Проверка обязана упасть,
+  // а не пропустить себя.
   requiredEnv('E2E_PLAN_SELECTED_NUMBERS');
+
+  // Три собственных заказа: два уходят в расчёт, третий остаётся посторонним.
+  const [firstChosen, secondChosen, foreignNumber] = seedOrders(3, { withPoint: true });
+  const chosen = [firstChosen ?? '', secondChosen ?? ''];
+  expect(chosen.every((number) => number !== '')).toBe(true);
+  expect(foreignNumber).toBeTruthy();
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
@@ -945,34 +971,17 @@ test('Сделки: точный выбор → расчёт → превью �
   await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
 
   /*
-   * 2. «Сделки»: выбирается ровно два заказа, а третий свободный остаётся
+   * 2. «Сделки»: выбираются два собственных заказа, а третий остаётся
    *    посторонним — он обязан не попасть ни в расчёт, ни в черновики.
-   *
-   * Заказы берутся по признаку «сейчас доступен», а не по номеру из фикстуры:
-   * файл выполняется последовательно, и соседние сценарии успевают увести
-   * конкретные номера в свои черновики.
    */
   await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
-  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
-
-  const free = page.locator('[data-testid="deal-card"][data-selectable="yes"]');
-  test.skip((await free.count()) < 3, 'нужны три свободных заказа дня');
-
-  const chosen = [
-    (await free.nth(0).getAttribute('data-order-number')) ?? '',
-    (await free.nth(1).getAttribute('data-order-number')) ?? '',
-  ];
-  const foreignNumber = (await free.nth(2).getAttribute('data-order-number')) ?? '';
-  expect(foreignNumber).not.toBe('');
 
   for (const number of chosen) {
-    expect(number).not.toBe('');
-    await page
-      .locator(`[data-testid="deal-card"][data-order-number="${number}"]`)
-      .getByTestId('deal-pick')
-      .click();
+    const deal = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(deal).toHaveAttribute('data-selectable', 'yes');
+    await deal.getByTestId('deal-pick').click();
   }
 
   const foreignCard = page.locator(

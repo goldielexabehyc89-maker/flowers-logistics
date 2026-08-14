@@ -54,6 +54,18 @@ async function main(): Promise<number> {
   const countArg = process.argv.find((argument) => argument.startsWith('--count='));
   const count = Math.min(Math.max(Number(countArg?.split('=')[1] ?? '1') || 1, 1), 10);
 
+  /**
+   * Сразу поставить подтверждённую точку.
+   *
+   * Без неё заказ непригоден к распределению, и сценарию, которому нужен
+   * готовый к работе заказ, пришлось бы занимать чужой. Каждый сценарий
+   * получает СВОИ заказы — только так повторный прогон набора даёт тот же
+   * результат, а не зависит от того, что успели забрать соседи.
+   *
+   * Координаты синтетические и в production не встречаются.
+   */
+  const withPoint = process.argv.includes('--with-point');
+
   const db = createDatabase(config, logger);
   try {
     for (let index = 0; index < count; index += 1) {
@@ -181,6 +193,22 @@ async function main(): Promise<number> {
         },
         select: { id: true, externalName: true },
       });
+
+      if (withPoint) {
+        // Точки разнесены по индексу: совпадающие координаты дали бы один
+        // ключ кэша матриц, и расчёт вернул бы чужой результат.
+        await db.deliveryOrder.update({
+          where: { id: order.id },
+          data: {
+            geoState: 'RESOLVED',
+            geoSource: 'SYNTHETIC',
+            geoPrecision: 'EXACT_HOUSE',
+            geoLatMicro: 55_760_000 + index * 1_000,
+            geoLonMicro: 37_600_000 + index * 1_000,
+            geoResolvedAt: new Date(),
+          },
+        });
+      }
 
       logger.info({ number: order.externalName }, 'проверочный заказ создан');
       // Номер нужен браузерному сценарию, поэтому печатается отдельной строкой.
