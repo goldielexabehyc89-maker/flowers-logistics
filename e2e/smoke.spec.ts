@@ -127,7 +127,10 @@ async function logout(page: Page): Promise<void> {
  * карточку, и «ноль остановок» означало бы не пустой состав, а закрытый блок.
  */
 async function openDraft(page: Page, number: string): Promise<void> {
-  const draft = page.locator('.routes__draft', { hasText: number });
+  // Поиск по атрибуту, а не по тексту: раскрытая карточка содержит номера
+  // ДРУГИХ черновиков в списке «Перенести в маршрут», и поиск по тексту
+  // находил бы сразу несколько.
+  const draft = page.locator(`.routes__draft[data-draft-number="${number}"]`);
   await expect(draft).toHaveCount(1);
   if ((await draft.getAttribute('data-expanded')) !== 'true') {
     await draft.locator('button').first().click();
@@ -809,7 +812,7 @@ test('маршрут: черновик → состав → порядок → �
   await page.getByTestId('route-confirm-submit').click();
 
   // Подтверждённый черновик исчезает из «Маршрутизации».
-  await expect(page.locator('.routes__draft', { hasText: routeNumber })).toHaveCount(0);
+  await expect(page.locator(`.routes__draft[data-draft-number="${routeNumber}"]`)).toHaveCount(0);
 
   // Тот же маршрут появляется в маршрутных листах.
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
