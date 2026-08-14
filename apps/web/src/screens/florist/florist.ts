@@ -127,6 +127,20 @@ export interface ShiftView {
   openAssignments: number;
 }
 
+/**
+ * Ответ на «какая у меня смена и сколько за мной работы».
+ *
+ * `activeOrders` — серверное итоговое число заказов в состояниях
+ * `IN_ASSEMBLY` и `NEEDS_REVIEW`. Оно НЕ выводится из списков: день, поиск,
+ * догруженные страницы и открытая вкладка на него не влияют, а на вкладке
+ * «Печать» списка «Моих заказов» нет вовсе. Смены может не быть, а заказы
+ * за человеком остаться, поэтому число лежит рядом со сменой, а не внутри неё.
+ */
+export interface ShiftResponse {
+  shift: ShiftView | null;
+  activeOrders: number;
+}
+
 export interface PrintJobView {
   id: string;
   orderId: string;

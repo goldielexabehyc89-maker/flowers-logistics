@@ -25,6 +25,10 @@
 
 .florist__tab,
 .florist__day {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: center;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -42,6 +46,35 @@
   border-color: var(--color-accent);
   color: var(--color-accent);
   font-weight: 600;
+}
+
+/*
+ * Счётчик активных заказов на вкладке «Мои заказы».
+ *
+ * Стоит здесь, а не в заголовке раздела, потому что вкладки видны на всех
+ * разделах: число не исчезает ни на «Очереди», ни на «Печати». Размер
+ * намеренно небольшой — это спутник названия вкладки, а не отдельный элемент,
+ * — но цифры моноширинные, чтобы «9» и «11» не дёргали ширину вкладки.
+ */
+.florist__tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 0 var(--space-1);
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+/* На выбранной вкладке фон уже мягко-акцентный: счётчик обязан остаться виден. */
+.florist__tab[aria-pressed='true'] .florist__tab-count {
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
 }
 
 .florist__filters {
@@ -270,13 +303,40 @@
   cursor: pointer;
 }
 
+/*
+ * ТЕЛЕФОН.
+ *
+ * Ширина самой строки не трогается — она верна и на широком экране, и на
+ * узком. Меняется только распределение содержимого ВНУТРИ неё.
+ *
+ * Раньше строка разворачивалась в столбец, а обе её половины оставались
+ * прижатыми к левому краю: номер, интервал, статус и исполнитель занимали
+ * треть ширины, а справа висела пустая область почти в половину экрана.
+ * Теперь каждая половина занимает всю доступную ширину и распределяет по ней
+ * своё содержимое, а кнопки делят остаток строки между собой.
+ *
+ * Перенос по-прежнему разрешён: на 320 пикселях «Взять в работу» и «Просмотр»
+ * встают друг под друга целиком, а не сжимаются в нечитаемые огрызки и не
+ * уезжают за край. Горизонтальной прокрутки не появляется ни в одном случае —
+ * ширины здесь задаются долями, а не пикселями.
+ */
 @media (max-width: 640px) {
   .florist__row {
     flex-direction: column;
     align-items: stretch;
   }
 
+  .florist__row-main,
   .florist__row-side {
-    justify-content: flex-start;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  /*
+   * Кнопка растёт до края, но не ужимается ниже своего текста: обрезанное
+   * действие — это недоступное действие, а флорист нажимает его пальцем.
+   */
+  .florist__row-side .btn {
+    flex: 1 1 auto;
   }
 }

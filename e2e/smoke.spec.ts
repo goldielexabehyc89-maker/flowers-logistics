@@ -1163,6 +1163,24 @@ test('флорист: смена, захват, сборка, бланк и от
   await clickAndAwait(floristPage, claimButton, 'POST', '/claim');
   await expect(floristPage.locator('.florist__row', { hasText: orderNumber })).toHaveCount(0);
 
+  /*
+   * Счётчик активных заказов: серверное число, видное на ЛЮБОЙ вкладке.
+   *
+   * Сейчас открыта «Очередь» — списка «Моих заказов» на экране нет вовсе,
+   * а число уже верное и обновилось без перезагрузки страницы. Проверяется
+   * и «Печать»: именно там счётчик, посчитанный по загруженному списку,
+   * оказался бы нулём или отсутствовал бы.
+   */
+  const activeCount = floristPage.getByTestId('florist-active-count');
+  await expect(activeCount).toHaveText('1');
+  await floristPage.getByTestId('florist-tab-print').click();
+  await expect(activeCount).toHaveText('1');
+  await floristPage.getByTestId('florist-tab-queue').click();
+  // Ни поиск, ни выбранный день на счётчик не влияют: он не о показанном.
+  await floristPage.getByTestId('florist-day-tomorrow').click();
+  await expect(activeCount).toHaveText('1');
+  await floristPage.getByTestId('florist-day-today').click();
+
   await floristPage.getByTestId('florist-tab-mine').click();
   const mineRow = floristPage.locator('.florist__row', { hasText: orderNumber });
   await expect(mineRow).toBeVisible();
@@ -1187,7 +1205,12 @@ test('флорист: смена, захват, сборка, бланк и от
 
   // Единица измерения: у компонента она подтверждена, у бандла её нет —
   // и тогда показывается ОДНО ЧИСЛО, без «ед. не указана» и без «шт».
+  //
+  // В базе у компонента лежит ПОЛНОЕ название «штука»: короткого обозначения
+  // у этой единицы в справочнике нет. Человеку показывается «шт» — полного
+  // названия рядом с числом быть не должно.
   await expect(card).toContainText('11 шт');
+  await expect(card).not.toContainText('штука');
   await expect(card.getByTestId('position-quantity').first()).toHaveText('1');
   await expect(card).not.toContainText('ед. не указана');
 
@@ -1211,6 +1234,10 @@ test('флорист: смена, захват, сборка, бланк и от
   await expect(cardDialog).toBeVisible();
   await expect(card).toContainText('Собран');
   await expect(card.getByTestId('card-print-state')).toContainText('Ожидает печати');
+
+  // Собранный заказ работой не является: счётчик активных обнулился сам,
+  // без перезагрузки и без закрытия окна.
+  await expect(activeCount).toHaveText('0');
 
   // 8. Бланк скачивается настоящим файлом PDF.
   const [download] = await Promise.all([
@@ -1346,6 +1373,52 @@ test('флорист на телефоне: без нижней полосы, к
   await expect(firstRow).toBeVisible();
   const opener = firstRow.getByTestId('row-open');
   await expect(opener).toHaveText('Просмотр');
+
+  /*
+   * РАСКЛАДКА СТРОКИ НА ТЕЛЕФОНЕ.
+   *
+   * Ширина самой строки не проверяется на изменение — она и была верной.
+   * Проверяется распределение СОДЕРЖИМОГО внутри неё: раньше номер, интервал,
+   * статус и исполнитель жались к левому краю, а справа висела пустая область
+   * почти в половину экрана.
+   */
+  const rowBox = await firstRow.boundingBox();
+  expect(rowBox, 'строка обязана иметь геометрию').not.toBeNull();
+  const rowRight = (rowBox?.x ?? 0) + (rowBox?.width ?? 0);
+
+  for (const part of ['.florist__row-main', '.florist__row-side']) {
+    const partBox = await firstRow.locator(part).boundingBox();
+    expect(partBox, `${part} обязан иметь геометрию`).not.toBeNull();
+    // Половина строки занимает её целиком, а не треть: пустого поля справа нет.
+    expect(partBox?.width ?? 0).toBeGreaterThan((rowBox?.width ?? 0) * 0.9);
+    // И при этом не выходит за строку — иначе появилась бы прокрутка.
+    expect((partBox?.x ?? 0) + (partBox?.width ?? 0)).toBeLessThanOrEqual(rowRight + 1);
+  }
+
+  // Кнопки действия видны ЦЕЛИКОМ и остаются крупной целью для пальца.
+  const claim = firstRow.getByTestId('row-claim');
+  for (const button of [claim, opener]) {
+    if ((await button.count()) === 0) {
+      continue;
+    }
+    await expect(button).toBeVisible();
+    const buttonBox = await button.boundingBox();
+    expect(buttonBox, 'кнопка обязана иметь геометрию').not.toBeNull();
+    expect(buttonBox?.x ?? -1).toBeGreaterThanOrEqual((rowBox?.x ?? 0) - 1);
+    expect((buttonBox?.x ?? 0) + (buttonBox?.width ?? 0)).toBeLessThanOrEqual(rowRight + 1);
+    expect(buttonBox?.height ?? 0).toBeGreaterThanOrEqual(32);
+  }
+
+  // Горизонтальной прокрутки нет во всей странице: узкий экран не должен
+  // заставлять возить содержимое вбок, чтобы прочитать номер заказа.
+  const overflowX = await mobilePage.evaluate<number>(
+    'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+  );
+  expect(overflowX).toBeLessThanOrEqual(0);
+
+  // Счётчик активных заказов виден и на телефоне: он часть вкладки, а не
+  // отдельной широкой панели, которая на узком экране уехала бы вниз.
+  await expect(mobilePage.getByTestId('florist-active-count')).toBeVisible();
 
   const scrollBefore = await mobilePage.evaluate<number>('window.scrollY');
   await opener.click();

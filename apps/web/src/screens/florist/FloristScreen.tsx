@@ -79,6 +79,7 @@ import {
   type QueueDay,
   type QueueItemView,
   type QueueResponse,
+  type ShiftResponse,
   type ShiftView,
 } from './florist';
 import './florist.css';
@@ -133,9 +134,16 @@ export function FloristScreen(): React.JSX.Element {
 
   const scope = tab === 'mine' ? 'mine' : 'general';
 
+  /**
+   * Смена и счётчик активных заказов.
+   *
+   * Запрос без `enabled`: он нужен на всех трёх вкладках. Именно поэтому число
+   * активных заказов приходит здесь, а не в ответе очереди, — на «Печати»
+   * очередь не запрашивается вовсе, а счётчик обязан остаться на виду.
+   */
   const shiftQuery = useQuery({
     queryKey: ['florist-shift'],
-    queryFn: () => client.get<{ shift: ShiftView | null }>('/api/florist/shift'),
+    queryFn: () => client.get<ShiftResponse>('/api/florist/shift'),
   });
 
   /** Адрес страницы списка. Один на обе группы: условия у них общие. */
@@ -273,6 +281,16 @@ export function FloristScreen(): React.JSX.Element {
 
   const shift = shiftQuery.data?.shift ?? null;
   const hasActiveShift = shift !== null;
+
+  /**
+   * Сколько заказов сейчас за флористом. Считает сервер, и только он.
+   *
+   * Ни длина загруженной страницы, ни выбранный день, ни строка поиска, ни
+   * содержимое DOM в это число не входят: все они дают разный ответ на один
+   * вопрос. До первого ответа сервера показывается `null` — счётчик просто
+   * отсутствует, а не показывает выдуманный ноль.
+   */
+  const activeOrders = shiftQuery.data?.activeOrders ?? null;
 
   /**
    * Общий перезапрос после любого действия.
@@ -503,6 +521,19 @@ export function FloristScreen(): React.JSX.Element {
         </section>
       )}
 
+      {/*
+       * Счётчик активных заказов стоит на самой вкладке «Мои заказы».
+       *
+       * Место выбрано не ради красоты: вкладки видны на всех трёх разделах,
+       * поэтому число не исчезает ни на «Очереди», ни на «Печати». Заголовок
+       * раздела для этого не годится — там счётчик относится к смене, а работа
+       * остаётся за человеком и после её закрытия.
+       *
+       * В счёте только незавершённое: `IN_ASSEMBLY` и `NEEDS_REVIEW`. Собранные
+       * заказы в него не входят — у них своя свёрнутая группа со своим числом,
+       * и сложить их вместе значило бы показывать «10» тому, кому осталось
+       * собрать один букет.
+       */}
       <nav className="florist__tabs" aria-label="Разделы флориста">
         {TABS.map((item) => (
           <button
@@ -514,6 +545,15 @@ export function FloristScreen(): React.JSX.Element {
             onClick={() => setTab(item.key)}
           >
             {item.title}
+            {item.key === 'mine' && activeOrders !== null && (
+              <span
+                className="florist__tab-count"
+                data-testid="florist-active-count"
+                aria-label={`активных заказов: ${activeOrders}`}
+              >
+                {activeOrders}
+              </span>
+            )}
           </button>
         ))}
       </nav>

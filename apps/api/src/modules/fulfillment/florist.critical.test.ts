@@ -42,6 +42,7 @@ import { applyFulfillmentSnapshot } from './service.js';
 import { snapshotHash as compositionHash, type FulfillmentSnapshot } from './composition.js';
 import {
   MAX_SEARCH_LENGTH,
+  countActiveAssignments,
   readQueue,
   resolveQueueDate,
   type QueueQuery,
@@ -915,28 +916,34 @@ describe('печатный бланк', () => {
  * единицу, а не молча теряет её по дороге.
  */
 describe('единица измерения в карточке и бланке', () => {
-  it('карточка показывает единицу позиций и компонентов, а её отсутствие — просто числом', async () => {
+  it('карточка показывает короткое обозначение, а её отсутствие — просто числом', async () => {
     const order = await seedOrder({
       number: uniqueNumber('UOM'),
       positions: [
         {
           name: 'Букет «Весна»',
           quantity: '1',
-          uomName: 'шт',
+          // Так единица лежит в базе после прошлых проходов: короткого поля
+          // у неё не было, и запасной путь сохранил полное название.
+          uomName: 'штука',
           kind: 'BUNDLE',
           components: [
             { name: 'Роза', quantity: '11', uomName: 'шт' },
-            { name: 'Лента', quantity: '0.5', uomName: 'м' },
+            { name: 'Лента', quantity: '0.5', uomName: 'метр' },
           ],
         },
         // У этой позиции единицы нет вовсе: карточка обязана показать одно число.
         { name: 'Упаковка', quantity: '2' },
+        // А эту единицу сокращать НЕЧЕМ: догадка выглядела бы как факт.
+        { name: 'Коробка', quantity: '1', uomName: 'упаковка' },
       ],
     });
 
     const card = await readOrderCard(ctx.db, order.id);
 
-    expect(card.positions.map((position) => position.uomName)).toEqual(['шт', null]);
+    // Человеку показывается «шт» и «м», а не «штука» и «метр». Уже сохранённые
+    // строки исправляются проекцией: миграции ради обозначения не заводится.
+    expect(card.positions.map((position) => position.uomName)).toEqual(['шт', null, 'упаковка']);
     expect(card.positions[0]?.components.map((component) => component.uomName)).toEqual([
       'шт',
       'м',
@@ -1494,6 +1501,78 @@ describe('«Мои заказы»: работа и собранные', () => {
     expect(afterReopen.items.map((item) => item.id)).toEqual([order.id]);
     expect(afterReopen.assembledTotal).toBe(0);
     expect((await ask(florist, 'assembled', tag)).items).toEqual([]);
+  });
+
+  /**
+   * Счётчик активных заказов виден на всех вкладках, и потому не имеет права
+   * зависеть от того, что показано на экране.
+   *
+   * Проверяется ровно это: число не меняется от выбранного дня, от строки
+   * поиска и от размера страницы, зато меняется от КАЖДОГО перехода состояния —
+   * захват, сборка, возврат в работу, изменение после сборки. Счётчик,
+   * посчитанный по загруженной странице, дал бы верный ответ ровно до первого
+   * из этих событий.
+   */
+  it('счётчик активных заказов считает базу и переживает смену состояния', async () => {
+    const florist = await floristOnShift();
+    const admin = await actorFor(['ADMIN']);
+    const tag = uniqueNumber('ACT');
+
+    // Пока за флористом ничего нет, число — ноль, а не «неизвестно».
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(0);
+
+    const today = await seedOrder({ number: `${tag}-TODAY` });
+    await claimOrder(ctx.db, florist, today.id, CONTEXT);
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(1);
+
+    // Заказ ДРУГОГО дня тоже за флористом. Счётчик про работу, а не про
+    // выбранное представление: переключение «Сегодня»/«Завтра» его не трогает.
+    const tomorrow = await seedOrder({ number: `${tag}-TOMORROW`, day: '2027-03-11' });
+    await claimOrder(ctx.db, florist, tomorrow.id, CONTEXT);
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(2);
+
+    // Список выбранного дня при этом показывает один заказ, а счётчик — два.
+    // Это не расхождение, а разные вопросы: «что видно» и «сколько за мной».
+    const day = await ask(florist, 'work', tag, { limit: 1 });
+    expect(day.items).toHaveLength(1);
+    expect(day.total).toBe(1);
+
+    // Собранный заказ работой не является и в счётчик не входит: он ушёл
+    // в свёрнутую группу «Собранные» со своим собственным числом.
+    const claimed = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: today.id },
+      select: { fulfillmentProcessVersion: true },
+    });
+    await assembleOrder(
+      ctx.db,
+      florist,
+      { orderId: today.id, expectedProcessVersion: claimed.fulfillmentProcessVersion },
+      CONTEXT,
+    );
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(1);
+
+    // Изменение заказа после сборки возвращает его в работу: `NEEDS_REVIEW`
+    // требует действия и обязан снова оказаться в счёте.
+    await applyChangedSnapshot(today.id);
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(2);
+
+    // Возврат в работу администратором — то же самое с другой стороны.
+    await claimAndAssemble(florist, (await seedOrder({ number: `${tag}-BACK` })).id);
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(2);
+    const back = await ctx.db.deliveryOrder.findFirstOrThrow({
+      where: { externalName: `${tag}-BACK` },
+      select: { id: true },
+    });
+    await reopenOrder(ctx.db, admin, { orderId: back.id, reason: 'Повреждена упаковка' }, CONTEXT);
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(3);
+
+    // Возврат заказа в общую очередь снимает его с человека — и со счётчика.
+    await releaseOrder(ctx.db, florist, tomorrow.id, CONTEXT);
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(2);
+
+    // Чужая работа в чужой счётчик не попадает ни при каком дне.
+    const stranger = await floristOnShift();
+    expect(await countActiveAssignments(ctx.db, stranger.userId)).toBe(0);
   });
 
   it('поиск ищет в обеих группах и не выходит за выбранный день', async () => {

@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { visiblePositions } from './visibility.js';
 import type { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
-import type { FulfillmentAssortmentKind } from './composition.js';
+import { shortUnitLabel, type FulfillmentAssortmentKind } from './composition.js';
 
 /**
  * Версия шаблона бланка.
@@ -189,7 +189,10 @@ export function buildPrintFormSnapshot(input: {
       .map((position) => ({
         name: position.name,
         quantity: quantityText(position.quantity),
-        uomName: position.uomName,
+        // Короткое обозначение замораживается в НОВОМ снимке. Уже созданные
+        // бланки и их PDF не переписываются: их JSON неизменяем, и повторная
+        // печать обязана дать побайтово тот же документ.
+        uomName: shortUnitLabel(position.uomName),
         characteristicLabel: position.characteristicLabel,
         isBundle: position.assortmentKind === 'BUNDLE',
         components: [...position.components]
@@ -197,7 +200,7 @@ export function buildPrintFormSnapshot(input: {
           .map((component) => ({
             name: component.name,
             quantity: quantityText(component.quantity),
-            uomName: component.uomName,
+            uomName: shortUnitLabel(component.uomName),
           })),
       })),
   };

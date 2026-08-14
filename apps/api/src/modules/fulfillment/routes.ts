@@ -21,7 +21,7 @@ import { authenticateWithRoles } from '../auth/guards.js';
 import { MoyskladClient } from '../integrations/moysklad/client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { readOrderCard } from './card.js';
-import { MAX_SEARCH_LENGTH, readQueue } from './queue-service.js';
+import { MAX_SEARCH_LENGTH, countActiveAssignments, readQueue } from './queue-service.js';
 import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from './paging.js';
 import { requirePhoto } from './photo.js';
 import {
@@ -147,9 +147,22 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
 
   // --- Смена ----------------------------------------------------------------
 
+  /**
+   * Смена и число активных заказов флориста.
+   *
+   * `activeOrders` живёт РЯДОМ со сменой, а не внутри неё, и это не мелочь:
+   * заказы остаются за человеком и после закрытия смены (`shifts.ts`), поэтому
+   * число, спрятанное в `shift`, исчезало бы ровно тогда, когда важнее всего.
+   * Запрос этого адреса выполняется на всех вкладках раздела, и счётчик виден
+   * постоянно — в том числе там, где списка «Моих заказов» нет.
+   */
   app.get('/api/florist/shift', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
-    return { shift: await ownShift(deps.db, actor.userId) };
+    const [shift, activeOrders] = await Promise.all([
+      ownShift(deps.db, actor.userId),
+      countActiveAssignments(deps.db, actor.userId),
+    ]);
+    return { shift, activeOrders };
   });
 
   app.post('/api/florist/shift/start', async (request) => {
