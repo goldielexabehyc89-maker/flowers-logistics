@@ -24,8 +24,6 @@ import { markerKind, toLngLat, type MapPoint } from './geo';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, registerPmtiles } from './map-runtime';
 import { resolveStyleUrls, type StyleDocument } from './style-urls';
 
-
-
 export interface OrdersMapProps {
   styleUrl: string;
   attribution: string | null;
