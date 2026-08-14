@@ -13,6 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -323,10 +324,11 @@ describe('окружение: свой Photon и чужая DaData подчин�
     }
   });
 
-  it('автоматическое геокодирование включает адрес Photon, и только он', () => {
-    // Свой сервис не тратит чужих денег и не отдаёт адреса наружу, поэтому
-    // окружение здесь не участвует: он одинаково допустим и в local, и в
-    // production. Условие ровно одно — он настроен.
+  it('настроенный Photon сам по себе автоматический режим НЕ включает', () => {
+    // Главное разделение этой контрольной точки: «геокодер настроен» и «ему
+    // разрешено обработать всю очередь» — разные решения. На новом наборе
+    // сначала нужен управляемый проход, а не молчаливая обработка всех
+    // накопленных заказов.
     for (const env of ['local', 'production'] as const) {
       const config = loadConfig({
         ...base,
@@ -335,17 +337,87 @@ describe('окружение: свой Photon и чужая DaData подчин�
         PHOTON_URL: 'http://photon.internal:2322/api',
       });
       expect(isPhotonConfigured(config), env).toBe(true);
-      expect(shouldGeocodeAutomatically(config), env).toBe(true);
+      expect(shouldGeocodeAutomatically(config), env).toBe(false);
       // И при этом ни одна подсказка DaData не разрешена: ключей нет.
       expect(isDadataAllowed(config), env).toBe(false);
     }
+  });
 
-    // Пустое значение — это «не настроен», а не «настроен пустотой».
+  it('автоматический режим включается только обоими условиями сразу', () => {
+    const withUrl = { PHOTON_URL: 'http://photon.internal:2322/api' };
+
+    // Оба условия.
+    const both = loadConfig({
+      ...base,
+      APP_ENV: 'local',
+      APP_ENVIRONMENT_MARKER: 'local',
+      ...withUrl,
+      PHOTON_AUTO_GEOCODING_ENABLED: 'true',
+    });
+    expect(shouldGeocodeAutomatically(both)).toBe(true);
+
+    // Флаг без геокодера ничего не включает: включать нечего.
+    const flagOnly = loadConfig({
+      ...base,
+      APP_ENV: 'local',
+      APP_ENVIRONMENT_MARKER: 'local',
+      PHOTON_AUTO_GEOCODING_ENABLED: 'true',
+    });
+    expect(isPhotonConfigured(flagOnly)).toBe(false);
+    expect(shouldGeocodeAutomatically(flagOnly)).toBe(false);
+
+    // Fail closed: умолчание, пустое значение и явное «false» — всё выключено.
+    for (const value of [undefined, '', '   ', 'false']) {
+      const config = loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        ...withUrl,
+        ...(value === undefined ? {} : { PHOTON_AUTO_GEOCODING_ENABLED: value }),
+      });
+      expect(config.PHOTON_AUTO_GEOCODING_ENABLED, JSON.stringify(value)).toBe(false);
+      expect(shouldGeocodeAutomatically(config), JSON.stringify(value)).toBe(false);
+      // Геокодер при этом настроен: ручной проход им пользоваться может.
+      expect(isPhotonConfigured(config), JSON.stringify(value)).toBe(true);
+    }
+
+    // Значение не из перечисления — ошибка развёртывания, а не тихое «false».
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        ...withUrl,
+        PHOTON_AUTO_GEOCODING_ENABLED: 'yes',
+      }),
+    ).toThrow(/PHOTON_AUTO_GEOCODING_ENABLED/);
+  });
+
+  it('ручной ограниченный проход от флага не зависит', async () => {
+    // Пилот и существует для того, чтобы пройти два десятка адресов при
+    // выключенном автоматическом режиме. Если бы ручной проход смотрел на тот
+    // же флаг, включить его можно было бы только вместе с обработкой всей
+    // очереди — то есть ровно тем, чего пилот и избегает.
+    const script = await readFile(
+      new URL('../../../scripts/geocoding-backfill.ts', import.meta.url),
+      'utf8',
+    );
+
+    expect(script).toContain('isPhotonConfigured(config)');
+    expect(script).not.toContain('PHOTON_AUTO_GEOCODING_ENABLED');
+    expect(script).not.toContain('shouldGeocodeAutomatically');
+
+    // И потолок обращений остаётся обязательным.
+    expect(script).toContain('parseBackfillOptions');
+  });
+
+  it('пустой адрес Photon — это «не настроен», а не «настроен пустотой»', () => {
     const blank = loadConfig({
       ...base,
       APP_ENV: 'local',
       APP_ENVIRONMENT_MARKER: 'local',
       PHOTON_URL: '   ',
+      PHOTON_AUTO_GEOCODING_ENABLED: 'true',
     });
     expect(isPhotonConfigured(blank)).toBe(false);
     expect(shouldGeocodeAutomatically(blank)).toBe(false);

@@ -1910,6 +1910,31 @@ describe('геокодер в составе окружения', () => {
     expect(photon).toContain('http://127.0.0.1:2322/status');
   });
 
+  it('адрес геокодера указывает на эндпоинт поиска, а не на корень', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    // Клиент дописывает параметры к ЭТОМУ адресу. Корень отвечает 404
+    // на каждый запрос, очередь трактует это как отказ сервиса и уходит
+    // в паузу — при исправном и простаивающем геокодере.
+    expect(compose).toContain('PHOTON_URL: http://photon:2322/api');
+    expect(compose).not.toMatch(/PHOTON_URL: http:\/\/photon:2322\s*$/m);
+
+    // И выкатка отвергает корневой адрес до запуска приложения.
+    const lib = await readFile(path.join(REPO_ROOT, 'deploy/scripts/lib/common.sh'), 'utf8');
+    expect(lib).toContain('PHOTON_URL');
+    expect(lib).toContain('указывает на корень');
+    expect(lib).toMatch(/\*\/api\|\*\/api\/\)/);
+  });
+
+  it('переключатель автоматического режима приходит из файла окружения', async () => {
+    const compose = await readFile(COMPOSE_FILE, 'utf8');
+
+    // Решение «пилот или полная обработка» принимается на конкретном
+    // окружении, а не версией кода. Значение в compose переопределило бы
+    // файл окружения и отняло бы это решение у оператора.
+    expect(compose).not.toContain('PHOTON_AUTO_GEOCODING_ENABLED:');
+  });
+
   it('приложение обращается к геокодеру по внутреннему имени', async () => {
     const compose = await readFile(COMPOSE_FILE, 'utf8');
 
