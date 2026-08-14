@@ -9,8 +9,8 @@
  * Выбор общий со списком: клик по маркеру меняет тот же самый набор.
  */
 
-import { useQuery } from '@tanstack/react-query';
-import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { lazy, Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ErrorState, LoadingState } from '../../ui/components';
 import type { MapConfig } from '../routing/geo';
@@ -121,6 +121,10 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
   const query = useQuery({
     queryKey: ['deals-map', scopeKey],
     queryFn: () => client.get<MapResponse>(`/api/deals/map?${scopeKey}`),
+    // Смена фильтра меняет ключ запроса, то есть создаёт НОВЫЙ запрос без
+    // данных. Без этого карта на время загрузки размонтировалась бы целиком
+    // и создавалась заново — логист видел бы моргание вместо обновления.
+    placeholderData: keepPreviousData,
   });
 
   // Подложка своя: адрес стиля приходит из нашей конфигурации, публичные тайлы
@@ -131,7 +135,28 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
     staleTime: 5 * 60 * 1000,
   });
 
-  const points = useMemo(() => query.data?.points ?? [], [query.data]);
+  /*
+   * Последние успешно полученные данные.
+   *
+   * `keepPreviousData` держит прежний ответ, пока новый ЗАГРУЖАЕТСЯ, но если
+   * повторный запрос УПАЛ, данных у запроса не остаётся. Карта из-за временной
+   * ошибки исчезать не должна, поэтому последний удачный ответ помнится
+   * отдельно и переживает любой отказ обновления.
+   */
+  const lastGood = useRef<MapResponse | null>(null);
+  if (query.data !== undefined) {
+    lastGood.current = query.data;
+  }
+  const shown = query.data ?? lastGood.current;
+
+  // Адрес стиля запоминается так же: пропасть он может только вместе с картой.
+  const lastStyleUrl = useRef('');
+  const configuredStyleUrl = config.data?.styleUrl ?? '';
+  if (configuredStyleUrl !== '') {
+    lastStyleUrl.current = configuredStyleUrl;
+  }
+
+  const points = useMemo(() => shown?.points ?? [], [shown]);
 
   const { chosen, clusters } = splitForMap(points, selected, zoomedOut);
 
@@ -144,20 +169,35 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
     [selected],
   );
 
-  if (query.isPending) {
+  // Состояние загрузки допустимо ТОЛЬКО до первых данных. Дальше карта
+  // остаётся на месте при любом обновлении.
+  if (shown === null && query.isPending) {
     return <LoadingState title="Загружаем карту…" />;
   }
-  if (query.isError) {
+  if (shown === null) {
     return <ErrorState title="Не удалось загрузить карту" onRetry={() => void query.refetch()} />;
   }
 
-  const styleUrl = config.data?.styleUrl ?? '';
+  const styleUrl = lastStyleUrl.current;
   const empty = points.length === 0;
+  // Обновление идёт, но прежние точки показаны: это не загрузка, а уточнение.
+  const refreshing = query.isFetching;
+  // Обновление не удалось. Карта и прежние точки остаются: они всё ещё верны,
+  // просто новее ничего не пришло.
+  const refreshFailed = query.isError;
 
   return (
     <section className="deals-map" data-testid="deals-map">
       <div className="deals-map__head">
-        <span>На карте: {points.length}</span>
+        <span>
+          На карте: {points.length}
+          {refreshing && (
+            <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
+              {' '}
+              Обновляем…
+            </span>
+          )}
+        </span>
         <button
           type="button"
           className="deals__link"
@@ -190,6 +230,15 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
           <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
         </li>
       </ul>
+
+      {refreshFailed && (
+        <p className="deals-map__refresh-error" role="status" data-testid="deals-map-refresh-error">
+          Не удалось обновить точки. Показаны прежние.{' '}
+          <button type="button" className="deals__link" onClick={() => void query.refetch()}>
+            Повторить
+          </button>
+        </p>
+      )}
 
       {/*
         Карта показывается ВСЕГДА, даже когда точек ноль. Пустой день — обычное

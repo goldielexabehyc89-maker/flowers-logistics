@@ -361,3 +361,16 @@
   border-radius: 4px;
   cursor: default;
 }
+
+/* Обновление идёт: прежние точки на месте, сообщение не мешает работать. */
+.deals-map__refreshing {
+  color: var(--text-muted, #666);
+  font-size: 12px;
+}
+
+/* Обновление не удалось: карта и прежние точки остаются, они всё ещё верны. */
+.deals-map__refresh-error {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--warning-text, #8a5a00);
+}
