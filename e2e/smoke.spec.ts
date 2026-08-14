@@ -11,7 +11,14 @@
  * и в отчёт не печатаются.
  */
 
-import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Browser,
+  type Locator,
+  type Page,
+} from '@playwright/test';
 
 const ADMIN_PHONE = process.env['E2E_ADMIN_PHONE'] ?? '+79990000001';
 const ADMIN_CODE = process.env['E2E_ADMIN_CODE'] ?? '';
@@ -2145,4 +2152,188 @@ test('карта «Сделок»: подложка Москвы при нуле
   await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
   await expect(page.getByTestId('deals-map-empty')).toBeVisible();
   expect(await page.evaluate(() => (globalThis as { name?: string }).name)).toBe(RELOAD_SENTINEL);
+});
+
+/**
+ * Локальный обработчик печати: привязка, тестовая печать, отказ и отзыв.
+ *
+ * Роль обработчика играет ПРЯМОЙ КЛИЕНТ протокола `/api/print-agent/*`,
+ * а не подделка внутри приложения. Настоящая Windows-программа делает ровно
+ * эти запросы в этом же порядке, поэтому сценарий доказывает работоспособность
+ * протокола целиком: код привязки, токен устройства, захват задания, документ,
+ * отчёты и отзыв.
+ *
+ * Печать на бумаге здесь не проверяется и проверена быть не может: физический
+ * принтер подтверждает владелец на своём компьютере. Проверяется всё, что
+ * находится до драйвера.
+ */
+test('печать: код привязки, тестовая печать очередью, ошибка и отзыв устройства', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+
+  const section = page.getByTestId('print-agent');
+  await expect(section).toBeVisible();
+
+  // 1. До привязки система честно говорит, что печать ручная.
+  await expect(page.getByTestId('print-agent-readiness')).toContainText('не подключён');
+
+  // 2. Администратор создаёт код привязки. Он показывается ОДИН раз.
+  await clickAndAwait(
+    page,
+    page.getByTestId('print-agent-pair'),
+    'POST',
+    '/api/settings/print/pairing-code',
+  );
+
+  const codeDialog = page.getByTestId('print-agent-code');
+  await expect(codeDialog).toBeVisible();
+  const pairingCode = (await codeDialog.locator('.one-time-code').innerText()).trim();
+  expect(pairingCode).toMatch(/^[2-9A-HJ-NP-TV-Z]{4}-[2-9A-HJ-NP-TV-Z]{4}$/);
+  await page.getByTestId('print-agent-code-close').click();
+
+  // 3. Обработчик меняет код на собственный токен.
+  const paired = await request.post('/api/print-agent/pair', {
+    data: {
+      code: pairingCode,
+      deviceName: 'Компьютер флориста E2E',
+      os: 'Windows 11',
+      agentVersion: '1.0.0-e2e',
+      defaultPrinterName: 'Проверочный принтер',
+    },
+  });
+  expect(paired.status(), await paired.text()).toBe(200);
+  const device = (await paired.json()) as { deviceId: string; token: string; isPrimary: boolean };
+  // Первое устройство становится основным само: система, где привязан один
+  // компьютер и он ничего не печатает, — лишний шаг, о котором никто не узнает.
+  expect(device.isPrimary).toBe(true);
+
+  const asDevice = { headers: { authorization: `Bearer ${device.token}` } };
+
+  // 4. Тот же код второй раз не работает.
+  const replay = await request.post('/api/print-agent/pair', {
+    data: { code: pairingCode, deviceName: 'Самозванец' },
+  });
+  expect(replay.status()).not.toBe(200);
+
+  // 5. Настройки показывают компьютер: в сети, основной, с текущим принтером.
+  await page.reload();
+  const row = page.getByTestId('print-agent-device').filter({ hasText: 'Компьютер флориста E2E' });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('В сети');
+  await expect(row).toContainText('Основной');
+  await expect(row).toContainText('Проверочный принтер');
+  await expect(row).toContainText('1.0.0-e2e');
+  await expect(page.getByTestId('print-agent-readiness')).toContainText('Печать работает');
+
+  /*
+   * 6. Очередь разбирается ДО тестовой печати.
+   *
+   * К этому моменту предыдущие сценарии уже собрали заказы, и в очереди лежат
+   * настоящие бланки. Обработчик обязан взять их первыми — задания выдаются
+   * в порядке создания, — и это не помеха проверке, а её условие: очередь
+   * действительно одна на всех, а не отдельная «для тестов».
+   */
+  const claimOne = async (): Promise<{
+    jobId: string;
+    documentKind: string;
+    documentPath: string;
+  } | null> => {
+    const response = await request.post('/api/print-agent/jobs/claim', asDevice);
+    expect(response.status(), await response.text()).toBe(200);
+    return (
+      (await response.json()) as {
+        job: { jobId: string; documentKind: string; documentPath: string } | null;
+      }
+    ).job;
+  };
+
+  const reportPrinted = async (jobId: string): Promise<void> => {
+    const response = await request.post(`/api/print-agent/jobs/${jobId}/result`, {
+      ...asDevice,
+      data: { outcome: 'printed', defaultPrinterName: 'Проверочный принтер' },
+    });
+    expect(response.status(), await response.text()).toBe(200);
+  };
+
+  // Предел намеренно конечный: бесконечный разбор скрыл бы задание, которое
+  // очередь возвращает снова и снова, вместо того чтобы назвать его.
+  for (let drained = 0; drained < 50; drained += 1) {
+    const pending = await claimOne();
+    if (pending === null) {
+      break;
+    }
+    await reportPrinted(pending.jobId);
+  }
+
+  await clickAndAwait(
+    page,
+    page.getByTestId('print-agent-test'),
+    'POST',
+    '/api/settings/print/test',
+  );
+
+  const job = await claimOne();
+  expect(job, 'тестовое задание не попало в очередь').not.toBeNull();
+  const testJob = job as { jobId: string; documentKind: string; documentPath: string };
+  expect(testJob.documentKind).toBe('TEST_PAGE');
+
+  // Документ — настоящий PDF того же генератора, что и бланки заказов.
+  // Путь пришёл ОТ СЕРВЕРА и указывает на этот же сервер: произвольных
+  // адресов обработчик не получает вовсе.
+  expect(testJob.documentPath).toMatch(/^\/api\/print-agent\/jobs\/[0-9a-f-]+\/document\.pdf$/);
+  const document = await request.get(testJob.documentPath, asDevice);
+  expect(document.status()).toBe(200);
+  expect(document.headers()['content-type']).toContain('application/pdf');
+  expect((await document.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
+
+  // 7. Обработчик сообщает об этапах и об успехе.
+  const printing = await request.post(`/api/print-agent/jobs/${testJob.jobId}/printing`, asDevice);
+  expect(printing.status(), await printing.text()).toBe(200);
+
+  await reportPrinted(testJob.jobId);
+
+  await page.reload();
+  await expect(row).toContainText('Напечатано');
+
+  // 8. Отказ печати виден сотруднику СЛОВАМИ, а не кодом.
+  await clickAndAwait(
+    page,
+    page.getByTestId('print-agent-test'),
+    'POST',
+    '/api/settings/print/test',
+  );
+
+  const failing = await claimOne();
+  expect(failing, 'второе тестовое задание не попало в очередь').not.toBeNull();
+
+  const failed = await request.post(
+    `/api/print-agent/jobs/${(failing as { jobId: string }).jobId}/result`,
+    { ...asDevice, data: { outcome: 'failed', errorCode: 'PRINTER_OFFLINE' } },
+  );
+  expect(failed.status(), await failed.text()).toBe(200);
+
+  await page.getByRole('link', { name: 'Флорист' }).first().click();
+  await page.getByTestId('florist-tab-print').click();
+  const errorRow = page.getByTestId('print-row').filter({ hasText: 'Тестовая страница' }).first();
+  await expect(errorRow).toBeVisible();
+  await expect(errorRow.getByTestId('print-error')).toContainText('Принтер не отвечает');
+  // Повтор существует, но остаётся осознанным действием человека: ни одно
+  // состояние не отправляет документ на принтер повторно само.
+  await expect(errorRow.getByTestId('print-retry')).toBeVisible();
+
+  // 9. Отзыв устройства немедленно закрывает доступ.
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await clickAndAwait(page, row.getByTestId('print-agent-revoke'), 'POST', '/revoke');
+  await expect(row).toContainText('Отключено');
+
+  const afterRevoke = await request.post('/api/print-agent/jobs/claim', asDevice);
+  expect(afterRevoke.status()).toBe(401);
 });
