@@ -233,27 +233,6 @@ export async function redeemPairingCode(
   const result = await db.$transaction(async (tx) => {
     await lockPairing(tx);
 
-    // Погашение — условный UPDATE, а не проверка «до».
-    //
-    // Два одновременных обмена одним кодом прочитали бы одну и ту же активную
-    // строку и оба сочли бы код действительным. Здесь выигрывает ровно один:
-    // проигравший видит `count === 0`, и вся его транзакция откатывается —
-    // ни устройства, ни токена, ни записи в журнале от него не остаётся.
-    const consumed = await tx.printAgentPairingCode.updateMany({
-      where: {
-        id: candidate.id,
-        activeKey: ACTIVE_SENTINEL,
-        consumedAt: null,
-        invalidatedAt: null,
-        expiresAt: { gt: new Date() },
-      },
-      data: { activeKey: null, consumedAt: new Date() },
-    });
-
-    if (consumed.count === 0) {
-      throw pairingRejected('pairing code already spent');
-    }
-
     // Основное устройство ищется под той же блокировкой: «основных нет»
     // и «создаю основного» обязаны быть одним неделимым решением.
     const existingPrimary = await tx.printAgentDevice.findFirst({
@@ -262,6 +241,17 @@ export async function redeemPairingCode(
     });
     const isPrimary = existingPrimary === null;
 
+    // Устройство создаётся ДО погашения кода, и это не небрежность.
+    //
+    // Погашенный код обязан указывать на устройство, которое он создал
+    // (CHECK базы `PrintAgentPairingCode_consumed_has_device`): «код потрачен,
+    // а рабочего места нет» — состояние, из которого нет выхода, потому что
+    // выпустить второй код администратор может, а понять, что случилось
+    // с первым, — уже нет. Обратный порядок такое состояние создавал бы,
+    // пусть и на миг внутри транзакции.
+    //
+    // Проигравший гонку ничего за собой не оставляет: транзакция откатывается
+    // целиком, вместе с этим устройством и его токеном.
     const device = await tx.printAgentDevice.create({
       data: {
         name: input.deviceName,
@@ -278,10 +268,29 @@ export async function redeemPairingCode(
       select: { id: true, name: true },
     });
 
-    await tx.printAgentPairingCode.update({
-      where: { id: candidate.id },
-      data: { deviceId: device.id },
+    // Погашение — условный UPDATE, а не проверка «до».
+    //
+    // Два одновременных обмена одним кодом прочитали бы одну и ту же активную
+    // строку и оба сочли бы код действительным. Здесь выигрывает ровно один:
+    // проигравший видит `count === 0`, и вся его транзакция откатывается —
+    // ни устройства, ни токена, ни записи в журнале от него не остаётся.
+    //
+    // Устройство проставляется тем же UPDATE: «погашен» и «кем погашен» —
+    // одно решение, а не два.
+    const consumed = await tx.printAgentPairingCode.updateMany({
+      where: {
+        id: candidate.id,
+        activeKey: ACTIVE_SENTINEL,
+        consumedAt: null,
+        invalidatedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      data: { activeKey: null, consumedAt: new Date(), deviceId: device.id },
     });
+
+    if (consumed.count === 0) {
+      throw pairingRejected('pairing code already spent');
+    }
 
     await resetFailures(tx, keys);
 

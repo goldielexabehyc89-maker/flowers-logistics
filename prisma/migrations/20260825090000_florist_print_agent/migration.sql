@@ -200,3 +200,39 @@ ALTER TABLE "OrderPrintJob"
 ALTER TABLE "OrderPrintJob"
   ADD CONSTRAINT "OrderPrintJob_claimed_has_device"
   CHECK ("state" NOT IN ('CLAIMED', 'PRINTING') OR "deviceId" IS NOT NULL);
+
+-- «Напечатано» по-прежнему именное, но подтвердить может и машина.
+--
+-- Прежнее правило (`20260821090000`) требовало `completedById`, и его
+-- собственный комментарий объяснял почему: «в MVP физической службы печати
+-- нет, и подтверждает человек». Служба появилась, и требование человека стало
+-- бы означать, что успешную машинную печать записать нельзя вовсе.
+--
+-- Смысл правила при этом сохраняется полностью: отметка не может быть
+-- анонимной. Изменилось только то, что автором признаётся ещё и устройство —
+-- ровно одно из двух, и по этому же полю ручная отметка остаётся отличима
+-- от машинной.
+ALTER TABLE "OrderPrintJob"
+  DROP CONSTRAINT "OrderPrintJob_printed_is_complete";
+
+ALTER TABLE "OrderPrintJob"
+  ADD CONSTRAINT "OrderPrintJob_printed_is_complete"
+  CHECK (
+    "state" <> 'PRINTED'
+    OR (
+      "completedAt" IS NOT NULL
+      AND ("completedById" IS NOT NULL OR "deviceId" IS NOT NULL)
+    )
+  );
+
+-- Разбор тоже обязан быть назван безопасным кодом.
+--
+-- Тот же довод, что у `OrderPrintJob_error_is_named`: `NEEDS_REVIEW` без
+-- причины — это «разберись сам», отправленное человеку, который как раз
+-- и не знает, что случилось.
+ALTER TABLE "OrderPrintJob"
+  ADD CONSTRAINT "OrderPrintJob_review_is_named"
+  CHECK (
+    "state" <> 'NEEDS_REVIEW'
+    OR ("lastErrorCode" IS NOT NULL AND "lastErrorAt" IS NOT NULL)
+  );
