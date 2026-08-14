@@ -24,7 +24,8 @@ export type AttentionReason =
   | 'UNRECOGNIZED_INTERVAL'
   | 'MISSING_ADDRESS'
   | 'MISSING_RECIPIENT'
-  | 'CASH_OVERPAYMENT';
+  | 'CASH_OVERPAYMENT'
+  | 'GEOCODING_ADDRESS_INCOMPLETE';
 
 export type ScopeExitReason = 'STORE_CHANGED' | 'DELIVERY_METHOD_CHANGED' | 'SOURCE_ARCHIVED';
 
@@ -329,7 +330,7 @@ export function mapOrder(
     attentionReasons: [],
   };
 
-  snapshot.attentionReasons = attentionReasonsFor(snapshot);
+  snapshot.attentionReasons = attentionReasonsFor(snapshot, addressSource);
   return { snapshot, interval, deliveryDate };
 }
 
@@ -337,7 +338,10 @@ export function mapOrder(
  * Причины «Требует внимания» — детерминированная функция снимка.
  * Внешний статус в них не участвует: он ничего не решает.
  */
-export function attentionReasonsFor(snapshot: OrderSnapshot): AttentionReason[] {
+export function attentionReasonsFor(
+  snapshot: OrderSnapshot,
+  addressSource: AddressSource = 'shipmentAddress',
+): AttentionReason[] {
   const reasons: AttentionReason[] = [];
 
   if (snapshot.deliveryDateRaw === null) {
@@ -355,6 +359,19 @@ export function attentionReasonsFor(snapshot: OrderSnapshot): AttentionReason[] 
   }
   if (snapshot.address === null) {
     reasons.push('MISSING_ADDRESS');
+  } else if (addressSource === 'shipmentAddressFull' && snapshot.geocodeAddress === null) {
+    // Адрес есть, но геокодеру его мало: улицы или дома в разобранных данных
+    // источника не оказалось. Второй причины к «адреса нет» здесь быть не может
+    // — состояния взаимоисключающие, и дублировать их значило бы запутать.
+    //
+    // Причина осмысленна ТОЛЬКО когда разобранный источник включён. При
+    // источнике по умолчанию `geocodeAddress` пуст у всех заказов просто
+    // потому, что его никто не собирал, и причина оказалась бы у каждого —
+    // то есть не значила бы ничего.
+    //
+    // Ручная правка это состояние снимает, но о ней снимок не знает: её
+    // учитывает `effectiveAttentionReasons`.
+    reasons.push('GEOCODING_ADDRESS_INCOMPLETE');
   }
   if (snapshot.recipient === null) {
     reasons.push('MISSING_RECIPIENT');

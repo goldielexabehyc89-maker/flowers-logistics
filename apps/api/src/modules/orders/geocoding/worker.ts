@@ -539,7 +539,7 @@ async function processJob(deps: GeocodeWorkerDeps, job: ClaimedJob): Promise<Job
       // миллисекунд, а строка заказа всё это время должна оставаться свободной.
       answer = await deps.client.search(address);
     } catch (error) {
-      return handleFailure(deps, job, error);
+      return handleFailure(deps, job, error, address);
     }
     decision = decideResult(answer, address);
     await writeCache(deps.db, address, decision, answer);
@@ -763,6 +763,7 @@ async function handleFailure(
   deps: GeocodeWorkerDeps,
   job: ClaimedJob,
   error: unknown,
+  addressAtRequest: string,
 ): Promise<JobOutcome> {
   const now = clockOf(deps);
   const code: PhotonErrorCode = error instanceof PhotonError ? error.code : 'TRANSPORT_ERROR';
@@ -799,7 +800,7 @@ async function handleFailure(
     const until = new Date(now.getTime() + cooldownMs);
 
     if (exhausted) {
-      const outcome = await failOrder(deps, job, code, attempts, now);
+      const outcome = await failOrder(deps, job, code, attempts, now, addressAtRequest);
       return { ...outcome, requested: true, stop: { kind: 'COOLDOWN', until } };
     }
 
@@ -838,7 +839,7 @@ async function handleFailure(
     return { ...EMPTY_OUTCOME, retried: true, requested: true, errorCode: code };
   }
 
-  const outcome = await failOrder(deps, job, code, attempts, now);
+  const outcome = await failOrder(deps, job, code, attempts, now, addressAtRequest);
   return { ...outcome, requested: true };
 }
 
@@ -854,10 +855,15 @@ async function failOrder(
   code: PhotonErrorCode,
   attempts: number,
   now: Date,
+  addressAtRequest: string,
 ): Promise<JobOutcome> {
   return deps.db.$transaction(async (tx) => {
     const order = await lockOrder(tx, job.orderId);
-    const stale = staleReason(order, job, order?.address ?? '');
+    // Сверяется адрес, с которым УХОДИЛ запрос, а не операционный адрес
+    // заказа. Это разные строки: в геокодер уходит собранный запрос, а курьеру
+    // показывается полный адрес с квартирой. Подстановка операционного делала
+    // бы любой отказ «устаревшим» — заказ никогда не доходил бы до FAILED.
+    const stale = staleReason(order, job, addressAtRequest);
 
     // Заказ мог измениться, пока шли повторы: тогда отказ относится к прежнему
     // состоянию заказа, и переводить в FAILED текущее было бы неправдой.

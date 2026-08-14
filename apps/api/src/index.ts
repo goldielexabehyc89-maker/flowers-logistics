@@ -25,7 +25,6 @@ import {
 import { PhotonClient } from './modules/integrations/photon/client.js';
 import { createGeocodeWorker, GEOCODE_LOCK_KEY } from './modules/orders/geocoding/worker.js';
 import { reportGeocodingStartupStatus } from './modules/orders/geocoding/status.js';
-import { backfillGeocoding } from './modules/orders/geocoding/queue.js';
 import { clearHalt } from './modules/orders/geocoding/provider-state.js';
 import { ValhallaClient } from './modules/integrations/valhalla/client.js';
 import { probeRouting } from './modules/geo/routing-status.js';
@@ -63,7 +62,14 @@ async function main(): Promise<void> {
   });
   outbox.start();
 
-  // Геокодирование включается ровно там, где есть кому обрабатывать очередь.
+  // Создание заданий и их обработка — РАЗНЫЕ решения.
+  //
+  // Задание описывает событие «у этого заказа появился адрес, который никто
+  // ещё не разрешал». Оно возникает независимо от того, разрешено ли сейчас
+  // обращаться к геокодеру: иначе выключенный обработчик молча терял бы
+  // события, и после включения о них никто бы не узнал.
+  const enqueueOnImport = isPhotonConfigured(config);
+  // А вот ОБРАБОТКА требует и настроенного геокодера, и явного разрешения.
   const geocodingEnabled = shouldGeocodeAutomatically(config);
 
   // Синхронизация МоегоСклада. Токен допускается только в production и в
@@ -83,7 +89,7 @@ async function main(): Promise<void> {
     ids: MOYSKLAD_IDS,
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,
     lock: { connectionString: config.DATABASE_URL },
-    geocodingEnabled,
+    enqueueOnImport,
     // Источник запроса к геокодеру. Адрес заказа этим не управляется.
     addressSource: config.MOYSKLAD_GEOCODING_ADDRESS_SOURCE,
   };
@@ -112,39 +118,22 @@ async function main(): Promise<void> {
         lock: { connectionString: config.DATABASE_URL, key: GEOCODE_LOCK_KEY },
       })
     : null;
-  // Разовое наполнение очереди уже импортированными заказами.
+  // Стартового наполнения очереди НЕТ и быть не должно.
   //
-  // Постановка происходит только при импорте и смене адреса, поэтому заказы,
-  // пришедшие до включения геокодирования, сами в очередь не попадут. Проход
-  // идёт в фоне: он длинный, а старт приложения задерживать нельзя, — но при
-  // остановке процесса его обязательно дожидаются, иначе последняя пачка
-  // работала бы с базой, которую уже закрывают.
-  let backfillStopping = false;
-  let backfill: Promise<void> | null = null;
-
+  // Раньше приложение при каждом запуске ставило в очередь все исторические
+  // заказы без координат — 685 заданий за одну минуту на staging. Это неверно
+  // по смыслу: геокодировать надо СОБЫТИЕ, а не состояние. Заказ попадает
+  // в очередь, когда он впервые импортирован либо когда логист исправил адрес;
+  // отсутствие координат у старого заказа событием не является и само по себе
+  // основанием для обращения к геокодеру не служит.
+  //
+  // Массовый проход по истории остался ровно один — явная операторская команда
+  // `npm run geocode:backfill -- --limit N`. Сама она не запускается никогда.
   if (geocodeWorker !== null) {
-    // Остановка обращений снимается только здесь: приложение стартовало,
-    // значит, конфигурацию проверял человек. Та же неверная настройка снова
-    // остановит обращения после первого же отказа, и это стоит одного запроса.
+    // Остановка обращений снимается при старте: приложение поднялось, значит,
+    // конфигурацию проверял человек. Та же неверная настройка снова остановит
+    // обращения после первого же отказа, и это стоит одного запроса.
     await clearHalt(db);
-
-    backfill = backfillGeocoding(db, { shouldStop: () => backfillStopping })
-      .then((result) => {
-        if (result.exhaustedBatches) {
-          logger.error(
-            { geocoding: result },
-            'наполнение очереди геокодирования прервано аварийным пределом: часть заказов осталась без задания',
-          );
-          return;
-        }
-        logger.info(
-          { geocoding: result },
-          'очередь геокодирования наполнена существующими заказами',
-        );
-      })
-      .catch((error: unknown) =>
-        logger.error({ err: error }, 'наполнение очереди геокодирования не удалось'),
-      );
   }
 
   geocodeWorker?.start();
@@ -203,15 +192,12 @@ async function main(): Promise<void> {
       // Сначала фоновые задачи: они дожидаются начатого прохода, поэтому
       // к моменту закрытия соединения с базой ни один обработчик уже не работает.
       // Общий лимит остановки при этом не меняется — он висит выше по коду.
-      backfillStopping = true;
       await Promise.all([
         outbox.stop(),
         maintenance.stop(),
         syncWorker?.stop() ?? Promise.resolve(),
         geocodeWorker?.stop() ?? Promise.resolve(),
         planningRunner?.stop() ?? Promise.resolve(),
-        // Наполнение опрашивает флаг между пачками, поэтому ожидание короткое.
-        backfill ?? Promise.resolve(),
       ]);
       await app.close();
       await notifier.stop();
