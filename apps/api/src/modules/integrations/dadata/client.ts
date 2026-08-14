@@ -46,7 +46,13 @@ export class DadataError extends Error {
   }
 }
 
+/**
+ * Учётные данные подсказок.
+ *
+ * Ключ ровно один. Секретный ключ (`X-Secret`) требовался платному Clean API,
+ * которого в проекте нет: поля для него здесь нет намеренно, иначе однажды
+ * кто-нибудь начал бы его требовать и хранить без всякой надобности.
+ */
 export interface DadataCredentials {
   apiKey: string | null;
-  secretKey: string | null;
 }

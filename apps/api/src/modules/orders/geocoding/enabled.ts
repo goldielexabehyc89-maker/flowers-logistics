@@ -9,8 +9,8 @@
  *    новые и изменённые адреса автоматически.
  * 2. **DaData Suggestions** — чужой платный сервис. Каждый запрос содержит
  *    адрес клиента и расходует квоту организации, поэтому условий три:
- *    разрешённое окружение (оба признака совпали), явное включение и полная
- *    пара ключей. Подсказки используются ТОЛЬКО в ручной правке адреса.
+ *    разрешённое окружение (оба признака совпали), явное включение и ключ.
+ *    Подсказки используются ТОЛЬКО в ручной правке адреса.
  *
  * Платный `Clean API` DaData не вызывается нигде: автоматическое
  * геокодирование делает Photon (`docs/OWNER_DECISIONS.md`, `GEO-005`).
@@ -18,20 +18,20 @@
 
 import { dadataEnvironment, type AppConfig } from '../../../platform/config.js';
 
-/** Есть ли полная пара ключей. Половина пары — ошибка, а не частичный доступ. */
-function hasBothKeys(config: AppConfig): boolean {
-  return config.DADATA_API_KEY !== undefined && config.DADATA_SECRET_KEY !== undefined;
-}
-
 /**
  * Разрешены ли подсказки DaData.
  *
  * Только ручная правка адреса. Ни один фоновый проход их не вызывает:
  * подсказка нужна человеку, который печатает, а не обходу очереди.
+ *
+ * Ключ ровно один: подсказки авторизуются заголовком `Authorization: Token`.
+ * Секретный ключ требовался платному Clean API, которого больше нет.
  */
 export function isDadataAllowed(config: AppConfig): boolean {
   return (
-    dadataEnvironment(config) !== 'denied' && config.DADATA_GEOCODING_ENABLED && hasBothKeys(config)
+    dadataEnvironment(config) !== 'denied' &&
+    config.DADATA_GEOCODING_ENABLED &&
+    config.DADATA_API_KEY !== undefined
   );
 }
 

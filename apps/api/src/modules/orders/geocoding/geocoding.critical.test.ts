@@ -31,6 +31,7 @@ import { PhotonError, precisionOf, type PhotonAnswer } from '../../integrations/
 import { isDadataAllowed, isPhotonConfigured, shouldGeocodeAutomatically } from './enabled.js';
 import { normalizeAddress } from './normalize.js';
 import { geocodingReport } from './report.js';
+import { MAX_LIMIT, parseBackfillOptions } from './backfill-options.js';
 import { backfillGeocoding, isGeocodable, retryDelayMs, RETRY_DELAYS_MS } from './queue.js';
 import {
   createGeocodeWorker,
@@ -253,11 +254,10 @@ describe('окружение: свой Photon и чужая DaData подчин�
 
   const withKeys = {
     DADATA_API_KEY: 'key',
-    DADATA_SECRET_KEY: 'secret',
     DADATA_GEOCODING_ENABLED: 'true',
   };
 
-  it('подсказки DaData включаются только при совпавших маркерах, ключах и флаге', () => {
+  it('подсказки DaData включаются только при совпавших маркерах, ключе и флаге', () => {
     // Владелец разрешил staging наравне с production: адреса настоящие,
     // расход квоты принят. Прежний абсолютный запрет вне production заменён.
     for (const env of ['production', 'staging'] as const) {
@@ -357,18 +357,33 @@ describe('окружение: свой Photon и чужая DaData подчин�
     }
   });
 
-  it('половина пары ключей — отказ, а не частичный доступ', () => {
+  it('подсказкам нужен ровно один ключ, и секретный среди них не значится', () => {
     for (const env of ['production', 'staging'] as const) {
+      // Секретный ключ требовался платному Clean API, которого больше нет.
+      // Один API-ключ — полная и достаточная настройка подсказок.
+      const config = loadConfig({
+        ...base,
+        APP_ENV: env,
+        APP_ENVIRONMENT_MARKER: env,
+        DADATA_API_KEY: 'key',
+        DADATA_GEOCODING_ENABLED: 'true',
+      });
+      expect(isDadataAllowed(config), env).toBe(true);
+
+      // А включённые подсказки без ключа — ошибка развёртывания: экран обещал
+      // бы подсказки, которых не будет.
       expect(() =>
         loadConfig({
           ...base,
           APP_ENV: env,
           APP_ENVIRONMENT_MARKER: env,
-          DADATA_API_KEY: 'key',
           DADATA_GEOCODING_ENABLED: 'true',
         }),
-      ).toThrow(/DADATA_SECRET_KEY/);
+      ).toThrow(/DADATA_API_KEY/);
     }
+
+    // Секретного ключа в конфигурации нет вовсе: он не читается и не хранится.
+    expect('DADATA_SECRET_KEY' in ctx.config).toBe(false);
   });
 
   it('тестовая конфигурация не включает ни один живой сервис', () => {
@@ -1633,6 +1648,32 @@ describe('кэш по нормализованному адресу', () => {
         ].sort(),
       );
     }
+  });
+});
+
+describe('ограниченный backfill: потолок обязателен', () => {
+  it('проход без явного потолка не запускается', () => {
+    // Умолчания нет намеренно: «ограниченный» проход без потолка ограниченным
+    // не является, а молчаливое умолчание однажды окажется не тем.
+    expect(parseBackfillOptions([])).toMatch(/--limit/);
+    expect(parseBackfillOptions(['--limit'])).toMatch(/--limit/);
+  });
+
+  it('нечисловой, нулевой, отрицательный и запредельный потолок отвергаются', () => {
+    for (const raw of ['0', '-1', '1.5', 'много', '', String(MAX_LIMIT + 1)]) {
+      expect(parseBackfillOptions(['--limit', raw]), raw).toBeTypeOf('string');
+    }
+  });
+
+  it('осмысленный потолок принимается, и это именно число обращений', () => {
+    expect(parseBackfillOptions(['--limit', '200'])).toEqual({ limit: 200, reportOnly: false });
+    expect(parseBackfillOptions([String('--report-only')])).toEqual({ limit: 0, reportOnly: true });
+  });
+
+  it('неизвестный аргумент останавливает проход, а не игнорируется', () => {
+    // Опечатка в имени флага не должна тихо превращаться в проход без потолка.
+    expect(parseBackfillOptions(['--limitt', '200'])).toMatch(/Неизвестный аргумент/);
+    expect(parseBackfillOptions(['--limit', '200', '--force'])).toMatch(/Неизвестный аргумент/);
   });
 });
 

@@ -24,6 +24,7 @@ import { PhotonClient } from '../modules/integrations/photon/client.js';
 import { isPhotonConfigured } from '../modules/orders/geocoding/enabled.js';
 import { backfillGeocoding } from '../modules/orders/geocoding/queue.js';
 import { geocodingReport, type GeocodingReport } from '../modules/orders/geocoding/report.js';
+import { parseBackfillOptions } from '../modules/orders/geocoding/backfill-options.js';
 import {
   GEOCODE_LOCK_KEY,
   processGeocodingOnce,
@@ -41,43 +42,6 @@ const BATCH_SIZE = 10;
  * проходы и останавливаться — честнее, чем крутиться до таймаута.
  */
 const MAX_IDLE_PASSES = 3;
-
-interface Options {
-  limit: number;
-  reportOnly: boolean;
-}
-
-function parseOptions(argv: readonly string[]): Options | string {
-  let limit = 0;
-  let reportOnly = false;
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--report-only') {
-      reportOnly = true;
-      continue;
-    }
-    if (arg === '--limit') {
-      const raw = argv[i + 1];
-      i += 1;
-      const parsed = Number(raw);
-      if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 100_000) {
-        return `--limit ожидает целое число от 1 до 100000, получено: ${String(raw)}`;
-      }
-      limit = parsed;
-      continue;
-    }
-    return `Неизвестный аргумент: ${String(arg)}`;
-  }
-
-  if (!reportOnly && limit === 0) {
-    // Умолчания нет намеренно: «ограниченный» backfill без явного потолка
-    // ограниченным не является, а молчаливое умолчание однажды окажется не тем.
-    return 'Укажите --limit <число обращений> либо --report-only';
-  }
-
-  return { limit, reportOnly };
-}
 
 /** Печатает сводку. Только числа — ни одного адреса. */
 function printReport(title: string, report: GeocodingReport): void {
@@ -101,7 +65,7 @@ function printReport(title: string, report: GeocodingReport): void {
 }
 
 async function main(): Promise<number> {
-  const options = parseOptions(process.argv.slice(2));
+  const options = parseBackfillOptions(process.argv.slice(2));
   if (typeof options === 'string') {
     process.stderr.write(`${options}\n`);
     return 2;

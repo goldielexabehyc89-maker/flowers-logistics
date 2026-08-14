@@ -5,41 +5,48 @@
 -- дежурный читал состояние чужого сервиса вместо своего — это не косметика,
 -- а неверное показание приборной панели во время отказа.
 --
--- Миграция forward-only и не редактирует предыдущие: ограничение singleton
--- пересоздаётся, а не правится на месте.
+-- Миграция РАСШИРЯЮЩАЯ и forward-only. Прежняя строка `dadata` НЕ удаляется
+-- и не переименовывается: между применением миграции и переключением версии
+-- работает ещё старое приложение, а оно обновляет именно её. Удалить строку
+-- здесь значило бы уронить работающий сервис ради аккуратности схемы.
+-- Сжатие — удаление строки `dadata` и возврат ограничения к одному значению —
+-- выполняется отдельной миграцией после того, как старая версия перестанет
+-- работать где бы то ни было.
 
 -- 1. Состояние темпа и остановки провайдера.
 --
--- Ограничение снимается до переименования: иначе UPDATE нарушил бы его сам.
+-- Ограничение расширяется до двух допустимых значений. Оно по-прежнему
+-- защищает от произвольных идентификаторов: список закрыт, просто теперь
+-- в нём два имени вместо одного.
 ALTER TABLE "GeocodingProviderState"
   DROP CONSTRAINT IF EXISTS "GeocodingProviderState_singleton";
 
--- Строка переносится, а не создаётся заново: пауза и причина остановки должны
--- пережить выкатку. Их потеря означала бы, что после обновления приложение
--- заново пойдёт в неработающий геокодер.
-UPDATE "GeocodingProviderState" SET "id" = 'photon' WHERE "id" = 'dadata';
+ALTER TABLE "GeocodingProviderState"
+  ADD CONSTRAINT "GeocodingProviderState_known_provider" CHECK ("id" IN ('dadata', 'photon'));
 
--- Строка обязана существовать даже там, где её почему-то нет.
+-- Строка нового провайдера создаётся отдельной, а не переносом старой.
+--
+-- Пауза и причина остановки относятся к КОНКРЕТНОМУ сервису: перенести паузу
+-- DaData на Photon значило бы заставить исправный геокодер ждать из-за чужого
+-- отказа. Новый провайдер начинает с чистого состояния.
 INSERT INTO "GeocodingProviderState" ("id", "nextRequestAllowedAt", "updatedAt")
 VALUES ('photon', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT ("id") DO NOTHING;
 
--- Посторонних строк остаться не должно: singleton — это ровно одна строка.
-DELETE FROM "GeocodingProviderState" WHERE "id" <> 'photon';
+-- Строка обязана существовать и на чистой базе, где прежней не было вовсе.
+INSERT INTO "GeocodingProviderState" ("id", "nextRequestAllowedAt", "updatedAt")
+VALUES ('dadata', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+ON CONFLICT ("id") DO NOTHING;
 
 ALTER TABLE "GeocodingProviderState"
   ALTER COLUMN "id" SET DEFAULT 'photon';
 
-ALTER TABLE "GeocodingProviderState"
-  ADD CONSTRAINT "GeocodingProviderState_singleton" CHECK ("id" = 'photon');
+COMMENT ON TABLE "GeocodingProviderState" IS
+  'Темп и остановка обращений к геокодеру. Рабочая строка — photon; строка dadata сохранена до вывода прежней версии приложения.';
 
 -- 2. Публичное состояние интеграции.
 --
--- Прежняя запись переименовывается, чтобы сохранить историю `lastOkAt`
--- и `lastErrorAt`. Если запись `photon` уже есть, прежняя удаляется:
--- две записи об одном геокодере противоречили бы друг другу.
-DELETE FROM "IntegrationStatus"
-WHERE "provider" = 'dadata'
-  AND EXISTS (SELECT 1 FROM "IntegrationStatus" WHERE "provider" = 'photon');
-
-UPDATE "IntegrationStatus" SET "provider" = 'photon' WHERE "provider" = 'dadata';
+-- Запись `photon` создаёт само приложение при запуске, поэтому здесь ничего
+-- вставлять не нужно. Прежняя запись `dadata` остаётся нетронутой: её пишет
+-- работающая сейчас версия, и её исчезновение показало бы дежурному
+-- пропавшую интеграцию вместо переименованной.
