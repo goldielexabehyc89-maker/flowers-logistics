@@ -700,14 +700,20 @@ test('маршрут: черновик → состав → порядок → �
   await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
 
   // Порядок меняется кнопками: перетаскивание не требуется.
-  const firstStopBefore = await stops.first().innerText();
+  await expect(stops.first()).toContainText(first);
   await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
-  await expect(stops.first()).not.toHaveText(firstStopBefore);
+  await expect(stops.first()).toContainText(second);
 
-  // Перестановка пережила обновление страницы: порядок живёт на сервере.
-  const afterReorder = await stops.first().innerText();
+  /*
+   * Перестановка пережила обновление страницы.
+   *
+   * Проверяется номер заказа на первой остановке, а не весь текст строки:
+   * порядок живёт на сервере, и доказывать надо именно его, а не совпадение
+   * пробелов после перерисовки. Заодно это проверка, что активный черновик
+   * восстановился из адреса — иначе остановок на экране не было бы вовсе.
+   */
   await page.reload();
-  await expect(page.locator('.routes__card .routes__stop').first()).toHaveText(afterReorder);
+  await expect(page.locator('.routes__card .routes__stop').first()).toContainText(second);
 
   // Второй черновик — из любого ещё свободного заказа, чтобы было куда
   // переносить: конкретный номер к этому моменту мог уйти в чужой черновик.
