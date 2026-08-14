@@ -131,7 +131,13 @@ export function invalidationKeysFor(topic: string): string[][] {
     return [['florist-shift'], ['florist-shifts'], ['florist-queue']];
   }
   if (topic.startsWith('print_job.')) {
-    return [['florist-print-jobs'], ['florist-card']];
+    // Реестр устройств обновляется вместе с очередью: успех и отказ печати
+    // меняют «последнее задание» и «последнюю ошибку» компьютера, а событий
+    // об устройстве при этом не возникает.
+    return [['florist-print-jobs'], ['florist-card'], ['print-agent-devices']];
+  }
+  if (topic.startsWith('print_agent.')) {
+    return [['print-agent-devices']];
   }
   if (topic.startsWith('pickup.')) {
     // Выдача самовывоза меняет и карточку у прилавка, и список дня.

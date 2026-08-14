@@ -51,6 +51,7 @@ jobs:
       # окружений: у staging и production собственные секреты вне репозитория.
       AUTH_ACCESS_TOKEN_SECRET: ci-only-access-token-secret-000000000000
       AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
+      PRINT_AGENT_PAIRING_PEPPER: ci-only-print-agent-pepper-000000000000
       # 32 байта в base64 — ключ AES-256-GCM, тоже только для CI.
       AUTH_REFRESH_REPLAY_KEY: Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0=
 
@@ -181,6 +182,7 @@ jobs:
               -e APP_ENVIRONMENT_MARKER=local \
               -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
               -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
+              -e PRINT_AGENT_PAIRING_PEPPER=ci-only-print-agent-pepper-000000000000 \
               -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
               "$IMAGE_LOCAL_TAG" \
               npm run --silent "$1" 2>&1
@@ -234,6 +236,7 @@ jobs:
             -e APP_ENVIRONMENT_MARKER=local \
             -e AUTH_ACCESS_TOKEN_SECRET=ci-only-access-token-secret-000000000000 \
             -e AUTH_PIN_PEPPER=ci-only-pin-pepper-0000000000000000000000 \
+            -e PRINT_AGENT_PAIRING_PEPPER=ci-only-print-agent-pepper-000000000000 \
             -e AUTH_REFRESH_REPLAY_KEY=Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0= \
             "$IMAGE_LOCAL_TAG"
 
@@ -314,6 +317,7 @@ jobs:
       TZ: Europe/Moscow
       AUTH_ACCESS_TOKEN_SECRET: ci-only-access-token-secret-000000000000
       AUTH_PIN_PEPPER: ci-only-pin-pepper-0000000000000000000000
+      PRINT_AGENT_PAIRING_PEPPER: ci-only-print-agent-pepper-000000000000
       AUTH_REFRESH_REPLAY_KEY: Y2ktb25seS1rZXktMzItYnl0ZXMtMDAwMDAwMDAwMC0=
       E2E_ADMIN_PHONE: '+79990000001'
 

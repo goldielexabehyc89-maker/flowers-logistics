@@ -69,6 +69,10 @@ import {
   nextPageOffset,
   pageSummary,
   printStateLabel,
+  printStateTone,
+  isPrintInFlight,
+  canCancelPrint,
+  canMarkPrinted,
   processLabel,
   routeLabel,
   type FloristOption,
@@ -789,54 +793,78 @@ export function FloristScreen(): React.JSX.Element {
             <li key={job.id} className="florist__row" data-testid="print-row">
               <div className="florist__row-main">
                 {/* Номер — текст. Карточку открывает кнопка `Просмотр` ниже:
-                    во всех списках флориста это одно и то же действие. */}
-                <span className="florist__number">{job.orderNumber}</span>
+                    во всех списках флориста это одно и то же действие.
+                    У тестовой страницы заказа нет, и номера у неё тоже нет. */}
+                <span className="florist__number">{job.orderNumber ?? 'Тестовая страница'}</span>
                 <span className="muted text-sm">{formatMoscowDateTime(job.createdAt)}</span>
-                <StatusBadge
-                  tone={
-                    job.state === 'ERROR'
-                      ? 'error'
-                      : job.state === 'PRINTED'
-                        ? 'success'
-                        : 'warning'
-                  }
-                >
+                <StatusBadge tone={printStateTone(job.state)}>
                   {printStateLabel(job.state)}
                 </StatusBadge>
-                <span className="muted text-sm">попытка {job.attempt}</span>
-                {job.lastErrorCode !== null && (
-                  <span className="muted text-sm">код {job.lastErrorCode}</span>
+                {job.attempt !== null && (
+                  <span className="muted text-sm">попытка {job.attempt}</span>
+                )}
+                {job.deviceName !== null && isPrintInFlight(job.state) && (
+                  <span className="muted text-sm">на «{job.deviceName}»</span>
+                )}
+                {/*
+                 * Причина показывается СЛОВАМИ, а не кодом.
+                 *
+                 * Флорист стоит у станка: «принтер выключен» он исправит сам
+                 * за десять секунд, а «код PRINTER_OFFLINE» отправит его
+                 * к администратору. Текст выбирает сервер из закрытого перечня —
+                 * строка с чужой машины сюда не попадает.
+                 */}
+                {job.lastErrorMessage !== null && (
+                  <span className="text-sm" data-testid="print-error">
+                    {job.lastErrorMessage}
+                  </span>
                 )}
               </div>
 
               <div className="florist__row-side">
-                <Button
-                  variant="ghost"
-                  data-testid="print-open"
-                  onClick={() => setOpenOrderId(job.orderId)}
-                >
-                  Просмотр
-                </Button>
-                <Button
-                  variant="secondary"
-                  data-testid="print-download"
-                  onClick={() => void downloadJobPdf(job)}
-                >
-                  Скачать PDF
-                </Button>
+                {job.orderId !== null && (
+                  <Button
+                    variant="ghost"
+                    data-testid="print-open"
+                    onClick={() => setOpenOrderId(job.orderId)}
+                  >
+                    Просмотр
+                  </Button>
+                )}
+                {job.printFormId !== null && (
+                  <Button
+                    variant="secondary"
+                    data-testid="print-download"
+                    onClick={() => void downloadJobPdf(job)}
+                  >
+                    Скачать PDF
+                  </Button>
+                )}
+                {/*
+                 * Повтор — всегда осознанное действие человека.
+                 *
+                 * Автоматического повтора нет ни для одного состояния: там,
+                 * где бумага могла выйти, второй бланк к тому же букету хуже,
+                 * чем отсутствие первого.
+                 *
+                 * Ключ идемпотентности создаётся на нажатие: двойной клик
+                 * и повтор при потерянном ответе обязаны дать один бланк.
+                 */}
                 <Button
                   variant="ghost"
                   disabled={action.isPending}
+                  data-testid="print-retry"
                   onClick={() =>
                     action.mutate({
                       path: `/api/florist/print-jobs/${job.id}/retry`,
+                      body: { idempotencyKey: crypto.randomUUID() },
                       success: 'Создана новая попытка печати',
                     })
                   }
                 >
                   Повторить печать
                 </Button>
-                {job.state !== 'PRINTED' && (
+                {canMarkPrinted(job.state) && (
                   <Button
                     variant="ghost"
                     disabled={action.isPending}
@@ -849,6 +877,21 @@ export function FloristScreen(): React.JSX.Element {
                     }
                   >
                     Напечатано вручную
+                  </Button>
+                )}
+                {canCancelPrint(job.state) && (
+                  <Button
+                    variant="ghost"
+                    disabled={action.isPending}
+                    data-testid="print-cancel"
+                    onClick={() =>
+                      action.mutate({
+                        path: `/api/florist/print-jobs/${job.id}/cancel`,
+                        success: 'Задание снято',
+                      })
+                    }
+                  >
+                    Отменить
                   </Button>
                 )}
               </div>

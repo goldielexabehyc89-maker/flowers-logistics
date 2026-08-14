@@ -142,6 +142,20 @@ export const AUDIT_ACTIONS = [
   'ORDER_PRINT_JOB_CREATED',
   'ORDER_PRINT_JOB_RETRIED',
   'ORDER_PRINT_JOB_PRINTED',
+  'ORDER_PRINT_JOB_CANCELLED',
+  // Локальный обработчик печати (`FUL-010`). Ни кода привязки, ни токена
+  // устройства в аудит не попадает — только идентификаторы, состояния
+  // и безопасные коды отказа. Автор действий устройства — не человек:
+  // actorUserId у них пуст, source = 'worker'.
+  'PRINT_AGENT_PAIRING_CODE_ISSUED',
+  'PRINT_AGENT_DEVICE_PAIRED',
+  'PRINT_AGENT_DEVICE_PRIMARY_CHANGED',
+  'PRINT_AGENT_DEVICE_REVOKED',
+  'PRINT_AGENT_JOB_CLAIMED',
+  'PRINT_AGENT_JOB_PRINTING',
+  'PRINT_AGENT_JOB_SUCCEEDED',
+  'PRINT_AGENT_JOB_FAILED',
+  'PRINT_AGENT_JOB_NEEDS_REVIEW',
   // Выдача самовывоза покупателю (этап 6.7). В записи — идентификаторы заказа,
   // размещения и ячейки: ни номера заказа, ни кода полки, ни получателя.
   'PICKUP_ORDER_ISSUED',

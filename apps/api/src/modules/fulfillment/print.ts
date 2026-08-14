@@ -31,22 +31,31 @@ export interface PrintActor {
 
 export interface PrintJobView {
   id: string;
-  orderId: string;
+  /** `ORDER_FORM` или `TEST_PAGE`. У тестовой страницы заказа нет. */
+  documentKind: string;
+  orderId: string | null;
   /** Номер заказа: человеческий ключ всех производственных экранов. */
-  orderNumber: string;
-  printFormId: string;
+  orderNumber: string | null;
+  printFormId: string | null;
   state: string;
-  attempt: number;
+  attempt: number | null;
   createdAt: string;
   completedAt: string | null;
   completedById: string | null;
   /** Короткий безопасный код: ни состава, ни PII. */
   lastErrorCode: string | null;
+  /** Понятная человеку причина. Текст выбирает сервер из закрытого перечня. */
+  lastErrorMessage: string | null;
   lastErrorAt: string | null;
+  /** Компьютер, взявший задание. Флорист видит, куда ушёл его бланк. */
+  deviceId: string | null;
+  deviceName: string | null;
+  cancelledAt: string | null;
 }
 
 const JOB_SELECT = {
   id: true,
+  documentKind: true,
   orderId: true,
   printFormId: true,
   state: true,
@@ -55,29 +64,39 @@ const JOB_SELECT = {
   completedAt: true,
   completedById: true,
   lastErrorCode: true,
+  lastErrorMessage: true,
   lastErrorAt: true,
+  cancelledAt: true,
+  deviceId: true,
+  device: { select: { name: true } },
   order: { select: { externalName: true } },
 } as const;
 
 interface JobRow {
   id: string;
-  orderId: string;
-  printFormId: string;
+  documentKind: string;
+  orderId: string | null;
+  printFormId: string | null;
   state: string;
-  attempt: number;
+  attempt: number | null;
   createdAt: Date;
   completedAt: Date | null;
   completedById: string | null;
   lastErrorCode: string | null;
+  lastErrorMessage: string | null;
   lastErrorAt: Date | null;
-  order: { externalName: string };
+  cancelledAt: Date | null;
+  deviceId: string | null;
+  device: { name: string } | null;
+  order: { externalName: string } | null;
 }
 
 function toView(job: JobRow): PrintJobView {
   return {
     id: job.id,
+    documentKind: job.documentKind,
     orderId: job.orderId,
-    orderNumber: job.order.externalName,
+    orderNumber: job.order?.externalName ?? null,
     printFormId: job.printFormId,
     state: job.state,
     attempt: job.attempt,
@@ -85,7 +104,11 @@ function toView(job: JobRow): PrintJobView {
     completedAt: job.completedAt === null ? null : job.completedAt.toISOString(),
     completedById: job.completedById,
     lastErrorCode: job.lastErrorCode,
+    lastErrorMessage: job.lastErrorMessage,
     lastErrorAt: job.lastErrorAt === null ? null : job.lastErrorAt.toISOString(),
+    deviceId: job.deviceId,
+    deviceName: job.device?.name ?? null,
+    cancelledAt: job.cancelledAt === null ? null : job.cancelledAt.toISOString(),
   };
 }
 
@@ -119,12 +142,23 @@ export async function listPrintJobs(
   db: Database,
   input: { filter: PrintFilter } & Partial<PageRequest>,
 ): Promise<PrintJobPage> {
+  // «Требуют внимания» — всё незавершённое: и ожидающее, и то, что сейчас
+  // в работе у обработчика. Задание, взятое компьютером и не вернувшееся,
+  // обязано остаться на виду — иначе именно оно и потеряется.
   const states =
     input.filter === 'attention'
-      ? (['PENDING', 'ERROR'] as const)
+      ? (['PENDING', 'CLAIMED', 'PRINTING', 'ERROR', 'NEEDS_REVIEW'] as const)
       : input.filter === 'printed'
         ? (['PRINTED'] as const)
-        : (['PENDING', 'ERROR', 'PRINTED'] as const);
+        : ([
+            'PENDING',
+            'CLAIMED',
+            'PRINTING',
+            'ERROR',
+            'NEEDS_REVIEW',
+            'PRINTED',
+            'CANCELLED',
+          ] as const);
 
   const page = normalizePageRequest(input);
   const where = { state: { in: [...states] } };
@@ -179,48 +213,190 @@ export async function retryPrint(
   actor: PrintActor,
   jobId: string,
   context: RequestContext,
+  /**
+   * Ключ идемпотентности нажатия.
+   *
+   * Двойной клик и повтор запроса при потерянном ответе приходят с ОДНИМ
+   * ключом и обязаны вернуть то же задание. Без него к букету приезжали бы
+   * два бланка с разными номерами попыток, и оба выглядели бы законными.
+   */
+  idempotencyKey: string | null = null,
 ): Promise<PrintJobView> {
+  if (idempotencyKey !== null) {
+    const existing = (await db.orderPrintJob.findUnique({
+      where: { idempotencyKey },
+      select: JOB_SELECT,
+    })) as JobRow | null;
+    if (existing !== null) {
+      return toView(existing);
+    }
+  }
+
   const source = await readJob(db, jobId);
 
-  const created = await db.$transaction(async (tx) => {
-    const attempt = await nextPrintAttempt(tx, source.orderId);
+  try {
+    const created = await db.$transaction(async (tx) => {
+      // Тестовая страница повторяется тестовой страницей: заказа и снимка
+      // у неё нет, а нумерация попыток ведётся по заказу.
+      if (source.documentKind === 'TEST_PAGE') {
+        const job = (await tx.orderPrintJob.create({
+          data: { documentKind: 'TEST_PAGE', state: 'PENDING', idempotencyKey },
+          select: JOB_SELECT,
+        })) as JobRow;
 
-    const job = await tx.orderPrintJob.create({
-      data: {
-        orderId: source.orderId,
-        // Тот же снимок и та же версия шаблона: документ обязан быть тем же.
-        printFormId: source.printFormId,
-        attempt,
-        state: 'PENDING',
-      },
-      select: JOB_SELECT,
+        await writeAudit(tx, {
+          action: 'ORDER_PRINT_JOB_RETRIED',
+          entityType: 'OrderPrintJob',
+          entityId: job.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { documentKind: 'TEST_PAGE', retriedFromJobId: source.id },
+          ip: context.ip,
+          userAgent: context.userAgent,
+        });
+        await publishPrintEvent(tx, job.id, null, 'RETRIED');
+
+        return job;
+      }
+
+      // Дальше — бланк заказа. CHECK базы гарантирует, что у него есть и заказ,
+      // и снимок; проверка здесь нужна лишь типам.
+      if (source.orderId === null || source.printFormId === null) {
+        throw new AppError('CONFLICT', { message: 'order print job without form' });
+      }
+
+      const attempt = await nextPrintAttempt(tx, source.orderId);
+
+      const job = (await tx.orderPrintJob.create({
+        data: {
+          orderId: source.orderId,
+          // Тот же снимок и та же версия шаблона: документ обязан быть тем же.
+          printFormId: source.printFormId,
+          attempt,
+          state: 'PENDING',
+          idempotencyKey,
+        },
+        select: JOB_SELECT,
+      })) as JobRow;
+
+      await writeAudit(tx, {
+        action: 'ORDER_PRINT_JOB_RETRIED',
+        entityType: 'OrderPrintJob',
+        entityId: job.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        newValue: {
+          orderId: source.orderId,
+          printFormId: source.printFormId,
+          attempt: job.attempt,
+          retriedFromJobId: source.id,
+        },
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+      await publishPrintEvent(tx, job.id, source.orderId, 'RETRIED');
+
+      return job;
     });
 
+    return toView(created);
+  } catch (error) {
+    // Гонка двух одинаковых нажатий: уникальный индекс отклонил второе.
+    // Возвращается первое задание — кнопку нажали дважды, а хотели один бланк.
+    if (idempotencyKey !== null) {
+      const raced = (await db.orderPrintJob.findUnique({
+        where: { idempotencyKey },
+        select: JOB_SELECT,
+      })) as JobRow | null;
+      if (raced !== null) {
+        return toView(raced);
+      }
+    }
+    throw error;
+  }
+}
+
+/**
+ * Снятие задания.
+ *
+ * Доступно тому, что заведомо не печатается: ожидающему, взятому, ошибочному
+ * и отправленному на разбор. Задание в состоянии `PRINTING` снять нельзя —
+ * документ уже у драйвера, и «отменено» было бы утверждением, которого никто
+ * не проверял. Оно сначала уходит в разбор по таймауту.
+ */
+export async function cancelPrint(
+  db: Database,
+  actor: PrintActor,
+  jobId: string,
+  context: RequestContext,
+): Promise<PrintJobView> {
+  const updated = await db.$transaction(async (tx) => {
+    const changed = await tx.orderPrintJob.updateMany({
+      // Условие в WHERE, а не проверка «до»: повторное нажатие не должно
+      // переписать чужую отметку и её автора.
+      where: { id: jobId, state: { in: ['PENDING', 'CLAIMED', 'ERROR', 'NEEDS_REVIEW'] } },
+      data: {
+        state: 'CANCELLED',
+        cancelledAt: new Date(),
+        cancelledById: actor.userId,
+        // Устройство отпускается: снятое задание больше ничьё.
+        deviceId: null,
+        claimedAt: null,
+      },
+    });
+
+    if (changed.count === 0) {
+      const existing = await tx.orderPrintJob.findUnique({
+        where: { id: jobId },
+        select: { id: true, state: true },
+      });
+      if (existing === null) {
+        throw new AppError('NOT_FOUND', { message: 'print job not found' });
+      }
+      throw new AppError('CONFLICT', {
+        message: `print job in state ${existing.state} cannot be cancelled`,
+        publicMessage:
+          existing.state === 'PRINTING'
+            ? 'Документ уже передан принтеру. Дождитесь результата.'
+            : 'Задание уже завершено.',
+        conflict: { kind: 'PRINT_JOB_ALREADY_COMPLETED' },
+      });
+    }
+
+    const job = (await tx.orderPrintJob.findUniqueOrThrow({
+      where: { id: jobId },
+      select: JOB_SELECT,
+    })) as JobRow;
+
     await writeAudit(tx, {
-      action: 'ORDER_PRINT_JOB_RETRIED',
+      action: 'ORDER_PRINT_JOB_CANCELLED',
       entityType: 'OrderPrintJob',
       entityId: job.id,
       actorUserId: actor.userId,
       actorRoles: actor.roles,
-      newValue: {
-        orderId: source.orderId,
-        printFormId: source.printFormId,
-        attempt: job.attempt,
-        retriedFromJobId: source.id,
-      },
+      newValue: { orderId: job.orderId, attempt: job.attempt },
       ip: context.ip,
       userAgent: context.userAgent,
     });
-    await publishPrintEvent(tx, job.id, source.orderId, 'RETRIED');
+    await publishPrintEvent(tx, job.id, job.orderId, 'CANCELLED');
 
-    return job as JobRow;
+    return job;
   });
 
-  return toView(created);
+  return toView(updated);
 }
 
 /**
  * Ручная отметка «Напечатано».
+ *
+ * ЗАПАСНОЙ РЕЖИМ, А НЕ ОТКАЗ. Обработчик может быть не подключён, отозван или
+ * выключен — бумага при этом всё равно выходит из принтера через браузер, и
+ * человек обязан иметь возможность это зафиксировать.
+ *
+ * Разрешена и для заданий, зависших у обработчика: `NEEDS_REVIEW` — это ровно
+ * вопрос «вышел ли бланк», и ответить на него может только человек, который
+ * посмотрел на лоток. `PRINTING` тоже разрешено: пока драйвер молчит, человек
+ * видит бумагу раньше сервера.
  *
  * Меняет ТОЛЬКО состояние печати. Складской приёмкой это не является:
  * она по-прежнему начинается физическим сканированием QR кладовщиком.
@@ -235,7 +411,10 @@ export async function markPrinted(
     const changed = await tx.orderPrintJob.updateMany({
       // Условие в WHERE, а не проверка «до»: повторное нажатие не должно
       // переписать чужую отметку и её автора.
-      where: { id: jobId, state: { in: ['PENDING', 'ERROR'] } },
+      where: {
+        id: jobId,
+        state: { in: ['PENDING', 'CLAIMED', 'PRINTING', 'ERROR', 'NEEDS_REVIEW'] },
+      },
       data: { state: 'PRINTED', completedAt: new Date(), completedById: actor.userId },
     });
 
@@ -293,11 +472,23 @@ export interface PrintDocument {
 export async function renderJobDocument(db: Database, jobId: string): Promise<PrintDocument> {
   const job = await db.orderPrintJob.findUnique({
     where: { id: jobId },
-    select: { printForm: { select: { snapshot: true, snapshotHash: true } } },
+    select: {
+      documentKind: true,
+      printForm: { select: { snapshot: true, snapshotHash: true } },
+    },
   });
 
   if (job === null) {
     throw new AppError('NOT_FOUND', { message: 'print job not found' });
+  }
+
+  // У тестовой страницы снимка нет и быть не может: она ничего не описывает.
+  // Скачивать её из вкладки «Печать» незачем — проверка идёт через принтер.
+  if (job.documentKind === 'TEST_PAGE' || job.printForm === null) {
+    throw new AppError('NOT_FOUND', {
+      message: 'print job has no order document',
+      publicMessage: 'У этого задания нет бланка заказа.',
+    });
   }
 
   return renderStored(job.printForm.snapshot, job.printForm.snapshotHash);

@@ -88,11 +88,23 @@ export interface CardPositionView {
 
 export interface CardPrintJobView {
   id: string;
-  attempt: number;
+  /**
+   * Номер попытки. `null` у заданий заказа не встречается — его обязательность
+   * держит CHECK базы; тип допускает его лишь потому, что таблица заданий
+   * общая с тестовой страницей, у которой заказа нет.
+   */
+  attempt: number | null;
   state: string;
   createdAt: string;
   completedAt: string | null;
   lastErrorCode: string | null;
+  /**
+   * Понятная причина отказа.
+   *
+   * Флорист не управляет устройствами, но обязан видеть, почему его бланк
+   * не вышел: «принтер выключен» он исправит сам за десять секунд.
+   */
+  lastErrorMessage: string | null;
 }
 
 export interface OrderCardView {
@@ -143,16 +155,24 @@ export interface ShiftResponse {
 
 export interface PrintJobView {
   id: string;
-  orderId: string;
-  orderNumber: string;
-  printFormId: string;
+  /** `ORDER_FORM` или `TEST_PAGE`. У тестовой страницы заказа нет. */
+  documentKind: string;
+  orderId: string | null;
+  orderNumber: string | null;
+  printFormId: string | null;
   state: string;
-  attempt: number;
+  attempt: number | null;
   createdAt: string;
   completedAt: string | null;
   completedById: string | null;
   lastErrorCode: string | null;
+  /** Понятная причина отказа. Текст выбирает сервер из закрытого перечня. */
+  lastErrorMessage: string | null;
   lastErrorAt: string | null;
+  /** Компьютер, взявший задание. Флорист видит, куда ушёл его бланк. */
+  deviceId: string | null;
+  deviceName: string | null;
+  cancelledAt: string | null;
 }
 
 export interface FloristOption {
@@ -183,7 +203,52 @@ export const PRINT_STATE_LABELS: Record<string, string> = {
   PENDING: 'Ожидает печати',
   PRINTED: 'Напечатано',
   ERROR: 'Ошибка печати',
+  CLAIMED: 'Передаётся на печать',
+  PRINTING: 'Печатается',
+  NEEDS_REVIEW: 'Проверьте, вышел ли бланк',
+  CANCELLED: 'Снято',
 };
+
+/**
+ * Состояния, из которых печать ещё может состояться.
+ *
+ * `NEEDS_REVIEW` сюда не входит: там вопрос не «когда напечатается»,
+ * а «вышел ли уже», и ответить на него может только человек.
+ */
+const PRINT_IN_FLIGHT = new Set(['PENDING', 'CLAIMED', 'PRINTING']);
+
+/**
+ * Тон значка состояния печати.
+ *
+ * `NEEDS_REVIEW` показывается предупреждением, а не ошибкой: ошибка означала бы
+ * «не напечаталось», а здесь неизвестно — бланк мог уже лежать в лотке.
+ */
+export function printStateTone(state: string): 'success' | 'warning' | 'error' | 'neutral' {
+  if (state === 'PRINTED') return 'success';
+  if (state === 'ERROR') return 'error';
+  if (state === 'CANCELLED') return 'neutral';
+  return 'warning';
+}
+
+/** Идёт ли задание к принтеру прямо сейчас. */
+export function isPrintInFlight(state: string): boolean {
+  return PRINT_IN_FLIGHT.has(state);
+}
+
+/**
+ * Можно ли снять задание.
+ *
+ * `PRINTING` снять нельзя: документ уже у драйвера, и «отменено» было бы
+ * утверждением, которого никто не проверял.
+ */
+export function canCancelPrint(state: string): boolean {
+  return ['PENDING', 'CLAIMED', 'ERROR', 'NEEDS_REVIEW'].includes(state);
+}
+
+/** Можно ли отметить задание напечатанным вручную: запасной режим. */
+export function canMarkPrinted(state: string): boolean {
+  return ['PENDING', 'CLAIMED', 'PRINTING', 'ERROR', 'NEEDS_REVIEW'].includes(state);
+}
 
 export function processLabel(state: string): string {
   return PROCESS_LABELS[state] ?? state;
@@ -279,7 +344,9 @@ export function availableActions(context: ActionContext): {
 
 /** Последнее задание печати заказа: с ним и работают кнопки карточки. */
 export function latestJob(card: OrderCardView): CardPrintJobView | null {
-  return [...card.print.jobs].sort((a, b) => b.attempt - a.attempt)[0] ?? null;
+  // `attempt` у заданий заказа всегда заполнен; `?? 0` защищает сортировку
+  // от NaN, а не описывает ожидаемые данные.
+  return [...card.print.jobs].sort((a, b) => (b.attempt ?? 0) - (a.attempt ?? 0))[0] ?? null;
 }
 
 /**

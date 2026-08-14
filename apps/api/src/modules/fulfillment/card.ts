@@ -55,11 +55,24 @@ export interface CardPosition {
 
 export interface CardPrintJob {
   id: string;
-  attempt: number;
+  /**
+   * Номер попытки. `null` не встречается у заданий заказа: их обязательность
+   * держит CHECK базы. Тип допускает его лишь потому, что таблица общая
+   * с тестовой страницей, у которой заказа нет.
+   */
+  attempt: number | null;
   state: string;
   createdAt: string;
   completedAt: string | null;
   lastErrorCode: string | null;
+  /**
+   * Понятная человеку причина отказа.
+   *
+   * Флорист управлять устройствами не может и не должен, но обязан видеть,
+   * почему его бланк не вышел: «принтер выключен» — это то, что он исправит
+   * сам за десять секунд, не отвлекая администратора.
+   */
+  lastErrorMessage: string | null;
 }
 
 export interface OrderCard {
@@ -152,6 +165,7 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
           createdAt: true,
           completedAt: true,
           lastErrorCode: true,
+          lastErrorMessage: true,
         },
       },
     },
@@ -228,6 +242,7 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
         createdAt: job.createdAt.toISOString(),
         completedAt: job.completedAt === null ? null : job.completedAt.toISOString(),
         lastErrorCode: job.lastErrorCode,
+        lastErrorMessage: job.lastErrorMessage,
       })),
     },
   };
