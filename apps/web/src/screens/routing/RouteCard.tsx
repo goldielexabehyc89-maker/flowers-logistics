@@ -16,7 +16,6 @@ import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
 import {
   Button,
-  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -28,6 +27,7 @@ import {
   TextInput,
 } from '../../ui/components';
 import { useRouteLease } from './useRouteLease';
+import { withRouteLease } from './lease-scope';
 import {
   blockerLabel,
   canEdit,
@@ -55,9 +55,26 @@ interface CourierOption {
 export interface RouteCardProps {
   routeId: string;
   onClose: () => void;
+  /**
+   * Карточка раскрыта внутри списка черновиков, а не показана отдельно.
+   * Сворачивает её сам список, поэтому собственная кнопка «Закрыть» лишняя.
+   */
+  embedded?: boolean;
+  /**
+   * Черновик подтверждён и перестал быть черновиком.
+   *
+   * Список обязан узнать об этом сам: подтверждённый маршрут уходит
+   * в «Маршрутные листы» и не должен остаться раскрытым на этой вкладке.
+   */
+  onConfirmed?: () => void;
 }
 
-export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Element {
+export function RouteCard({
+  routeId,
+  onClose,
+  embedded = false,
+  onConfirmed,
+}: RouteCardProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
@@ -69,6 +86,8 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
   const [reason, setReason] = useState('');
   const [reasonError, setReasonError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  /** Курьер, выбранный в окне подтверждения. Пустая строка — «не назначен». */
+  const [confirmCourierId, setConfirmCourierId] = useState('');
   const [moveTargetId, setMoveTargetId] = useState('');
 
   const routeQuery = useQuery({
@@ -164,32 +183,27 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
    * могло устареть, пока логист выбирал заказы.
    */
   const moveOrders = useMutation({
-    mutationFn: async (input: { targetId: string; orderIds: string[] }) => {
-      const acquired = await client.post<{ granted: boolean }>(
-        `/api/routes/${input.targetId}/edit-lock/acquire`,
-        {},
-      );
-
-      try {
-        const target = await client.get<RouteCardView>(`/api/routes/${input.targetId}`);
-        return await client.post<{ source: RouteCardView; target: RouteCardView }>(
-          '/api/routes/move',
-          {
+    mutationFn: (input: { targetId: string; orderIds: string[] }) =>
+      withRouteLease(
+        {
+          acquire: (id) =>
+            client.post<{ granted: boolean }>(`/api/routes/${id}/edit-lock/acquire`, {}),
+          release: async (id) => {
+            await client.post(`/api/routes/${id}/edit-lock/release`, {});
+          },
+        },
+        input.targetId,
+        async () => {
+          const target = await client.get<RouteCardView>(`/api/routes/${input.targetId}`);
+          return client.post<{ source: RouteCardView; target: RouteCardView }>('/api/routes/move', {
             fromRouteId: routeId,
             toRouteId: input.targetId,
             orderIds: input.orderIds,
             expectedSourceVersion: route?.version ?? 0,
             expectedTargetVersion: target.version,
-          },
-        );
-      } finally {
-        if (acquired.granted) {
-          await client
-            .post(`/api/routes/${input.targetId}/edit-lock/release`, {})
-            .catch(() => undefined);
-        }
-      }
-    },
+          });
+        },
+      ),
     onSuccess: (result) => {
       setMoveTargetId('');
       afterSuccess('Заказы перенесены в другой маршрут', result.source);
@@ -227,14 +241,40 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
     onError: handleFailure,
   });
 
-  const confirmRoute = useMutation({
-    mutationFn: () =>
-      client.post<RouteCardView>(`/api/routes/${routeId}/confirm`, {
-        expectedVersion: route?.version ?? 0,
-      }),
+  /**
+   * Подтверждение, при необходимости вместе с назначением курьера.
+   *
+   * Две операции идут последовательно и по свежей версии: назначение курьера
+   * увеличивает версию маршрута, и подтверждение с прежней честно получило бы
+   * 409. Если курьер не менялся, лишнего запроса нет.
+   *
+   * Сервер перед переходом заново проверяет состав и конфликты — клиентская
+   * последовательность не заменяет эту проверку, а только не мешает ей.
+   */
+  const confirmWithCourier = useMutation({
+    mutationFn: async () => {
+      const desired = confirmCourierId === '' ? null : confirmCourierId;
+      const current = route?.courier?.id ?? null;
+      let version = route?.version ?? 0;
+
+      if (desired !== current) {
+        const updated = await client.put<RouteCardView>(`/api/routes/${routeId}/courier`, {
+          courierUserId: desired,
+          expectedVersion: version,
+        });
+        version = updated.version;
+      }
+
+      return client.post<RouteCardView>(`/api/routes/${routeId}/confirm`, {
+        expectedVersion: version,
+      });
+    },
     onSuccess: (card) => {
       setConfirmOpen(false);
       afterSuccess('Маршрут подтверждён', card);
+      // Подтверждённый маршрут больше не черновик: список обязан свернуть его
+      // и убрать со вкладки, а не оставить раскрытым.
+      onConfirmed?.();
     },
     onError: (error: unknown) => {
       setConfirmOpen(false);
@@ -327,7 +367,8 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
             {route.conflictCount > 0 ? ` · расхождений: ${route.conflictCount}` : ''}
           </p>
         </div>
-        <Button onClick={onClose}>Закрыть</Button>
+        {/* Встроенную карточку сворачивает сам список: вторая кнопка была бы лишней. */}
+        {!embedded && <Button onClick={onClose}>Закрыть</Button>}
       </header>
 
       {hint !== null && (
@@ -358,7 +399,12 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
             <Button
               variant="primary"
               disabled={!editable || route.confirmBlockers.length > 0}
-              onClick={() => setConfirmOpen(true)}
+              onClick={() => {
+                // Окно открывается с уже назначенным курьером, а не пустым:
+                // иначе подтверждение молча снимало бы прежнего.
+                setConfirmCourierId(route.courier?.id ?? '');
+                setConfirmOpen(true);
+              }}
             >
               Подтвердить маршрут
             </Button>
@@ -582,15 +628,61 @@ export function RouteCard({ routeId, onClose }: RouteCardProps): React.JSX.Eleme
         )}
       </details>
 
-      <ConfirmDialog
+      {/*
+        Подтверждение с назначением курьера.
+
+        Курьер остаётся необязательным: маршрут подтверждался без него и раньше,
+        и делать его обязательным без отдельного решения владельца нельзя.
+        Здесь он просто под рукой — назначать курьера отдельным полем, а потом
+        искать кнопку подтверждения было лишним шагом в самом частом действии.
+      */}
+      <Modal
         open={confirmOpen}
         title="Подтвердить маршрут"
-        description="После подтверждения состав нельзя менять без возврата в черновик."
-        confirmLabel="Подтвердить"
-        busy={confirmRoute.isPending}
-        onConfirm={() => confirmRoute.mutate()}
-        onCancel={() => setConfirmOpen(false)}
-      />
+        onClose={() => setConfirmOpen(false)}
+        dismissible={!confirmWithCourier.isPending}
+      >
+        <div className="stack">
+          <p className="text-sm muted">
+            После подтверждения состав нельзя менять без возврата в черновик. Маршрут появится в
+            «Маршрутных листах» и исчезнет из этой вкладки.
+          </p>
+          <Field label="Курьер" hint="Необязательно: маршрут можно подтвердить и без курьера">
+            {(fieldProps) => (
+              <Select
+                {...fieldProps}
+                value={confirmCourierId}
+                disabled={confirmWithCourier.isPending}
+                onChange={(event) => setConfirmCourierId(event.target.value)}
+              >
+                <option value="">Не назначен</option>
+                {route.courier !== null &&
+                  !(couriers.data?.items ?? []).some((item) => item.id === route.courier?.id) && (
+                    <option value={route.courier.id}>{route.courier.fullName}</option>
+                  )}
+                {(couriers.data?.items ?? []).map((courier) => (
+                  <option key={courier.id} value={courier.id}>
+                    {courier.fullName}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <div className="modal__footer">
+            <Button onClick={() => setConfirmOpen(false)} disabled={confirmWithCourier.isPending}>
+              Отмена
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="route-confirm-submit"
+              disabled={confirmWithCourier.isPending}
+              onClick={() => confirmWithCourier.mutate()}
+            >
+              Подтвердить
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={pendingAction !== null || takeoverOpen}

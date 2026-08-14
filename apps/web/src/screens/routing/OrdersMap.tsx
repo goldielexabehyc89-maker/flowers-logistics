@@ -35,6 +35,13 @@ export interface OrdersMapProps {
   picking: boolean;
   onPick: (coordinates: { lat: number; lon: number }) => void;
   /**
+   * Что написать на маркере. По умолчанию — номер заказа.
+   *
+   * Рабочее место черновика подписывает точки активного маршрута позицией
+   * остановки: нумерация на карте и в списке обязана совпадать.
+   */
+  labelOf?: (point: MapPoint) => string;
+  /**
    * Подложка не загрузилась.
    *
    * Стиль или архив тайлов могли оказаться недоступны уже после того, как
@@ -52,6 +59,7 @@ export function OrdersMap({
   onSelect,
   picking,
   onPick,
+  labelOf,
   onLoadError,
 }: OrdersMapProps): React.JSX.Element {
   /**
@@ -202,9 +210,15 @@ export function OrdersMap({
       }
       seen.add(point.orderId);
 
+      // Подпись маркера пересчитывается и у существующей точки: после
+      // перестановки остановок номера обязаны совпасть со списком, иначе
+      // карта показывала бы прежний порядок как действующий.
+      const label = labelOf === undefined ? point.number : labelOf(point);
+
       const existing = markers.get(point.orderId);
       if (existing !== undefined) {
         existing.setLngLat(lngLat);
+        existing.getElement().textContent = label;
         applyKind(existing, point, selectedOrderId);
         continue;
       }
@@ -212,7 +226,9 @@ export function OrdersMap({
       const element = document.createElement('button');
       element.type = 'button';
       element.className = 'map-marker';
-      element.textContent = point.number;
+      element.textContent = label;
+      // Опознание всегда по номеру заказа: подпись может быть позицией
+      // остановки, и «Заказ 3» означало бы совсем другое.
       element.setAttribute('aria-label', `Заказ ${point.number} на карте`);
       element.addEventListener('click', (event) => {
         event.stopPropagation();
@@ -230,7 +246,7 @@ export function OrdersMap({
         markers.delete(orderId);
       }
     }
-  }, [points, selectedOrderId, mapReady]);
+  }, [points, selectedOrderId, mapReady, labelOf]);
 
   // Выбор строки в списке подсвечивает маркер и подводит к нему карту.
   useEffect(() => {

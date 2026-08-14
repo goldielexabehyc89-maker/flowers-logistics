@@ -33,6 +33,94 @@
   align-items: start;
 }
 
+/*
+ * Рабочее место черновиков: список слева, карта справа.
+ *
+ * Карта закрепляется на своей высоте и не уезжает при длинном списке —
+ * иначе раскрытый черновик с двумя десятками остановок уводил бы её
+ * за нижний край, и сверять номера остановок было бы не с чем.
+ */
+.routes__workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .routes__workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.routes__map-panel {
+  position: sticky;
+  top: var(--space-3);
+}
+
+@media (max-width: 1100px) {
+  .routes__map-panel {
+    position: static;
+  }
+}
+
+.routes__draft-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routes__draft {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.routes__draft--open {
+  border-color: var(--color-accent, var(--color-border));
+}
+
+/*
+ * Заголовок черновика — кнопка во всю ширину: раскрытие должно работать
+ * мышью, с клавиатуры и пальцем одинаково.
+ */
+.routes__draft-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.routes__map-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.routes__toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.routes__map-selection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
 .routes__panel {
   display: flex;
   flex-direction: column;

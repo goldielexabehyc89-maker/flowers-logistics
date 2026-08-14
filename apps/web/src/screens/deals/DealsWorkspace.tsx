@@ -13,12 +13,12 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { moscowToday } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Button,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -29,6 +29,15 @@ import {
 import { attentionLabel, formatMinutes } from './deals';
 import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
+import {
+  buildSlots,
+  DEFAULT_CAPACITY,
+  firstDraftId,
+  splitPhase,
+  type PlanRunView,
+} from './auto-split';
+import { useWorkspace } from '../logistics/useWorkspace';
+import { workspaceHref } from '../logistics/workspace-url';
 import {
   dropUnavailable,
   intervalProblem,
@@ -54,6 +63,10 @@ interface DealsResponse {
 
 const PAGE_SIZE = 50;
 
+/** Как часто спрашивать готовность расчёта и сколько всего его ждать. */
+const SPLIT_POLL_MS = 1500;
+const SPLIT_TIMEOUT_MS = 120_000;
+
 /** Минуты от полуночи в строку `ЧЧ:ММ` для поля формы. */
 function minutesToText(minute: number | null): string {
   if (minute === null) {
@@ -67,7 +80,9 @@ export function DealsWorkspace(): React.JSX.Element {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [date, setDate] = useState(() => moscowToday());
+  // День общий с «Маршрутизацией» и живёт в адресе: два независимых значения
+  // на одном рабочем месте расходились молча.
+  const { day: date, setDay: setDate } = useWorkspace();
   const [search, setSearch] = useState('');
   const [fromTime, setFromTime] = useState('');
   const [toTime, setToTime] = useState('');
@@ -83,6 +98,11 @@ export function DealsWorkspace(): React.JSX.Element {
   const [intervalFrom, setIntervalFrom] = useState('');
   const [intervalTo, setIntervalTo] = useState('');
   const [intervalError, setIntervalError] = useState<string | null>(null);
+  /** Готовое превью, ожидающее согласия на неразмещённые заказы. */
+  const [pendingSplit, setPendingSplit] = useState<{
+    run: PlanRunView;
+    unassignedCount: number;
+  } | null>(null);
 
   /** Ровно те параметры, которыми пользуются список, карта и «выбрать все». */
   const scope = useMemo(() => {
@@ -158,8 +178,9 @@ export function DealsWorkspace(): React.JSX.Element {
     onSuccess: (route) => {
       setSelected([]);
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
-      // Успех ведёт в созданный черновик, а не «куда-нибудь в маршрутизацию».
-      void navigate(`/logistics/routing?route=${route.id}`);
+      // Успех ведёт в созданный черновик, а не «куда-нибудь в маршрутизацию»:
+      // «Маршрутизация» раскрывает именно его и на тот же день.
+      void navigate(workspaceHref('/logistics/routing', { day: date, draftId: route.id }));
     },
     onError: (error: unknown) => {
       const conflict = (error as { conflict?: { orderIds?: string[] } }).conflict;
@@ -204,25 +225,124 @@ export function DealsWorkspace(): React.JSX.Element {
     },
   });
 
+  /**
+   * Ожидание готового превью.
+   *
+   * Расчёт выполняет фоновый исполнитель, поэтому ответ приходит не сразу.
+   * Ожидание ограничено по времени: висящая без объяснения кнопка хуже
+   * честного отказа, а запуск при этом остаётся в истории расчётов.
+   */
+  const awaitPreview = useCallback(
+    async (runId: string): Promise<PlanRunView> => {
+      const deadline = Date.now() + SPLIT_TIMEOUT_MS;
+      for (;;) {
+        const run = await client.get<PlanRunView>(`/api/route-plans/${runId}`);
+        if (splitPhase(run).kind !== 'RUNNING') {
+          return run;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(
+            'Расчёт идёт дольше обычного. Он не потерян: откройте его позже или повторите.',
+          );
+        }
+        await new Promise((resolve) => globalThis.setTimeout(resolve, SPLIT_POLL_MS));
+      }
+    },
+    [client],
+  );
+
+  /**
+   * Автоматическая разбивка выбора на несколько черновиков.
+   *
+   * Логист ждёт здесь и уходит в «Маршрутизацию» с готовыми черновиками:
+   * технический запуск, очередь и превью в интерфейс не всплывают. Двухфазность
+   * сохраняется на сервере, но стадией рабочего места она больше не является.
+   *
+   * Прежнее обращение шло на `/api/planning/runs` — такого адреса на сервере
+   * нет — и слало `capacity` вместо `capacityOrders`. Оба отказа скрывал мок
+   * браузерной проверки, поэтому кнопка не работала, а проверки были зелёными.
+   */
+  const finishApplied = useCallback(
+    (run: PlanRunView): void => {
+      setPendingSplit(null);
+      setSelected([]);
+      void queryClient.invalidateQueries({ queryKey: ['deals'] });
+
+      const first = firstDraftId(run);
+      if (first === null) {
+        setNotice('Расчёт применён, но ни одного черновика не создано.');
+        return;
+      }
+      // Раскрывается первый созданный черновик: логист попадает в работу,
+      // а не в общий список, где свой результат пришлось бы искать.
+      void navigate(workspaceHref('/logistics/routing', { day: date, draftId: first }));
+    },
+    [date, navigate, queryClient],
+  );
+
+  const splitFailed = useCallback((error: unknown): void => {
+    setPendingSplit(null);
+    setNotice(
+      (error as { message?: string }).message ?? 'Расчёт не запущен: проверьте выбор и настройки.',
+    );
+  }, []);
+
   const autoPlan = useMutation({
-    mutationFn: () =>
-      client.post<{ id: string }>('/api/planning/runs', {
+    mutationFn: async () => {
+      const started = await client.post<PlanRunView>('/api/route-plans', {
         deliveryDate: date,
         orderIds: selected,
-        slots: [{ vehicleType: 'CAR', capacity: selected.length }],
+        slots: buildSlots({
+          orderCount: selected.length,
+          capacityOrders: DEFAULT_CAPACITY,
+          vehicleType: 'CAR',
+        }),
+      });
+
+      const ready = await awaitPreview(started.id);
+      const phase = splitPhase(ready);
+
+      if (phase.kind === 'FAILED') {
+        throw new Error('Расчёт не удался. Проверьте условия и повторите.');
+      }
+      if (phase.kind === 'NEEDS_CONSENT') {
+        return { kind: 'CONSENT' as const, run: ready, unassignedCount: phase.unassignedCount };
+      }
+
+      const applied = await client.post<PlanRunView>(`/api/route-plans/${ready.id}/apply`, {
+        expectedVersion: ready.version,
+        allowUnassigned: false,
+      });
+      return { kind: 'APPLIED' as const, run: applied };
+    },
+    onSuccess: (result) => {
+      if (result.kind === 'CONSENT') {
+        // Заказ, который никто не повезёт, логист обязан увидеть ДО создания
+        // черновиков. Выбор при этом не сбрасывается: отказавшись, он остаётся
+        // ровно с тем множеством, с которого начал.
+        setPendingSplit({ run: result.run, unassignedCount: result.unassignedCount });
+        return;
+      }
+      finishApplied(result.run);
+    },
+    onError: splitFailed,
+  });
+
+  /**
+   * Применение уже посчитанного превью после согласия.
+   *
+   * Отдельная операция, а не повтор всей разбивки: расчёт уже выполнен, и
+   * второй запуск того же дня упёрся бы в уникальный `activeDateKey` — день
+   * занят собственным готовым превью.
+   */
+  const applyPending = useMutation({
+    mutationFn: (run: PlanRunView) =>
+      client.post<PlanRunView>(`/api/route-plans/${run.id}/apply`, {
+        expectedVersion: run.version,
+        allowUnassigned: true,
       }),
-    onSuccess: (run) => {
-      setSelected([]);
-      // Превью открывается по конкретному запуску: обновление страницы
-      // и прямая ссылка возвращают тот же расчёт.
-      void navigate(`/logistics/routing?run=${run.id}`);
-    },
-    onError: (error: unknown) => {
-      setNotice(
-        (error as { message?: string }).message ??
-          'Расчёт не запущен: проверьте выбор и настройки.',
-      );
-    },
+    onSuccess: finishApplied,
+    onError: splitFailed,
   });
 
   if (list.isPending) {
@@ -410,7 +530,12 @@ export function DealsWorkspace(): React.JSX.Element {
                               type="button"
                               className="deals__link"
                               onClick={() =>
-                                void navigate(`/logistics/routing?route=${item.draftRouteId}`)
+                                void navigate(
+                                  workspaceHref('/logistics/routing', {
+                                    day: date,
+                                    draftId: item.draftRouteId,
+                                  }),
+                                )
                               }
                             >
                               {item.draftRouteNumber ?? 'Открыть черновик'}
@@ -546,13 +671,39 @@ export function DealsWorkspace(): React.JSX.Element {
           </Button>
           <Button
             data-testid="deals-auto-plan"
+            loading={autoPlan.isPending}
             disabled={autoPlan.isPending}
             onClick={() => autoPlan.mutate()}
           >
-            Распределить автоматически
+            {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
           </Button>
         </div>
       )}
+
+      {/*
+        Согласие на неразмещённые заказы.
+
+        Спрашивается ДО создания черновиков: заказ, который никто не повезёт,
+        не должен уехать в работу молча. Отказ оставляет выбор нетронутым —
+        логист меняет состав или число машин и повторяет.
+      */}
+      <ConfirmDialog
+        open={pendingSplit !== null}
+        title="Часть заказов не размещена"
+        description={
+          `Решатель не смог разместить заказов: ${pendingSplit?.unassignedCount ?? 0}. ` +
+          'Их никто не повезёт — они останутся нераспределёнными и будут видны ' +
+          'в «Маршрутизации». Создать черновики для остальных?'
+        }
+        confirmLabel="Создать черновики"
+        busy={applyPending.isPending}
+        onConfirm={() => {
+          if (pendingSplit !== null) {
+            applyPending.mutate(pendingSplit.run);
+          }
+        }}
+        onCancel={() => setPendingSplit(null)}
+      />
 
       {editing !== null && (
         <AddressDialog
