@@ -843,18 +843,21 @@ test('перехват блокировки переводит прежнего 
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
-  // Первый сеанс раскрывает черновик и держит его в работе.
-  await login(page, ADMIN_PHONE, ADMIN_PIN);
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  // Собственный черновик сценария: чужой мог быть подтверждён соседом,
+  // и перехватывать было бы нечего.
+  const own = seedOrders(1, { withPoint: true })[0] ?? '';
+  expect(own).not.toBe('');
 
-  await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
-  const drafts = page.locator('.routes__draft');
-  test.skip((await drafts.count()) === 0, 'черновиков дня нет');
-  const draftNumber = (await drafts.first().getAttribute('data-draft-number')) ?? '';
-  expect(draftNumber).not.toBe('');
-  await openDraft(page, draftNumber);
+  // Первый сеанс создаёт черновик и держит его в работе.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  const ownDeal = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(ownDeal).toHaveAttribute('data-selectable', 'yes');
+  await ownDeal.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
