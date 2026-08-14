@@ -19,7 +19,7 @@ import {
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../integrations/moysklad/mapper.js';
-import { addressState, effectiveAddress, isSourceConflict } from './address.js';
+import { addressState, effectiveAddress, geocodingAddress, isSourceConflict } from './address.js';
 import { effectiveAttentionReasons } from './attention.js';
 
 let ctx: TestContext;
@@ -335,5 +335,57 @@ describe('инварианты заказа держит база', () => {
         data: { addressConflict: true },
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe('запрос геокодеру отличается от адреса курьеру', () => {
+  it('курьер видит полный адрес, геокодер — разобранный запрос', () => {
+    const order = {
+      address: 'Москва, Тверская улица, 13, кв. 5, домофон 1234',
+      geocodeAddress: 'Москва, Тверская улица, 13',
+      localAddress: null,
+    };
+
+    // Без квартиры и домофона курьер не доедет.
+    expect(effectiveAddress(order)).toBe('Москва, Тверская улица, 13, кв. 5, домофон 1234');
+    // А геокодеру они мешают: он ищет дом, а не квартиру в нём.
+    expect(geocodingAddress(order)).toBe('Москва, Тверская улица, 13');
+  });
+
+  it('правка логиста сильнее обоих', () => {
+    const order = {
+      address: 'Москва, Тверская улица, 13, кв. 5',
+      geocodeAddress: 'Москва, Тверская улица, 13',
+      localAddress: 'Москва, Тверская улица, 15',
+    };
+
+    // Логист подтверждал конкретный адрес: подменять его разобранным нельзя.
+    expect(effectiveAddress(order)).toBe('Москва, Тверская улица, 15');
+    expect(geocodingAddress(order)).toBe('Москва, Тверская улица, 15');
+  });
+
+  it('без отдельного запроса геокодер берёт адрес заказа', () => {
+    // Прежнее поведение сохраняется до единого символа там, где источник
+    // не включён: пустое поле означает «отдельного запроса нет».
+    for (const geocodeAddress of [null, undefined, '   ']) {
+      const order = { address: 'Москва, Тверская улица, 13', geocodeAddress, localAddress: null };
+      expect(geocodingAddress(order), JSON.stringify(geocodeAddress)).toBe(
+        'Москва, Тверская улица, 13',
+      );
+    }
+  });
+
+  it('смена квартиры меняет адрес курьеру, но не запрос геокодеру', () => {
+    // Именно на этом держится «не геокодировать дом заново из-за квартиры»:
+    // поколение растёт только при изменении запроса.
+    const before = {
+      address: 'Москва, Тверская улица, 13, кв. 5',
+      geocodeAddress: 'Москва, Тверская улица, 13',
+      localAddress: null,
+    };
+    const after = { ...before, address: 'Москва, Тверская улица, 13, кв. 9' };
+
+    expect(effectiveAddress(before)).not.toBe(effectiveAddress(after));
+    expect(geocodingAddress(before)).toBe(geocodingAddress(after));
   });
 });

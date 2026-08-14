@@ -9,12 +9,21 @@
  * Выбор общий со списком: клик по маркеру меняет тот же самый набор.
  */
 
-import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { lazy, Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
-import { EmptyState, ErrorState, LoadingState } from '../../ui/components';
+import { ErrorState, LoadingState } from '../../ui/components';
+import type { MapConfig } from '../routing/geo';
 import { formatMinutes } from './deals';
 import { selectionNumber } from './selection';
+
+/**
+ * Карта грузится отдельным куском: MapLibre и разбор тайлов — сотни килобайт,
+ * и остальным экранам они не нужны.
+ */
+const DealsMapCanvas = lazy(() =>
+  import('./DealsMapCanvas').then((module) => ({ default: module.DealsMapCanvas })),
+);
 
 export interface DealPoint {
   orderId: string;
@@ -107,31 +116,95 @@ export function splitForMap(
 export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
   const [zoomedOut, setZoomedOut] = useState(true);
+  const [basemapFailed, setBasemapFailed] = useState(false);
 
   const query = useQuery({
     queryKey: ['deals-map', scopeKey],
     queryFn: () => client.get<MapResponse>(`/api/deals/map?${scopeKey}`),
+    // Смена фильтра меняет ключ запроса, то есть создаёт НОВЫЙ запрос без
+    // данных. Без этого карта на время загрузки размонтировалась бы целиком
+    // и создавалась заново — логист видел бы моргание вместо обновления.
+    placeholderData: keepPreviousData,
   });
 
-  const points = useMemo(() => query.data?.points ?? [], [query.data]);
+  // Подложка своя: адрес стиля приходит из нашей конфигурации, публичные тайлы
+  // не используются.
+  const config = useQuery({
+    queryKey: ['map-config'],
+    queryFn: () => client.get<MapConfig>('/api/map/config'),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  /*
+   * Последние успешно полученные данные.
+   *
+   * `keepPreviousData` держит прежний ответ, пока новый ЗАГРУЖАЕТСЯ, но если
+   * повторный запрос УПАЛ, данных у запроса не остаётся. Карта из-за временной
+   * ошибки исчезать не должна, поэтому последний удачный ответ помнится
+   * отдельно и переживает любой отказ обновления.
+   */
+  const lastGood = useRef<MapResponse | null>(null);
+  if (query.data !== undefined) {
+    lastGood.current = query.data;
+  }
+  const shown = query.data ?? lastGood.current;
+
+  // Адрес стиля запоминается так же: пропасть он может только вместе с картой.
+  const lastStyleUrl = useRef('');
+  const configuredStyleUrl = config.data?.styleUrl ?? '';
+  if (configuredStyleUrl !== '') {
+    lastStyleUrl.current = configuredStyleUrl;
+  }
+
+  const points = useMemo(() => shown?.points ?? [], [shown]);
 
   const { chosen, clusters } = splitForMap(points, selected, zoomedOut);
 
-  if (query.isPending) {
+  // Номер выбранного заказа подписью на отметке. Пусто — заказ не выбран.
+  const numberOf = useCallback(
+    (orderId: string): string | null => {
+      const number = selectionNumber(selected, orderId);
+      return number === null ? null : String(number);
+    },
+    [selected],
+  );
+
+  // Состояние загрузки допустимо ТОЛЬКО до первых данных. Дальше карта
+  // остаётся на месте при любом обновлении.
+  if (shown === null && query.isPending) {
     return <LoadingState title="Загружаем карту…" />;
   }
-  if (query.isError) {
+  if (shown === null) {
     return <ErrorState title="Не удалось загрузить карту" onRetry={() => void query.refetch()} />;
   }
+
+  const styleUrl = lastStyleUrl.current;
+  const empty = points.length === 0;
+  // Обновление идёт, но прежние точки показаны: это не загрузка, а уточнение.
+  const refreshing = query.isFetching;
+  // Обновление не удалось. Карта и прежние точки остаются: они всё ещё верны,
+  // просто новее ничего не пришло.
+  const refreshFailed = query.isError;
 
   return (
     <section className="deals-map" data-testid="deals-map">
       <div className="deals-map__head">
-        <span>На карте: {points.length}</span>
+        <span>
+          На карте: {points.length}
+          {refreshing && (
+            <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
+              {' '}
+              Обновляем…
+            </span>
+          )}
+        </span>
         <button
           type="button"
           className="deals__link"
           data-testid="deals-map-zoom"
+          // Приближать нечего, пока точек нет: кнопка не должна обещать
+          // действие, которое ничего не изменит.
+          disabled={empty}
           onClick={() => setZoomedOut((value) => !value)}
         >
           {zoomedOut ? 'Приблизить' : 'Отдалить'}
@@ -158,9 +231,52 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
         </li>
       </ul>
 
-      {points.length === 0 ? (
-        <EmptyState title="Точек на карте нет" />
-      ) : (
+      {refreshFailed && (
+        <p className="deals-map__refresh-error" role="status" data-testid="deals-map-refresh-error">
+          Не удалось обновить точки. Показаны прежние.{' '}
+          <button type="button" className="deals__link" onClick={() => void query.refetch()}>
+            Повторить
+          </button>
+        </p>
+      )}
+
+      {/*
+        Карта показывается ВСЕГДА, даже когда точек ноль. Пустой день — обычное
+        дело, и подложка Москвы в этот момент нужна не меньше: логист видит,
+        где он работает, а не серый прямоугольник. Сообщение об отсутствии
+        координат лежит поверх карты и её не заменяет.
+      */}
+      <div className="deals-map__surface">
+        {styleUrl === '' ? (
+          <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
+            Карта не настроена
+          </p>
+        ) : basemapFailed ? (
+          <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
+            Подложка карты не загрузилась. Список и выбор работают как обычно.
+          </p>
+        ) : (
+          <Suspense fallback={<LoadingState title="Готовим карту…" />}>
+            <DealsMapCanvas
+              styleUrl={styleUrl}
+              attribution={config.data?.attribution ?? null}
+              chosen={chosen}
+              clusters={clusters}
+              numberOf={numberOf}
+              onToggle={onToggle}
+              onLoadError={() => setBasemapFailed(true)}
+            />
+          </Suspense>
+        )}
+
+        {empty && !basemapFailed && styleUrl !== '' && (
+          <p className="deals-map__notice" role="status" data-testid="deals-map-empty">
+            В выбранном дне нет заказов с координатами
+          </p>
+        )}
+      </div>
+
+      {points.length === 0 ? null : (
         <ul className="deals-map__points">
           {chosen.map((point) => (
             <li key={point.orderId} data-testid="map-point" data-order-number={point.number}>

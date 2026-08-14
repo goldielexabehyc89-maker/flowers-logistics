@@ -84,6 +84,8 @@ async function main(): Promise<void> {
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,
     lock: { connectionString: config.DATABASE_URL },
     geocodingEnabled,
+    // Источник запроса к геокодеру. Адрес заказа этим не управляется.
+    addressSource: config.MOYSKLAD_GEOCODING_ADDRESS_SOURCE,
   };
   await reportStartupStatus(moysklad, config);
 

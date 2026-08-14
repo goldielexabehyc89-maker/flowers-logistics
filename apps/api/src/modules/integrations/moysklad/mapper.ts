@@ -50,6 +50,8 @@ export interface OrderSnapshot {
   intervalStartMinute: number | null;
   intervalEndMinute: number | null;
   address: string | null;
+  /** Запрос к геокодеру. Пусто — отдельного запроса нет, берётся `address`. */
+  geocodeAddress: string | null;
   recipient: string | null;
   comment: string | null;
   paymentTypeId: string | null;
@@ -170,7 +172,57 @@ export interface MapOrderResult {
  * «Время доставки». Резервных источников нет: подстановка «похожего» поля
  * молча подменила бы ошибку заполнения правдоподобной догадкой.
  */
-export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
+/**
+ * Собирает адрес из разобранных частей МоегоСклада.
+ *
+ * В строку входят ТОЛЬКО те части, которые ищет геокодер: индекс, страна,
+ * регион, город, улица и дом. Квартира, подъезд, этаж и комментарии
+ * не входят намеренно — геокодер ищет дом, а не квартиру в нём, и лишние
+ * слова только уводят поиск.
+ *
+ * Без улицы или дома адреса нет. Возвращается `null`, и заказ уходит к человеку:
+ * подставлять вместо этого строку `shipmentAddress` нельзя — ради её замены
+ * источник и включали, а тихий откат к ней превратил бы проверку источника
+ * в проверку неизвестно чего.
+ */
+export function composeStructuredAddress(
+  full: MoyskladOrderDto['shipmentAddressFull'],
+): string | null {
+  if (full === undefined || full === null) {
+    return null;
+  }
+
+  const street = text(full.street);
+  const house = text(full.house);
+  if (street === null || house === null) {
+    return null;
+  }
+
+  const name = (value: unknown): string | null =>
+    typeof value === 'object' && value !== null && 'name' in value
+      ? text((value as { name?: unknown }).name)
+      : null;
+
+  const parts = [
+    text(full.postalCode),
+    name(full.country),
+    name(full.region),
+    text(full.city),
+    street,
+    house,
+  ].filter((part): part is string => part !== null);
+
+  return parts.length === 0 ? null : parts.join(', ');
+}
+
+/** Откуда собирать запрос к геокодеру. Адрес заказа этим не управляется. */
+export type AddressSource = 'shipmentAddress' | 'shipmentAddressFull';
+
+export function mapOrder(
+  order: MoyskladOrderDto,
+  ids: Ids,
+  addressSource: AddressSource = 'shipmentAddress',
+): MapOrderResult {
   const storeId = idFromHref(order.store?.meta.href);
   const deliveryMethod = attribute(order, ids.deliveryMethodAttribute);
   const paymentType = attribute(order, ids.paymentTypeAttribute);
@@ -210,7 +262,17 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
   }
 
   const deliveryDate = parseDeliveryDate(order.deliveryPlannedMoment);
+  // Адрес заказа — операционный: его читают логист и курьер, и квартира,
+  // подъезд и домофон в нём обязаны остаться. Он не зависит от источника
+  // запроса к геокодеру.
   const address = text(order.shipmentAddress);
+
+  // Запрос к геокодеру — отдельное значение. Пусто означает «отдельного
+  // запроса нет»: геокодер возьмёт адрес заказа, как и раньше.
+  const geocodeAddress =
+    addressSource === 'shipmentAddressFull'
+      ? composeStructuredAddress(order.shipmentAddressFull)
+      : null;
   const recipient = attribute(order, ids.recipientAttribute).text;
   const comment = attribute(order, ids.commentAttribute).text;
 
@@ -231,6 +293,7 @@ export function mapOrder(order: MoyskladOrderDto, ids: Ids): MapOrderResult {
     intervalStartMinute: interval.startMinute,
     intervalEndMinute: interval.endMinute,
     address,
+    geocodeAddress,
     recipient,
     comment,
     paymentTypeId: paymentType.id,

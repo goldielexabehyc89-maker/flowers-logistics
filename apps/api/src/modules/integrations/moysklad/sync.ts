@@ -29,7 +29,7 @@ import { MoyskladError, type MoyskladClient } from './client.js';
 import type { MOYSKLAD_IDS } from './config.js';
 import { approvedStoreFilter, deltaFilter } from './filters.js';
 import { applyOrderSnapshot, markSourceMissing } from './import-service.js';
-import { mapOrder } from './mapper.js';
+import { mapOrder, type AddressSource } from './mapper.js';
 import { acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
 import {
   CompositionError,
@@ -58,6 +58,8 @@ export interface SyncDeps {
   client: MoyskladClient;
   logger: AppLogger;
   ids: typeof MOYSKLAD_IDS;
+  /** Откуда собирать запрос к геокодеру. Умолчание — отдельного запроса нет. */
+  addressSource?: AddressSource;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   /** Перекрытие окна delta. Стартовое значение — пять минут. */
@@ -304,7 +306,7 @@ async function applyRows(
   const now = (deps.now ?? (() => new Date()))();
 
   for (const row of rows) {
-    const { snapshot } = mapOrder(row as never, deps.ids);
+    const { snapshot } = mapOrder(row as never, deps.ids, deps.addressSource);
     const order = row as MoyskladOrderDto;
 
     // Состав нужен только производственной области. Заказ чужого склада

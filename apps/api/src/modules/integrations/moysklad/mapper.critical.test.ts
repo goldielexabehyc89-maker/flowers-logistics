@@ -20,6 +20,7 @@ import {
 import {
   attentionReasonsFor,
   canonicalJson,
+  composeStructuredAddress,
   diffSnapshots,
   mapOrder,
   snapshotHash,
@@ -684,5 +685,125 @@ describe('плановая дата — календарная дата Моск
 
   it('дата без времени принимается', () => {
     expect(parseDeliveryDate('2026-08-07').date).toBe('2026-08-07');
+  });
+});
+
+describe('адрес курьеру и запрос геокодеру — разные значения', () => {
+  const full = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+    addInfo: 'код домофона 1234',
+    comment: 'позвонить за час',
+  };
+
+  it('без настройки отдельного запроса нет, адрес прежний', () => {
+    const mapped = mapOrder(order({ shipmentAddressFull: full } as never), IDS);
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+    expect(mapped.snapshot.geocodeAddress).toBeNull();
+  });
+
+  it('при включённом источнике адрес курьеру НЕ меняется', () => {
+    // Главное свойство: что бы ни делал геокодер, курьеру нужен операционный
+    // адрес целиком — с квартирой, подъездом и домофоном.
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: full } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+  });
+
+  it('запрос геокодеру собирается только из нужных частей', () => {
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: full } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.geocodeAddress).toBe(
+      '141014, Россия, Московская область, Мытищи, Олимпийский проспект, 29',
+    );
+    for (const excluded of ['137', 'домофон', '1234', 'позвонить']) {
+      expect(mapped.snapshot.geocodeAddress, excluded).not.toContain(excluded);
+    }
+  });
+
+  it('без улицы или дома запроса нет, и адрес заказа его не подменяет', () => {
+    const mapped = mapOrder(
+      order({ shipmentAddressFull: { ...full, house: undefined } } as never),
+      IDS,
+      'shipmentAddressFull',
+    );
+    expect(mapped.snapshot.geocodeAddress).toBeNull();
+    // Адрес курьеру при этом на месте.
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+  });
+});
+
+describe('сборка адреса для геокодера', () => {
+  /**
+   * Разобранный адрес МоегоСклада. Синтетический: настоящих адресов тут нет.
+   *
+   * Функция готова, но НЕ подключена: хранить собранную строку отдельно
+   * от операционного адреса пока негде — свободного поля в модели нет,
+   * а класть её в `address` значило бы потерять квартиру и домофон,
+   * которые нужны курьеру.
+   */
+  const full = {
+    postalCode: '141014',
+    country: { name: 'Россия' },
+    region: { name: 'Московская область' },
+    city: 'Мытищи',
+    street: 'Олимпийский проспект',
+    house: '29',
+    apartment: '137',
+    addInfo: 'код домофона 1234',
+    comment: 'позвонить за час',
+  };
+
+  it('адрес заказа остаётся операционным: квартира не теряется', () => {
+    // Что бы ни делал геокодер, курьеру нужен полный адрес.
+    const mapped = mapOrder(order({ shipmentAddressFull: full } as never), IDS);
+    expect(mapped.snapshot.address).toBe('Москва, тестовый адрес');
+  });
+
+  it('в запрос к геокодеру входят только части, которые он ищет', () => {
+    expect(composeStructuredAddress(full as never)).toBe(
+      '141014, Россия, Московская область, Мытищи, Олимпийский проспект, 29',
+    );
+
+    // Квартира, домофон и комментарий не входят: геокодер ищет дом,
+    // а не квартиру в нём, и лишние слова только уводят поиск.
+    const query = composeStructuredAddress(full as never) ?? '';
+    for (const excluded of ['137', 'домофон', '1234', 'позвонить']) {
+      expect(query, excluded).not.toContain(excluded);
+    }
+  });
+
+  it('без улицы или дома запроса нет, и запасной вариант не подставляется', () => {
+    for (const missing of [{ street: undefined }, { house: undefined }]) {
+      expect(
+        composeStructuredAddress({ ...full, ...missing } as never),
+        JSON.stringify(missing),
+      ).toBeNull();
+    }
+    expect(composeStructuredAddress(undefined)).toBeNull();
+  });
+
+  it('пропущенные необязательные части просто не попадают в строку', () => {
+    expect(composeStructuredAddress({ street: 'Тверская улица', house: '13' } as never)).toBe(
+      'Тверская улица, 13',
+    );
+  });
+
+  it('смена дома меняет запрос, смена квартиры — нет', () => {
+    const base = composeStructuredAddress(full as never);
+    expect(composeStructuredAddress({ ...full, house: '31' } as never)).not.toBe(base);
+    // Для геокодера это тот же дом, и повторный запрос ничего не изменил бы.
+    expect(composeStructuredAddress({ ...full, apartment: '999' } as never)).toBe(base);
   });
 });
