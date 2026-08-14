@@ -125,6 +125,12 @@ model User {
   assignedFulfillment DeliveryOrder[] @relation("OrderFulfillmentAssignee")
   assembledOrders     DeliveryOrder[] @relation("OrderFulfillmentAssembledBy")
   completedPrintJobs  OrderPrintJob[] @relation("PrintJobCompletedBy")
+  cancelledPrintJobs  OrderPrintJob[] @relation("PrintJobCancelledBy")
+
+  /// Обработчики печати: кто привязал, кто отозвал, кто выпустил код.
+  createdPrintAgents      PrintAgentDevice[]      @relation("PrintAgentDeviceCreatedBy")
+  revokedPrintAgents      PrintAgentDevice[]      @relation("PrintAgentDeviceRevokedBy")
+  issuedPrintPairingCodes PrintAgentPairingCode[] @relation("PrintAgentPairingCodeIssuedBy")
 
   createdDepots     Depot[]                @relation("DepotCreatedBy")
   requestedPlanRuns RoutePlanRun[]         @relation("PlanRunRequestedBy")
@@ -134,20 +140,20 @@ model User {
   createdStorageCells StorageCell[] @relation("StorageCellCreatedBy")
   changedStorageCells StorageCell[] @relation("StorageCellChangedBy")
 
-  placedOrders      OrderPlacement[]   @relation("PlacementPlacedBy")
-  releasedOrders    OrderPlacement[]   @relation("PlacementReleasedBy")
-  boundRouteCells   RouteCellBinding[] @relation("RouteCellBoundBy")
-  unboundRouteCells RouteCellBinding[] @relation("RouteCellReleasedBy")
-  issuedRoutes      RouteIssueSession[] @relation("IssueSessionCourier")
-  pickupIssues      OrderPickupIssue[]  @relation("PickupIssuedBy")
-  confirmedIssues   RouteIssueSession[] @relation("IssueSessionConfirmedBy")
-  cancelledIssues   RouteIssueSession[] @relation("IssueSessionCancelledBy")
-
-  @@index([status])
-  @@index([createdAt])
+  placedOrders          OrderPlacement[]              @relation("PlacementPlacedBy")
+  releasedOrders        OrderPlacement[]              @relation("PlacementReleasedBy")
+  boundRouteCells       RouteCellBinding[]            @relation("RouteCellBoundBy")
+  unboundRouteCells     RouteCellBinding[]            @relation("RouteCellReleasedBy")
+  issuedRoutes          RouteIssueSession[]           @relation("IssueSessionCourier")
+  pickupIssues          OrderPickupIssue[]            @relation("PickupIssuedBy")
+  confirmedIssues       RouteIssueSession[]           @relation("IssueSessionConfirmedBy")
+  cancelledIssues       RouteIssueSession[]           @relation("IssueSessionCancelledBy")
   deliveryAttempts      DeliveryAttempt[]             @relation("DeliveryAttemptCourier")
   deliveryCancellations DeliveryAttemptCancellation[] @relation("DeliveryCancelActor")
   deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
+
+  @@index([status])
+  @@index([createdAt])
 }
 
 /// Роли пользователя (many-to-many без отдельной таблицы ролей: набор ролей фиксирован).
@@ -540,7 +546,7 @@ model DeliveryOrder {
   /// Этим полем владеет синхронизация МоегоСклада. Локальная правка его НЕ
   /// перезаписывает: иначе следующий проход синхронизации молча вернул бы
   /// прежнее значение, а логист не узнал бы, что его работа исчезла.
-  address   String?
+  address String?
 
   /// Строка запроса к геокодеру, собранная из разобранного адреса источника.
   ///
@@ -558,7 +564,7 @@ model DeliveryOrder {
   /// отправки в МойСклад ещё нет, и делать вид, что она произошла, нельзя —
   /// поэтому исходное поле остаётся нетронутым (`docs/OWNER_DECISIONS.md`,
   /// `LOG-001`).
-  localAddress String?
+  localAddress        String?
   /// Кто и когда исправил. Заполняются только вместе с самим адресом:
   /// «адрес есть, автора нет» — состояние, которого не должно существовать.
   localAddressSetAt   DateTime?
@@ -582,9 +588,9 @@ model DeliveryOrder {
   /// Неизменяемая история локального адреса и разрешения конфликтов.
   addressHistory OrderAddressHistory[]
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
-  recipient String?
+  recipient      String?
   /// Только «Комментарий по доставке». Необязателен.
-  comment   String?
+  comment        String?
 
   paymentTypeId   String? @db.Uuid
   paymentTypeName String?
@@ -603,7 +609,7 @@ model DeliveryOrder {
   /// способ получения «Доставка» и не архивирован. Смысл поля не менялся —
   /// на него по-прежнему опираются экраны логиста, маршрутизация, планирование,
   /// конфликты и геокодирование.
-  inScope         Boolean               @default(true)
+  inScope            Boolean               @default(true)
   /// Относится ли заказ к ПРОИЗВОДСТВЕННОЙ области: утверждённый склад и заказ
   /// не архивирован, **независимо от способа получения**. Самовывоз, другое
   /// значение и незаполненный способ сюда входят (`docs/OWNER_DECISIONS.md`,
@@ -618,12 +624,12 @@ model DeliveryOrder {
   /// строку, а ограничение с тем же именем фиксирует само правило. Это нужно
   /// для отката: код прежней версии колонки не знает и записал бы `false`
   /// рядом с `inScope = true`.
-  fulfillmentInScope Boolean            @default(false)
-  scopeExitReason OrderScopeExitReason?
-  scopeExitedAt   DateTime?
-  sourceArchived  Boolean               @default(false)
+  fulfillmentInScope Boolean               @default(false)
+  scopeExitReason    OrderScopeExitReason?
+  scopeExitedAt      DateTime?
+  sourceArchived     Boolean               @default(false)
   /// Источник не найден контрольной сверкой: физическое удаление опросом не видно.
-  sourceMissing   Boolean               @default(false)
+  sourceMissing      Boolean               @default(false)
 
   needsAttention   Boolean                @default(false)
   attentionReasons OrderAttentionReason[]
@@ -723,17 +729,17 @@ model DeliveryOrder {
   fulfillmentProcessVersion Int                          @default(0)
 
   /// Единственный флорист, за которым закреплён заказ.
-  fulfillmentAssigneeId String? @db.Uuid
-  fulfillmentAssignee   User?   @relation("OrderFulfillmentAssignee", fields: [fulfillmentAssigneeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fulfillmentAssigneeId String?       @db.Uuid
+  fulfillmentAssignee   User?         @relation("OrderFulfillmentAssignee", fields: [fulfillmentAssigneeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   fulfillmentAssignedAt DateTime?
   /// Смена, в которой заказ взят. Нужна принудительному завершению смены:
   /// оно обязано найти незакрытые назначения, а не потерять их.
   fulfillmentShiftId    String?       @db.Uuid
   fulfillmentShift      FloristShift? @relation("OrderFulfillmentShift", fields: [fulfillmentShiftId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  fulfillmentAssembledAt   DateTime?
-  fulfillmentAssembledById String?   @db.Uuid
-  fulfillmentAssembledBy   User?     @relation("OrderFulfillmentAssembledBy", fields: [fulfillmentAssembledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fulfillmentAssembledAt         DateTime?
+  fulfillmentAssembledById       String?                   @db.Uuid
+  fulfillmentAssembledBy         User?                     @relation("OrderFulfillmentAssembledBy", fields: [fulfillmentAssembledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
   /// Ревизия состава, по которой заказ фактически собран. По ней же построен
   /// печатный бланк, и она же сравнивается при последующих изменениях.
   fulfillmentAssembledRevisionId String?                   @db.Uuid
@@ -940,7 +946,7 @@ model OrderFulfillmentRevision {
   reason        OrderFulfillmentRevisionReason
 
   printForms    OrderPrintForm[]
-  assembledFrom DeliveryOrder[] @relation("OrderAssembledRevision")
+  assembledFrom DeliveryOrder[]  @relation("OrderAssembledRevision")
 
   @@index([orderId, receivedAt])
   @@index([orderId, snapshotHash])
@@ -974,11 +980,60 @@ enum OrderFulfillmentProcessState {
   NEEDS_REVIEW
 }
 
-/// Состояние задания печати бланка.
+/// Состояние задания печати.
+///
+/// Значения ДОБАВЛЯЮТСЯ в конец: PostgreSQL хранит порядок объявления, и вставка
+/// в середину сдвинула бы существующие. Старые значения не переименованы —
+/// строки, созданные до появления обработчика, обязаны читаться прежним смыслом.
+///
+/// `PENDING` И ЕСТЬ «в очереди». Отдельного `QUEUED` намеренно нет: два имени
+/// у одного состояния означали бы, что каждый запрос обязан вечно перечислять
+/// оба, и первый же забытый список тихо потерял бы часть заданий.
 enum PrintJobState {
+  /// В очереди: задание создано, но ни один обработчик его не взял.
   PENDING
+  /// Напечатано. Либо подтверждено обработчиком, либо отмечено человеком.
   PRINTED
+  /// Печать не удалась. Повтор возможен и создаёт НОВОЕ задание.
   ERROR
+  /// Обработчик забрал задание, но документ принтеру ещё не передан.
+  ///
+  /// Состояние однозначное: печати не было. Задание можно вернуть в очередь.
+  CLAIMED
+  /// Документ передан системному драйверу, подтверждения ещё нет.
+  ///
+  /// Состояние НЕОДНОЗНАЧНОЕ: бумага могла выйти. Автоматический повтор отсюда
+  /// запрещён (`FUL-006`).
+  PRINTING
+  /// Исход неизвестен, решение принимает человек.
+  ///
+  /// Сюда попадает зависшее `PRINTING`: принтер мог принять документ, а
+  /// обработчик закрыться до подтверждения. Повторить или отменить —
+  /// осознанное действие, а не работа таймера.
+  NEEDS_REVIEW
+  /// Задание снято человеком. Печатать его больше не будут.
+  CANCELLED
+}
+
+/// Что печатает задание.
+///
+/// Тестовая страница идёт ТОЙ ЖЕ очередью, что и бланк: очередь, которую
+/// проверяют отдельным путём, проверена не была.
+enum PrintDocumentKind {
+  /// Бланк сборки заказа A5.
+  ORDER_FORM
+  /// Тестовая страница проверки связи с принтером. Заказа у неё нет.
+  TEST_PAGE
+}
+
+/// Состояние локального обработчика печати.
+enum PrintAgentDeviceState {
+  /// Привязан и выходил на связь недавно.
+  CONNECTED
+  /// Привязан, но давно не отвечает. Токен ещё действует.
+  DISCONNECTED
+  /// Отозван администратором. Токен недействителен навсегда, задания не выдаются.
+  REVOKED
 }
 
 /// Смена флориста.
@@ -1051,26 +1106,60 @@ model OrderPrintForm {
 /// прежнее: история попыток — часть доказательства того, что бланк вообще
 /// печатали. Состояние «Собран» от печати не зависит и ею не откатывается.
 model OrderPrintJob {
-  id      String        @id @default(uuid(7)) @db.Uuid
-  orderId String        @db.Uuid
-  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  id String @id @default(uuid(7)) @db.Uuid
 
-  printFormId String         @db.Uuid
-  printForm   OrderPrintForm @relation(fields: [printFormId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Что печатаем. Ключ, от которого зависит обязательность заказа и снимка.
+  documentKind PrintDocumentKind @default(ORDER_FORM)
 
-  state PrintJobState @default(PENDING)
-  /// Номер попытки для заказа, начиная с 1.
-  attempt Int
+  /// Заказ. NULL только у тестовой страницы — её печатают до всякого заказа.
+  ///
+  /// Обязательность держит CHECK базы, а не соглашение кода: `ORDER_FORM`
+  /// без заказа — это бланк без содержимого, и вставить такую строку нельзя.
+  orderId String?        @db.Uuid
+  order   DeliveryOrder? @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  /// Печать подтверждена человеком: в MVP это штатный путь, а не отказ.
-  /// Windows-службы бездиалоговой печати в этом срезе нет.
+  printFormId String?         @db.Uuid
+  printForm   OrderPrintForm? @relation(fields: [printFormId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  state   PrintJobState @default(PENDING)
+  /// Номер попытки для заказа, начиная с 1. У тестовой страницы NULL.
+  attempt Int?
+
+  /// Обработчик, забравший задание. Проставляется атомарным claim.
+  deviceId String?           @db.Uuid
+  device   PrintAgentDevice? @relation("PrintJobDevice", fields: [deviceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Когда обработчик взял задание и когда передал документ драйверу.
+  claimedAt  DateTime?
+  printingAt DateTime?
+
+  /// Ключ идемпотентности запроса, создавшего задание.
+  ///
+  /// Повторное нажатие кнопки и повтор HTTP-запроса приходят с ТЕМ ЖЕ ключом
+  /// и обязаны вернуть то же задание, а не создать второй бланк на тот же
+  /// букет. Уникальность держит база: две одновременные попытки не могут
+  /// обе пройти проверку «такого ключа ещё нет».
+  idempotencyKey String? @unique
+
+  /// Печать подтверждена человеком: запасной режим, когда обработчика нет.
   completedAt   DateTime?
   completedById String?   @db.Uuid
   completedBy   User?     @relation("PrintJobCompletedBy", fields: [completedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Кто и когда снял задание.
+  cancelledAt   DateTime?
+  cancelledById String?   @db.Uuid
+  cancelledBy   User?     @relation("PrintJobCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   /// Безопасный короткий код последней ошибки. Ни состава, ни PII.
-  lastErrorCode String?
-  lastErrorAt   DateTime?
+  lastErrorCode    String?
+  /// Понятная человеку причина отказа: «Принтер не отвечает», а не код.
+  ///
+  /// Текст выбирает СЕРВЕР из закрытого перечня по коду. Строку обработчика
+  /// сюда не пишут: она пришла бы с чужой машины и могла бы содержать путь,
+  /// имя пользователя Windows или что угодно ещё.
+  lastErrorMessage String?
+  lastErrorAt      DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1078,6 +1167,130 @@ model OrderPrintJob {
   @@unique([orderId, attempt])
   @@index([state, createdAt])
   @@index([orderId, createdAt])
+  @@index([deviceId, state])
+}
+
+/// Локальный обработчик печати на компьютере флориста.
+///
+/// ПЛОЩАДКИ ЗДЕСЬ НЕТ. В первом срезе производственная площадка одна, и
+/// обработчик привязан к системе целиком (`FUL-006`). Поля «площадка» нет
+/// намеренно: пустая размерность, которую все запросы обязаны учитывать,
+/// дороже, чем её отсутствие. `Depot` не используется — по `FUL-004`
+/// логистический склад и производственные понятия разделены.
+///
+/// ЭТО МАШИННЫЙ КОНТУР, А НЕ ПОЛЬЗОВАТЕЛЬ. Обработчик намеренно НЕ получает
+/// учётную запись и не проходит через `ActivationCode`: тот привязан к
+/// человеку и активирует аккаунт с ролями. Компьютер, наделённый ролями
+/// человека, видел бы заказы, пользователей и настройки — вся разница между
+/// «печатает бланки» и «читает базу» держалась бы на аккуратности вызовов.
+/// Токен устройства действует ТОЛЬКО на `/api/print-agent/*`.
+model PrintAgentDevice {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Понятное название компьютера. Сообщает обработчик, переименовать может ADMIN.
+  name String
+
+  state PrintAgentDeviceState @default(CONNECTED)
+
+  /// Хеш токена устройства (SHA-256).
+  ///
+  /// Открытый токен не хранится, наружу повторно не выдаётся и в журналы
+  /// не попадает. Токен — 32 случайных байта, перебор невозможен, поэтому
+  /// argon2 здесь не нужен: он сделал бы медленным КАЖДЫЙ запрос обработчика,
+  /// а тот опрашивает очередь постоянно. Ровно тот же расчёт, что у
+  /// refresh-токена (`crypto.ts`).
+  tokenHash String @unique
+
+  /// Признак основного обработчика, выраженный базой.
+  ///
+  /// Ровно одна строка во всей таблице может содержать значение: столбец
+  /// уникален, у остальных он NULL, а NULL в PostgreSQL друг с другом не
+  /// конфликтуют. Проверка в коде здесь не годится — два одновременных
+  /// запроса «сделать основным» прошли бы обе проверки и оставили бы два
+  /// основных обработчика, то есть два бланка на один букет.
+  ///
+  /// CHECK базы дополнительно запрещает значение, отличное от `PRIMARY`,
+  /// и основной статус у отозванного устройства.
+  primaryKey String? @unique
+
+  /// Что сообщил о себе обработчик. Заполняется им, а не администратором.
+  os           String?
+  agentVersion String?
+
+  /// Имя системного принтера по умолчанию на момент последней связи.
+  ///
+  /// Это ОТЧЁТ, а не настройка: печатать обработчик будет в тот принтер,
+  /// который окажется принтером по умолчанию непосредственно перед печатью.
+  /// Смена принтера в Windows не требует ни перепривязки, ни правки here.
+  defaultPrinterName String?
+
+  lastSeenAt DateTime?
+
+  /// Последнее успешно напечатанное задание.
+  lastSucceededJobId String?   @db.Uuid
+  lastSucceededAt    DateTime?
+
+  lastErrorCode    String?
+  lastErrorMessage String?
+  lastErrorAt      DateTime?
+
+  pairedAt    DateTime  @default(now())
+  revokedAt   DateTime?
+  revokedById String?   @db.Uuid
+  revokedBy   User?     @relation("PrintAgentDeviceRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Администратор, выпустивший код, по которому появилось устройство.
+  createdById String? @db.Uuid
+  createdBy   User?   @relation("PrintAgentDeviceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobs         OrderPrintJob[]         @relation("PrintJobDevice")
+  pairingCodes PrintAgentPairingCode[] @relation("PrintAgentPairingCodeDevice")
+
+  @@index([state, lastSeenAt])
+}
+
+/// Одноразовый код привязки обработчика печати.
+///
+/// Живёт десять минут, гасится первым же успешным обменом и после этого
+/// недействителен. Хранится только Argon2id-хеш с ОТДЕЛЬНЫМ pepper: код
+/// короткий и вводится человеком, поэтому стоимость подбора держится высокой
+/// намеренно — как у PIN.
+///
+/// АКТИВНЫЙ КОД ОДИН НА ВСЮ СИСТЕМУ. У кода активации `activeKey` равен
+/// `userId` — там область «один человек». Здесь область — вся система, и
+/// значение постоянно (`ACTIVE`): уникальный индекс по нему физически не
+/// позволяет существовать двум активным кодам сразу. Это и делает возможным
+/// поиск по Argon2id-хешу, который принципиально неискуем: активная строка
+/// заведомо одна, и проверять нужно ровно её.
+model PrintAgentPairingCode {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Argon2id-хеш кода с pepper `PRINT_AGENT_PAIRING_PEPPER`.
+  /// Открытый код не хранится и после выдачи не восстановим.
+  codeHash String
+
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  /// Инвалидирован выпуском следующего кода.
+  invalidatedAt DateTime?
+
+  /// Устройство, созданное этим кодом. Появляется в момент обмена.
+  deviceId String?           @db.Uuid
+  device   PrintAgentDevice? @relation("PrintAgentPairingCodeDevice", fields: [deviceId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Ровно `ACTIVE`, пока код действует; при погашении, инвалидации или
+  /// истечении — NULL. Уникальный индекс даёт «не более одного активного кода
+  /// во всей системе», CHECK базы запрещает любое другое значение.
+  activeKey String? @unique
+
+  issuedById String   @db.Uuid
+  issuedBy   User     @relation("PrintAgentPairingCodeIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
 }
 
 /// Курсор фоновой синхронизации. Отделён от `IntegrationStatus.details`:
@@ -1239,11 +1452,11 @@ model DeliveryRoute {
   editLease     RouteEditLease?
   cellBindings  RouteCellBinding[]
   issueSessions RouteIssueSession[]
+  attempts      DeliveryAttempt[]      @relation("DeliveryAttemptRoute")
 
   @@index([deliveryDate, state])
   @@index([courierUserId])
   @@index([planRunId])
-  attempts DeliveryAttempt[] @relation("DeliveryAttemptRoute")
 }
 
 /// Участие заказа в маршруте с историей.
@@ -1701,8 +1914,8 @@ model OrderAddressHistory {
   occurredAt DateTime           @default(now())
 
   /// Прежнее и новое значения ЭФФЕКТИВНОГО адреса: именно его видит логист.
-  oldAddress String?
-  newAddress String?
+  oldAddress    String?
+  newAddress    String?
   /// Каким был исходный адрес МоегоСклада в этот момент.
   sourceAddress String?
 
@@ -1982,9 +2195,9 @@ model StorageCell {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  placements   OrderPlacement[]   @relation("PlacementCell")
-  movedInto    OrderPlacement[]   @relation("PlacementMovedToCell")
-  movedFrom    OrderPlacement[]   @relation("PlacementFromCell")
+  placements    OrderPlacement[]   @relation("PlacementCell")
+  movedInto     OrderPlacement[]   @relation("PlacementMovedToCell")
+  movedFrom     OrderPlacement[]   @relation("PlacementFromCell")
   routeBindings RouteCellBinding[]
   pickupIssues  OrderPickupIssue[] @relation("PickupIssueCell")
 
@@ -2199,11 +2412,11 @@ model DeliveryFailureReason {
   id String @id @default(uuid(7)) @db.Uuid
 
   /// Машинный код: `NO_ANSWER`, `OTHER` и так далее. Не меняется никогда.
-  code String @unique
+  code            String  @unique
   /// Человеческое название. Именно оно копируется снимком в историю.
-  name String
+  name            String
   /// Порядок показа курьеру.
-  ordinal Int
+  ordinal         Int
   /// Требует ли причина обязательного комментария. Истинно для «Другое».
   requiresComment Boolean @default(false)
   isActive        Boolean @default(true)
@@ -2258,7 +2471,7 @@ model DeliveryAttempt {
   /// Снимок названия причины на момент результата.
   reasonNameSnapshot String?
   /// Комментарий курьера. Обязателен для причины «Другое».
-  comment String?
+  comment            String?
 
   courierUserId String @db.Uuid
   courier       User   @relation("DeliveryAttemptCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
