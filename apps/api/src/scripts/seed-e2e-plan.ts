@@ -152,6 +152,9 @@ async function main(): Promise<number> {
           address: 'Москва, проверочный склад',
           latMicro: DEPOT.latMicro,
           lonMicro: DEPOT.lonMicro,
+          // Точка фикстуры считается подтверждённой: так её создал бы выбор
+          // подсказки. Без этого склад не может быть основным.
+          pointConfirmedAt: new Date(),
           defaultKey: 'default',
           createdById: admin.id,
         },
@@ -279,8 +282,9 @@ async function main(): Promise<number> {
           id: depot.id,
           name: depot.name,
           address: depot.address,
-          latMicro: depot.latMicro,
-          lonMicro: depot.lonMicro,
+          latMicro: depot.latMicro ?? DEPOT.latMicro,
+          lonMicro: depot.lonMicro ?? DEPOT.lonMicro,
+          pointConfirmedAt: depot.pointConfirmedAt,
           isActive: depot.isActive,
           defaultKey: depot.defaultKey,
           version: depot.version,

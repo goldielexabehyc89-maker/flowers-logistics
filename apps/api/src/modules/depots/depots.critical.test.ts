@@ -88,7 +88,7 @@ describe('инварианты базы', () => {
     const depot = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, склад', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, склад', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -100,7 +100,7 @@ describe('инварианты базы', () => {
     const depot = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, склад', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, склад', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -155,7 +155,7 @@ describe('инварианты базы', () => {
     const other = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, второй', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, второй', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -167,6 +167,127 @@ describe('инварианты базы', () => {
 
     const defaults = await ctx.db.depot.count({ where: { defaultKey: { not: null } } });
     expect(defaults).toBe(1);
+  });
+});
+
+describe('точка склада приходит из подсказок', () => {
+  it('склад можно сохранить без точки, но основным он не станет', async () => {
+    // Адрес без выбранной подсказки — это адрес без координат. Хранить его
+    // можно, опираться на него в расчёте нельзя.
+    const actor = await adminActor();
+    const depot = await createDepot(
+      ctx.db,
+      actor,
+      { name: uniqueName(), address: 'Москва, адрес без подсказки', point: null },
+      CONTEXT,
+    );
+
+    expect(depot.latMicro).toBeNull();
+    expect(depot.lonMicro).toBeNull();
+    expect(depot.pointConfirmedAt).toBeNull();
+    expect(depot.defaultKey).toBeNull();
+
+    const current = await findDefaultDepot(ctx.db);
+    await expect(
+      setDefaultDepot(
+        ctx.db,
+        actor,
+        depot.id,
+        {
+          expectedVersion: depot.version,
+          expectedCurrentDefaultId: current?.id ?? null,
+          expectedCurrentDefaultVersion: current?.version ?? null,
+        },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('база не допускает основной склад без подтверждённой точки', async () => {
+    // Проверка кода — удобство; запрет живёт в базе и переживает любой обход.
+    const actor = await adminActor();
+    const depot = await createDepot(
+      ctx.db,
+      actor,
+      { name: uniqueName(), address: 'Москва, адрес без подсказки', point: null },
+      CONTEXT,
+    );
+
+    await expect(
+      ctx.db.$executeRawUnsafe(
+        `UPDATE "Depot" SET "defaultKey" = 'default' WHERE "id" = '${depot.id}'::uuid`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('повторный выбор адреса возвращает склад в работу', async () => {
+    // Ровно путь исправления существующей записи: адрес выбирается заново,
+    // точка приходит вместе с ним, склад снова годится в основные.
+    const actor = await adminActor();
+    const depot = await createDepot(
+      ctx.db,
+      actor,
+      { name: uniqueName(), address: 'Москва, адрес без подсказки', point: null },
+      CONTEXT,
+    );
+
+    const fixed = await updateDepot(
+      ctx.db,
+      actor,
+      depot.id,
+      {
+        name: depot.name,
+        address: 'Москва, Цветочная улица, 1',
+        point: { lat: LAT, lon: LON },
+        expectedVersion: depot.version,
+      },
+      CONTEXT,
+    );
+
+    expect(fixed.latMicro).not.toBeNull();
+    expect(fixed.pointConfirmedAt).not.toBeNull();
+
+    const current = await findDefaultDepot(ctx.db);
+    const assigned = await setDefaultDepot(
+      ctx.db,
+      actor,
+      fixed.id,
+      {
+        expectedVersion: fixed.version,
+        expectedCurrentDefaultId: current?.id ?? null,
+        expectedCurrentDefaultVersion: current?.version ?? null,
+      },
+      CONTEXT,
+    );
+    expect(assigned.defaultKey).not.toBeNull();
+  });
+
+  it('смена адреса без новой подсказки снимает прежнюю точку', async () => {
+    // Прежние координаты относятся к прежнему адресу: оставить их значило бы
+    // увезти курьера по старому дому.
+    const actor = await adminActor();
+    const depot = await createDepot(
+      ctx.db,
+      actor,
+      { name: uniqueName(), address: 'Москва, Цветочная улица, 1', point: { lat: LAT, lon: LON } },
+      CONTEXT,
+    );
+
+    const edited = await updateDepot(
+      ctx.db,
+      actor,
+      depot.id,
+      {
+        name: depot.name,
+        address: 'Москва, другая улица, 2',
+        point: null,
+        expectedVersion: depot.version,
+      },
+      CONTEXT,
+    );
+
+    expect(edited.latMicro).toBeNull();
+    expect(edited.pointConfirmedAt).toBeNull();
   });
 });
 
@@ -187,7 +308,7 @@ describe('склад по умолчанию', () => {
     const other = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, ещё один', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, ещё один', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -202,7 +323,7 @@ describe('склад по умолчанию', () => {
     const next = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, смена', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, смена', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -236,7 +357,7 @@ describe('склад по умолчанию', () => {
     const next = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, устаревшая версия', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, устаревшая версия', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -265,7 +386,7 @@ describe('склад по умолчанию', () => {
     const inactive = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, выключенный', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, выключенный', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
     const off = await setDepotActive(
@@ -346,13 +467,13 @@ describe('склад по умолчанию', () => {
     const left = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, гонка A', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, гонка A', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
     const right = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, гонка B', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, гонка B', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -395,7 +516,7 @@ describe('изменение склада', () => {
     const depot = await createDepot(
       ctx.db,
       actor,
-      { name: uniqueName(), address: 'Москва, правка', lat: LAT, lon: LON },
+      { name: uniqueName(), address: 'Москва, правка', point: { lat: LAT, lon: LON } },
       CONTEXT,
     );
 
@@ -407,8 +528,7 @@ describe('изменение склада', () => {
         {
           name: 'Другое имя',
           address: 'Другой адрес',
-          lat: LAT,
-          lon: LON,
+          point: { lat: LAT, lon: LON },
           expectedVersion: depot.version + 5,
         },
         CONTEXT,
@@ -423,7 +543,7 @@ describe('изменение склада', () => {
       createDepot(
         ctx.db,
         actor,
-        { name: uniqueName(), address: 'Никуда', lat: 95, lon: 0 },
+        { name: uniqueName(), address: 'Никуда', point: { lat: 95, lon: 0 } },
         CONTEXT,
       ),
     ).rejects.toBeInstanceOf(AppError);
@@ -445,7 +565,7 @@ describe('права', () => {
       method: 'POST',
       url: '/api/depots',
       headers: { authorization: `Bearer ${token}` },
-      payload: { name: uniqueName(), address: 'Москва', lat: LAT, lon: LON },
+      payload: { name: uniqueName(), address: 'Москва', point: { lat: LAT, lon: LON } },
     });
     expect(write.statusCode).toBe(403);
   });
@@ -474,7 +594,7 @@ describe('права', () => {
       method: 'POST',
       url: '/api/depots',
       headers: { authorization: `Bearer ${token}` },
-      payload: { name: uniqueName(), address: 'Москва, через API', lat: LAT, lon: LON },
+      payload: { name: uniqueName(), address: 'Москва, через API', point: { lat: LAT, lon: LON } },
     });
     expect(created.statusCode).toBe(201);
 

@@ -256,6 +256,18 @@ export async function awaitPreview(
  * оставить кнопку в вечном ожидании или показать техническую строку вместо
  * причины.
  */
+/**
+ * Причины, по которым расчёт не начинается.
+ *
+ * Список короткий и закрытый: это предпосылки, которые человек чинит сам.
+ * Фактический отказ решателя сюда не попадает и показывается как есть.
+ */
+const PLANNING_BLOCKERS: Record<string, string> = {
+  DEPOT_NOT_CONFIGURED: 'Не выбран основной склад',
+  DEPOT_POINT_MISSING: 'У склада не определены координаты',
+  SHIFT_NOT_CONFIGURED: 'Не настроена рабочая смена',
+};
+
 export interface SplitFailureEffect {
   /** Текст для человека. Сообщение сервера сохраняется, если оно есть. */
   message: string;
@@ -268,6 +280,19 @@ export interface SplitFailureEffect {
 }
 
 export function splitFailure(error: unknown): SplitFailureEffect {
+  // Конфликт с известной причиной объясняется точно: «не выбран основной
+  // склад», «у склада не определены координаты», «не настроена рабочая смена».
+  // Общий текст остаётся только там, где сервер причины не назвал.
+  const kind = (error as { conflict?: { kind?: string } })?.conflict?.kind;
+  if (kind !== undefined && PLANNING_BLOCKERS[kind] !== undefined) {
+    return {
+      message: PLANNING_BLOCKERS[kind] ?? '',
+      keepSelection: true,
+      navigate: false,
+      busy: false,
+    };
+  }
+
   const message =
     typeof (error as { message?: unknown })?.message === 'string' &&
     (error as { message: string }).message.trim() !== ''

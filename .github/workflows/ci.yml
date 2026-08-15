@@ -322,6 +322,9 @@ jobs:
       # и отдельных сервисов, которых здесь нет. Конфигурация не позволяет
       # включить это вне APP_ENV=local.
       PLANNING_TEST_SOLVER: 'true'
+      # Подменённый HTTP подсказок вместо живой DaData: ключа в проверках нет
+      # и быть не должно, а контракт подсказок обязан проверяться настоящий.
+      DADATA_TEST_SUGGESTIONS: 'true'
 
     steps:
       - uses: actions/checkout@v4

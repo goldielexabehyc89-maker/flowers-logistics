@@ -210,6 +210,35 @@ describe('отказ решателя доходит до логиста без 
     expect(effect.busy).toBe(false);
   });
 
+  it('предпосылки расчёта названы точно, а не общим «расчёт не удался»', () => {
+    // Каждая причина требует своего действия: создать склад, выбрать его адрес
+    // заново или настроить смену. Общий текст не подсказывает ни одного.
+    const cases = [
+      ['DEPOT_NOT_CONFIGURED', /не выбран основной склад/i],
+      ['DEPOT_POINT_MISSING', /не определены координаты/i],
+      ['SHIFT_NOT_CONFIGURED', /не настроена рабочая смена/i],
+    ] as const;
+
+    for (const [kind, expected] of cases) {
+      const effect = splitFailure(
+        Object.assign(new Error('Расчёт не удался'), { conflict: { kind } }),
+      );
+      expect(effect.message, kind).toMatch(expected);
+      expect(effect.keepSelection).toBe(true);
+      expect(effect.navigate).toBe(false);
+    }
+  });
+
+  it('фактический отказ решателя показывается как есть', () => {
+    // Незнакомую причину нельзя подменять догадкой из списка предпосылок.
+    const effect = splitFailure(
+      Object.assign(new Error('Решатель отказал: недостижимая пара точек'), {
+        conflict: { kind: 'MATRIX_UNREACHABLE_PAIR' },
+      }),
+    );
+    expect(effect.message).toMatch(/недостижимая пара/i);
+  });
+
   it('отказ без внятного текста подменяется понятной причиной', () => {
     // Пустое сообщение и техническая строка одинаково бесполезны человеку.
     expect(splitFailure(new Error('')).message).toMatch(/проверьте выбор и настройки/i);

@@ -25,14 +25,25 @@ import {
   TextInput,
 } from '../../ui/components';
 import {
+  activePoint,
   depotError,
+  depotSuggestHint,
+  EMPTY_DEPOT_DRAFT,
   formatTimeOfDay,
-  parseCoordinate,
   parseTimeOfDay,
   serviceTimeError,
   shiftError,
   type DepotDraft,
 } from './planning-settings';
+import {
+  isUsablePoint,
+  MIN_SUGGEST_QUERY,
+  suggestionsUrl,
+  type SuggestResponse,
+} from '../logistics/address-suggestions';
+
+/** Микроградусы в градусы: та же единица хранения, что у заказов и складов. */
+const MICRO = 1_000_000;
 
 interface PlanningSettingsResponse {
   shift: { value: { startMinute: number; endMinute: number } | null; version: number };
@@ -54,8 +65,6 @@ interface DepotView {
   version: number;
 }
 
-const EMPTY_DEPOT: DepotDraft = { name: '', address: '', lat: '', lon: '' };
-
 export function PlanningSettings(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -73,7 +82,7 @@ export function PlanningSettings(): React.JSX.Element {
 
   const [shift, setShift] = useState({ start: '', end: '' });
   const [service, setService] = useState({ car: '', foot: '' });
-  const [depot, setDepot] = useState<DepotDraft>(EMPTY_DEPOT);
+  const [depot, setDepot] = useState<DepotDraft>(EMPTY_DEPOT_DRAFT);
 
   // Поля заполняются сохранённым значением ровно один раз на загрузку: иначе
   // фоновое обновление затирало бы то, что человек уже набрал.
@@ -126,16 +135,31 @@ export function PlanningSettings(): React.JSX.Element {
     onError: (error: unknown) => showToast(errorText(error), 'error'),
   });
 
+  /**
+   * Подсказки адреса — тот же серверный контракт, что и в правке адреса заказа.
+   *
+   * Второй интеграции не заводится: ключ, ограничения и разбор ответа живут
+   * на сервере в одном месте.
+   */
+  const suggestions = useQuery({
+    queryKey: ['address-suggestions', depot.address],
+    queryFn: () => client.get<SuggestResponse>(suggestionsUrl(depot.address)),
+    enabled: depot.address.trim().length >= MIN_SUGGEST_QUERY,
+  });
+
+  const suggestionsAvailable = suggestions.data?.available ?? true;
+  const chosenPoint = activePoint(depot);
+
   const createDepot = useMutation({
     mutationFn: () =>
       client.post('/api/depots', {
         name: depot.name.trim(),
         address: depot.address.trim(),
-        lat: parseCoordinate(depot.lat),
-        lon: parseCoordinate(depot.lon),
+        // Точка уходит только вместе с выбранной подсказкой.
+        point: chosenPoint,
       }),
     onSuccess: async () => {
-      setDepot(EMPTY_DEPOT);
+      setDepot(EMPTY_DEPOT_DRAFT);
       await invalidate();
       showToast('Склад создан', 'success');
     },
@@ -371,44 +395,66 @@ export function PlanningSettings(): React.JSX.Element {
             )}
           </Field>
 
-          <Field label="Адрес">
+          {/*
+            Адрес выбирается из серверных подсказок.
+
+            Ключ DaData остаётся на сервере: браузер обращается только к нашему
+            API. Ручных полей широты и долготы здесь нет намеренно — набранные
+            руками координаты ничем не связаны с адресом, и именно так склад
+            оказывался не на карте, а расчёт отказывал без внятной причины.
+          */}
+          <Field label="Адрес" hint={depotSuggestHint(suggestionsAvailable)}>
             {(fieldProps) => (
               <TextInput
                 {...fieldProps}
                 data-testid="depot-address"
                 value={depot.address}
+                autoComplete="off"
                 onChange={(event) =>
+                  // Правка текста немедленно снимает прежнюю точку: она
+                  // относилась к другому адресу.
                   setDepot((current) => ({ ...current, address: event.target.value }))
                 }
               />
             )}
           </Field>
 
-          <Field label="Широта" hint="Например, 55.751244">
-            {(fieldProps) => (
-              <TextInput
-                {...fieldProps}
-                data-testid="depot-lat"
-                value={depot.lat}
-                onChange={(event) =>
-                  setDepot((current) => ({ ...current, lat: event.target.value }))
-                }
-              />
-            )}
-          </Field>
+          {suggestions.data !== undefined && suggestions.data.suggestions.length > 0 && (
+            <ul className="stack" data-testid="depot-suggestions">
+              {suggestions.data.suggestions.map((item) => (
+                <li key={`${item.value}-${item.qcGeo ?? 'нет'}`}>
+                  <Button
+                    variant="ghost"
+                    data-testid="depot-suggestion"
+                    // Принять можно только подсказку с домом и координатами:
+                    // улица без дома не годится складу так же, как заказу.
+                    disabled={!isUsablePoint(item)}
+                    onClick={() => {
+                      const latMicro = item.latMicro;
+                      const lonMicro = item.lonMicro;
+                      if (!isUsablePoint(item) || latMicro === null || lonMicro === null) {
+                        return;
+                      }
+                      setDepot((current) => ({
+                        ...current,
+                        address: item.value,
+                        point: { value: item.value, lat: latMicro / MICRO, lon: lonMicro / MICRO },
+                      }));
+                    }}
+                  >
+                    {item.value}
+                    {item.exact ? ' · точка найдена' : ' · без точной привязки'}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
 
-          <Field label="Долгота" hint="Например, 37.618423">
-            {(fieldProps) => (
-              <TextInput
-                {...fieldProps}
-                data-testid="depot-lon"
-                value={depot.lon}
-                onChange={(event) =>
-                  setDepot((current) => ({ ...current, lon: event.target.value }))
-                }
-              />
-            )}
-          </Field>
+          {chosenPoint !== null && (
+            <p className="muted text-sm" data-testid="depot-point">
+              Точка определена: {chosenPoint.lat.toFixed(6)}, {chosenPoint.lon.toFixed(6)}
+            </p>
+          )}
 
           <div>
             <Button

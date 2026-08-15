@@ -69,6 +69,25 @@ describe('загрузка конфигурации', () => {
     ).toThrow(/PLANNING_TEST_SOLVER/);
   });
 
+  it('подменённые подсказки выключены по умолчанию и закрыты вне local', () => {
+    expect(loadConfig({ ...BASE }).DADATA_TEST_SUGGESTIONS).toBe(false);
+
+    expect(() =>
+      loadConfig({ ...BASE, APP_ENV: 'local', DADATA_TEST_SUGGESTIONS: 'true' }),
+    ).not.toThrow();
+
+    for (const env of ['staging', 'production'] as const) {
+      expect(() =>
+        loadConfig({
+          ...BASE,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: env,
+          DADATA_TEST_SUGGESTIONS: 'true',
+        }),
+      ).toThrow(/DADATA_TEST_SUGGESTIONS/);
+    }
+  });
+
   it('применяет безопасные значения по умолчанию', () => {
     const config = loadConfig({ ...BASE });
 

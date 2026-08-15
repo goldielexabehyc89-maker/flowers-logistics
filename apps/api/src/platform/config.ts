@@ -248,6 +248,21 @@ const configSchema = z.object({
    * в локальном окружении — план, выданный им за посчитанный, на staging или
    * в production был бы обманом.
    */
+  /**
+   * Подменённый HTTP подсказок адреса вместо живой DaData.
+   *
+   * Существует ради браузерной приёмки: она обязана идти через настоящий
+   * серверный контракт подсказок — тот же эндпоинт, тот же разбор ответа, —
+   * а живого ключа в проверках нет и быть не должно.
+   *
+   * Значение допустимо ТОЛЬКО в локальном окружении: подменённые подсказки
+   * на staging или в production выдавали бы выдуманные адреса за настоящие.
+   */
+  DADATA_TEST_SUGGESTIONS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
   PLANNING_TEST_SOLVER: z
     .enum(['true', 'false'])
     .default('false')
@@ -371,6 +386,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   assertMoyskladEnvironment(parsed.data);
   assertDadataEnvironment(parsed.data);
   assertTestSolverEnvironment(parsed.data);
+  assertTestSuggestionsEnvironment(parsed.data);
   assertGeocodingSource(parsed.data);
 
   return Object.freeze({
@@ -527,6 +543,25 @@ function assertTestSolverEnvironment(data: z.infer<typeof configSchema>): void {
     throw new Error(
       'PLANNING_TEST_SOLVER=true допустим только при APP_ENV=local: подменный ' +
         'решатель не считает маршруты и его план нельзя выдавать за расчёт',
+    );
+  }
+}
+
+/**
+ * Подменённые подсказки допустимы только в локальном окружении.
+ *
+ * Выдуманный адрес, показанный как подсказка DaData, ничем не отличается
+ * от настоящего — и склад встал бы по несуществующей точке.
+ */
+function assertTestSuggestionsEnvironment(data: z.infer<typeof configSchema>): void {
+  if (!data.DADATA_TEST_SUGGESTIONS) {
+    return;
+  }
+
+  if (data.APP_ENV !== 'local' || data.APP_ENVIRONMENT_MARKER === 'production') {
+    throw new Error(
+      'DADATA_TEST_SUGGESTIONS=true допустим только при APP_ENV=local: подменённые ' +
+        'подсказки нельзя выдавать за ответ DaData',
     );
   }
 }
