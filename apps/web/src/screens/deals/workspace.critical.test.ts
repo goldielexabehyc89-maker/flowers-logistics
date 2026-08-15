@@ -13,7 +13,8 @@ import { planMarkers, type DealMapPoint } from './DealsMapCanvas';
 import { moscowCalendarDate } from '@fl/shared';
 import { intervalProblem, parseTimeFilter, type DealCard } from './selection';
 import { clusterize, MARKER_LOOKS, splitForMap, type DealPoint } from './DealsMap';
-import { availabilityHint, suggestionPoint, suggestionsUrl } from './AddressDialog';
+import { availabilityHint, suggestionPoint } from './AddressDialog';
+import { suggestionsUrl } from '../logistics/address-suggestions';
 
 /** Минимальная карточка: проверке нужны только минуты интервала. */
 function card(overrides: Partial<DealCard>): DealCard {
@@ -40,6 +41,7 @@ function card(overrides: Partial<DealCard>): DealCard {
     sourceEndMinute: null,
     sourceIntervalRaw: null,
     version: 1,
+    assembled: false,
     ...overrides,
   };
 }
@@ -52,7 +54,9 @@ function point(id: string, lat: string, lon: string): DealPoint {
     lon,
     startMinute: 600,
     endMinute: 720,
-    needsAttention: false,
+    address: 'Москва, Цветочная улица, 1',
+    assembled: false,
+    selectable: true,
   };
 }
 
@@ -107,7 +111,7 @@ describe('карта: состояния различимы не только ц
   });
 
   it('легенда покрывает все состояния карты', () => {
-    expect(Object.keys(MARKER_LOOKS).sort()).toEqual(['DEPOT', 'DRAFT', 'FREE', 'PICKED']);
+    expect(Object.keys(MARKER_LOOKS).sort()).toEqual(['ASSEMBLED', 'DRAFT', 'FREE', 'PICKED']);
   });
 });
 
@@ -174,7 +178,11 @@ describe('отметки настоящей карты', () => {
     number,
     lat: '55.7558',
     lon: '37.6173',
-    needsAttention: false,
+    address: 'Москва, Цветочная улица, 1',
+    startMinute: 600,
+    endMinute: 720,
+    assembled: false,
+    selectable: true,
     ...over,
   });
 
@@ -182,7 +190,7 @@ describe('отметки настоящей карты', () => {
     const plans = planMarkers(
       [point('a', 'A-1')],
       [{ key: 'k', points: [point('b', 'A-2'), point('c', 'A-3')] }],
-      (orderId) => (orderId === 'a' ? '1' : null),
+      (orderId) => (orderId === 'a' ? 1 : null),
     );
 
     const picked = plans.find((plan) => plan.orderId === 'a');
@@ -204,18 +212,40 @@ describe('отметки настоящей карты', () => {
     expect(plans[0]?.orderId).toBeNull();
   });
 
-  it('одиночная точка кликабельна и различает требующие внимания', () => {
+  it('одиночная точка кликабельна и отличает уже занятую черновиком', () => {
     const plans = planMarkers(
       [],
       [
         { key: 'b', points: [point('b', 'A-2')] },
-        { key: 'c', points: [point('c', 'A-3', { needsAttention: true })] },
+        { key: 'c', points: [point('c', 'A-3', { selectable: false })] },
       ],
       () => null,
     );
 
     expect(plans.find((plan) => plan.orderId === 'b')?.className).toContain('free');
     expect(plans.find((plan) => plan.orderId === 'c')?.className).toContain('draft');
+  });
+
+  it('невыбранная отметка — круг без номера, но со временем и подсказкой', () => {
+    // Сотня номеров на карте не читается и превращает её в текст.
+    const plans = planMarkers([], [{ key: 'b', points: [point('b', 'A-2')] }], () => null);
+
+    expect(plans[0]?.label).toBe('');
+    expect(plans[0]?.interval).toBe('10:00–12:00');
+    expect(plans[0]?.hint).toBe('A-2 · Москва, Цветочная улица, 1');
+  });
+
+  it('собранный заказ различим галочкой и в выборе, и без него', () => {
+    const plans = planMarkers(
+      [point('a', 'A-1', { assembled: true })],
+      [{ key: 'b', points: [point('b', 'A-2', { assembled: true })] }],
+      (orderId) => (orderId === 'a' ? 2 : null),
+    );
+
+    // Выбранный сохраняет номер порядка, галочку несёт класс отметки.
+    expect(plans.find((plan) => plan.orderId === 'a')?.label).toBe('2');
+    expect(plans.find((plan) => plan.orderId === 'a')?.className).toContain('assembled');
+    expect(plans.find((plan) => plan.orderId === 'b')?.label).toBe('✓');
   });
 
   it('непригодная координата отметки не создаёт', () => {

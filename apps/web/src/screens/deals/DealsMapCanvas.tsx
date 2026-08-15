@@ -25,15 +25,11 @@ import type { StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, registerPmtiles } from '../routing/map-runtime';
 import { resolveStyleUrls, type StyleDocument } from '../routing/style-urls';
+import { formatMinutes } from './deals';
+import { markerHint, markerInterval, markerLabel, type MapPoint } from './deals-view';
 
 /** Точка дня. Совпадает с ответом `/api/deals/map`. */
-export interface DealMapPoint {
-  orderId: string;
-  number: string;
-  lat: string;
-  lon: string;
-  needsAttention: boolean;
-}
+export type DealMapPoint = MapPoint;
 
 /** Группа точек, показываемая одной отметкой. */
 export interface DealMapCluster {
@@ -49,7 +45,7 @@ export interface DealsMapCanvasProps {
   /** Остальные: одиночные отметки либо кластеры. */
   clusters: readonly DealMapCluster[];
   /** Номер заказа в выборке. Пусто — заказ не выбран. */
-  numberOf: (orderId: string) => string | null;
+  numberOf: (orderId: string) => number | null;
   onToggle: (orderId: string) => void;
   /** Подложка не загрузилась: экран обязан сказать это, а не молчать. */
   onLoadError: () => void;
@@ -69,7 +65,12 @@ function toLngLat(point: DealMapPoint): [number, number] | null {
 interface MarkerPlan {
   key: string;
   lngLat: [number, number];
+  /** Что написано в кружке. Пусто — невыбранный заказ без признаков. */
   label: string;
+  /** Подпись над кружком. Показана всегда: по времени логист и группирует день. */
+  interval: string;
+  /** Подсказка при наведении: номер и адрес — то, чего на самой отметке нет. */
+  hint: string;
   className: string;
   ariaLabel: string;
   orderId: string | null;
@@ -84,7 +85,7 @@ interface MarkerPlan {
 export function planMarkers(
   chosen: readonly DealMapPoint[],
   clusters: readonly DealMapCluster[],
-  numberOf: (orderId: string) => string | null,
+  numberOf: (orderId: string) => number | null,
 ): MarkerPlan[] {
   const plans: MarkerPlan[] = [];
 
@@ -93,12 +94,15 @@ export function planMarkers(
     if (lngLat === null) {
       continue;
     }
+    const selection = numberOf(point.orderId);
     plans.push({
       key: point.orderId,
       lngLat,
-      label: numberOf(point.orderId) ?? '•',
-      className: 'deals-marker deals-marker--picked',
-      ariaLabel: `Заказ ${point.number} выбран, номер ${numberOf(point.orderId) ?? ''}`,
+      label: markerLabel(selection),
+      interval: markerInterval(point, formatMinutes),
+      hint: markerHint(point),
+      className: `deals-marker deals-marker--picked${point.assembled ? ' deals-marker--assembled' : ''}`,
+      ariaLabel: `Заказ ${point.number} выбран, номер ${selection ?? ''}`,
       orderId: point.orderId,
     });
   }
@@ -114,12 +118,21 @@ export function planMarkers(
     }
 
     if (cluster.points.length === 1) {
+      // Невыбранный заказ — простой круг без номера: сотня номеров на карте
+      // не читается и превращает её в текст. Номер и адрес показывает
+      // подсказка при наведении, время — подпись над кружком.
       plans.push({
         key: first.orderId,
         lngLat,
-        label: first.number,
-        className: `deals-marker deals-marker--${first.needsAttention ? 'draft' : 'free'}`,
-        ariaLabel: `Заказ ${first.number} на карте`,
+        label: first.assembled ? '✓' : '',
+        interval: markerInterval(first, formatMinutes),
+        hint: markerHint(first),
+        className: [
+          'deals-marker',
+          first.selectable ? 'deals-marker--free' : 'deals-marker--draft',
+          ...(first.assembled ? ['deals-marker--assembled'] : []),
+        ].join(' '),
+        ariaLabel: `${markerHint(first)}${first.assembled ? ', собран' : ''}`,
         orderId: first.orderId,
       });
       continue;
@@ -132,6 +145,8 @@ export function planMarkers(
       key: `cluster:${cluster.key}`,
       lngLat,
       label: String(cluster.points.length),
+      interval: '',
+      hint: `Здесь ${cluster.points.length} заказов`,
       className: 'deals-marker deals-marker--cluster',
       ariaLabel: `Здесь ${cluster.points.length} заказов`,
       orderId: null,
@@ -139,6 +154,27 @@ export function planMarkers(
   }
 
   return plans;
+}
+
+/**
+ * Содержимое отметки.
+ *
+ * Кружок и подпись времени — разные узлы: подпись обязана оставаться читаемой
+ * и не растягивать сам кружок.
+ */
+function fillMarker(element: HTMLElement, plan: MarkerPlan): void {
+  element.className = plan.className;
+  element.title = plan.hint;
+  element.setAttribute('aria-label', plan.ariaLabel);
+
+  const time = element.querySelector('.deals-marker__time');
+  const dot = element.querySelector('.deals-marker__dot');
+  if (time !== null) {
+    time.textContent = plan.interval;
+  }
+  if (dot !== null) {
+    dot.textContent = plan.label;
+  }
 }
 
 export function DealsMapCanvas({
@@ -260,21 +296,21 @@ export function DealsMapCanvas({
       const existing = markers.get(plan.key);
       if (existing !== undefined) {
         existing.setLngLat(plan.lngLat);
-        const element = existing.getElement();
-        element.textContent = plan.label;
-        element.className = plan.className;
-        element.setAttribute('aria-label', plan.ariaLabel);
+        fillMarker(existing.getElement(), plan);
         continue;
       }
 
       const element = document.createElement('button');
       element.type = 'button';
-      element.className = plan.className;
-      element.textContent = plan.label;
-      element.setAttribute('aria-label', plan.ariaLabel);
+      const time = document.createElement('span');
+      time.className = 'deals-marker__time';
+      const dot = document.createElement('span');
+      dot.className = 'deals-marker__dot';
+      element.append(time, dot);
+      fillMarker(element, plan);
       element.dataset['testid'] = 'map-marker';
       if (plan.orderId !== null) {
-        element.dataset['orderNumber'] = plan.label;
+        element.dataset['orderId'] = plan.orderId;
         const orderId = plan.orderId;
         element.addEventListener('click', (event) => {
           event.stopPropagation();

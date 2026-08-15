@@ -36,6 +36,12 @@ export interface DealCard {
   sourceIntervalRaw: string | null;
   /** Версия заказа: ручная правка интервала работает по ней. */
   version: number;
+  /**
+   * Готов к отправке: собран флористом ЛИБО размещён в складской ячейке.
+   * Сервер сводит оба факта в один признак — логисту важна готовность,
+   * а не путь, которым она наступила.
+   */
+  assembled: boolean;
 }
 
 /** Почему заказ нельзя выбрать. `null` — можно. */
@@ -82,6 +88,29 @@ export function toggleSelection(selected: readonly string[], order: DealCard): s
     return [...selected];
   }
   return [...selected, order.id];
+}
+
+/**
+ * Переключает заказ, известный только карте.
+ *
+ * Отметка на карте существует независимо от того, загружена ли страница списка,
+ * на которой лежит эта карточка. Раньше клик по такой отметке молча не делал
+ * ничего: обработчик искал заказ среди загруженных и не находил его.
+ *
+ * Пригодность берётся из самой точки: сервер уже не отдаёт на карту заказы,
+ * требующие внимания, а `selectable` говорит, не занят ли заказ черновиком.
+ */
+export function toggleMapPoint(
+  selected: readonly string[],
+  point: { orderId: string; selectable: boolean },
+): string[] {
+  if (selected.includes(point.orderId)) {
+    return selected.filter((id) => id !== point.orderId);
+  }
+  if (!point.selectable) {
+    return [...selected];
+  }
+  return [...selected, point.orderId];
 }
 
 /**

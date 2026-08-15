@@ -15,6 +15,7 @@ import {
   selectAll,
   selectionNumber,
   summarize,
+  toggleMapPoint,
   toggleSelection,
   unselectableReason,
   type DealCard,
@@ -44,6 +45,7 @@ function card(overrides: Partial<DealCard> = {}): DealCard {
     sourceEndMinute: 720,
     sourceIntervalRaw: 'с 10:00 по 12:00',
     version: 1,
+    assembled: false,
     ...overrides,
   };
 }
@@ -97,6 +99,31 @@ describe('непригодный заказ выбрать нельзя', () => 
   it('уже выбранный заказ снимается всегда, даже если стал непригодным', () => {
     // Иначе заказ, ставший недоступным, невозможно было бы убрать руками.
     expect(toggleSelection(['o-1'], card({ id: 'o-1', needsAttention: true }))).toEqual([]);
+  });
+});
+
+describe('выбор по отметке карты', () => {
+  it('не зависит от того, загружена ли карточка заказа', () => {
+    // Раньше клик по отметке заказа со второй страницы списка молча ничего
+    // не делал: обработчик искал заказ среди загруженных и не находил его.
+    expect(toggleMapPoint([], { orderId: 'far-away', selectable: true })).toEqual(['far-away']);
+  });
+
+  it('занятый черновиком заказ отметкой не забрать', () => {
+    expect(toggleMapPoint([], { orderId: 'in-draft', selectable: false })).toEqual([]);
+  });
+
+  it('повторное нажатие снимает выбор в любом случае', () => {
+    // Даже если заказ успел стать непригодным: снять выбор человек вправе
+    // всегда, иначе номер остался бы на карте навсегда.
+    expect(toggleMapPoint(['a'], { orderId: 'a', selectable: false })).toEqual([]);
+  });
+
+  it('порядок выбора сохраняется', () => {
+    let selected = toggleMapPoint([], { orderId: 'a', selectable: true });
+    selected = toggleMapPoint(selected, { orderId: 'b', selectable: true });
+
+    expect(selected).toEqual(['a', 'b']);
   });
 });
 

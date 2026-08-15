@@ -5,6 +5,8 @@
  * тестами, не поднимая браузер.
  */
 
+import type { RealtimeTopic } from '@fl/shared';
+
 /** Максимальная задержка между попытками переподключения. */
 export const RECONNECT_MAX_DELAY_MS = 30_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
@@ -101,53 +103,112 @@ export function collapseToFirstPage<T>(data: T): T {
 }
 
 /**
+ * Таблица «событие → экраны, которые оно затрагивает».
+ *
+ * Раньше здесь была цепочка `startsWith`, и она молча теряла целые разделы:
+ * `route_plan.`, `depot.`, `storage_cell.` и `delivery.` не совпадали ни с одним
+ * префиксом и падали в общий `return [['status']]`. Экран расчёта, настройки
+ * складов, справочник ячеек и курьерские списки не обновлялись вообще, а
+ * `order.*` обновлял ключи `orders` и `unassigned-orders`, которых на живых
+ * экранах уже не существует, — «Сделки» не видели ни чужой правки, ни своей.
+ *
+ * Поэтому таблица явная и ПОЛНАЯ: тип `Record<RealtimeTopic, ...>` превращает
+ * новое событие в ошибку компиляции, а не в тихо необновляемый экран.
+ *
+ * Ключи перечисляются корнями: `invalidateQueries` сопоставляет префикс,
+ * поэтому `['deals']` покрывает `['deals', scope, page]`.
+ */
+const DEALS_SCREEN: string[][] = [['deals'], ['deals-map']];
+const ROUTING_SCREEN: string[][] = [['routes'], ['route'], ['route-history'], ['map-points']];
+const WAREHOUSE_SCREEN: string[][] = [
+  ['warehouse-placements'],
+  ['warehouse-routes'],
+  ['warehouse-route'],
+];
+const FLORIST_SCREEN: string[][] = [
+  ['florist-queue'],
+  ['florist-card'],
+  ['florist-print-jobs'],
+  ['florist-shift'],
+];
+const DELIVERY_SCREEN: string[][] = [
+  ['delivery-active'],
+  ['delivery-history'],
+  ['delivery-reasons'],
+];
+const USERS_SCREEN: string[][] = [
+  ['users'],
+  ['user-history'],
+  ['couriers-active'],
+  ['couriers-for-routes'],
+  ['florist-florists'],
+];
+
+const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
+  'user.created': USERS_SCREEN,
+  'user.updated': USERS_SCREEN,
+  'user.frozen': USERS_SCREEN,
+  'user.unfrozen': USERS_SCREEN,
+  'user.roles_changed': USERS_SCREEN,
+  // Сеанс закрывается целиком: перезапрашивать нечего.
+  'session.revoked': [],
+
+  /*
+   * Заказ меняется — меняются и список «Сделок», и его карта.
+   *
+   * `deals-map` здесь обязателен: адрес и точка живут именно там, и без этого
+   * ключа исправленный заказ появлялся на карте только после F5.
+   */
+  'order.created': [...DEALS_SCREEN, ['status']],
+  'order.updated': [...DEALS_SCREEN, ['status']],
+  'order.scope_changed': [...DEALS_SCREEN, ['status']],
+  'order.geo_changed': [...DEALS_SCREEN, ['map-points']],
+  'order.address_changed': [...DEALS_SCREEN, ['map-points'], ['address-history']],
+
+  /*
+   * Производственные события трогают очередь флориста И «Сделки»: признак
+   * «Собран» логист видит в своём списке и на карте.
+   */
+  'order.fulfillment_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN],
+  'order.fulfillment_process_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN],
+  'florist.shift_changed': [['florist-shift'], ['florist-shifts'], ['florist-queue']],
+  'print_job.changed': [['florist-print-jobs'], ['florist-card']],
+
+  // Маршруты: состав, жизненный цикл и блокировка редактора.
+  'route.created': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  'route.updated': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  'route.conflict_detected': ROUTING_SCREEN,
+  'route.confirmed': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  'route.returned_to_draft': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  'route.cancelled': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  'route.edit_lock_changed': [['route']],
+  'route.edit_lock_taken_over': [['route']],
+  'route.completed': [...ROUTING_SCREEN, ...DELIVERY_SCREEN],
+  // Ход расчёта: без этого ключа превью не узнавало о собственном завершении.
+  'route_plan.updated': [['route-plan'], ['route-plans']],
+  // Склад планирования: и список складов, и условия расчёта.
+  'depot.changed': [['depots'], ['planning-settings'], ['map-config']],
+
+  // Складские экраны. Размещение меняет и «Собран» в «Сделках».
+  'storage_cell.changed': [['storage-cells'], ...WAREHOUSE_SCREEN],
+  'warehouse.placement_changed': [...WAREHOUSE_SCREEN, ...DEALS_SCREEN],
+  'warehouse.route_flow_changed': [...WAREHOUSE_SCREEN, ['routes'], ['route']],
+
+  'delivery.result_recorded': [...DELIVERY_SCREEN, ['routes'], ['route']],
+  'delivery.result_cancelled': [...DELIVERY_SCREEN, ['routes'], ['route']],
+  'pickup.issued': [['pickup-day'], ['warehouse-placements']],
+
+  'integration.status_changed': [['status']],
+  'outbox.message_failed': [['outbox-failures']],
+};
+
+/**
  * Какие ключи запросов обновить при событии.
- * Списки сотрудников перезапрашиваются, история конкретного пользователя — тоже.
+ *
+ * Незнакомое событие обновляет только общий признак состояния: молча
+ * не обновить ничего опаснее, чем лишний запрос, но и перезапрашивать
+ * весь клиент на неизвестное имя нельзя.
  */
 export function invalidationKeysFor(topic: string): string[][] {
-  if (topic.startsWith('user.')) {
-    return [['users'], ['user-history']];
-  }
-  if (topic === 'session.revoked') {
-    return [];
-  }
-  if (topic.startsWith('warehouse.')) {
-    // Складские экраны и карточка маршрутного листа. Событие не несёт данных:
-    // клиент перезапрашивает нужный список сам.
-    return [['warehouse-placements'], ['warehouse-routes'], ['warehouse-route']];
-  }
-  // Производственные события проверяются ДО общего правила `order.*`:
-  // логистический список от изменения состава не зависит, а очередь флориста
-  // обязана обновиться точечно, а не перезапросить всё подряд.
-  if (topic.startsWith('order.fulfillment')) {
-    // `florist-shift` здесь ради счётчика активных заказов: производственное
-    // событие способно добавить работу или снять её (переназначение админом,
-    // изменившийся состав, чужой возврат в очередь), а счётчик серверный и сам
-    // о себе не узнает. Без этого ключа число оставалось бы верным только до
-    // первого чужого действия.
-    return [['florist-queue'], ['florist-card'], ['florist-print-jobs'], ['florist-shift']];
-  }
-  if (topic === 'florist.shift_changed') {
-    return [['florist-shift'], ['florist-shifts'], ['florist-queue']];
-  }
-  if (topic.startsWith('print_job.')) {
-    return [['florist-print-jobs'], ['florist-card']];
-  }
-  if (topic.startsWith('pickup.')) {
-    // Выдача самовывоза меняет и карточку у прилавка, и список дня.
-    return [['pickup-day']];
-  }
-  if (topic.startsWith('order.')) {
-    // Событие не несёт данных заказа: список перезапрашивается целиком.
-    // Ни звука, ни всплывающего уведомления — обычный новый заказ рутина.
-    return [['orders'], ['status'], ['unassigned-orders']];
-  }
-  if (topic.startsWith('route.')) {
-    // Сюда попадают и изменения состава, и жизненный цикл, и блокировка редактора.
-    // Карточка перезапрашивается целиком: событие намеренно не несёт содержимого,
-    // а перехват блокировки обязан немедленно перевести прежнего редактора
-    // в режим просмотра.
-    return [['routes'], ['route'], ['route-history'], ['unassigned-orders']];
-  }
-  return [['status']];
+  return TOPIC_KEYS[topic as RealtimeTopic] ?? [['status']];
 }

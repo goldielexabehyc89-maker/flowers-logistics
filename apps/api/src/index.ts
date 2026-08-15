@@ -25,10 +25,12 @@ import {
 import { PhotonClient } from './modules/integrations/photon/client.js';
 import { createGeocodeWorker, GEOCODE_LOCK_KEY } from './modules/orders/geocoding/worker.js';
 import { reportGeocodingStartupStatus } from './modules/orders/geocoding/status.js';
+import { reportSuggestionsStartupStatus } from './modules/integrations/dadata/status.js';
 import { clearHalt } from './modules/orders/geocoding/provider-state.js';
 import { ValhallaClient } from './modules/integrations/valhalla/client.js';
 import { probeRouting } from './modules/geo/routing-status.js';
 import {
+  isDadataAllowed,
   isPhotonConfigured,
   shouldGeocodeAutomatically,
 } from './modules/orders/geocoding/enabled.js';
@@ -104,6 +106,16 @@ async function main(): Promise<void> {
   // worker не создаётся вовсе: геокодер честно остаётся ненастроенным, заказы
   // остаются в «Требует внимания», и точку ставит человек. Ни одного обращения
   // к внешнему платному сервису отсюда не происходит.
+  /*
+   * Подсказки адреса отчитываются отдельно от геокодера.
+   *
+   * Это разные сервисы: Photon разрешает адреса фоном, DaData подсказывает
+   * человеку в форме. Прежде запись `dadata` осталась от переименованного
+   * кода и не обновлялась вообще — панель показывала «Не настроена» при
+   * работающих подсказках.
+   */
+  await reportSuggestionsStartupStatus(db, { allowed: isDadataAllowed(config) });
+
   await reportGeocodingStartupStatus(db, {
     configured: isPhotonConfigured(config),
     enabled: geocodingEnabled,
