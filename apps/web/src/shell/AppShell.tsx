@@ -221,15 +221,34 @@ export function AppShell(): React.JSX.Element {
         </nav>
 
         {/*
+          Состояние связи на телефоне живёт здесь, а не в верхней строке.
+          Постоянная надпись «Переподключение…» занимала место рядом с именем
+          раздела и обрезала его, сообщая при этом то, что человеку нужно
+          от силы раз в смену. Механизм переподключения от переезда не
+          меняется: индикатор только показывает его состояние.
+
+          На широком экране этот блок скрыт — там индикатор остаётся
+          в верхней строке, как и был.
+        */}
+        <div className="shell__connection">
+          <ConnectionIndicator client={client} realtime={realtime} />
+        </div>
+
+        {/*
           Имя сотрудника и выход закреплены внизу панели. Кнопка подписана
           «Выход», а не «Выйти»: рядом, в окне учётной записи, живёт настоящее
           завершение сессии, и два одинаково подписанных элемента на одной
           странице человек различал бы только по месту.
         */}
         <div className="shell__account">
-          <span className="shell__account-name" title={user?.fullName ?? ''}>
+          <button
+            type="button"
+            className="shell__account-name"
+            title={user?.fullName ?? ''}
+            onClick={() => setAccountOpen(true)}
+          >
             {user?.fullName ?? 'Пользователь'}
-          </span>
+          </button>
           <Button
             variant="ghost"
             className="btn--icon"

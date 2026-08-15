@@ -418,6 +418,16 @@ export interface SegmentedOption<T extends string> {
   label: ReactNode;
   /** Метка для браузерных проверок. */
   testId?: string;
+  /**
+   * Число рядом с подписью: количество активных заказов, непрочитанных заданий.
+   *
+   * Живёт на самом переключателе, а не в заголовке раздела: переключатель виден
+   * на всех режимах, и число не исчезает при уходе на соседний.
+   */
+  badge?: ReactNode;
+  badgeTestId?: string;
+  /** Что означает число. Без этого программа чтения с экрана называет голую цифру. */
+  badgeLabel?: string;
 }
 
 /**
@@ -455,6 +465,15 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(option.value)}
           >
             {option.label}
+            {option.badge !== undefined && option.badge !== null && (
+              <span
+                className="segmented__badge"
+                data-testid={option.badgeTestId}
+                aria-label={option.badgeLabel}
+              >
+                {option.badge}
+              </span>
+            )}
           </button>
         );
       })}
