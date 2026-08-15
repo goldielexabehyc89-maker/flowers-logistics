@@ -18,7 +18,10 @@ import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config
 import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
 import { mapOrder, type OrderSnapshot } from '../integrations/moysklad/mapper.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { dealsCount, dealsIds } from './deals-scope.js';
+import { TEST_SECRETS } from '../../platform/testing/secrets.js';
+import { hashSecretCode } from '../auth/crypto.js';
+import { login } from '../auth/service.js';
+import { dealsCount, dealsIds, dealsWithoutPointCount } from './deals-scope.js';
 
 let ctx: TestContext;
 const IDS = MOYSKLAD_IDS;
@@ -276,5 +279,191 @@ describe('страницы и порядок', () => {
     expect(first.filter((id) => second.includes(id))).toHaveLength(0);
     // Порядок устойчив: повтор того же запроса даёт тот же результат.
     expect(await dealsIds(ctx.db, { deliveryDate: day }, { limit: 2, offset: 0 })).toEqual(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Что рабочее место читает о заказе.
+ *
+ * Проверяется ровно то, на что логист смотрит и по чему принимает решение:
+ * готов ли заказ к отправке, есть ли у него точка и попадает ли он на карту.
+ * Эти три факта раньше либо не отдавались вовсе, либо расходились с картой.
+ */
+describe('факты, по которым логист принимает решение', () => {
+  async function logisticianToken(): Promise<string> {
+    const pin = '4321';
+    const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
+    const user = await seedUser(ctx.db, { roles: ['LOGISTICIAN'], pinHash });
+    const session = await login(
+      ctx,
+      { phone: user.phone, pin },
+      { ip: null, userAgent: 'vitest', deviceLabel: null },
+    );
+    return session.accessToken;
+  }
+
+  async function get<T>(url: string): Promise<T> {
+    const token = await logisticianToken();
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+    return response.json() as T;
+  }
+
+  const DECISION_DAY = '2027-09-19';
+  const dayScope = { deliveryDate: DECISION_DAY };
+  const dayQuery = `deliveryDate=${DECISION_DAY}`;
+
+  it('готовность к отправке видна из обоих источников', async () => {
+    // Флорист завершил сборку.
+    const byFlorist = await seedRoutable({
+      deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000`,
+    });
+    const florist = await seedUser(ctx.db, { roles: ['FLORIST'] });
+    const revision = await ctx.db.orderFulfillmentRevision.create({
+      data: {
+        orderId: byFlorist,
+        externalUpdated: new Date(),
+        snapshot: {},
+        snapshotHash: `hash-${process.hrtime.bigint() % 1_000_000n}`,
+        changedFields: [],
+        reason: 'INITIAL_IMPORT',
+      },
+      select: { id: true },
+    });
+    // Завершённая сборка называет и время, и исполнителя, и снимок состава:
+    // неполная строка запрещена ограничением базы.
+    await ctx.db.deliveryOrder.update({
+      where: { id: byFlorist },
+      data: {
+        fulfillmentProcessState: 'ASSEMBLED',
+        fulfillmentAssigneeId: florist.id,
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentAssembledAt: new Date(),
+        fulfillmentAssembledById: florist.id,
+        fulfillmentAssembledRevisionId: revision.id,
+      },
+    });
+
+    // Заказ уже лежит в складской ячейке. Для логиста это тот же факт
+    // готовности: путь, которым она наступила, ему безразличен.
+    const byPlacement = await seedRoutable({
+      deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000`,
+    });
+    const keeper = await seedUser(ctx.db, { roles: ['WAREHOUSE'] });
+    const code = `B01-${process.hrtime.bigint() % 1_000_000n}`;
+    const cell = await ctx.db.storageCell.create({
+      data: {
+        code,
+        normalizedCode: code.toUpperCase(),
+        kind: 'STORAGE',
+        createdById: keeper.id,
+      },
+      select: { id: true },
+    });
+    await ctx.db.orderPlacement.create({
+      data: {
+        orderId: byPlacement,
+        cellId: cell.id,
+        source: 'RECEIVED',
+        placedById: keeper.id,
+      },
+    });
+
+    const plain = await seedRoutable({ deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000` });
+
+    const list = await get<{ items: { id: string; assembled: boolean }[] }>(
+      `/api/deals?${dayQuery}&limit=100&offset=0`,
+    );
+    const assembledIn = (id: string): boolean =>
+      list.items.find((item) => item.id === id)?.assembled === true;
+
+    expect(assembledIn(byFlorist)).toBe(true);
+    expect(assembledIn(byPlacement)).toBe(true);
+    expect(assembledIn(plain)).toBe(false);
+
+    // На карте тот же признак: отметка собранного заказа несёт галочку.
+    const map = await get<{ points: { orderId: string; assembled: boolean }[] }>(
+      `/api/deals/map?${dayQuery}`,
+    );
+    expect(map.points.find((point) => point.orderId === byPlacement)?.assembled).toBe(true);
+  });
+
+  it('заказ без точки посчитан отдельно и на карту не попадает', async () => {
+    const withPoint = await seedRoutable({
+      deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000`,
+    });
+    const withoutPoint = await seedRoutable({
+      deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000`,
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: withoutPoint },
+      // Признаки решённой геокодировки снимаются вместе: неполная строка
+      // запрещена ограничением `DeliveryOrder_geo_resolved_complete`.
+      data: {
+        geoState: 'PENDING',
+        geoLatMicro: null,
+        geoLonMicro: null,
+        geoSource: null,
+        geoPrecision: null,
+        geoResolvedAt: null,
+      },
+    });
+
+    // Счётчик называет оба числа: иначе разница между списком и картой
+    // выглядит как потеря заказов.
+    expect(await dealsWithoutPointCount(ctx.db, dayScope)).toBeGreaterThanOrEqual(1);
+    const list = await get<{ total: number; withoutPoint: number }>(
+      `/api/deals?${dayQuery}&limit=100&offset=0`,
+    );
+    expect(list.withoutPoint).toBeGreaterThanOrEqual(1);
+    expect(list.total).toBeGreaterThan(list.withoutPoint);
+
+    const map = await get<{ points: { orderId: string }[] }>(`/api/deals/map?${dayQuery}`);
+    const ids = map.points.map((point) => point.orderId);
+    expect(ids).toContain(withPoint);
+    expect(ids).not.toContain(withoutPoint);
+  });
+
+  it('заказ «Требует внимания» на карте не показывается вовсе', async () => {
+    // Маркер заказа с нераспознанным интервалом выглядел бы готовым
+    // к маршрутизации, хотя везти его нельзя.
+    const attention = await seedRoutable({
+      deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000`,
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: attention },
+      data: { needsAttention: true, attentionReasons: ['UNRECOGNIZED_INTERVAL'] },
+    });
+
+    const list = await get<{ items: { id: string; attentionReasons: string[] }[] }>(
+      `/api/deals?${dayQuery}&limit=100&offset=0`,
+    );
+    // В списке он остаётся, назван причиной и чинится именно там.
+    expect(list.items.find((item) => item.id === attention)?.attentionReasons).toEqual([
+      'UNRECOGNIZED_INTERVAL',
+    ]);
+
+    const map = await get<{ points: { orderId: string }[] }>(`/api/deals/map?${dayQuery}`);
+    expect(map.points.map((point) => point.orderId)).not.toContain(attention);
+  });
+
+  it('точка сама говорит, можно ли выбрать заказ', async () => {
+    // Без этого признака карта могла выбрать только тот заказ, чья карточка
+    // уже загружена: отметка заказа за «Загрузить ещё» не выбиралась вовсе.
+    const free = await seedRoutable({ deliveryPlannedMoment: `${DECISION_DAY} 12:00:00.000` });
+
+    const map = await get<{ points: { orderId: string; selectable: boolean; address: string }[] }>(
+      `/api/deals/map?${dayQuery}`,
+    );
+    const point = map.points.find((item) => item.orderId === free);
+    expect(point?.selectable).toBe(true);
+    // Адрес нужен подсказке при наведении: без него отметку не опознать.
+    expect(point?.address).toBe(ADDRESS);
   });
 });

@@ -173,3 +173,21 @@ export async function dealsCount(db: Database, scope: DealsScope): Promise<numbe
   `;
   return Number(rows[0]?.count ?? 0n);
 }
+
+/**
+ * Сколько заказов отбора не имеют пригодной точки.
+ *
+ * Считается по всему дню, а не по загруженной странице: счётчик над списком
+ * обязан называть настоящее число, иначе он объяснял бы разрыв между списком
+ * и картой неверно. Условие то же, что и у списка, плюс отсутствие
+ * подтверждённых координат.
+ */
+export async function dealsWithoutPointCount(db: Database, scope: DealsScope): Promise<number> {
+  const rows = await db.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count
+    FROM "DeliveryOrder" o
+    WHERE ${dealsWhere(scope)}
+      AND (o."geoState" <> 'RESOLVED' OR o."geoLatMicro" IS NULL OR o."geoLonMicro" IS NULL)
+  `;
+  return Number(rows[0]?.count ?? 0n);
+}

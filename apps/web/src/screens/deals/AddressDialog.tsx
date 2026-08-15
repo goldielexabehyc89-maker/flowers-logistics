@@ -15,6 +15,15 @@ import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, Field, Modal, StatusBadge, TextInput } from '../../ui/components';
 import type { DealCard } from './selection';
+import {
+  acceptSuggestion,
+  isSuggestListOpen,
+  shouldRequestSuggestions,
+  suggestBoxFrom,
+  suggestionsUrl,
+  typeInSuggestBox,
+  type SuggestBox,
+} from '../logistics/address-suggestions';
 
 interface Suggestion {
   value: string;
@@ -47,7 +56,6 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 /** Короче трёх символов подсказка бессмысленна: столько же требует сервер. */
-const MIN_QUERY = 3;
 const DEBOUNCE_MS = 350;
 
 /**
@@ -64,17 +72,6 @@ export function suggestionPoint(
     return null;
   }
   return { latMicro: chosen.latMicro, lonMicro: chosen.lonMicro };
-}
-
-/**
- * Адрес нашего эндпоинта подсказок.
- *
- * Браузер обращается ТОЛЬКО сюда: ни ключа DaData, ни её адреса он не знает.
- * Функция существует ради этой проверки — иначе однажды кто-нибудь позвал бы
- * провайдера напрямую «для скорости».
- */
-export function suggestionsUrl(query: string): string {
-  return `/api/orders/address-suggestions?query=${encodeURIComponent(query.trim())}`;
 }
 
 /** Подпись под полем: подсказки доступны или адрес сохранится без точки. */
@@ -98,6 +95,14 @@ export function AddressDialog({
   const { client } = useAuth();
   const [draft, setDraft] = useState(order.address ?? '');
   const [chosen, setChosen] = useState<Suggestion | null>(null);
+  /*
+   * Список закрывается выбором, а не уходом фокуса.
+   *
+   * Прежде принятое значение возвращалось в ключ запроса, подсказки уходили
+   * снова на тот же адрес и список открывался повторно. Состояние помнит,
+   * для какого текста выбор уже сделан.
+   */
+  const [box, setBox] = useState<SuggestBox>(() => suggestBoxFrom(order.address ?? ''));
   const [query, setQuery] = useState('');
 
   // Подсказки стоят денег на каждый символ, поэтому запрос уходит не на каждое
@@ -107,11 +112,20 @@ export function AddressDialog({
     return () => clearTimeout(timer);
   }, [draft]);
 
+  // Запрос уходит по «отстоявшемуся» тексту, а решение открывать список
+  // принимает то же правило, что и в форме склада.
+  const settled: SuggestBox = { text: query, acceptedFor: box.acceptedFor };
+
   const suggestions = useQuery({
     queryKey: ['address-suggestions', query],
-    enabled: query.trim().length >= MIN_QUERY,
+    enabled: shouldRequestSuggestions(settled),
     queryFn: () => client.get<SuggestResponse>(suggestionsUrl(query)),
   });
+
+  const suggestListOpen = isSuggestListOpen(
+    settled,
+    (suggestions.data?.suggestions.length ?? 0) > 0,
+  );
 
   const history = useQuery({
     queryKey: ['address-history', order.id],
@@ -181,12 +195,13 @@ export function AddressDialog({
               onChange={(event) => {
                 setDraft(event.target.value);
                 setChosen(null);
+                setBox((current) => typeInSuggestBox(current, event.target.value));
               }}
             />
           )}
         </Field>
 
-        {suggestions.data !== undefined && suggestions.data.suggestions.length > 0 && (
+        {suggestListOpen && suggestions.data !== undefined && (
           <ul className="stack" data-testid="address-suggestions">
             {suggestions.data.suggestions.map((item) => (
               <li key={item.value}>
@@ -196,6 +211,8 @@ export function AddressDialog({
                   onClick={() => {
                     setChosen(item);
                     setDraft(item.value);
+                    // Выбор закрывает список и не отправляет новый запрос.
+                    setBox(acceptSuggestion(item.value));
                   }}
                 >
                   {item.value}

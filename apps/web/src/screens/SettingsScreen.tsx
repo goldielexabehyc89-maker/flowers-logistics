@@ -31,6 +31,12 @@ interface StatusResponse {
 const PROVIDER_LABELS: Record<string, string> = {
   moysklad: 'МойСклад',
   maps: 'Карты',
+  // Подсказки адреса человеку. Clean API в проекте нет — только Suggestions.
+  dadata: 'Подсказки адреса (DaData)',
+  // Собственный геокодер: разрешает адреса фоном.
+  photon: 'Геокодер (Photon)',
+  valhalla: 'Маршрутизатор (Valhalla)',
+  vroom: 'Решатель (VROOM)',
 };
 
 const STATE_LABELS: Record<string, string> = {

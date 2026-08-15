@@ -34,7 +34,8 @@ import {
 } from './address-service.js';
 import { isDadataAllowed } from './geocoding/enabled.js';
 import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
-import { dealsCount, dealsIds, type DealsScope } from './deals-scope.js';
+import { setSuggestionsStatus } from '../integrations/dadata/status.js';
+import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
 import { addressState } from './address.js';
 import {
   MAX_QUERY_LENGTH,
@@ -315,6 +316,20 @@ async function dealCards(db: Database, ids: string[]) {
       geoState: true,
       version: true,
       intervalRaw: true,
+      /*
+       * Два источника признака «Собран».
+       *
+       * Флорист завершил сборку либо заказ лежит в складской ячейке. Логисту
+       * важен сам факт готовности, а не то, каким путём он наступил: на карте
+       * это галочка, в списке — текст. Активное размещение — строка
+       * с пустым `releasedAt`; второго такого места не существует физически.
+       */
+      fulfillmentProcessState: true,
+      placements: {
+        where: { releasedAt: null },
+        select: { id: true },
+        take: 1,
+      },
       routeOrders: {
         where: { removedAt: null },
         select: { routeId: true, route: { select: { number: true, state: true } } },
@@ -366,6 +381,9 @@ async function dealCards(db: Database, ids: string[]) {
         draftRouteNumber: participation?.route.number ?? null,
         selectable:
           !row.needsAttention && row.geoState === 'RESOLVED' && participation === undefined,
+        // Готов к отправке: собран флористом ЛИБО уже размещён на складе.
+        // Логисту важен факт готовности, а не путь, которым он наступил.
+        assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
       },
     ];
   });
@@ -742,24 +760,47 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     const testFetch = deps.config.DADATA_TEST_SUGGESTIONS ? testSuggestFetch() : null;
 
     if (testFetch === null && !isDadataAllowed(deps.config)) {
+      // Отчётный статус обязан совпадать с фактом: подсказок здесь нет.
+      await setSuggestionsStatus(deps.db, 'NOT_CONFIGURED', {
+        reason: 'no-key-or-environment',
+      });
       return { suggestions: [] as AddressSuggestion[], available: false };
     }
 
-    const suggestions = await suggestAddresses(
-      {
-        credentials: {
-          // Подменённому HTTP ключ не нужен и не передаётся: наружу
-          // не уходит ни одного запроса.
-          apiKey: testFetch === null ? (deps.config.DADATA_API_KEY ?? null) : 'test-only',
+    let suggestions: AddressSuggestion[];
+    try {
+      suggestions = await suggestAddresses(
+        {
+          credentials: {
+            // Подменённому HTTP ключ не нужен и не передаётся: наружу
+            // не уходит ни одного запроса.
+            apiKey: testFetch === null ? (deps.config.DADATA_API_KEY ?? null) : 'test-only',
+          },
+          ...(testFetch !== null
+            ? { fetch: testFetch }
+            : deps.suggestFetch === undefined
+              ? {}
+              : { fetch: deps.suggestFetch }),
         },
-        ...(testFetch !== null
-          ? { fetch: testFetch }
-          : deps.suggestFetch === undefined
-            ? {}
-            : { fetch: deps.suggestFetch }),
-      },
-      query,
-    );
+        query,
+      );
+    } catch (error: unknown) {
+      /*
+       * Отказ провайдера виден дежурному сразу.
+       *
+       * Наружу уходит только код: ни запроса, ни ответа, ни ключа. Само
+       * обращение при этом отказывает как прежде — статус не подменяет ошибку.
+       */
+      await setSuggestionsStatus(deps.db, 'ERROR', { reason: 'provider-failed' });
+      throw error;
+    }
+
+    // Успешный ответ — единственное настоящее доказательство работоспособности.
+    await setSuggestionsStatus(deps.db, 'OK', {
+      reason: 'suggestions-served',
+      // Число вариантов, а не сами варианты: адресов здесь быть не может.
+      returned: suggestions.length,
+    });
 
     return { suggestions, available: true };
   });
@@ -823,14 +864,18 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     const query = dealsQuerySchema.parse(request.query);
     const scope = scopeOf(query);
 
-    const [ids, total] = await Promise.all([
+    const [ids, total, withoutPoint] = await Promise.all([
       dealsIds(deps.db, scope, { limit: query.limit, offset: query.offset }),
       dealsCount(deps.db, scope),
+      dealsWithoutPointCount(deps.db, scope),
     ]);
 
     return {
       items: await dealCards(deps.db, ids),
       total,
+      // Счётчик называет и общее число, и число заказов без координат:
+      // разрыв между списком и картой обязан быть объяснён числом.
+      withoutPoint,
       limit: query.limit,
       offset: query.offset,
       hasMore: query.offset + ids.length < total,
@@ -850,18 +895,29 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     const scope = scopeOf(query);
     const ids = await dealsIds(deps.db, scope);
 
+    /*
+     * Заказ «Требует внимания» на карту не попадает вовсе.
+     *
+     * Маркер у заказа с нераспознанным адресом или интервалом выглядел бы
+     * готовым к маршрутизации, хотя везти его нельзя. Такой заказ виден
+     * в списке, выделен и назван причиной — там его и исправляют.
+     */
     const rows = await deps.db.deliveryOrder.findMany({
-      where: { id: { in: ids }, geoState: 'RESOLVED' },
+      where: { id: { in: ids }, geoState: 'RESOLVED', needsAttention: false },
       select: {
         id: true,
         externalName: true,
+        address: true,
+        localAddress: true,
         geoLatMicro: true,
         geoLonMicro: true,
         intervalStartMinute: true,
         intervalEndMinute: true,
         manualIntervalStartMinute: true,
         manualIntervalEndMinute: true,
-        needsAttention: true,
+        fulfillmentProcessState: true,
+        placements: { where: { releasedAt: null }, select: { id: true }, take: 1 },
+        routeOrders: { where: { removedAt: null }, select: { routeId: true }, take: 1 },
       },
     });
 
@@ -869,11 +925,21 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       points: rows.map((row) => ({
         orderId: row.id,
         number: row.externalName,
+        // Адрес нужен подсказке при наведении: без него маркер не опознать.
+        address: row.localAddress ?? row.address,
         lat: fromMicro(row.geoLatMicro ?? 0),
         lon: fromMicro(row.geoLonMicro ?? 0),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,
         endMinute: row.manualIntervalEndMinute ?? row.intervalEndMinute,
-        needsAttention: row.needsAttention,
+        assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
+        /*
+         * Пригодность решает сервер и отдаёт её вместе с точкой.
+         *
+         * Без этого признака карта могла выбрать только тот заказ, чья
+         * карточка уже загружена: маркер заказа за «Загрузить ещё» не
+         * выбирался вовсе.
+         */
+        selectable: row.routeOrders.length === 0,
       })),
       deliveryDate: scope.deliveryDate,
     };

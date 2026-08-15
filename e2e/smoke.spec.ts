@@ -2252,7 +2252,9 @@ test('карта «Сделок»: подложка Москвы при нуле
     lon: '37.617300',
     startMinute: null,
     endMinute: null,
-    needsAttention: false,
+    address: 'Москва, Цветочная улица, 1',
+    assembled: false,
+    selectable: true,
   };
   await page.route('**/api/deals/map*', (route) => {
     const geocoded = new URL(route.request().url()).searchParams.get('includeDrafts') === 'true';
@@ -2306,4 +2308,304 @@ test('карта «Сделок»: подложка Москвы при нуле
   await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
   await expect(page.getByTestId('deals-map-empty')).toBeVisible();
   expect(await page.evaluate(() => (globalThis as { name?: string }).name)).toBe(RELOAD_SENTINEL);
+});
+
+/**
+ * Рабочее место логиста на большом экране.
+ *
+ * Проверяется то, что раньше приходилось проверять глазами и о чём пришли
+ * замечания приёмки: доля колонки и карты, собственное окно прокрутки списка,
+ * неподвижность карты и фильтров, закреплённая панель действий вне прокрутки,
+ * а на телефоне — отсутствие горизонтального выезда.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ, названная прямо. Список и точки здесь подменены: раскладку
+ * доказывает предсказуемое число карточек, а не то, сколько заказов оказалось
+ * в базе к моменту прогона. Сам контракт `/api/deals` и `/api/deals/map`
+ * проверяется серверными критическими тестами, а не отсюда.
+ */
+test('«Сделки» на большом экране: доли, своя прокрутка и закреплённая панель', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const page = await context.newPage();
+
+  /*
+   * Подложка — пустой валидный стиль.
+   *
+   * Проверяется раскладка, а не отрисовка тайлов: крошечный проверочный набор
+   * PMTiles на большом экране отдаёт не все запрошенные тайлы, и карта честно
+   * сообщила бы об отказе подложки. Внешних обращений при этом по-прежнему нет.
+   */
+  const styleUrl = 'https://maps.local.test/deals-layout.json';
+  await page.route('**/api/map/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true, styleUrl, attribution: '© Проверка' }),
+    }),
+  );
+  await page.route(styleUrl, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: EMPTY_STYLE }),
+  );
+
+  const item = (index: number, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    number: `E2E-РАБ-${index}`,
+    address: 'Москва, Цветочная улица, 1',
+    sourceAddress: 'Москва, Цветочная улица, 1',
+    addressCorrected: false,
+    addressConflict: false,
+    recipient: 'Получатель проверки',
+    comment: null,
+    deliveryDate: '2026-08-15',
+    startMinute: 600,
+    endMinute: 720,
+    intervalCorrected: false,
+    needsAttention: false,
+    attentionReasons: [],
+    geoState: 'RESOLVED',
+    draftRouteId: null,
+    draftRouteNumber: null,
+    selectable: true,
+    sourceStartMinute: 600,
+    sourceEndMinute: 720,
+    sourceIntervalRaw: 'с 10:00 по 12:00',
+    version: 1,
+    assembled: false,
+    ...over,
+  });
+
+  const items = [
+    // Один заказ с нераспознанным интервалом: он обязан быть назван причиной
+    // в списке и не попасть на карту вовсе.
+    item(1, {
+      needsAttention: true,
+      attentionReasons: ['UNRECOGNIZED_INTERVAL'],
+      startMinute: null,
+      endMinute: null,
+      selectable: false,
+    }),
+    item(2, { assembled: true }),
+    ...Array.from({ length: 38 }, (_unused, index) => item(index + 3)),
+  ];
+
+  await page.route(
+    (url) => url.pathname === '/api/deals',
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items,
+          total: items.length,
+          withoutPoint: 3,
+          limit: 50,
+          offset: 0,
+          hasMore: false,
+          deliveryDate: '2026-08-15',
+        }),
+      }),
+  );
+
+  // На карте — все, кроме требующего внимания: сервер такие точки не отдаёт.
+  await page.route(
+    (url) => url.pathname === '/api/deals/map',
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          points: items
+            .filter((row) => row['needsAttention'] === false)
+            .map((row, index) => ({
+              orderId: row['id'],
+              number: row['number'],
+              address: row['address'],
+              lat: String(55.75 + index * 0.001),
+              lon: String(37.61 + index * 0.001),
+              startMinute: row['startMinute'],
+              endMinute: row['endMinute'],
+              assembled: row['assembled'],
+              selectable: row['selectable'],
+            })),
+          deliveryDate: '2026-08-15',
+        }),
+      }),
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  // 1. Доли колонок: список — четверть с небольшим, карта — остальное.
+  const body = await page.getByTestId('deals-body').boundingBox();
+  const column = await page.getByTestId('deals-column').boundingBox();
+  const mapColumn = await page.getByTestId('deals-map-column').boundingBox();
+  expect(body).not.toBeNull();
+  expect(column).not.toBeNull();
+  expect(mapColumn).not.toBeNull();
+
+  const bodyWidth = body?.width ?? 0;
+  const columnWidth = column?.width ?? 0;
+  const mapWidth = mapColumn?.width ?? 0;
+
+  expect(columnWidth).toBeGreaterThanOrEqual(360);
+  expect(columnWidth).toBeLessThanOrEqual(440);
+  expect(columnWidth / bodyWidth).toBeGreaterThanOrEqual(0.25);
+  expect(columnWidth / bodyWidth).toBeLessThanOrEqual(0.3);
+  expect(mapWidth / bodyWidth).toBeGreaterThanOrEqual(0.68);
+  expect(mapWidth / bodyWidth).toBeLessThanOrEqual(0.75);
+
+  // 2. Карта видна целиком и занимает рабочую высоту, а не полосу сверху.
+  const surface = await page.getByTestId('deals-map-canvas').boundingBox();
+  expect(surface?.height ?? 0).toBeGreaterThan(400);
+  expect((surface?.y ?? 0) + (surface?.height ?? 0)).toBeLessThanOrEqual(900);
+
+  // 3. Список прокручивается ВНУТРИ своего окна: страница при этом стоит.
+  const scroll = page.getByTestId('deals-scroll');
+  const mapBefore = await page.getByTestId('deals-map-canvas').boundingBox();
+  const filtersBefore = await page.getByTestId('deals-total').boundingBox();
+
+  // Типы DOM в браузерной проверке намеренно не подключены: нужные свойства
+  // называются по месту, а не тянут за собой всю библиотеку.
+  await scroll.evaluate((element: { scrollTop: number; scrollHeight: number }) => {
+    element.scrollTop = element.scrollHeight;
+  });
+
+  const scrolled = await scroll.evaluate((element: { scrollTop: number }) => element.scrollTop);
+  expect(scrolled).toBeGreaterThan(0);
+  expect(await page.evaluate(() => (globalThis as { scrollY?: number }).scrollY ?? 0)).toBe(0);
+
+  // Карта и шапка списка при этом не сдвинулись ни на пиксель.
+  const mapAfter = await page.getByTestId('deals-map-canvas').boundingBox();
+  const filtersAfter = await page.getByTestId('deals-total').boundingBox();
+  expect(mapAfter?.y).toBe(mapBefore?.y);
+  expect(filtersAfter?.y).toBe(filtersBefore?.y);
+
+  // 4. Панель действий закреплена, видна без прокрутки и лежит ВНЕ списка.
+  const summary = page.getByTestId('deals-summary');
+  await expect(summary).toBeVisible();
+  const summaryBox = await summary.boundingBox();
+  expect((summaryBox?.y ?? 0) + (summaryBox?.height ?? 0)).toBeLessThanOrEqual(900);
+  const insideScroll = await page.evaluate(() => {
+    const doc = (
+      globalThis as unknown as {
+        document: {
+          querySelector: (selector: string) => { contains: (node: unknown) => boolean } | null;
+        };
+      }
+    ).document;
+    const area = doc.querySelector('[data-testid="deals-scroll"]');
+    const panel = doc.querySelector('[data-testid="deals-summary"]');
+    return area !== null && panel !== null && area.contains(panel);
+  });
+  expect(insideScroll).toBe(false);
+
+  // Обе кнопки одной ширины и во всю ширину панели: это два равноправных исхода.
+  const manual = await page.getByTestId('deals-manual-draft').boundingBox();
+  const auto = await page.getByTestId('deals-auto-plan').boundingBox();
+  expect(Math.round(manual?.width ?? 0)).toBe(Math.round(auto?.width ?? 0));
+  expect((manual?.width ?? 0) / columnWidth).toBeGreaterThan(0.8);
+
+  // 5. Счётчик называет и общее число, и заказы без координат.
+  await expect(page.getByTestId('deals-total')).toContainText('Заказов: 40');
+  await expect(page.getByTestId('deals-total')).toContainText('без координат: 3');
+
+  // 6. Требующий внимания заказ: красный в списке, названа причина и действие.
+  const attention = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-1"]');
+  await expect(attention).toHaveAttribute('data-attention', 'yes');
+  await expect(attention.getByTestId('deal-attention')).toContainText('Не распознан интервал');
+  await expect(attention.getByTestId('deal-attention-action')).toHaveText('Задать интервал');
+
+  // 7. Готовность к отправке видна словом в списке.
+  const assembled = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-2"]');
+  await expect(assembled.getByTestId('deal-assembled')).toHaveText('Собран');
+
+  // 8. Переключатель группировки назван действием, а не масштабом.
+  await expect(page.getByTestId('deals-map-zoom')).toHaveText(/Показать отдельно|Сгруппировать/);
+
+  // 9. Поля времени карты сужают только карту: список остаётся прежним.
+  const cardsBefore = await page.locator('[data-testid="deal-card"]').count();
+  await page.getByTestId('deals-map-from').fill('20:00');
+  await expect(page.getByTestId('deals-map-head-count')).toContainText('скрыто фильтром');
+  expect(await page.locator('[data-testid="deal-card"]').count()).toBe(cardsBefore);
+  await page.getByTestId('deals-map-from').fill('');
+
+  // 10. Телефон: обе части на месте и страница не едет вбок.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByTestId('deals-list')).toBeVisible();
+  await expect(page.getByTestId('deals-map')).toBeVisible();
+  const overflow = await page.evaluate(() => {
+    const root = (
+      globalThis as unknown as {
+        document: { documentElement: { scrollWidth: number; clientWidth: number } };
+      }
+    ).document.documentElement;
+    return root.scrollWidth - root.clientWidth;
+  });
+  expect(overflow).toBeLessThanOrEqual(0);
+
+  await context.close();
+});
+
+/**
+ * Правка в одном сеансе доходит до другого сама.
+ *
+ * Перезагрузки здесь нет намеренно: проверяется именно канал событий и то,
+ * что экран «Сделок» на него подписан. Прежде таблица подписок вела события
+ * заказа на ключи, которых на живых экранах нет, и список молчал до F5.
+ */
+test('«Сделки»: правка интервала доходит до второго сеанса без перезагрузки', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [number] = seedOrders(1, { withPoint: true });
+  expect(number).toBeTruthy();
+
+  const first = await browser.newContext();
+  const second = await browser.newContext();
+  const editor = await first.newPage();
+  const watcher = await second.newPage();
+
+  const openDeals = async (target: Page): Promise<void> => {
+    await login(target, ADMIN_PHONE, ADMIN_PIN);
+    await target.getByRole('link', { name: 'Логистика' }).first().click();
+    await target.getByRole('link', { name: 'Сделки' }).first().click();
+    await expect(target.getByTestId('deals-workspace')).toBeVisible();
+    await target.getByLabel('Поиск в этом дне').fill(number ?? '');
+  };
+
+  await openDeals(editor);
+  await openDeals(watcher);
+
+  const watched = watcher.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+  await expect(watched).toBeVisible();
+
+  // Метка живёт в самом окне: перезагрузка страницы её сбросила бы.
+  await watcher.evaluate((value: string) => {
+    (globalThis as { name?: string }).name = value;
+  }, RELOAD_SENTINEL);
+
+  const edited = editor.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+  await edited.getByTestId('deal-edit-interval').click();
+  await edited.getByTestId('deal-interval-from').fill('09:00');
+  await edited.getByTestId('deal-interval-to').fill('11:00');
+  await edited.getByTestId('deal-interval-save').click();
+
+  // Второй сеанс узнаёт об изменении сам.
+  await expect(watched).toContainText('09:00–11:00', { timeout: 30_000 });
+  expect(await watcher.evaluate(() => (globalThis as { name?: string }).name)).toBe(
+    RELOAD_SENTINEL,
+  );
+
+  await first.close();
+  await second.close();
 });

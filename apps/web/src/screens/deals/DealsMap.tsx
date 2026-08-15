@@ -14,8 +14,8 @@ import { lazy, Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ErrorState, LoadingState } from '../../ui/components';
 import type { MapConfig } from '../routing/geo';
-import { formatMinutes } from './deals';
-import { selectionNumber } from './selection';
+import { visiblePoints, type MapPoint, type TimeWindow } from './deals-view';
+import { parseTimeFilter, selectionNumber } from './selection';
 
 /**
  * Карта грузится отдельным куском: MapLibre и разбор тайлов — сотни килобайт,
@@ -25,15 +25,7 @@ const DealsMapCanvas = lazy(() =>
   import('./DealsMapCanvas').then((module) => ({ default: module.DealsMapCanvas })),
 );
 
-export interface DealPoint {
-  orderId: string;
-  number: string;
-  lat: string;
-  lon: string;
-  startMinute: number | null;
-  endMinute: number | null;
-  needsAttention: boolean;
-}
+export type DealPoint = MapPoint;
 
 interface MapResponse {
   points: DealPoint[];
@@ -43,7 +35,8 @@ interface MapResponse {
 interface DealsMapProps {
   scopeKey: string;
   selected: readonly string[];
-  onToggle: (orderId: string) => void;
+  /** Отдаёт саму точку: пригодность берётся из неё, а не из списка. */
+  onToggle: (point: MapPoint) => void;
 }
 
 /**
@@ -77,18 +70,22 @@ export function clusterize(points: readonly DealPoint[]): Cluster[] {
  * Различается и цветом, и формой: одного цвета мало тому, кто его не различает,
  * а маркер без различий превращает карту в набор одинаковых точек.
  */
-export type MarkerState = 'DEPOT' | 'FREE' | 'PICKED' | 'DRAFT';
+export type MarkerState = 'FREE' | 'PICKED' | 'DRAFT' | 'ASSEMBLED';
 
 export interface MarkerLook {
   color: string;
-  shape: 'diamond' | 'circle' | 'square' | 'triangle';
+  shape: 'circle' | 'number' | 'ring' | 'check';
 }
 
+/**
+ * Склада среди состояний нет: на этой карте отметки склада не существует,
+ * а легенда, называющая то, чего не показывают, хуже отсутствующей.
+ */
 export const MARKER_LOOKS: Record<MarkerState, MarkerLook> = {
-  DEPOT: { color: '#333', shape: 'diamond' },
   FREE: { color: '#6b7280', shape: 'circle' },
-  PICKED: { color: 'hsl(210 70% 45%)', shape: 'square' },
-  DRAFT: { color: '#9ca3af', shape: 'triangle' },
+  PICKED: { color: 'hsl(210 70% 45%)', shape: 'number' },
+  DRAFT: { color: '#9ca3af', shape: 'ring' },
+  ASSEMBLED: { color: 'hsl(150 55% 32%)', shape: 'check' },
 };
 
 /**
@@ -116,6 +113,8 @@ export function splitForMap(
 export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
   const [zoomedOut, setZoomedOut] = useState(true);
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [basemapFailed, setBasemapFailed] = useState(false);
 
   const query = useQuery({
@@ -156,16 +155,28 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
     lastStyleUrl.current = configuredStyleUrl;
   }
 
-  const points = useMemo(() => shown?.points ?? [], [shown]);
+  const all = useMemo(() => shown?.points ?? [], [shown]);
+
+  /*
+   * Фильтр времени карты.
+   *
+   * Ограничивает ТОЛЬКО показанные отметки. Список заказов слева при этом
+   * не меняется и не перезагружается: это отдельный, более узкий вопрос
+   * «что я сейчас вижу на карте», а не смена рабочего отбора дня.
+   */
+  const fromMinute = parseTimeFilter(from);
+  const toMinute = parseTimeFilter(to);
+  const points = useMemo(
+    () => visiblePoints(all, { fromMinute, toMinute } satisfies TimeWindow),
+    [all, fromMinute, toMinute],
+  );
+  const hidden = all.length - points.length;
 
   const { chosen, clusters } = splitForMap(points, selected, zoomedOut);
 
   // Номер выбранного заказа подписью на отметке. Пусто — заказ не выбран.
   const numberOf = useCallback(
-    (orderId: string): string | null => {
-      const number = selectionNumber(selected, orderId);
-      return number === null ? null : String(number);
-    },
+    (orderId: string): number | null => selectionNumber(selected, orderId),
     [selected],
   );
 
@@ -189,8 +200,9 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
   return (
     <section className="deals-map" data-testid="deals-map">
       <div className="deals-map__head">
-        <span>
+        <span data-testid="deals-map-head-count">
           На карте: {points.length}
+          {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
           {refreshing && (
             <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
               {' '}
@@ -198,16 +210,40 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
             </span>
           )}
         </span>
+
+        {/*
+          Два простых поля времени. Ничего не пересчитывают и никуда
+          не отправляются: только сужают то, что показано на карте.
+        */}
+        <label className="deals-map__time">
+          От
+          <input
+            type="time"
+            value={from}
+            data-testid="deals-map-from"
+            onChange={(event) => setFrom(event.target.value)}
+          />
+        </label>
+        <label className="deals-map__time">
+          До
+          <input
+            type="time"
+            value={to}
+            data-testid="deals-map-to"
+            onChange={(event) => setTo(event.target.value)}
+          />
+        </label>
+
         <button
           type="button"
           className="deals__link"
           data-testid="deals-map-zoom"
-          // Приближать нечего, пока точек нет: кнопка не должна обещать
+          // Разделять нечего, пока точек нет: кнопка не должна обещать
           // действие, которое ничего не изменит.
           disabled={empty}
           onClick={() => setZoomedOut((value) => !value)}
         >
-          {zoomedOut ? 'Приблизить' : 'Отдалить'}
+          {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
         </button>
       </div>
 
@@ -218,16 +254,16 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
       */}
       <ul className="deals-map__legend" data-testid="deals-map-legend">
         <li>
-          <span className="deals-map__dot deals-map__dot--depot" /> склад
-        </li>
-        <li>
           <span className="deals-map__dot deals-map__dot--free" /> доступен
         </li>
         <li>
-          <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером
+          <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером порядка
         </li>
         <li>
           <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--assembled" /> собран, с галочкой
         </li>
       </ul>
 
@@ -263,7 +299,12 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
               chosen={chosen}
               clusters={clusters}
               numberOf={numberOf}
-              onToggle={onToggle}
+              onToggle={(orderId) => {
+                const point = points.find((item) => item.orderId === orderId);
+                if (point !== undefined) {
+                  onToggle(point);
+                }
+              }}
               onLoadError={() => setBasemapFailed(true)}
             />
           </Suspense>
@@ -275,55 +316,6 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
           </p>
         )}
       </div>
-
-      {points.length === 0 ? null : (
-        <ul className="deals-map__points">
-          {chosen.map((point) => (
-            <li key={point.orderId} data-testid="map-point" data-order-number={point.number}>
-              <button
-                type="button"
-                className="deals-map__marker deals-map__marker--picked"
-                onClick={() => onToggle(point.orderId)}
-              >
-                {selectionNumber(selected, point.orderId)}
-              </button>
-              <span>
-                {point.number} · {formatMinutes(point.startMinute)}–{formatMinutes(point.endMinute)}
-              </span>
-            </li>
-          ))}
-
-          {clusters.map((cluster) =>
-            cluster.points.length === 1 ? (
-              <li
-                key={cluster.key}
-                data-testid="map-point"
-                data-order-number={cluster.points[0]?.number}
-              >
-                <button
-                  type="button"
-                  className="deals-map__marker deals-map__marker--free"
-                  onClick={() => onToggle(cluster.points[0]?.orderId ?? '')}
-                >
-                  •
-                </button>
-                <span>
-                  {cluster.points[0]?.number} ·{' '}
-                  {formatMinutes(cluster.points[0]?.startMinute ?? null)}–
-                  {formatMinutes(cluster.points[0]?.endMinute ?? null)}
-                </span>
-              </li>
-            ) : (
-              <li key={cluster.key} data-testid="map-cluster">
-                <span className="deals-map__marker deals-map__marker--cluster">
-                  {cluster.points.length}
-                </span>
-                <span>рядом заказов: {cluster.points.length}</span>
-              </li>
-            ),
-          )}
-        </ul>
-      )}
     </section>
   );
 }

@@ -36,9 +36,14 @@ import {
   type DepotDraft,
 } from './planning-settings';
 import {
+  acceptSuggestion,
+  EMPTY_SUGGEST_BOX,
+  isSuggestListOpen,
   isUsablePoint,
-  MIN_SUGGEST_QUERY,
+  shouldRequestSuggestions,
   suggestionsUrl,
+  typeInSuggestBox,
+  type SuggestBox,
   type SuggestResponse,
 } from '../logistics/address-suggestions';
 
@@ -141,13 +146,25 @@ export function PlanningSettings(): React.JSX.Element {
    * Второй интеграции не заводится: ключ, ограничения и разбор ответа живут
    * на сервере в одном месте.
    */
+  /*
+   * Список закрывается выбором, а не уходом фокуса.
+   *
+   * Прежде выбранный адрес попадал обратно в ключ запроса, и подсказки тут же
+   * открывались снова на только что принятом значении.
+   */
+  const [suggestBox, setSuggestBox] = useState<SuggestBox>(EMPTY_SUGGEST_BOX);
+
   const suggestions = useQuery({
-    queryKey: ['address-suggestions', depot.address],
-    queryFn: () => client.get<SuggestResponse>(suggestionsUrl(depot.address)),
-    enabled: depot.address.trim().length >= MIN_SUGGEST_QUERY,
+    queryKey: ['address-suggestions', suggestBox.text],
+    queryFn: () => client.get<SuggestResponse>(suggestionsUrl(suggestBox.text)),
+    enabled: shouldRequestSuggestions(suggestBox),
   });
 
   const suggestionsAvailable = suggestions.data?.available ?? true;
+  const suggestListOpen = isSuggestListOpen(
+    suggestBox,
+    (suggestions.data?.suggestions.length ?? 0) > 0,
+  );
   const chosenPoint = activePoint(depot);
 
   const createDepot = useMutation({
@@ -160,6 +177,7 @@ export function PlanningSettings(): React.JSX.Element {
       }),
     onSuccess: async () => {
       setDepot(EMPTY_DEPOT_DRAFT);
+      setSuggestBox(EMPTY_SUGGEST_BOX);
       await invalidate();
       showToast('Склад создан', 'success');
     },
@@ -410,16 +428,17 @@ export function PlanningSettings(): React.JSX.Element {
                 data-testid="depot-address"
                 value={depot.address}
                 autoComplete="off"
-                onChange={(event) =>
+                onChange={(event) => {
                   // Правка текста немедленно снимает прежнюю точку: она
                   // относилась к другому адресу.
-                  setDepot((current) => ({ ...current, address: event.target.value }))
-                }
+                  setDepot((current) => ({ ...current, address: event.target.value }));
+                  setSuggestBox((current) => typeInSuggestBox(current, event.target.value));
+                }}
               />
             )}
           </Field>
 
-          {suggestions.data !== undefined && suggestions.data.suggestions.length > 0 && (
+          {suggestListOpen && suggestions.data !== undefined && (
             <ul className="stack" data-testid="depot-suggestions">
               {suggestions.data.suggestions.map((item) => (
                 <li key={`${item.value}-${item.qcGeo ?? 'нет'}`}>
@@ -440,6 +459,7 @@ export function PlanningSettings(): React.JSX.Element {
                         address: item.value,
                         point: { value: item.value, lat: latMicro / MICRO, lon: lonMicro / MICRO },
                       }));
+                      setSuggestBox(acceptSuggestion(item.value));
                     }}
                   >
                     {item.value}
