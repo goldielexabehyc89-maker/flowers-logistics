@@ -13,9 +13,8 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { moscowToday } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Button,
@@ -23,12 +22,26 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  Modal,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
 import { attentionLabel, formatMinutes } from './deals';
 import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
+import {
+  capacityShortfall,
+  parseSplitParams,
+  runAutoSplit,
+  splitFailure,
+  type PlanRunView,
+  type SplitClient,
+  type SplitClock,
+  type SplitParams,
+} from './auto-split';
+import { useWorkspace } from '../logistics/useWorkspace';
+import { GeoPointDialog } from '../logistics/GeoPointDialog';
+import { previewHref, workspaceHref } from '../logistics/workspace-url';
 import {
   dropUnavailable,
   intervalProblem,
@@ -67,7 +80,9 @@ export function DealsWorkspace(): React.JSX.Element {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [date, setDate] = useState(() => moscowToday());
+  // День общий с «Маршрутизацией» и живёт в адресе: два независимых значения
+  // на одном рабочем месте расходились молча.
+  const { day: date, setDay: setDate } = useWorkspace();
   const [search, setSearch] = useState('');
   const [fromTime, setFromTime] = useState('');
   const [toTime, setToTime] = useState('');
@@ -77,12 +92,28 @@ export function DealsWorkspace(): React.JSX.Element {
   const [selected, setSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<DealCard | null>(null);
+  /** Заказ, которому ставят точку вручную. */
+  const [pointFor, setPointFor] = useState<DealCard | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   /** Заказ, у которого сейчас правят интервал, и черновик значений. */
   const [intervalFor, setIntervalFor] = useState<DealCard | null>(null);
   const [intervalFrom, setIntervalFrom] = useState('');
   const [intervalTo, setIntervalTo] = useState('');
   const [intervalError, setIntervalError] = useState<string | null>(null);
+  /**
+   * Параметры разбивки, которые логист вводит перед запуском.
+   *
+   * Пустые по умолчанию намеренно. Сохранённых значений в настройках
+   * планирования нет — там живут только смена и время обслуживания, — а
+   * подставить «сколько-нибудь» значило бы принять бизнес-решение за человека.
+   */
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [vehiclesInput, setVehiclesInput] = useState('');
+  const [capacityInput, setCapacityInput] = useState('');
+  const [splitErrors, setSplitErrors] = useState<{
+    vehicles: string | null;
+    capacityOrders: string | null;
+  }>({ vehicles: null, capacityOrders: null });
 
   /** Ровно те параметры, которыми пользуются список, карта и «выбрать все». */
   const scope = useMemo(() => {
@@ -158,8 +189,9 @@ export function DealsWorkspace(): React.JSX.Element {
     onSuccess: (route) => {
       setSelected([]);
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
-      // Успех ведёт в созданный черновик, а не «куда-нибудь в маршрутизацию».
-      void navigate(`/logistics/routing?route=${route.id}`);
+      // Успех ведёт в созданный черновик, а не «куда-нибудь в маршрутизацию»:
+      // «Маршрутизация» раскрывает именно его и на тот же день.
+      void navigate(workspaceHref('/logistics/routing', { day: date, draftId: route.id }));
     },
     onError: (error: unknown) => {
       const conflict = (error as { conflict?: { orderIds?: string[] } }).conflict;
@@ -204,25 +236,85 @@ export function DealsWorkspace(): React.JSX.Element {
     },
   });
 
-  const autoPlan = useMutation({
-    mutationFn: () =>
-      client.post<{ id: string }>('/api/planning/runs', {
-        deliveryDate: date,
-        orderIds: selected,
-        slots: [{ vehicleType: 'CAR', capacity: selected.length }],
-      }),
-    onSuccess: (run) => {
+  /**
+   * Обращения разбивки к серверу.
+   *
+   * Сам ход разбивки живёт в `auto-split.ts` и проверяется без браузера:
+   * отказ решателя, ограниченное ожидание и согласие на частичный результат —
+   * это правила, а не разметка. Здесь остаётся только связывание с клиентом.
+   */
+  const splitClient: SplitClient = useMemo(
+    () => ({
+      start: (body) => client.post<PlanRunView>('/api/route-plans', body),
+      read: (runId) => client.get<PlanRunView>(`/api/route-plans/${runId}`),
+    }),
+    [client],
+  );
+
+  const splitClock: SplitClock = useMemo(
+    () => ({
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((resolve) => globalThis.setTimeout(resolve, ms)),
+    }),
+    [],
+  );
+
+  /**
+   * Автоматическая разбивка выбора на несколько черновиков.
+   *
+   * Логист ждёт здесь и уходит в «Маршрутизацию» с готовыми черновиками:
+   * технический запуск, очередь и превью в интерфейс не всплывают. Двухфазность
+   * сохраняется на сервере, но стадией рабочего места она больше не является.
+   *
+   * Прежнее обращение шло на `/api/planning/runs` — такого адреса на сервере
+   * нет — и слало `capacity` вместо `capacityOrders`. Оба отказа скрывал мок
+   * браузерной проверки, поэтому кнопка не работала, а проверки были зелёными.
+   */
+  /**
+   * Расчёт готов: логист уходит смотреть предложенные маршруты.
+   *
+   * Черновиков ещё нет и не будет до явного «Применить» в «Маршрутизации».
+   * Выбор сбрасывается: заказы заморожены неизменяемым снимком расчёта,
+   * и держать их отмеченными значило бы предлагать посчитать то же ещё раз.
+   */
+  const finishPreview = useCallback(
+    (run: PlanRunView): void => {
       setSelected([]);
-      // Превью открывается по конкретному запуску: обновление страницы
-      // и прямая ссылка возвращают тот же расчёт.
-      void navigate(`/logistics/routing?run=${run.id}`);
+      void queryClient.invalidateQueries({ queryKey: ['deals'] });
+      void navigate(previewHref('/logistics/routing', { day: date, runId: run.id }));
     },
-    onError: (error: unknown) => {
-      setNotice(
-        (error as { message?: string }).message ??
-          'Расчёт не запущен: проверьте выбор и настройки.',
-      );
-    },
+    [date, navigate, queryClient],
+  );
+
+  const splitPreview = useMemo(() => {
+    const parsed = parseSplitParams({ vehicles: vehiclesInput, capacityOrders: capacityInput });
+    return parsed.ok ? { shortfall: capacityShortfall(selected.length, parsed.value) } : null;
+  }, [vehiclesInput, capacityInput, selected.length]);
+
+  /**
+   * Отказ разбивки.
+   *
+   * Правило целиком в `splitFailure`: выбор остаётся за логистом, перехода
+   * в «Маршрутизацию» не происходит, ожидание снимается. Здесь только
+   * применение готового решения — иначе каждую из этих частей легко нарушить
+   * незаметно.
+   */
+  const splitFailed = useCallback((error: unknown): void => {
+    const effect = splitFailure(error);
+    setNotice(effect.message);
+  }, []);
+
+  const autoPlan = useMutation({
+    mutationFn: (params: SplitParams) =>
+      runAutoSplit(
+        splitClient,
+        // Ровно столько машин, сколько указал логист. Число не выводится
+        // из размера выбора: это было бы решение, принятое за человека.
+        { deliveryDate: date, orderIds: selected, params, vehicleType: 'CAR' },
+        splitClock,
+      ),
+    onSuccess: (result) => finishPreview(result.run),
+    onError: splitFailed,
   });
 
   if (list.isPending) {
@@ -410,7 +502,12 @@ export function DealsWorkspace(): React.JSX.Element {
                               type="button"
                               className="deals__link"
                               onClick={() =>
-                                void navigate(`/logistics/routing?route=${item.draftRouteId}`)
+                                void navigate(
+                                  workspaceHref('/logistics/routing', {
+                                    day: date,
+                                    draftId: item.draftRouteId,
+                                  }),
+                                )
                               }
                             >
                               {item.draftRouteNumber ?? 'Открыть черновик'}
@@ -431,6 +528,20 @@ export function DealsWorkspace(): React.JSX.Element {
                       <Button variant="ghost" onClick={() => setEditing(item)}>
                         Исправить адрес
                       </Button>
+                      {/*
+                        Точка и адрес — одна проблема одного заказа, поэтому
+                        действия стоят рядом. Заказу с пригодной точкой кнопка
+                        не нужна: он уже готов к распределению.
+                      */}
+                      {item.geoState !== 'RESOLVED' && (
+                        <Button
+                          variant="ghost"
+                          data-testid="deal-set-point"
+                          onClick={() => setPointFor(item)}
+                        >
+                          Указать точку на карте
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         data-testid="deal-edit-interval"
@@ -546,13 +657,108 @@ export function DealsWorkspace(): React.JSX.Element {
           </Button>
           <Button
             data-testid="deals-auto-plan"
+            loading={autoPlan.isPending}
             disabled={autoPlan.isPending}
-            onClick={() => autoPlan.mutate()}
+            onClick={() => {
+              // Тот же единственный сценарий: кнопка спрашивает параметры
+              // и запускает тот же расчёт. Второго входа в разбивку нет.
+              setSplitErrors({ vehicles: null, capacityOrders: null });
+              setSplitOpen(true);
+            }}
           >
-            Распределить автоматически
+            {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
           </Button>
         </div>
       )}
+
+      {/*
+        Параметры разбивки.
+
+        Оба значения обязательны и вводятся логистом. Значения по умолчанию
+        здесь нет: план, собранный из подставленного числа машин, выглядел бы
+        как решение системы, которого никто не принимал.
+      */}
+      <Modal
+        open={splitOpen}
+        title="Автоматическая разбивка"
+        onClose={() => setSplitOpen(false)}
+        dismissible={!autoPlan.isPending}
+      >
+        <div className="stack">
+          <p className="text-sm muted">
+            Выбрано заказов: {selected.length}. Укажите, сколько машин выйдет на маршруты и сколько
+            заказов помещается в одну.
+          </p>
+
+          <Field label="Количество машин" error={splitErrors.vehicles ?? undefined}>
+            {(props) => (
+              <TextInput
+                {...props}
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                data-testid="split-vehicles"
+                value={vehiclesInput}
+                disabled={autoPlan.isPending}
+                onChange={(event) => setVehiclesInput(event.target.value)}
+              />
+            )}
+          </Field>
+
+          <Field label="Заказов на одну машину" error={splitErrors.capacityOrders ?? undefined}>
+            {(props) => (
+              <TextInput
+                {...props}
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                data-testid="split-capacity"
+                value={capacityInput}
+                disabled={autoPlan.isPending}
+                onChange={(event) => setCapacityInput(event.target.value)}
+              />
+            )}
+          </Field>
+
+          {splitPreview !== null && splitPreview.shortfall > 0 && (
+            <p className="text-sm" data-testid="split-shortfall">
+              Мест хватит не всем: {splitPreview.shortfall} заказ(ов) останутся неразмещёнными.
+              Согласие на них будет запрошено отдельно.
+            </p>
+          )}
+
+          <div className="modal__footer">
+            <Button onClick={() => setSplitOpen(false)} disabled={autoPlan.isPending}>
+              Отмена
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="split-submit"
+              disabled={autoPlan.isPending}
+              onClick={() => {
+                const parsed = parseSplitParams({
+                  vehicles: vehiclesInput,
+                  capacityOrders: capacityInput,
+                });
+                if (!parsed.ok) {
+                  setSplitErrors({
+                    vehicles: parsed.vehicles,
+                    capacityOrders: parsed.capacityOrders,
+                  });
+                  return;
+                }
+                setSplitErrors({ vehicles: null, capacityOrders: null });
+                setSplitOpen(false);
+                autoPlan.mutate(parsed.value);
+              }}
+            >
+              Рассчитать
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {editing !== null && (
         <AddressDialog
@@ -562,6 +768,23 @@ export function DealsWorkspace(): React.JSX.Element {
             setEditing(null);
             void queryClient.invalidateQueries({ queryKey: ['deals'] });
           }}
+        />
+      )}
+
+      {/*
+        Отмена ничего не записывает: окно просто закрывается, и заказ остаётся
+        в «Требует внимания» ровно в прежнем состоянии.
+      */}
+      {pointFor !== null && (
+        <GeoPointDialog
+          order={{
+            id: pointFor.id,
+            number: pointFor.number,
+            version: pointFor.version,
+            address: pointFor.address,
+          }}
+          onClose={() => setPointFor(null)}
+          onSaved={() => setPointFor(null)}
         />
       )}
     </section>

@@ -11,7 +11,48 @@
  * и в отчёт не печатаются.
  */
 
+import { execFileSync } from 'node:child_process';
 import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
+
+/**
+ * Собственные заказы сценария.
+ *
+ * Раньше логистические сценарии делили заказы фикстуры и брали «любой
+ * доступный». Такой выбор скрывает взаимное влияние: сценарий проходил
+ * не потому, что верен, а потому, что сосед ещё не успел занять номер, —
+ * и повторный прогон набора давал другой результат.
+ *
+ * Теперь каждый сценарий создаёт СВОИ заказы и работает ровно с ними.
+ * Заказы создаются напрямую в базе: токена МоегоСклада в проверках нет,
+ * и ни одного обращения к нему быть не должно.
+ *
+ * `withPoint` ставит подтверждённую точку. Без неё заказ непригоден
+ * к распределению — это нужно сценарию ручной установки точки и мешает
+ * всем остальным.
+ */
+function seedOrders(count: number, options: { withPoint: boolean }): string[] {
+  // Интервал распознан всегда: иначе заказ остаётся в «Требует внимания»
+  // по чужой причине, и сценарий доказывал бы не то, что заявляет.
+  const args = [
+    'run',
+    '--silent',
+    'seed:e2e-order',
+    '--',
+    `--count=${count}`,
+    '--recognized-interval',
+  ];
+  if (options.withPoint) {
+    args.push('--with-point');
+  }
+
+  const output = execFileSync('npm', args, { encoding: 'utf8' });
+  const numbers = [...output.matchAll(/^номер:\s*(.+)$/gm)].map((match) => match[1]?.trim() ?? '');
+
+  if (numbers.length !== count) {
+    throw new Error(`сеялка вернула ${numbers.length} заказов вместо ${count}`);
+  }
+  return numbers;
+}
 
 const ADMIN_PHONE = process.env['E2E_ADMIN_PHONE'] ?? '+79990000001';
 const ADMIN_CODE = process.env['E2E_ADMIN_CODE'] ?? '';
@@ -77,6 +118,26 @@ async function logout(page: Page): Promise<void> {
  * черновика — и заказы уезжают не туда, а тест падает на следующем шаге,
  * сообщая про количество остановок вместо настоящей причины.
  */
+
+/**
+ * Раскрывает черновик по номеру и дожидается именно раскрытия.
+ *
+ * Заголовок работает переключателем: повторное нажатие сворачивает. Без явного
+ * ожидания `data-expanded` проверка иногда утверждала бы про свёрнутую
+ * карточку, и «ноль остановок» означало бы не пустой состав, а закрытый блок.
+ */
+async function openDraft(page: Page, number: string): Promise<void> {
+  // Поиск по атрибуту, а не по тексту: раскрытая карточка содержит номера
+  // ДРУГИХ черновиков в списке «Перенести в маршрут», и поиск по тексту
+  // находил бы сразу несколько.
+  const draft = page.locator(`.routes__draft[data-draft-number="${number}"]`);
+  await expect(draft).toHaveCount(1);
+  if ((await draft.getAttribute('data-expanded')) !== 'true') {
+    await draft.locator('button').first().click();
+  }
+  await expect(draft).toHaveAttribute('data-expanded', 'true');
+}
+
 async function selectRouteByNumber(select: Locator, number: string): Promise<void> {
   const option = select.locator(`option:has-text("${number}")`);
   await expect(option).toHaveCount(1);
@@ -300,20 +361,33 @@ test('карта не настроена: интерфейс говорит че
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
   await expect(page.getByText('Карта не настроена', { exact: true })).toBeVisible();
-  // Карта не появилась, но работа не остановилась.
+  // Карта не появилась, но работа не остановилась: список черновиков дня
+  // на месте, и его состояние показано честно — списком либо пустым экраном.
   await expect(page.locator('[data-testid="orders-map"]')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Создать черновик' })).toBeEnabled();
-  await page.waitForSelector('.routes__order, .state', { state: 'visible' });
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
 });
 
-test('карта: ручная точка ставится без перезагрузки, строка и маркер связаны', async ({
+/**
+ * Ручная точка живёт в «Сделках», рядом с исправлением адреса.
+ *
+ * Точка и адрес — одна проблема одного заказа. «Маршрутизация» работает только
+ * с заказами, у которых пригодные координаты уже есть, и редактора точки
+ * не показывает вовсе.
+ *
+ * Подменяются только конфигурация карты и стиль подложки: настоящий набор
+ * PMTiles весит гигабайты. Сам заказ, установка точки и переход в пригодные
+ * идут через настоящий API и базу.
+ */
+test('Сделки: ручная точка выводит заказ из «Требует внимания» в пригодные', async ({
   page,
 }: {
   page: Page;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
-  test.skip(first === '', 'нужен проверочный заказ');
+  // Собственный заказ БЕЗ точки: ровно то, что чинит этот сценарий.
+  const number = seedOrders(1, { withPoint: false })[0] ?? '';
+  expect(number).not.toBe('');
 
   const styleUrl = 'https://maps.local.test/style.json';
   await page.route('**/api/map/config', (route) =>
@@ -328,46 +402,59 @@ test('карта: ручная точка ставится без перезаг
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  // Собственный заказ сценария, намеренно без точки.
+  await page.waitForSelector('[data-testid="deal-card"], .state', { state: 'visible' });
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+  await expect(card).toBeVisible();
+
+  // Без точки заказ распределить нельзя, и причина названа прямо.
+  await expect(card).toHaveAttribute('data-selectable', 'no');
+  await expect(card).toContainText('Нет подтверждённой точки на карте');
+
+  // 1. Отмена ничего не записывает.
+  await card.getByTestId('deal-set-point').click();
+  await expect(page.getByRole('heading', { name: `Точка заказа ${number}` })).toBeVisible();
+  await page.getByRole('button', { name: 'Отмена' }).click();
+  await expect(page.getByRole('heading', { name: `Точка заказа ${number}` })).toHaveCount(0);
+  await expect(card).toHaveAttribute('data-selectable', 'no');
+  await expect(card).toContainText('Нет подтверждённой точки на карте');
+
+  // 2. Причина обязательна: без неё сохранить нельзя.
+  await card.getByTestId('deal-set-point').click();
+  const dialogMap = page.locator('[data-testid="orders-map"]');
+  await expect(dialogMap).toBeVisible();
+
+  // Пока точка не выбрана, сохранение недоступно.
+  await expect(page.getByTestId('geo-point-save')).toBeDisabled();
+
+  await dialogMap.click({ position: { x: 240, y: 160 } });
+  await expect(page.getByTestId('geo-point-picked')).toContainText('Выбрано:');
+  await expect(page.getByTestId('geo-point-save')).toBeEnabled();
+
+  await page.getByTestId('geo-point-save').click();
+  await expect(page.getByText('Опишите причину: не меньше трёх символов.')).toBeVisible();
+
+  // 3. С причиной точка сохраняется.
+  await page.getByTestId('geo-point-reason').fill('Проверочная синтетическая точка');
+  await page.getByTestId('geo-point-save').click();
+  await expect(page.locator('.toast-region').getByText(/Точка сохранена|уже стояла/)).toBeVisible();
+
+  // 4. Заказ вышел из состояния «нет точки» и стал пригоден для черновика.
+  await expect(card).not.toContainText('Нет подтверждённой точки на карте');
+  await expect(card.getByTestId('deal-set-point')).toHaveCount(0);
+  await expect(card).toHaveAttribute('data-selectable', 'yes');
+  await card.getByTestId('deal-pick').click();
+  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 1');
+
+  // 5. В «Маршрутизации» редактора точки нет: там работают только с заказами,
+  //    у которых координаты уже пригодны.
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-
-  const map = page.locator('[data-testid="orders-map"]');
-  await expect(map).toBeVisible();
-
-  const row = page.locator('.routes__order', { hasText: first });
-  await expect(row).toBeVisible();
-
-  // Точки ещё нет: строка объясняет причину и остаётся в работе.
-  await expect(row.locator('.routes__geo-hint')).toBeVisible();
-
-  await row.getByRole('button', { name: 'Указать точку' }).click();
-  await expect(page.locator('.routes__hint')).toContainText('Укажите точку на карте');
-
-  await map.click({ position: { x: 240, y: 160 } });
-  await expect(page.getByRole('heading', { name: 'Подтвердите точку заказа' })).toBeVisible();
-  await page.getByLabel('Причина').fill('Проверочная синтетическая точка');
-  await page.getByRole('button', { name: 'Сохранить точку' }).click();
-
-  // Маркер появляется без перезагрузки страницы.
-  const marker = page.locator(`.map-marker[aria-label="Заказ ${first} на карте"]`);
-  await expect(marker).toBeVisible();
-  await expect(row.locator('.routes__geo-hint')).toHaveCount(0);
-
-  // Выбор маркера подсвечивает строку…
-  await marker.click();
-  await expect(row.locator('.routes__number-button')).toHaveAttribute('aria-pressed', 'true');
-  await expect(marker).toHaveClass(/map-marker--selected/);
-
-  // …а выбор другой строки снимает подсветку и переносит её.
-  const secondNumber = process.env['E2E_ORDER_NUMBER_2'] ?? '';
-  test.skip(secondNumber === '', 'нужен второй проверочный заказ');
-  const secondRow = page.locator('.routes__order', { hasText: secondNumber });
-  await secondRow.locator('.routes__number-button').click();
-  await expect(marker).not.toHaveClass(/map-marker--selected/);
-
-  await row.locator('.routes__number-button').click();
-  await expect(marker).toHaveClass(/map-marker--selected/);
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Указать точку' })).toHaveCount(0);
 });
 
 /** Ответ конфигурации карты. Адреса маршрутизатора здесь нет и быть не может. */
@@ -620,57 +707,81 @@ test('маршрут: черновик → состав → порядок → �
   page: Page;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  const first = process.env['E2E_ORDER_NUMBER'] ?? '';
-  const second = process.env['E2E_ORDER_NUMBER_2'] ?? '';
-  test.skip(first === '' || second === '', 'нужны два проверочных заказа');
+  /*
+   * Черновики создаются в «Сделках», а редактируются и подтверждаются
+   * в «Маршрутизации». Кнопки создания на «Маршрутизации» нет намеренно:
+   * рабочее место работает с уже созданными черновиками.
+   *
+   * Три собственных заказа: два в первый черновик и один во второй, чтобы
+   * было куда переносить. Чужие заказы сценарий не трогает.
+   */
+  const seeded = seedOrders(3, { withPoint: true });
+  const first = seeded[0] ?? '';
+  const second = seeded[1] ?? '';
+  const third = seeded[2] ?? '';
+  expect([first, second, third].every((number) => number !== '')).toBe(true);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
-  // Черновик создаётся и сразу открывается: аренда выдаётся создателю.
-  await page.getByRole('button', { name: 'Создать черновик' }).click();
+  for (const number of [first, second]) {
+    const deal = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(deal).toHaveAttribute('data-selectable', 'yes');
+    await deal.getByTestId('deal-pick').click();
+  }
+  await page.getByTestId('deals-manual-draft').click();
+
+  // Переход ведёт в созданный черновик: он раскрыт, а не потерян в списке.
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Создать черновик' })).toHaveCount(0);
+
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
   const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
   expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
 
-  // Оба заказа отмечаются и добавляются в маршрут.
-  await page.getByLabel(`Выбрать заказ ${first}`).check();
-  await page.getByLabel(`Выбрать заказ ${second}`).check();
-  await selectRouteByNumber(page.getByLabel('Маршрут для добавления'), routeNumber);
-  await clickAndAwait(
-    page,
-    page.getByRole('button', { name: /Добавить выбранные/ }),
-    'POST',
-    '/orders',
-  );
-
   const stops = card.locator('.routes__stop');
   await expect(stops).toHaveCount(2);
-  const firstStopBefore = await stops.first().innerText();
+
+  // Раскрыт ровно один черновик.
+  await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
 
   // Порядок меняется кнопками: перетаскивание не требуется.
+  await expect(stops.first()).toContainText(first);
   await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
-  await expect(stops.first()).not.toHaveText(firstStopBefore);
+  await expect(stops.first()).toContainText(second);
 
-  // Настоящий перенос между двумя черновиками: аренда целевого берётся клиентом.
-  await page.getByRole('button', { name: 'Создать черновик' }).click();
-  // Карточка переключается на новый маршрут не мгновенно: сначала приходит ответ,
-  // затем перерисовка. Ждём именно смену номера, а не догадываемся по времени.
-  await expect(card.getByRole('heading')).not.toContainText(routeNumber);
-  const secondCardNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
-  await card.getByRole('button', { name: 'Закрыть' }).click();
+  /*
+   * Перестановка пережила обновление страницы.
+   *
+   * Проверяется номер заказа на первой остановке, а не весь текст строки:
+   * порядок живёт на сервере, и доказывать надо именно его, а не совпадение
+   * пробелов после перерисовки. Заодно это проверка, что активный черновик
+   * восстановился из адреса — иначе остановок на экране не было бы вовсе.
+   */
+  await page.reload();
+  await expect(page.locator('.routes__card .routes__stop').first()).toContainText(second);
 
-  await page
-    .locator('.routes__list-item', { hasText: routeNumber })
-    .getByRole('button', { name: 'Открыть' })
-    .click();
+  // Второй черновик — из третьего собственного заказа, чтобы было куда
+  // переносить.
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  const thirdDeal = page.locator(`[data-testid="deal-card"][data-order-number="${third}"]`);
+  await expect(thirdDeal).toHaveAttribute('data-selectable', 'yes');
+  await thirdDeal.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
+  const secondCardNumber = (
+    await page.locator('.routes__card').getByRole('heading').innerText()
+  ).replace(/[^R\d-]/g, '');
+
+  // Перенос из списка: аренда обоих черновиков берётся клиентом.
+  // В первом черновике два собственных заказа, во втором — один.
+  await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
-
-  await card.getByLabel(`Выбрать заказ ${second}`).check();
+  await card.getByLabel(`Выбрать заказ ${first}`).check();
   await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), secondCardNumber);
   await clickAndAwait(
     page,
@@ -678,16 +789,13 @@ test('маршрут: черновик → состав → порядок → �
     'POST',
     '/routes/move',
   );
-  // Один заказ ушёл: перенос действительно выполнен, а не отклонён блокировкой.
+  // Заказ ушёл: перенос выполнен, а не отклонён блокировкой.
   await expect(card.locator('.routes__stop')).toHaveCount(1);
 
   // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
-  await page
-    .locator('.routes__list-item', { hasText: secondCardNumber })
-    .getByRole('button', { name: 'Открыть' })
-    .click();
-  await expect(card.locator('.routes__stop')).toHaveCount(1);
-  await card.getByLabel(`Выбрать заказ ${second}`).check();
+  await openDraft(page, secondCardNumber);
+  await expect(card.locator('.routes__stop')).toHaveCount(2);
+  await card.getByLabel(`Выбрать заказ ${first}`).check();
   await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), routeNumber);
   await clickAndAwait(
     page,
@@ -695,18 +803,16 @@ test('маршрут: черновик → состав → порядок → �
     'POST',
     '/routes/move',
   );
-  await expect(card.locator('.routes__stop')).toHaveCount(0);
 
-  await page
-    .locator('.routes__list-item', { hasText: routeNumber })
-    .getByRole('button', { name: 'Открыть' })
-    .click();
+  await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
 
-  // Подтверждение: блокировок быть не должно.
+  // Подтверждение с назначением курьера в том же окне.
   await card.getByRole('button', { name: 'Подтвердить маршрут' }).click();
-  await page.getByRole('button', { name: 'Подтвердить', exact: true }).last().click();
-  await expect(card.locator('.routes__hint')).toContainText('Маршрут подтверждён');
+  await page.getByTestId('route-confirm-submit').click();
+
+  // Подтверждённый черновик исчезает из «Маршрутизации».
+  await expect(page.locator(`.routes__draft[data-draft-number="${routeNumber}"]`)).toHaveCount(0);
 
   // Тот же маршрут появляется в маршрутных листах.
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
@@ -737,12 +843,21 @@ test('перехват блокировки переводит прежнего 
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
+  // Собственный черновик сценария: чужой мог быть подтверждён соседом,
+  // и перехватывать было бы нечего.
+  const own = seedOrders(1, { withPoint: true })[0] ?? '';
+  expect(own).not.toBe('');
+
   // Первый сеанс создаёт черновик и держит его в работе.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await page.getByRole('button', { name: 'Создать черновик' }).click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  const ownDeal = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(ownDeal).toHaveAttribute('data-selectable', 'yes');
+  await ownDeal.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
@@ -754,10 +869,7 @@ test('перехват блокировки переводит прежнего 
   const secondPage = await secondContext.newPage();
   await login(secondPage, ADMIN_PHONE, ADMIN_PIN);
   await secondPage.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await secondPage
-    .locator('.routes__list-item', { hasText: routeNumber })
-    .getByRole('button', { name: 'Открыть' })
-    .click();
+  await openDraft(secondPage, routeNumber);
 
   const secondCard = secondPage.locator('.routes__card');
   await expect(secondCard.getByRole('button', { name: 'Перехватить' })).toBeVisible();
@@ -837,12 +949,19 @@ test('Сделки: точный выбор → расчёт → превью �
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
   // Фикстура обязательна: без неё доказывать точность выбора нечем, и проверка
-  // обязана упасть, а не пропустить себя.
-  const planRunId = requiredEnv('E2E_PLAN_RUN');
-  const selectedIds = requiredEnv('E2E_PLAN_SELECTED_IDS').split(',');
-  const selectedNumbers = requiredEnv('E2E_PLAN_SELECTED_NUMBERS').split(',');
-  const foreignId = requiredEnv('E2E_PLAN_FOREIGN_ID');
-  const foreignNumber = requiredEnv('E2E_PLAN_FOREIGN_NUMBER');
+  // обязана упасть, а не пропустить себя. Готового превью фикстура больше
+  // не создаёт — расчёт выполняется по-настоящему из браузера.
+  // Фикстура обязана существовать: она создаёт склад и обязательные настройки,
+  // без которых расчёту не из чего складываться. Проверка обязана упасть,
+  // а не пропустить себя.
+  requiredEnv('E2E_PLAN_SELECTED_NUMBERS');
+
+  // Три собственных заказа: два уходят в расчёт, третий остаётся посторонним.
+  const seededForSplit = seedOrders(3, { withPoint: true });
+  const chosen = [seededForSplit[0] ?? '', seededForSplit[1] ?? ''];
+  const foreignNumber = seededForSplit[2] ?? '';
+  expect(chosen.every((number) => number !== '')).toBe(true);
+  expect(foreignNumber).not.toBe('');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
@@ -879,105 +998,117 @@ test('Сделки: точный выбор → расчёт → превью �
   await settings.getByTestId('shift-save').click();
   await expect(page.locator('.toast-region').getByText('Смена сохранена')).toBeVisible();
 
-  // 2. «Сделки»: выбирается РОВНО набор фикстуры, посторонний заказ виден
-  //    в том же дне и остаётся невыбранным.
+  /*
+   * 2. «Сделки»: выбираются два собственных заказа, а третий остаётся
+   *    посторонним — он обязан не попасть ни в расчёт, ни в черновики.
+   */
+  // Сколько черновиков уже есть у дня: разбивка обязана добавить ровно два,
+  // а не «сделать так, чтобы их стало два» — соседние сценарии оставляют свои.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
+  const draftsBefore = await page.getByTestId('routing-drafts').locator('.routes__draft').count();
+
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
-  for (const number of selectedNumbers) {
-    const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
-    await expect(card).toBeVisible();
-    await card.getByTestId('deal-pick').click();
+  for (const number of chosen) {
+    const deal = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(deal).toHaveAttribute('data-selectable', 'yes');
+    await deal.getByTestId('deal-pick').click();
   }
+
   const foreignCard = page.locator(
     `[data-testid="deal-card"][data-order-number="${foreignNumber}"]`,
   );
-  await expect(foreignCard).toBeVisible();
   await expect(foreignCard).toHaveAttribute('data-selected', 'no');
-  await expect(page.getByTestId('deals-selected-count')).toContainText(
-    `Выбрано: ${selectedNumbers.length}`,
-  );
+  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 2');
 
   /*
    * ГРАНИЦА СЦЕНАРИЯ, названная прямо.
    *
-   * Перехватывается РОВНО ОДИН запрос — старт расчёта. Сам расчёт требует
-   * дорожного графа Valhalla, которого в браузерной проверке нет; путь расчёта
-   * доказан отдельно направленными проверками с подменёнными Valhalla и VROOM.
-   * Здесь проверяется, что клиент отправил именно выбранный набор, и
-   * возвращается идентификатор готового превью той же фикстуры. Всё после
-   * старта — настоящее: чтение превью, применение и черновики идут через
-   * реальные API и базу.
+   * Ни одного подменённого запроса здесь нет. Расчёт идёт через настоящий
+   * серверный контракт `/api/route-plans`: постановка, ожидание, превью
+   * и применение. Подменены только два внешних сервиса — решатель и матрица, —
+   * и подменены они ВНУТРИ приложения (`PLANNING_TEST_SOLVER`), а не в браузере.
+   * Прежняя проверка перехватывала сам HTTP-ответ и потому оставалась зелёной,
+   * когда клиент обращался к несуществующему адресу и слал неверное поле.
    */
-  let sentBody: { deliveryDate?: string; orderIds?: string[]; slots?: unknown[] } = {};
-  await page.route('**/api/planning/runs', async (route) => {
-    if (route.request().method() !== 'POST') {
-      await route.fallback();
-      return;
-    }
-    sentBody = JSON.parse(route.request().postData() ?? '{}');
-    await route.fulfill({
-      status: 201,
-      contentType: 'application/json',
-      body: JSON.stringify({ id: planRunId, state: 'PREVIEW' }),
-    });
-  });
 
+  // 3. Параметры разбивки логист задаёт сам: значений по умолчанию нет.
   await page.getByTestId('deals-auto-plan').click();
+  await expect(page.getByRole('heading', { name: 'Автоматическая разбивка' })).toBeVisible();
 
-  // В расчёт ушло ровно выбранное множество и ни одним заказом больше.
-  expect([...(sentBody.orderIds ?? [])].sort()).toEqual([...selectedIds].sort());
-  expect(sentBody.orderIds).not.toContain(foreignId);
-  expect(sentBody.deliveryDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-  expect(sentBody.slots?.length ?? 0).toBeGreaterThan(0);
+  // Пустые поля не пропускаются.
+  await page.getByTestId('split-submit').click();
+  await expect(page.getByText('Укажите значение.').first()).toBeVisible();
 
-  // Дальше всё настоящее: приложение открыло конкретный запуск по адресу.
-  await page.unroute('**/api/planning/runs');
-  await expect(page).toHaveURL(new RegExp(`run=${planRunId}`));
-  await expect(page.getByRole('heading', { name: 'Планирование маршрутов' })).toBeVisible();
+  // Дробное число машин тоже отвергается до сети.
+  await page.getByTestId('split-vehicles').fill('1.5');
+  await page.getByTestId('split-capacity').fill('1');
+  await page.getByTestId('split-submit').click();
+  await expect(page.getByText('Введите целое число, без дробной части.')).toBeVisible();
 
-  // Условия расчёта показаны до кнопки: логист видит, из чего сложится план.
-  await expect(page.getByText('Смена: 09:00 — 21:00')).toBeVisible();
+  // Две машины по одному заказу: выбрано два заказа, поэтому размещаются оба.
+  await page.getByTestId('split-vehicles').fill('2');
+  await page.getByTestId('split-capacity').fill('1');
+  await page.getByTestId('split-submit').click();
 
-  const unassignedBlock = page.getByTestId('plan-unassigned');
-  await expect(unassignedBlock).toBeVisible();
-  await expect(unassignedBlock.getByRole('listitem')).toHaveCount(1);
-
-  // Посторонний заказ дня в неразмещённые не попал: расчёт видел ровно
-  // выбранное множество. Проверяется именно блок превью, а не вся страница —
-  // «Маршрутизация» рядом честно показывает все заказы дня, включая его.
-  await expect(unassignedBlock).not.toContainText(foreignNumber);
-
-  // 3. Применение требует отдельного подтверждения: заказ, который никто
-  //    не повезёт, не должен уехать в черновики молча.
-  await page.getByRole('button', { name: 'Применить' }).click();
-  await expect(page.getByRole('heading', { name: /неразмещёнными заказами/ })).toBeVisible();
-  await page.getByRole('button', { name: 'Применить частично' }).click();
-
-  // Черновики созданы, и запуск перешёл в применённое состояние.
-  await expect(page.locator('[data-plan-state="APPLIED"]')).toBeVisible();
-  await expect(
-    page.locator('[data-plan-state="APPLIED"]').getByText(/Создано черновиков: 1/),
-  ).toBeVisible();
-
-  // 4. Черновик действительно появился в маршрутизации.
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  // 4. Ожидание идёт в «Сделках», а переход ведёт в ВИДИМОЕ предложение:
+  //    черновиков ещё нет и не будет до явного «Применить».
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*run=/, { timeout: 60_000 });
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
-  await expect(page.locator('.routes__number-button').first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Предложенный расчёт' })).toBeVisible();
 
-  // Состав черновика отдельно не разбирается намеренно: он целиком следует
-  // из неизменяемого снимка, а снимок уже доказан двумя проверками выше —
-  // отправленным набором заказов и отсутствием постороннего в превью.
-  // Посторонний заказ при этом остался доступным в «Сделках».
+  const drafts = page.getByTestId('routing-drafts').locator('.routes__draft');
+  await expect(drafts).toHaveCount(draftsBefore);
+
+  // 5. Предложение проверяемо: два маршрута, номера заказов, порядок остановок,
+  //    время и расстояние — а не обрезанные идентификаторы.
+  const previewRoutes = page.locator('[data-preview-route]');
+  await expect(previewRoutes).toHaveCount(2);
+  for (const number of chosen) {
+    await expect(page.locator('.routes__preview')).toContainText(number);
+  }
+  await expect(previewRoutes.first()).toContainText('В пути');
+  await expect(previewRoutes.first().locator('.routes__position').first()).toHaveText('1');
+
+  // 6. «Отклонить» не создаёт ни одного черновика.
+  await page.getByTestId('preview-dismiss').click();
+  await expect(page.getByRole('heading', { name: 'Предложенный расчёт' })).toHaveCount(0);
+  await expect(drafts).toHaveCount(draftsBefore);
+
+  // 7. Повторный расчёт того же выбора и применение: черновики появляются
+  //    только теперь.
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  for (const number of chosen) {
+    await page
+      .locator(`[data-testid="deal-card"][data-order-number="${number}"]`)
+      .getByTestId('deal-pick')
+      .click();
+  }
+  await page.getByTestId('deals-auto-plan').click();
+  await page.getByTestId('split-vehicles').fill('2');
+  await page.getByTestId('split-capacity').fill('1');
+  await page.getByTestId('split-submit').click();
+
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*run=/, { timeout: 60_000 });
+  await expect(page.getByTestId('preview-apply')).toBeEnabled();
+  await page.getByTestId('preview-apply').click();
+
+  await expect(page.getByTestId('routing-drafts').locator('.routes__draft')).toHaveCount(
+    draftsBefore + 2,
+  );
+  await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
+
+  // 6. Посторонний заказ дня в расчёт не попал и остался доступным в «Сделках».
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(
     page.locator(`[data-testid="deal-card"][data-order-number="${foreignNumber}"]`),
-  ).toBeVisible();
+  ).toHaveAttribute('data-selectable', 'yes');
 
-  // 5. Третья обязательная форма: время обслуживания. Меняется после
+  // 7. Третья обязательная форма: время обслуживания. Меняется после
   //    применения, поэтому условия уже применённого плана не задевает.
   await page.getByRole('link', { name: 'Настройки' }).first().click();
   await settings.getByTestId('service-car').fill('12');

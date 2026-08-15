@@ -168,6 +168,14 @@ export async function registerPlanningRoutes(
           shiftEndMinute: slot.shiftEndMinute,
         })),
         replacePreviewId: body.replacePreviewId,
+        // Явный выбор логиста обязан дойти до расчёта.
+        //
+        // Схема принимала `orderIds`, а обработчик их не передавал: расчёт
+        // молча брал весь пригодный день. Заказ, который логист не выбирал,
+        // попадал в план, а посторонний непригодный заказ дня блокировал
+        // расчёт целиком. Прежняя браузерная проверка этого не видела —
+        // она подменяла сам запрос.
+        orderIds: body.orderIds,
       },
       contextOf(request),
     );

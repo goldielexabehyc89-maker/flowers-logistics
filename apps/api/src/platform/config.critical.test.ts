@@ -34,6 +34,41 @@ describe('загрузка конфигурации', () => {
     expect(message).not.toContain('sup3r-s3cret');
   });
 
+  it('подменный решатель выключен по умолчанию', () => {
+    expect(loadConfig({ ...BASE }).PLANNING_TEST_SOLVER).toBe(false);
+  });
+
+  it('подменный решатель допустим только в локальном окружении', () => {
+    // Он не оптимизирует, а раскладывает заказы подряд. Выданный за посчитанный
+    // план на staging или в production был бы обманом, поэтому проверка
+    // происходит до старта приложения, а не «договорённостью выключить».
+    expect(() =>
+      loadConfig({ ...BASE, APP_ENV: 'local', PLANNING_TEST_SOLVER: 'true' }),
+    ).not.toThrow();
+
+    for (const env of ['staging', 'production'] as const) {
+      expect(() =>
+        loadConfig({
+          ...BASE,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: env,
+          PLANNING_TEST_SOLVER: 'true',
+        }),
+      ).toThrow(/PLANNING_TEST_SOLVER/);
+    }
+
+    // Смешанная конфигурация тоже отвергается: маркер production при APP_ENV=local
+    // означает ошибку развёртывания, а не локальную машину.
+    expect(() =>
+      loadConfig({
+        ...BASE,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'production',
+        PLANNING_TEST_SOLVER: 'true',
+      }),
+    ).toThrow(/PLANNING_TEST_SOLVER/);
+  });
+
   it('применяет безопасные значения по умолчанию', () => {
     const config = loadConfig({ ...BASE });
 

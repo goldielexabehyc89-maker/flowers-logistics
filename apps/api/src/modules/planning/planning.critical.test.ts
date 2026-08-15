@@ -65,6 +65,9 @@ const DAY_FIVE = '2026-12-05';
 const DAY_SIX = '2026-12-06';
 const DAY_SEVEN = '2026-12-07';
 const DAY_EIGHT = '2026-12-08';
+const DAY_NINE = '2026-12-09';
+const DAY_TEN = '2026-12-10';
+const DAY_ELEVEN = '2026-12-11';
 
 const SHIFT = { startMinute: 9 * 60, endMinute: 21 * 60 };
 
@@ -209,6 +212,11 @@ function fakeMatrix(): MatrixDeps['valhalla'] {
 interface FakeSolver {
   requests: VroomRequest[];
   solve: (request: VroomRequest) => Promise<VroomSolution>;
+  /**
+   * Настроен ли решатель. Постановка запуска читает это ДО создания записи:
+   * ненастроенный решатель обязан ответить отказом, а не оставить `QUEUED`.
+   */
+  configured: boolean;
 }
 
 /**
@@ -223,6 +231,7 @@ function fakeSolver(
   const requests: VroomRequest[] = [];
   return {
     requests,
+    configured: true,
     async solve(request) {
       requests.push(request);
       if (handler !== undefined) {
@@ -378,6 +387,46 @@ describe('условия планирования', () => {
     }
 
     expect((await findDefaultDepot(ctx.db))?.id).toBe(depotId);
+  });
+
+  it('ненастроенный решатель отказывает 503 и НЕ создаёт запись расчёта', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    // Заказ нужен второй половине проверки: она ставит настоящий запуск на тот
+    // же день и тем доказывает, что отказ не занял дату.
+    await seedOrder({ day: DAY_THREE });
+
+    // Фоновый исполнитель поднимается только при заданном адресе решателя.
+    // Принятый в таких условиях запуск остался бы `QUEUED` навсегда и держал бы
+    // день уникальным `activeDateKey`: следующий расчёт получал бы «уже идёт
+    // расчёт», хотя не считает никто.
+    const deps = planningDeps({ solver: { ...fakeSolver(), configured: false } });
+
+    await expect(
+      requestPlan(deps, actor, { deliveryDate: DAY_THREE, slots: [slot()] }, CONTEXT),
+    ).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+
+    // Проверяется именно отсутствие записи, а не текст отказа: вечный `QUEUED`
+    // и был той поломкой, ради которой добавлена проверка.
+    expect(
+      await ctx.db.routePlanRun.count({
+        where: { deliveryDate: new Date(`${DAY_THREE}T00:00:00Z`) },
+      }),
+    ).toBe(0);
+
+    // День остался свободным: настроенный решатель ставит запуск на ту же дату.
+    // Если бы отказ всё-таки создал запись, уникальный `activeDateKey` ответил бы
+    // здесь конфликтом «день уже считается».
+    const ok = await requestPlan(
+      planningDeps({ solver: fakeSolver() }),
+      actor,
+      { deliveryDate: DAY_THREE, slots: [slot()] },
+      CONTEXT,
+    );
+    expect(ok.state).toBe('QUEUED');
+
+    // Запуск не досчитывается: очередь общая, и брошенный `QUEUED` поймала бы
+    // чужая проверка аренды.
+    await clearQueue();
   });
 
   it('заказ без подтверждённой точки останавливает весь расчёт и назван поимённо', async () => {
@@ -1313,6 +1362,115 @@ describe('истечение превью', () => {
     // День снова свободен.
     const third = await requestPlan(deps, actor, { deliveryDate: day, slots: [slot()] }, CONTEXT);
     expect(third.state).toBe('QUEUED');
+  });
+});
+
+// --- Параметры машин --------------------------------------------------------
+
+describe('параметры машин приходят от логиста', () => {
+  it('сколько машин указано, столько слотов и попадает в снимок входа', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    await seedOrder({ day: DAY_NINE });
+
+    const started = await requestPlan(
+      planningDeps({ solver: fakeSolver() }),
+      actor,
+      {
+        deliveryDate: DAY_NINE,
+        slots: [slot(7), slot(7), slot(7)],
+      },
+      CONTEXT,
+    );
+
+    const slots = await ctx.db.routePlanVehicleSlot.findMany({
+      where: { runId: started.id },
+      orderBy: { slotIndex: 'asc' },
+    });
+
+    // Число машин не выводится из количества заказов: заказ один, машин три.
+    expect(slots).toHaveLength(3);
+    expect(slots.map((item) => item.capacityOrders)).toEqual([7, 7, 7]);
+
+    await clearQueue();
+  });
+
+  it('выбор логиста доходит до расчёта через HTTP, а не теряется в обработчике', async () => {
+    /*
+     * Схема принимала `orderIds`, а обработчик их не передавал: расчёт молча
+     * брал весь пригодный день. Сервисная проверка этого не видела — она зовёт
+     * `requestPlan` напрямую, минуя HTTP.
+     *
+     * Здесь берётся ровно один заказ из двух пригодных, и доказывается, что
+     * в снимок входа попал только он.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const chosen = await seedOrder({ day: DAY_ELEVEN });
+    await seedOrder({ day: DAY_ELEVEN });
+
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/route-plans',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        deliveryDate: DAY_ELEVEN,
+        orderIds: [chosen],
+        slots: [{ vehicleType: 'CAR', capacityOrders: 10 }],
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    const runId = (response.json() as { id: string }).id;
+
+    const snapshot = await ctx.db.routePlanInputSnapshot.findUniqueOrThrow({
+      where: { runId },
+      select: { payload: true },
+    });
+    const orders = (snapshot.payload as unknown as PlanInputSnapshot).orders;
+
+    expect(orders.map((order) => order.orderId)).toEqual([chosen]);
+
+    await clearQueue();
+  });
+
+  it('невалидные параметры отклоняются HTTP-слоем и не создают расчёт', async () => {
+    // Сервер проверяет параметры заново: клиентская проверка — удобство,
+    // а не защита. Отклонённый запрос не должен оставить ни запуска, ни
+    // занятого дня.
+    const token = await tokenFor(['LOGISTICIAN']);
+    // Считается прирост, а не абсолютное число: файл работает в общей базе,
+    // и чужие запуски к этой проверке отношения не имеют.
+    const before = await ctx.db.routePlanRun.count();
+
+    const invalid = [
+      { title: 'ноль машин', slots: [] },
+      { title: 'нулевая вместимость', slots: [{ vehicleType: 'CAR', capacityOrders: 0 }] },
+      { title: 'отрицательная вместимость', slots: [{ vehicleType: 'CAR', capacityOrders: -5 }] },
+      { title: 'дробная вместимость', slots: [{ vehicleType: 'CAR', capacityOrders: 2.5 }] },
+      { title: 'вместимость не числом', slots: [{ vehicleType: 'CAR', capacityOrders: 'много' }] },
+      // Прежний клиент слал именно это поле, и запрос отвергался до расчёта.
+      {
+        title: 'поле capacity вместо capacityOrders',
+        slots: [{ vehicleType: 'CAR', capacity: 10 }],
+      },
+      {
+        title: 'машин больше предела',
+        slots: Array.from({ length: 51 }, () => ({ vehicleType: 'CAR', capacityOrders: 10 })),
+      },
+    ];
+
+    for (const variant of invalid) {
+      const response = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/route-plans',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { deliveryDate: DAY_TEN, slots: variant.slots },
+      });
+
+      expect(response.statusCode, variant.title).toBe(400);
+    }
+
+    // Ни один отклонённый запрос не оставил после себя запуска.
+    expect(await ctx.db.routePlanRun.count()).toBe(before);
   });
 });
 

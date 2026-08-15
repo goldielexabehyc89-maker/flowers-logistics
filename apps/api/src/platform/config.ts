@@ -237,6 +237,23 @@ const configSchema = z.object({
     .optional(),
 
   /**
+   * Подменные решатель и матрица вместо VROOM и Valhalla.
+   *
+   * Существует ради браузерной приёмки: она обязана проходить через настоящий
+   * серверный контракт, а не подменять HTTP-ответ в браузере. Настоящий расчёт
+   * требует дорожного графа и отдельных сервисов, которых в проверке нет.
+   *
+   * Оптимизации подменный решатель не выполняет и выполнять не может: он
+   * раскладывает заказы подряд по вместимости. Значение допустимо ТОЛЬКО
+   * в локальном окружении — план, выданный им за посчитанный, на staging или
+   * в production был бы обманом.
+   */
+  PLANNING_TEST_SOLVER: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
+  /**
    * Верхняя граница числа точек матрицы: она растёт квадратично.
    *
    * Значение по умолчанию берётся из общего источника, а не пишется числом:
@@ -353,6 +370,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   assertMoyskladEnvironment(parsed.data);
   assertDadataEnvironment(parsed.data);
+  assertTestSolverEnvironment(parsed.data);
   assertGeocodingSource(parsed.data);
 
   return Object.freeze({
@@ -489,6 +507,27 @@ function assertDadataEnvironment(data: z.infer<typeof configSchema>): void {
   // экран обещал бы подсказки, которых не будет.
   if (data.DADATA_GEOCODING_ENABLED && data.DADATA_API_KEY === undefined) {
     throw new Error('DADATA_GEOCODING_ENABLED=true требует DADATA_API_KEY');
+  }
+}
+
+/**
+ * Подменный решатель допустим только в локальном окружении.
+ *
+ * Он не оптимизирует, а раскладывает заказы подряд. План, выданный им
+ * за посчитанный, на staging или в production был бы обманом, и никакой
+ * договорённости «включим только на время» здесь недостаточно: проверка
+ * происходит до старта приложения.
+ */
+function assertTestSolverEnvironment(data: z.infer<typeof configSchema>): void {
+  if (!data.PLANNING_TEST_SOLVER) {
+    return;
+  }
+
+  if (data.APP_ENV !== 'local' || data.APP_ENVIRONMENT_MARKER === 'production') {
+    throw new Error(
+      'PLANNING_TEST_SOLVER=true допустим только при APP_ENV=local: подменный ' +
+        'решатель не считает маршруты и его план нельзя выдавать за расчёт',
+    );
   }
 }
 

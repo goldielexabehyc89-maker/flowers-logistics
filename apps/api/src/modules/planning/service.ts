@@ -84,7 +84,12 @@ export interface PlanningDeps {
   logger: AppLogger;
   /** Зависимости сервиса матриц. Сетевые вызовы выполняются строго вне транзакции. */
   matrix: MatrixDeps;
-  vroom: Pick<VroomClient, 'solve'>;
+  /**
+   * Решатель. `configured` читается ДО постановки запуска: без адреса решателя
+   * фоновый исполнитель не поднимается вовсе, и принятый запуск остался бы
+   * в `QUEUED` навсегда, молча удерживая день уникальным `activeDateKey`.
+   */
+  vroom: Pick<VroomClient, 'solve' | 'configured'>;
   /** Ворота решателя: подтверждают, что он отвечает и учитывает время обслуживания. */
   verifySolver: () => Promise<void>;
   /** Версия решателя, объявленная конфигурацией. Пишется в снимок результата. */
@@ -159,6 +164,25 @@ export async function requestPlan(
     throw new AppError('SERVICE_UNAVAILABLE', {
       message: 'graph content revision is not configured',
       publicMessage: 'Планирование недоступно: не задано содержимое дорожного графа.',
+    });
+  }
+
+  // Отказ ДО создания записи, а не после.
+  //
+  // Фоновый исполнитель поднимается только при заданном адресе решателя
+  // (`index.ts`). Без него принятый запуск навсегда остался бы в `QUEUED`
+  // и удерживал бы день уникальным `activeDateKey`: следующий расчёт того же
+  // дня получал бы «уже идёт расчёт», хотя не считает никто. Снять такой
+  // запуск можно было бы только руками.
+  //
+  // Проверяется настройка, а не живой ответ решателя: сетевое обращение
+  // на пути постановки означало бы ожидание и новый режим отказа. Готовность
+  // самого решателя проверяет `verifySolver` уже внутри расчёта.
+  if (!deps.vroom.configured) {
+    throw new AppError('SERVICE_UNAVAILABLE', {
+      message: 'solver is not configured',
+      publicMessage:
+        'Автоматический расчёт недоступен: решатель не настроен. Ручные черновики продолжают работать.',
     });
   }
 
@@ -938,6 +962,20 @@ export interface RunView {
     shiftEndMinute: number;
   }[];
   preview: PlanResult | null;
+  /**
+   * Заказы превью по-человечески.
+   *
+   * Превью без номера и адреса проверить нельзя: обрезанный идентификатор
+   * ничего не говорит логисту, а применение необратимо создаёт черновики.
+   * Снимок при этом остаётся неизменяемым — это отдельное чтение, а не правка.
+   */
+  orders: {
+    id: string;
+    number: string;
+    address: string | null;
+    intervalStartMinute: number | null;
+    intervalEndMinute: number | null;
+  }[];
   routeIds: string[];
 }
 
@@ -973,6 +1011,34 @@ export async function readRun(db: Database, runId: string): Promise<RunView> {
     throw new AppError('NOT_FOUND', { message: 'plan run not found' });
   }
 
+  const preview = run.result === null ? null : (run.result.plan as unknown as PlanResult);
+
+  // Заказы читаются по идентификаторам плана: и остановки, и неразмещённые.
+  const orderIds =
+    preview === null
+      ? []
+      : [
+          ...preview.routes.flatMap((route) => route.stops.map((stop) => stop.orderId)),
+          ...preview.unassignedOrderIds,
+        ];
+
+  const orders =
+    orderIds.length === 0
+      ? []
+      : await db.deliveryOrder.findMany({
+          where: { id: { in: orderIds } },
+          select: {
+            id: true,
+            externalName: true,
+            address: true,
+            localAddress: true,
+            intervalStartMinute: true,
+            intervalEndMinute: true,
+            manualIntervalStartMinute: true,
+            manualIntervalEndMinute: true,
+          },
+        });
+
   return {
     id: run.id,
     deliveryDate: run.deliveryDate.toISOString().slice(0, 10),
@@ -982,7 +1048,16 @@ export async function readRun(db: Database, runId: string): Promise<RunView> {
     createdAt: run.createdAt.toISOString(),
     appliedAt: run.appliedAt?.toISOString() ?? null,
     slots: run.slots,
-    preview: run.result === null ? null : (run.result.plan as unknown as PlanResult),
+    preview,
+    orders: orders.map((order) => ({
+      id: order.id,
+      number: order.externalName,
+      // Правка логиста сильнее исходного адреса: курьер поедет по ней.
+      address: order.localAddress ?? order.address,
+      // Ручной интервал тоже сильнее импортированного.
+      intervalStartMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
+      intervalEndMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
+    })),
     routeIds: run.routes.map((route) => route.id),
   };
 }

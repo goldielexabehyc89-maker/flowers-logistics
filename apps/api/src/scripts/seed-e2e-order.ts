@@ -54,6 +54,21 @@ async function main(): Promise<number> {
   const countArg = process.argv.find((argument) => argument.startsWith('--count='));
   const count = Math.min(Math.max(Number(countArg?.split('=')[1] ?? '1') || 1, 1), 10);
 
+  /**
+   * Сразу поставить подтверждённую точку.
+   *
+   * Без неё заказ непригоден к распределению, и сценарию, которому нужен
+   * готовый к работе заказ, пришлось бы занимать чужой. Каждый сценарий
+   * получает СВОИ заказы — только так повторный прогон набора даёт тот же
+   * результат, а не зависит от того, что успели забрать соседи.
+   *
+   * Координаты синтетические и в production не встречаются.
+   */
+  const withPoint = process.argv.includes('--with-point');
+
+  /** Разобранное окно доставки: заказ выходит из «Требует внимания». */
+  const recognizedInterval = process.argv.includes('--recognized-interval');
+
   const db = createDatabase(config, logger);
   try {
     for (let index = 0; index < count; index += 1) {
@@ -118,9 +133,20 @@ async function main(): Promise<number> {
           externalStateType: 'Regular',
           deliveryDate: toDateColumn(moscowToday(new Date())),
           deliveryDateRaw: `${moscowToday(new Date())} 12:00:00.000`,
-          // Интервал намеренно не распознан: сценарий проверяет ручное исправление.
-          intervalRaw: 'уточнить у клиента',
-          intervalKind: 'UNRECOGNIZED',
+          /*
+           * По умолчанию интервал НЕ распознан: сценарий ручного исправления
+           * интервала проверяет именно это.
+           *
+           * С `--recognized-interval` заказ получает разобранное окно и выходит
+           * из «Требует внимания». Это нужно сценариям, которым мешает ровно
+           * одна причина — отсутствие точки или ничего: иначе они доказывали бы
+           * не то, что заявляют.
+           */
+          intervalRaw: recognizedInterval ? 'с 12:00 по 18:00' : 'уточнить у клиента',
+          intervalKind: recognizedInterval ? 'RANGE' : 'UNRECOGNIZED',
+          ...(recognizedInterval
+            ? { intervalStartMinute: 12 * 60, intervalEndMinute: 18 * 60 }
+            : {}),
           address: 'Москва, проверочный адрес 1',
           recipient: 'Проверочный Получатель',
           comment: 'Проверочный заказ браузерного сценария',
@@ -129,8 +155,8 @@ async function main(): Promise<number> {
           cashCollectable: true,
           cashToCollectMinor: 499000n,
           inScope: true,
-          needsAttention: true,
-          attentionReasons: ['UNRECOGNIZED_INTERVAL'],
+          needsAttention: !recognizedInterval,
+          attentionReasons: recognizedInterval ? [] : ['UNRECOGNIZED_INTERVAL'],
           version: 1,
           // Производственная область: она шире логистической и включает этот
           // заказ независимо от способа получения.
@@ -181,6 +207,22 @@ async function main(): Promise<number> {
         },
         select: { id: true, externalName: true },
       });
+
+      if (withPoint) {
+        // Точки разнесены по индексу: совпадающие координаты дали бы один
+        // ключ кэша матриц, и расчёт вернул бы чужой результат.
+        await db.deliveryOrder.update({
+          where: { id: order.id },
+          data: {
+            geoState: 'RESOLVED',
+            geoSource: 'SYNTHETIC',
+            geoPrecision: 'EXACT_HOUSE',
+            geoLatMicro: 55_760_000 + index * 1_000,
+            geoLonMicro: 37_600_000 + index * 1_000,
+            geoResolvedAt: new Date(),
+          },
+        });
+      }
 
       logger.info({ number: order.externalName }, 'проверочный заказ создан');
       // Номер нужен браузерному сценарию, поэтому печатается отдельной строкой.
