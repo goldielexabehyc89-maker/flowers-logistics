@@ -1,8 +1,9 @@
 /**
  * Общий каркас приложения.
  *
- * Desktop: боковая панель и верхняя строка. Mobile: верхняя панель и нижняя
- * навигация не более чем из четырёх кнопок, последняя — «Ещё».
+ * Desktop: постоянная боковая панель слева и закреплённая строка заголовка над
+ * содержимым. Mobile: верхняя панель с бургером, содержимое и нижняя навигация
+ * не более чем из четырёх кнопок, последняя — «Ещё».
  *
  * Единственный доступный раздел нижнюю навигацию не получает вовсе. Кнопка,
  * ведущая на уже открытую страницу, ничего не даёт: она дублирует заголовок,
@@ -17,24 +18,80 @@
 
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
+import {
+  Flower2,
+  History,
+  LogOut,
+  Menu,
+  PackageCheck,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Route,
+  Settings,
+  Store,
+  Users,
+  Warehouse,
+  type LucideIcon,
+} from 'lucide-react';
 import { ROLE_LABELS } from '@fl/shared';
 import { useAuth } from '../auth/AuthContext';
-import { LOGISTICS_TABS, splitMobileNavigation, visibleSections } from '../navigation/navigation';
-import { Button, Modal } from '../ui/components';
+import {
+  LOGISTICS_TABS,
+  isWideLayout,
+  splitMobileNavigation,
+  visibleSections,
+} from '../navigation/navigation';
+import { Button, ICON_SIZE, Modal } from '../ui/components';
 import { useRealtime } from '../realtime/useRealtime';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import './shell.css';
 
 /**
- * Перекрывает ли меню содержимое.
+ * Иконка раздела.
  *
- * Порог совпадает с точкой в `shell.css`: одно правило в двух местах разошлось
- * бы, и меню закрывалось бы там, где оно ничего не перекрывает.
+ * Карта лежит здесь, а не в `navigation.ts`: там чистая конфигурация разделов
+ * и прав, которую читает и логика доступа. Иконка — оформление, и тянуть
+ * React-зависимость в модуль правил незачем.
+ *
+ * Свёрнутое меню показывает ТОЛЬКО иконку, поэтому раздел без своей иконки
+ * стал бы неотличим от соседнего. Значение по умолчанию не задаётся намеренно:
+ * новый раздел обязан получить знак осознанно.
  */
-const OVERLAY_QUERY = '(max-width: 900px)';
+const SECTION_ICONS: Readonly<Record<string, LucideIcon>> = {
+  logistics: Route,
+  active: PackageCheck,
+  history: History,
+  couriers: Users,
+  florist: Flower2,
+  warehouse: Warehouse,
+  pickup: Store,
+  settings: Settings,
+};
 
-function isOverlayViewport(): boolean {
-  return typeof window !== 'undefined' && window.matchMedia(OVERLAY_QUERY).matches;
+/**
+ * Ключ сохранённого состояния меню.
+ *
+ * Состояние живёт в браузере, а не в профиле: это привычка на конкретном
+ * устройстве, а не свойство сотрудника. На большом мониторе меню держат
+ * раскрытым, на ноутбуке — свёрнутым, и один и тот же человек ожидает разного.
+ */
+const SIDEBAR_STORAGE_KEY = 'fl.sidebar.collapsed';
+
+function readCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1';
+  } catch {
+    // Приватный режим и заблокированное хранилище — не повод не открыть меню.
+    return false;
+  }
+}
+
+function writeCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0');
+  } catch {
+    // Настройка не сохранилась — интерфейс всё равно обязан работать.
+  }
 }
 
 export function AppShell(): React.JSX.Element {
@@ -43,14 +100,20 @@ export function AppShell(): React.JSX.Element {
   const [menuOpen, setMenuOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   /**
-   * Раскрыто ли боковое меню.
+   * Свёрнуто ли боковое меню на широком экране.
    *
-   * Начальное значение — «раскрыто», и оно НЕ запоминается: ни в профиле,
-   * ни в local/session storage. Решение владельца: каждый новый вход и каждое
-   * обновление страницы начинаются с раскрытого меню, поэтому состояние живёт
-   * ровно столько, сколько живёт эта страница.
+   * Состояние сохраняется между входами — решение владельца. Свёрнутое меню
+   * остаётся полосой с иконками: полное исчезновение оставляло бы человека без
+   * ориентира, где он находится.
    */
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  /**
+   * Открыт ли drawer на телефоне.
+   *
+   * Отдельное состояние, и оно НЕ сохраняется: на узком экране меню перекрывает
+   * страницу, и восстановленное после входа открытое меню закрывало бы работу.
+   */
+  const [drawerOpen, setDrawerOpen] = useState(false);
   // Один канал обновлений на всё приложение.
   const realtime = useRealtime();
 
@@ -67,6 +130,11 @@ export function AppShell(): React.JSX.Element {
    */
   const singleSection = sections.length <= 1;
 
+  // Карты и крупные рабочие таблицы занимают всю ширину; обычная страница
+  // остаётся колонкой. Решение принимается по адресу, а не экраном: иначе
+  // каждый раздел договаривался бы о ширине сам.
+  const wide = isWideLayout(location.pathname);
+
   // Внутри «Логистики» заголовок страницы называет ОТКРЫТУЮ ВКЛАДКУ, а не
   // раздел: человек находится в «Сделках», и заголовок «Логистика» ничего
   // ему не сообщал бы.
@@ -79,59 +147,99 @@ export function AppShell(): React.JSX.Element {
   // закрывается само, иначе пользователь остаётся смотреть на меню вместо
   // экрана, который только что выбрал.
   //
-  // На широком экране меню НЕ закрывается: там оно занимает свою колонку и
-  // ничего не перекрывает, а самопроизвольное схлопывание после каждого
-  // перехода означало бы, что до соседнего раздела нужно два действия вместо
-  // одного.
+  // Свёрнутость на широком экране этим не затрагивается: там меню занимает свою
+  // колонку и ничего не перекрывает.
   useEffect(() => {
-    if (isOverlayViewport()) {
-      setSidebarOpen(false);
-    }
+    setDrawerOpen(false);
   }, [location.pathname]);
 
   // Escape закрывает overlay. Это доступность, а не новый смысл: без клавиатуры
   // выход из меню оставался бы только мышью.
   useEffect(() => {
-    if (!sidebarOpen) {
+    if (!drawerOpen) {
       return undefined;
     }
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
-        setSidebarOpen(false);
+        setDrawerOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sidebarOpen]);
+  }, [drawerOpen]);
+
+  function toggleCollapsed(): void {
+    setCollapsed((current) => {
+      const next = !current;
+      writeCollapsed(next);
+      return next;
+    });
+  }
 
   return (
     <div
       className={[
         'shell',
-        sidebarOpen ? null : 'shell--collapsed',
+        collapsed ? 'shell--collapsed' : null,
+        drawerOpen ? 'shell--drawer-open' : null,
         singleSection ? 'shell--single-section' : null,
       ]
         .filter((name) => name !== null)
         .join(' ')}
     >
-      <aside className="shell__sidebar" id="shell-sidebar" hidden={!sidebarOpen}>
-        <div className="shell__brand">Логистика</div>
-        <nav aria-label="Основные разделы">
+      <aside className="shell__sidebar" id="shell-sidebar">
+        <div className="shell__brand">
+          <span className="shell__brand-mark" aria-hidden>
+            Л
+          </span>
+          <span className="shell__brand-text">Логистика</span>
+        </div>
+        <nav className="shell__nav-area" aria-label="Основные разделы">
           <ul className="shell__nav">
-            {sections.map((section) => (
-              <li key={section.key}>
-                <NavLink
-                  to={section.path}
-                  className={({ isActive }) =>
-                    isActive ? 'shell__link shell__link--active' : 'shell__link'
-                  }
-                >
-                  {section.title}
-                </NavLink>
-              </li>
-            ))}
+            {sections.map((section) => {
+              const Icon = SECTION_ICONS[section.key];
+              return (
+                <li key={section.key}>
+                  <NavLink
+                    to={section.path}
+                    className={({ isActive }) =>
+                      isActive ? 'shell__link shell__link--active' : 'shell__link'
+                    }
+                    // В свёрнутом состоянии подпись скрыта, и подсказка остаётся
+                    // единственным способом узнать раздел, не разворачивая меню.
+                    title={section.title}
+                  >
+                    {Icon !== undefined && (
+                      <Icon className="shell__link-icon" size={ICON_SIZE} aria-hidden />
+                    )}
+                    <span className="shell__link-text">{section.title}</span>
+                  </NavLink>
+                </li>
+              );
+            })}
           </ul>
         </nav>
+
+        {/*
+          Имя сотрудника и выход закреплены внизу панели. Кнопка подписана
+          «Выход», а не «Выйти»: рядом, в окне учётной записи, живёт настоящее
+          завершение сессии, и два одинаково подписанных элемента на одной
+          странице человек различал бы только по месту.
+        */}
+        <div className="shell__account">
+          <span className="shell__account-name" title={user?.fullName ?? ''}>
+            {user?.fullName ?? 'Пользователь'}
+          </span>
+          <Button
+            variant="ghost"
+            className="btn--icon"
+            aria-label="Выход"
+            title="Выход"
+            onClick={() => void logout()}
+          >
+            <LogOut size={ICON_SIZE} aria-hidden />
+          </Button>
+        </div>
       </aside>
 
       {/*
@@ -139,29 +247,46 @@ export function AppShell(): React.JSX.Element {
         она не показывается — там меню занимает свою колонку, а не перекрывает
         содержимое.
       */}
-      {sidebarOpen && (
+      {drawerOpen && (
         <button
           type="button"
           className="shell__scrim"
           aria-label="Закрыть меню"
-          onClick={() => setSidebarOpen(false)}
+          onClick={() => setDrawerOpen(false)}
         />
       )}
 
       <header className="shell__topbar">
         {/*
-          Кнопка открытия доступна ВСЕГДА, а не только в свёрнутом состоянии:
-          иначе меню, скрытое полностью, оставляло бы пользователя без входа
-          обратно. Узкой полосы с иконками при этом не остаётся.
+          Две разные кнопки, а не одна с поведением «смотря какой экран».
+          На телефоне бургер открывает drawer, на широком экране — сворачивает
+          колонку до полосы с иконками. Это разные действия, и подписаны они
+          по-разному; лишняя в текущей раскладке скрыта стилями.
         */}
         <button
           type="button"
-          className="shell__menu-button"
-          aria-expanded={sidebarOpen}
+          className="shell__drawer-button"
+          aria-expanded={drawerOpen}
           aria-controls="shell-sidebar"
-          onClick={() => setSidebarOpen((open) => !open)}
+          aria-label="Меню"
+          onClick={() => setDrawerOpen((open) => !open)}
         >
-          {sidebarOpen ? 'Скрыть меню' : 'Показать меню'}
+          <Menu size={ICON_SIZE} aria-hidden />
+        </button>
+        <button
+          type="button"
+          className="shell__menu-button"
+          aria-expanded={!collapsed}
+          aria-controls="shell-sidebar"
+          aria-label={collapsed ? 'Показать меню' : 'Свернуть меню'}
+          title={collapsed ? 'Показать меню' : 'Свернуть меню'}
+          onClick={toggleCollapsed}
+        >
+          {collapsed ? (
+            <PanelLeftOpen size={ICON_SIZE} aria-hidden />
+          ) : (
+            <PanelLeftClose size={ICON_SIZE} aria-hidden />
+          )}
         </button>
         <h1 className="shell__title">{currentTitle}</h1>
         <div className="row">
@@ -173,24 +298,31 @@ export function AppShell(): React.JSX.Element {
       </header>
 
       <main className="shell__content">
-        <Outlet />
+        <div className={wide ? 'shell__page shell__page--wide' : 'shell__page'}>
+          <Outlet />
+        </div>
       </main>
 
       {!singleSection && (
         <nav className="shell__bottombar" aria-label="Навигация">
-          {mobile.primary.map((section) => (
-            <NavLink
-              key={section.key}
-              to={section.path}
-              className={({ isActive }) =>
-                isActive ? 'shell__tab shell__tab--active' : 'shell__tab'
-              }
-            >
-              {section.shortTitle}
-            </NavLink>
-          ))}
+          {mobile.primary.map((section) => {
+            const Icon = SECTION_ICONS[section.key];
+            return (
+              <NavLink
+                key={section.key}
+                to={section.path}
+                className={({ isActive }) =>
+                  isActive ? 'shell__tab shell__tab--active' : 'shell__tab'
+                }
+              >
+                {Icon !== undefined && <Icon size={20} aria-hidden />}
+                {section.shortTitle}
+              </NavLink>
+            );
+          })}
           {mobile.extra.length > 0 && (
             <button type="button" className="shell__tab" onClick={() => setMenuOpen(true)}>
+              <Menu size={20} aria-hidden />
               Ещё
             </button>
           )}
@@ -199,13 +331,23 @@ export function AppShell(): React.JSX.Element {
 
       <Modal open={menuOpen} title="Разделы" onClose={() => setMenuOpen(false)}>
         <ul className="shell__nav">
-          {mobile.extra.map((section) => (
-            <li key={section.key}>
-              <NavLink to={section.path} className="shell__link" onClick={() => setMenuOpen(false)}>
-                {section.title}
-              </NavLink>
-            </li>
-          ))}
+          {mobile.extra.map((section) => {
+            const Icon = SECTION_ICONS[section.key];
+            return (
+              <li key={section.key}>
+                <NavLink
+                  to={section.path}
+                  className="shell__link"
+                  onClick={() => setMenuOpen(false)}
+                >
+                  {Icon !== undefined && (
+                    <Icon className="shell__link-icon" size={ICON_SIZE} aria-hidden />
+                  )}
+                  <span className="shell__link-text">{section.title}</span>
+                </NavLink>
+              </li>
+            );
+          })}
         </ul>
       </Modal>
 

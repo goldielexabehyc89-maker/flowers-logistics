@@ -7,7 +7,17 @@
  */
 
 import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { X } from 'lucide-react';
 import './components.css';
+
+/**
+ * Размер иконки интерфейса.
+ *
+ * Одно значение на всё приложение: иконка в меню, в кнопке и в заголовке — это
+ * один и тот же знак, и разнобой в один-два пикселя заметен именно там, где
+ * они стоят рядом.
+ */
+export const ICON_SIZE = 17;
 
 // ---------------------------------------------------------------------------
 // Кнопка
@@ -278,7 +288,7 @@ export function Modal({
         <h2>{title}</h2>
         {dismissible && (
           <Button variant="ghost" onClick={onClose} aria-label="Закрыть">
-            ✕
+            <X size={ICON_SIZE} aria-hidden />
           </Button>
         )}
       </div>
@@ -333,9 +343,150 @@ export function ConfirmDialog({
   );
 }
 
+/**
+ * Шторка рабочего процесса.
+ *
+ * На телефоне открывается снизу, на широком экране — тем же окном по центру.
+ * Это НЕ второй вид модального окна: разница только в геометрии, поэтому
+ * компонент построен на том же `Modal`, а не на собственном `<dialog>`.
+ * Второй реализацией пришлось бы заново получать фокус-ловушку, Escape,
+ * верхний слой и возврат фокуса — всё то, что здесь уже работает.
+ *
+ * Ширина ограничена: шторка ведёт ОДНО действие — заголовок, короткий контекст,
+ * текущий шаг. Широкие формы остаются обычным `Modal`.
+ */
+export type DrawerProps = Omit<ModalProps, 'className'>;
+
+export function Drawer(props: DrawerProps): React.JSX.Element | null {
+  return <Modal {...props} className="modal--drawer" />;
+}
+
+// ---------------------------------------------------------------------------
+// Заголовок страницы, фильтры и переключатель режима
+// ---------------------------------------------------------------------------
+
+export interface PageHeaderProps {
+  title: string;
+  description?: ReactNode;
+  /** Основное действие раздела или переключатель режима. */
+  actions?: ReactNode;
+}
+
+/**
+ * Заголовок страницы: белая закреплённая панель над содержимым.
+ *
+ * Заголовок здесь `<h2>`, а не `<h1>`: имя раздела уже объявлено оболочкой
+ * в верхней строке, и второй `<h1>` на странице сделал бы структуру документа
+ * неоднозначной для программ чтения с экрана.
+ */
+export function PageHeader({ title, description, actions }: PageHeaderProps): React.JSX.Element {
+  return (
+    <div className="page-header">
+      <div className="page-header__title">
+        <h2>{title}</h2>
+        {description !== undefined && <p className="muted text-sm">{description}</p>}
+      </div>
+      {actions !== undefined && <div className="page-header__actions">{actions}</div>}
+    </div>
+  );
+}
+
+/**
+ * Панель фильтров.
+ *
+ * На широком экране поля выстраиваются в строку, на телефоне складываются
+ * в столбец. Отдельная поверхность нужна, чтобы фильтры не читались как часть
+ * данных: иначе строка поиска выглядит первой строкой таблицы.
+ */
+export function FilterPanel({
+  children,
+  actions,
+}: {
+  children: ReactNode;
+  actions?: ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="filters">
+      <div className="filters__fields">{children}</div>
+      {actions !== undefined && <div className="filters__actions">{actions}</div>}
+    </div>
+  );
+}
+
+export interface SegmentedOption<T extends string> {
+  value: T;
+  label: ReactNode;
+  /** Метка для браузерных проверок. */
+  testId?: string;
+}
+
+/**
+ * Компактный переключатель режима.
+ *
+ * Одновременно активен строго один вариант, поэтому кнопки объявлены группой
+ * с `aria-pressed`, а не набором независимых переключателей: программа чтения
+ * с экрана обязана сообщать, какой режим выбран сейчас.
+ *
+ * Значение приходит извне и НЕ хранится внутри: у режима, как правило, есть
+ * query-параметр, и внутреннее состояние разошлось бы с адресом страницы.
+ */
+export function SegmentedControl<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+}: {
+  options: readonly SegmentedOption<T>[];
+  value: T;
+  onChange: (value: T) => void;
+  label: string;
+}): React.JSX.Element {
+  return (
+    <div className="segmented" role="group" aria-label={label}>
+      {options.map((option) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            className={active ? 'segmented__item segmented__item--active' : 'segmented__item'}
+            aria-pressed={active}
+            data-testid={option.testId}
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Таблица и постраничная навигация
 // ---------------------------------------------------------------------------
+
+/**
+ * Поверхность таблицы или списка.
+ *
+ * Класс `table-wrap` сохранён: на него уже ссылаются существующие разделы,
+ * и переименование потребовало бы одновременной правки каждого из них.
+ *
+ * Адаптивность живёт в стилях поверхности, а не во второй разметке: на телефоне
+ * строки таблицы разворачиваются в компактные карточки. Два набора DOM на одну
+ * таблицу означали бы два источника правды и удвоенные совпадения в браузерных
+ * проверках. Раздел добавляет ячейкам `data-label`, чтобы в карточке осталась
+ * подпись столбца; без него поведение прежнее.
+ */
+export function DataSurface({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): React.JSX.Element {
+  return <div className={['table-wrap', className].filter(Boolean).join(' ')}>{children}</div>;
+}
 
 export function Pagination({
   offset,

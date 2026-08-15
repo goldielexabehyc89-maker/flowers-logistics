@@ -1,8 +1,12 @@
-.filters {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--space-3);
-}
+/*
+ * Стили раздела «Сотрудники и курьеры».
+ *
+ * Здесь остаётся только то, что принадлежит этому разделу. Панель фильтров
+ * и мобильная раскладка таблицы переехали в общие стили: объявленные здесь,
+ * они не были ничем ограничены и молча действовали на каждый экран приложения —
+ * склад, настройки и очередь интеграции получали чужие правила просто потому,
+ * что этот файл оказался загружен.
+ */
 
 .nowrap {
   white-space: nowrap;
@@ -34,36 +38,4 @@
   background: var(--color-surface-muted);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-}
-
-@media (max-width: 767px) {
-  /*
-   * На мобильном таблица превращается в список строк: горизонтальная прокрутка
-   * всей страницы недопустима, а прокручивать таблицу пальцем в узком экране неудобно.
-   */
-  .table thead {
-    display: none;
-  }
-
-  .table,
-  .table tbody,
-  .table tr,
-  .table td {
-    display: block;
-    width: 100%;
-  }
-
-  .table tr {
-    padding: var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .table td {
-    padding: var(--space-1) 0;
-    border: none;
-  }
-
-  .table-wrap {
-    overflow-x: visible;
-  }
 }

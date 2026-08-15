@@ -6,12 +6,13 @@
   justify-content: center;
   gap: var(--space-2);
   min-height: var(--control-height);
-  padding: 0 var(--space-3);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text);
   font: inherit;
+  font-weight: 500;
   cursor: pointer;
 }
 
@@ -20,24 +21,43 @@
 }
 
 .btn:disabled {
-  opacity: 0.55;
+  /* Заблокированное действие видно, но не притворяется доступным. */
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
+/*
+ * Основная кнопка — единственный градиент в интерфейсе.
+ *
+ * Он маркирует ровно одно: главное действие текущего экрана. Как только
+ * градиентом красится вторая кнопка, признак перестаёт работать.
+ */
 .btn--primary {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-end));
+  border-color: transparent;
   color: var(--color-text-inverse);
+  box-shadow: var(--shadow-accent);
 }
 
 .btn--primary:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+  background: linear-gradient(135deg, var(--color-accent-hover), var(--color-accent-end));
 }
 
 .btn--danger {
   background: var(--color-error);
   border-color: var(--color-error);
   color: var(--color-text-inverse);
+}
+
+/* Иконка внутри кнопки не должна сжиматься, когда подпись длинная. */
+.btn svg {
+  flex: 0 0 auto;
+}
+
+/* Кнопка только с иконкой остаётся квадратной, а не растянутой. */
+.btn--icon {
+  padding: 0;
+  width: var(--control-height);
 }
 
 .btn--ghost {
@@ -76,10 +96,14 @@
   min-height: var(--control-height);
   padding: 0 var(--space-3);
   border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text);
   font: inherit;
+}
+
+.input:focus-visible {
+  border-color: var(--color-accent);
 }
 
 .badge {
@@ -147,7 +171,7 @@
   max-height: calc(100dvh - 2 * var(--space-4));
   padding: 0;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--color-surface);
   color: var(--color-text);
   box-shadow: var(--shadow-md);
@@ -172,6 +196,17 @@
 /* Широкое окно: состав заказа с миниатюрами в 560 пикселей не помещается. */
 .modal--wide {
   width: min(760px, calc(100vw - 2 * var(--space-4)));
+}
+
+/*
+ * Шторка рабочего процесса.
+ *
+ * На широком экране это то же центрированное окно, только уже: один шаг
+ * не требует ширины формы. Мобильная раскладка — ниже, в общем блоке
+ * `max-width: 767px`.
+ */
+.modal--drawer {
+  width: min(var(--sheet-max-width), calc(100vw - 2 * var(--space-4)));
 }
 
 .modal__header {
@@ -209,6 +244,78 @@
   flex-wrap: wrap;
 }
 
+/* --- Фильтры --- */
+
+/*
+ * Панель фильтров — отдельная поверхность.
+ *
+ * Без неё строка поиска примыкает вплотную к таблице и читается как её первая
+ * строка: человек ищет глазами данные и находит поле ввода.
+ */
+.filters {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.filters__fields {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.filters__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* --- Переключатель режима --- */
+
+.segmented {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.segmented__item {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.segmented__item:hover:not(.segmented__item--active) {
+  background: var(--color-surface-hover);
+}
+
+/* Выбранный режим ровно один, и он читается без цвета — по контрасту. */
+.segmented__item--active {
+  background: var(--color-selected);
+  color: var(--color-text-inverse);
+  font-weight: 600;
+}
+
 /* --- Таблица --- */
 
 .table-wrap {
@@ -216,6 +323,7 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
 }
 
 .table {
@@ -279,16 +387,94 @@
 }
 
 @media (max-width: 767px) {
-  .btn,
-  .input {
-    min-height: var(--control-height-touch);
-  }
-
   .toast-region {
     right: var(--space-2);
     left: var(--space-2);
-    bottom: calc(var(--bottombar-height) + var(--space-2));
+    /* Уведомление не прячется под нижней навигацией и под краем iPhone. */
+    bottom: calc(var(--bottombar-height) + var(--space-2) + env(safe-area-inset-bottom));
     max-width: none;
+  }
+
+  .filters,
+  .filters__fields {
+    /* Поля складываются в столбец: втиснутые в строку, они нечитаемы. */
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /*
+   * Шторка приходит снизу.
+   *
+   * `margin: auto auto 0` прижимает `<dialog>` к нижнему краю, оставляя его
+   * центрированным по горизонтали. Скругление только сверху: снизу лист
+   * упирается в край экрана, и нижние углы выглядели бы обрезанными.
+   */
+  .modal--drawer {
+    width: 100vw;
+    max-width: none;
+    margin: auto auto 0;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    border-bottom: none;
+  }
+
+  .modal--drawer .modal__footer {
+    padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom));
+  }
+
+  /*
+   * Таблица становится списком строк.
+   *
+   * Это правило раньше жило в `screens/users/users.css` без всякой области
+   * видимости и потому действовало на каждую таблицу приложения. Поведение
+   * сохранено ровно то же, но объявлено там, где ему место: сжимать таблицу
+   * до нечитаемой ширины нельзя ни в одном разделе, и решать это построчно
+   * каждому экрану — значит рано или поздно получить разные ответы.
+   */
+  .table-wrap {
+    overflow-x: visible;
+  }
+
+  .table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+    width: 100%;
+  }
+
+  /* Шапка не нужна: столбцов на строке больше нет. */
+  .table thead {
+    display: none;
+  }
+
+  .table tr {
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .table td {
+    padding: var(--space-1) 0;
+    border: none;
+  }
+
+  /*
+   * Подпись столбца в карточке.
+   *
+   * Появляется только там, где раздел её задал: ячейка без `data-label` ведёт
+   * себя как раньше. Автоматически подставить подпись неоткуда — шапка
+   * в мобильной раскладке уже не отображается.
+   */
+  .table td[data-label] {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .table td[data-label]::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
   }
 }
 
