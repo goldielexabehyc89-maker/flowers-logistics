@@ -7,11 +7,13 @@
  * время обслуживания дробью и координата вне Земли.
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  activePoint,
   depotError,
+  depotSuggestHint,
   formatTimeOfDay,
-  parseCoordinate,
   parseTimeOfDay,
   serviceTimeError,
   shiftError,
@@ -70,33 +72,49 @@ describe('форма времени обслуживания', () => {
 });
 
 describe('форма склада', () => {
-  it('принимает заполненный склад с координатами', () => {
-    expect(
-      depotError({
-        name: 'Основной',
-        address: 'Москва, Цветочная 1',
-        lat: '55.751244',
-        lon: '37.618423',
-      }),
-    ).toBeNull();
-  });
+  const chosen = {
+    name: 'Основной',
+    address: 'Москва, Цветочная улица, 1',
+    point: { value: 'Москва, Цветочная улица, 1', lat: 55.751244, lon: 37.618423 },
+  };
 
-  it('принимает координату с запятой: так её набирают чаще', () => {
-    expect(
-      depotError({ name: 'Основной', address: 'Москва', lat: '55,751244', lon: '37,618423' }),
-    ).toBeNull();
-    expect(parseCoordinate('55,751244')).toBeCloseTo(55.751244, 6);
+  it('принимает склад с адресом, выбранным из подсказок', () => {
+    expect(depotError(chosen)).toBeNull();
+    expect(activePoint(chosen)).toEqual({ lat: 55.751244, lon: 37.618423 });
   });
 
   it('требует название и адрес', () => {
-    expect(depotError({ name: '  ', address: 'Москва', lat: '55.7', lon: '37.6' })).not.toBeNull();
-    expect(depotError({ name: 'Склад', address: '', lat: '55.7', lon: '37.6' })).not.toBeNull();
+    expect(depotError({ ...chosen, name: '  ' })).not.toBeNull();
+    expect(depotError({ ...chosen, address: '' })).not.toBeNull();
   });
 
-  it('отвергает координаты вне Земли и нечисловые', () => {
-    expect(depotError({ name: 'С', address: 'А', lat: '95', lon: '37.6' })).not.toBeNull();
-    expect(depotError({ name: 'С', address: 'А', lat: '55.7', lon: '190' })).not.toBeNull();
-    expect(depotError({ name: 'С', address: 'А', lat: 'север', lon: '37.6' })).not.toBeNull();
-    expect(depotError({ name: 'С', address: 'А', lat: '', lon: '' })).not.toBeNull();
+  it('напечатанный, но не выбранный адрес складом не становится', () => {
+    // Ровно эта поломка и приводила к складу без точки: текст есть,
+    // подсказка не выбрана, координат нет.
+    const typed = { name: 'Основной', address: 'Москва, Цветочная улица, 1', point: null };
+    expect(activePoint(typed)).toBeNull();
+    expect(depotError(typed)).toMatch(/выберите адрес из подсказок/i);
+  });
+
+  it('правка текста после выбора немедленно сбрасывает точку', () => {
+    // Логист дописал «, подъезд 2»: прежние координаты относятся к другой
+    // строке и указывали бы не туда.
+    const edited = { ...chosen, address: `${chosen.address}, подъезд 2` };
+    expect(activePoint(edited)).toBeNull();
+    expect(depotError(edited)).not.toBeNull();
+  });
+
+  it('ручного ввода координат в форме нет', () => {
+    // Проверка смотрит в исходник намеренно: поля широты и долготы легко
+    // вернуть «одной строчкой», и тогда склад снова окажется не на карте.
+    const source = readFileSync(new URL('./PlanningSettings.tsx', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/depot-lat/);
+    expect(source).not.toMatch(/depot-lon/);
+  });
+
+  it('без подсказок предлагается настроить их, а не вводить координаты', () => {
+    expect(depotSuggestHint(false)).toMatch(/подсказки адреса не настроены/i);
+    expect(depotSuggestHint(false)).not.toMatch(/координат/i);
+    expect(depotSuggestHint(true)).toMatch(/подсказку/i);
   });
 });

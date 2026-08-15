@@ -73,11 +73,48 @@ export function serviceTimeError(carMinutes: string, footMinutes: string): strin
   return null;
 }
 
+/**
+ * Черновик склада.
+ *
+ * Точка не набирается руками: она приходит вместе с выбранной подсказкой
+ * адреса. Набранные вручную координаты ничем не связаны с адресом — именно
+ * так склад оказывался в Гвинейском заливе, не показывался на карте и ронял
+ * расчёт без внятной причины.
+ */
 export interface DepotDraft {
   name: string;
+  /** Текст в поле адреса. Может отличаться от выбранной подсказки. */
   address: string;
-  lat: string;
-  lon: string;
+  /** Точка из выбранной подсказки. `null` — подсказка не выбрана. */
+  point: { value: string; lat: number; lon: number } | null;
+}
+
+export const EMPTY_DEPOT_DRAFT: DepotDraft = { name: '', address: '', point: null };
+
+/**
+ * Выбранная точка действительна, только пока текст адреса ей соответствует.
+ *
+ * Логист мог выбрать подсказку и дописать «, подъезд 2»: координаты остались бы
+ * от прежней строки, и склад молча указывал бы не туда.
+ */
+export function activePoint(draft: DepotDraft): { lat: number; lon: number } | null {
+  if (draft.point === null || draft.point.value !== draft.address) {
+    return null;
+  }
+  return { lat: draft.point.lat, lon: draft.point.lon };
+}
+
+/**
+ * Подпись под полем адреса склада.
+ *
+ * Когда подсказки не настроены, склад сохранить нельзя — и предлагать ввести
+ * координаты руками тоже нельзя: это и есть та поломка, от которой уходим.
+ * Честнее сказать, что подсказки не настроены.
+ */
+export function depotSuggestHint(available: boolean): string {
+  return available
+    ? 'Начните вводить адрес и выберите подсказку — точка определится сама'
+    : 'Подсказки адреса не настроены: без них склад не получит точку';
 }
 
 /** Ошибка формы склада. `null` — значения пригодны. */
@@ -88,26 +125,10 @@ export function depotError(draft: DepotDraft): string | null {
   if (draft.address.trim() === '') {
     return 'Укажите адрес склада';
   }
-
-  // Пустое поле — не нулевая координата: `Number('')` равно нулю, и без этой
-  // проверки склад молча оказался бы в Гвинейском заливе.
-  if (draft.lat.trim() === '' || draft.lon.trim() === '') {
-    return 'Укажите широту и долготу склада';
-  }
-
-  const lat = parseCoordinate(draft.lat);
-  const lon = parseCoordinate(draft.lon);
-
-  if (!Number.isFinite(lat) || Math.abs(lat) > 90) {
-    return 'Широта — число от −90 до 90';
-  }
-  if (!Number.isFinite(lon) || Math.abs(lon) > 180) {
-    return 'Долгота — число от −180 до 180';
+  if (activePoint(draft) === null) {
+    // Напечатанный, но не выбранный адрес координат не даёт. Предлагать ввести
+    // их руками здесь нельзя: это возвращает ровно ту поломку, от которой уходим.
+    return 'Выберите адрес из подсказок: без точки склад не будет работать';
   }
   return null;
-}
-
-/** Координата из поля: запятая допускается наравне с точкой. */
-export function parseCoordinate(value: string): number {
-  return Number(value.replace(',', '.'));
 }
