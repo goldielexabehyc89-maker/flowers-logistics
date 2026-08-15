@@ -976,12 +976,42 @@ test('Сделки: точный выбор → расчёт → превью �
   const defaultBadge = settings.getByText('по умолчанию', { exact: true });
   await expect(defaultBadge).toHaveCount(1);
 
-  // Второй склад создаётся формой и складом по умолчанию НЕ становится.
+  /*
+   * Второй склад создаётся формой через ПОДСКАЗКИ адреса и складом
+   * по умолчанию НЕ становится.
+   *
+   * Полей широты и долготы в форме нет: координаты приходят вместе с выбранной
+   * подсказкой. Провайдер подменён внутри приложения — браузер обращается
+   * только к нашему API, ключа DaData он не знает.
+   */
   const before = await settings.getByTestId('depot-item').count();
   await settings.getByTestId('depot-name').fill('Запасной склад');
-  await settings.getByTestId('depot-address').fill('Москва, запасной адрес');
-  await settings.getByTestId('depot-lat').fill('55,800000');
-  await settings.getByTestId('depot-lon').fill('37,700000');
+
+  // Напечатанный, но не выбранный адрес сохранить нельзя.
+  await settings.getByTestId('depot-address').fill('Москва, ул Цветочная');
+  await expect(settings.getByTestId('depot-save')).toBeDisabled();
+
+  const suggestions = settings.getByTestId('depot-suggestions');
+  await expect(suggestions).toBeVisible();
+
+  // Улица без дома не принимается: точка нужна конкретному адресу.
+  const street = suggestions.getByRole('button', { name: /без точной привязки/ });
+  await expect(street).toBeDisabled();
+
+  // Дом с точкой принимается, и координаты появляются сами.
+  await suggestions.getByRole('button', { name: /точка найдена/ }).click();
+  await expect(settings.getByTestId('depot-point')).toContainText('55.751244');
+  await expect(settings.getByTestId('depot-save')).toBeEnabled();
+
+  // Правка текста после выбора немедленно сбрасывает точку.
+  await settings.getByTestId('depot-address').fill('Москва, ул Цветочная, д 1, подъезд 2');
+  await expect(settings.getByTestId('depot-point')).toHaveCount(0);
+  await expect(settings.getByTestId('depot-save')).toBeDisabled();
+
+  // Повторный выбор возвращает точку — это же путь исправления старой записи.
+  await suggestions.getByRole('button', { name: /точка найдена/ }).click();
+  await expect(settings.getByTestId('depot-save')).toBeEnabled();
+
   await settings.getByTestId('depot-save').click();
   await expect(settings.getByTestId('depot-item')).toHaveCount(before + 1);
   await expect(defaultBadge).toHaveCount(1);

@@ -18,6 +18,7 @@ import { authenticateWithRoles } from '../auth/guards.js';
 import { MICRO } from '../orders/geo.js';
 import {
   createDepot,
+  hasConfirmedPoint,
   listDepots,
   setDefaultDepot,
   setDepotActive,
@@ -36,14 +37,25 @@ const uuid = z
 
 const idParamSchema = z.object({ id: uuid });
 
-const coordinatesSchema = z.object({
-  lat: z.number().min(-90).max(90),
-  lon: z.number().min(-180).max(180),
-});
+/**
+ * Точка склада приходит ТОЛЬКО вместе с выбранной подсказкой адреса.
+ *
+ * Отдельного ввода широты и долготы нет: набранные руками координаты ничем
+ * не связаны с адресом и молча уводят расчёт не туда. `null` — адрес сохранён,
+ * но точка не определена; складом по умолчанию такой склад стать не может.
+ */
+const pointSchema = z
+  .object({
+    lat: z.number().min(-90).max(90),
+    lon: z.number().min(-180).max(180),
+  })
+  .nullable()
+  .default(null);
 
-const createSchema = coordinatesSchema.extend({
+const createSchema = z.object({
   name: z.string().trim().min(1).max(200),
   address: z.string().trim().min(1).max(500),
+  point: pointSchema,
 });
 
 const updateSchema = createSchema.extend({
@@ -92,8 +104,17 @@ function toView(depot: DepotRow) {
     id: depot.id,
     name: depot.name,
     address: depot.address,
-    lat: depot.latMicro / MICRO,
-    lon: depot.lonMicro / MICRO,
+    // `null` — точка не определена. Ноль здесь означал бы Гвинейский залив.
+    lat: depot.latMicro === null ? null : depot.latMicro / MICRO,
+    lon: depot.lonMicro === null ? null : depot.lonMicro / MICRO,
+    /**
+     * Пригоден ли склад для расчёта.
+     *
+     * Интерфейс обязан отличать «адрес есть, точки нет» от рабочего склада:
+     * иначе логист не поймёт, почему расчёт отказывает, и полезет вводить
+     * координаты руками — ровно то, от чего мы уходим.
+     */
+    hasPoint: hasConfirmedPoint(depot),
     isActive: depot.isActive,
     isDefault: depot.defaultKey !== null,
     version: depot.version,

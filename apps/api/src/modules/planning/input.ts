@@ -279,13 +279,21 @@ export function buildInputSnapshot(input: BuildSnapshotInput): PlanInputSnapshot
     return index;
   };
 
-  const depots: SnapshotDepot[] = input.depots.map((depot) => ({
-    depotId: depot.id,
-    version: depot.version,
-    latMicro: depot.latMicro,
-    lonMicro: depot.lonMicro,
-    pointIndex: pointIndexOf(depot.latMicro, depot.lonMicro),
-  }));
+  const depots: SnapshotDepot[] = input.depots.map((depot) => {
+    // Склад без точки сюда не доходит: `requireDefaultDepot` отвергает его
+    // раньше и называет причину. Проверка оставлена как страховка от того,
+    // что снимок соберут в обход этого пути.
+    if (depot.latMicro === null || depot.lonMicro === null) {
+      throw new Error('снимок расчёта требует склад с определённой точкой');
+    }
+    return {
+      depotId: depot.id,
+      version: depot.version,
+      latMicro: depot.latMicro,
+      lonMicro: depot.lonMicro,
+      pointIndex: pointIndexOf(depot.latMicro, depot.lonMicro),
+    };
+  });
 
   const depotById = new Map(depots.map((depot) => [depot.depotId, depot]));
 

@@ -33,6 +33,7 @@ import {
   setLocalAddress,
 } from './address-service.js';
 import { isDadataAllowed } from './geocoding/enabled.js';
+import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { dealsCount, dealsIds, type DealsScope } from './deals-scope.js';
 import { addressState } from './address.js';
 import {
@@ -736,14 +737,26 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
 
     // Окружение решает раньше сети: там, где живой DaData не разрешён,
     // запрос не отправляется вовсе, а экран продолжает работать по базе.
-    if (!isDadataAllowed(deps.config)) {
+    // Подменённый HTTP заменяет провайдера, но не контракт: дальше работает
+    // тот же разбор ответа и те же правила точности.
+    const testFetch = deps.config.DADATA_TEST_SUGGESTIONS ? testSuggestFetch() : null;
+
+    if (testFetch === null && !isDadataAllowed(deps.config)) {
       return { suggestions: [] as AddressSuggestion[], available: false };
     }
 
     const suggestions = await suggestAddresses(
       {
-        credentials: { apiKey: deps.config.DADATA_API_KEY ?? null },
-        ...(deps.suggestFetch === undefined ? {} : { fetch: deps.suggestFetch }),
+        credentials: {
+          // Подменённому HTTP ключ не нужен и не передаётся: наружу
+          // не уходит ни одного запроса.
+          apiKey: testFetch === null ? (deps.config.DADATA_API_KEY ?? null) : 'test-only',
+        },
+        ...(testFetch !== null
+          ? { fetch: testFetch }
+          : deps.suggestFetch === undefined
+            ? {}
+            : { fetch: deps.suggestFetch }),
       },
       query,
     );

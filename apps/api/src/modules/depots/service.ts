@@ -58,11 +58,29 @@ export interface DepotRow {
   id: string;
   name: string;
   address: string;
-  latMicro: number;
-  lonMicro: number;
+  /** `null` — точка не определена: адрес есть, координат нет. */
+  latMicro: number | null;
+  lonMicro: number | null;
+  /** `null` — точка ни разу не подтверждалась выбором подсказки. */
+  pointConfirmedAt: Date | null;
   isActive: boolean;
   defaultKey: string | null;
   version: number;
+}
+
+/**
+ * Пригоден ли склад для расчёта.
+ *
+ * Мало иметь координаты: они должны быть подтверждены выбором адреса
+ * из подсказок. Набранные руками числа ничем не связаны с адресом, и опереть
+ * на них маршрут значит увезти курьера не туда.
+ */
+export function hasConfirmedPoint(depot: {
+  latMicro: number | null;
+  lonMicro: number | null;
+  pointConfirmedAt: Date | null;
+}): boolean {
+  return depot.latMicro !== null && depot.lonMicro !== null && depot.pointConfirmedAt !== null;
 }
 
 const depotSelect = {
@@ -71,6 +89,7 @@ const depotSelect = {
   address: true,
   latMicro: true,
   lonMicro: true,
+  pointConfirmedAt: true,
   isActive: true,
   defaultKey: true,
   version: true,
@@ -131,6 +150,24 @@ async function publishDepot(tx: TransactionClient, depotId: string): Promise<voi
 }
 
 /** Координаты приходят градусами и хранятся микроградусами: одна точность на геомодель. */
+/**
+ * Точка в микроградусы, либо «не определена».
+ *
+ * Отсутствие точки — не ноль: склад с координатами 0,0 оказался бы
+ * в Гвинейском заливе и молча ломал бы расчёт.
+ */
+function pointToMicro(point: { lat: number; lon: number } | null): {
+  latMicro: number | null;
+  lonMicro: number | null;
+  pointConfirmedAt: Date | null;
+} {
+  if (point === null) {
+    return { latMicro: null, lonMicro: null, pointConfirmedAt: null };
+  }
+  const micro = toMicro(point.lat, point.lon);
+  return { ...micro, pointConfirmedAt: new Date() };
+}
+
 function toMicro(lat: number, lon: number): { latMicro: number; lonMicro: number } {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
     throw new AppError('VALIDATION_FAILED', {
@@ -152,11 +189,23 @@ function toMicro(lat: number, lon: number): { latMicro: number; lonMicro: number
   return { latMicro, lonMicro };
 }
 
+/**
+ * Точка склада, подтверждённая выбором подсказки адреса.
+ *
+ * Отдельным полем, а не парой чисел рядом с адресом: координаты, набранные
+ * руками, ничем не связаны с адресом и молча уводят расчёт не туда. Здесь
+ * они приходят ВМЕСТЕ с выбранным адресом и только из подсказок.
+ */
+export interface DepotPoint {
+  lat: number;
+  lon: number;
+}
+
 export interface CreateDepotInput {
   name: string;
   address: string;
-  lat: number;
-  lon: number;
+  /** `null` — адрес сохранён, но точка не определена: складом по умолчанию он стать не может. */
+  point: DepotPoint | null;
 }
 
 /**
@@ -176,13 +225,16 @@ export async function createDepot(
   input: CreateDepotInput,
   context: RequestContext,
 ): Promise<DepotRow> {
-  const { latMicro, lonMicro } = toMicro(input.lat, input.lon);
+  const { latMicro, lonMicro, pointConfirmedAt } = pointToMicro(input.point);
 
   return db.$transaction(async (tx) => {
     await lockDepots(tx);
 
     const existing = await tx.depot.count();
-    const isFirst = existing === 0;
+    // Складом по умолчанию первый склад становится, только если у него есть
+    // подтверждённая точка: иначе расчёт получил бы «основной» склад,
+    // на координаты которого нельзя опереться.
+    const isFirst = existing === 0 && pointConfirmedAt !== null;
 
     const created = await tx.depot.create({
       data: {
@@ -190,6 +242,7 @@ export async function createDepot(
         address: input.address.trim(),
         latMicro,
         lonMicro,
+        pointConfirmedAt,
         isActive: true,
         // Ровно здесь первый склад становится складом по умолчанию.
         ...(isFirst ? { defaultKey: DEFAULT_KEY } : {}),
@@ -225,8 +278,7 @@ export async function createDepot(
 export interface UpdateDepotInput {
   name: string;
   address: string;
-  lat: number;
-  lon: number;
+  point: DepotPoint | null;
   expectedVersion: number;
 }
 
@@ -238,7 +290,7 @@ export async function updateDepot(
   input: UpdateDepotInput,
   context: RequestContext,
 ): Promise<DepotRow> {
-  const { latMicro, lonMicro } = toMicro(input.lat, input.lon);
+  const { latMicro, lonMicro, pointConfirmedAt } = pointToMicro(input.point);
 
   return db.$transaction(async (tx) => {
     const [current] = await lockDepotRows(tx, [depotId]);
@@ -251,8 +303,11 @@ export async function updateDepot(
       data: {
         name: input.name.trim(),
         address: input.address.trim(),
+        // Смена адреса без новой подсказки сбрасывает точку: прежние
+        // координаты относятся к прежнему адресу и увели бы курьера не туда.
         latMicro,
         lonMicro,
+        pointConfirmedAt,
         version: { increment: 1 },
       },
       select: depotSelect,
@@ -347,10 +402,22 @@ export async function setDefaultDepot(
       }
     }
 
-    // Активность проверяется ВНУТРИ условия обновления, а не отдельным чтением:
-    // между чтением и записью склад успели бы выключить.
+    // Активность и наличие подтверждённой точки проверяются ВНУТРИ условия
+    // обновления, а не отдельным чтением: между чтением и записью склад успели
+    // бы выключить или сменить ему адрес.
+    //
+    // Склад без подтверждённой точки складом по умолчанию стать не может:
+    // расчёт опёрся бы на координаты, которых нет либо которые никто
+    // не связывал с этим адресом. То же требует и CHECK базы.
     const assigned = await tx.depot.updateManyAndReturn({
-      where: { id: depotId, version: input.expectedVersion, isActive: true },
+      where: {
+        id: depotId,
+        version: input.expectedVersion,
+        isActive: true,
+        latMicro: { not: null },
+        lonMicro: { not: null },
+        pointConfirmedAt: { not: null },
+      },
       data: { defaultKey: DEFAULT_KEY, version: { increment: 1 } },
       select: depotSelect,
     });
@@ -362,7 +429,9 @@ export async function setDefaultDepot(
       throw new AppError('CONFLICT', {
         message: 'default depot assignment updated no rows',
         publicMessage:
-          'Не удалось назначить склад по умолчанию: он выключен или изменён другим пользователем.',
+          'Не удалось назначить склад основным: он выключен, изменён другим ' +
+          'пользователем либо у него не определена точка. Выберите адрес ' +
+          'из подсказок повторно.',
         conflict: { kind: 'STALE_VERSION' },
       });
     }
@@ -461,17 +530,35 @@ export async function findDefaultDepot(
   return client.depot.findUnique({ where: { defaultKey: DEFAULT_KEY }, select: depotSelect });
 }
 
-/** Склад по умолчанию, без которого планирование не начинается. */
-export async function requireDefaultDepot(client: Database | TransactionClient): Promise<DepotRow> {
+/**
+ * Склад по умолчанию с подтверждённой точкой.
+ *
+ * Две разные причины отказа названы по отдельности: «основной склад не выбран»
+ * и «у склада не определены координаты» требуют разных действий человека,
+ * и общее «расчёт не удался» не подсказывает ни одного из них.
+ */
+export async function requireDefaultDepot(
+  client: Database | TransactionClient,
+): Promise<DepotRow & { latMicro: number; lonMicro: number }> {
   const depot = await findDefaultDepot(client);
   if (depot === null) {
     throw new AppError('CONFLICT', {
       message: 'default depot is not configured',
-      publicMessage: 'Склад не настроен. Создайте склад в настройках, чтобы планировать маршруты.',
+      publicMessage: 'Не выбран основной склад. Выберите его в настройках планирования.',
       conflict: { kind: 'DEPOT_NOT_CONFIGURED' },
     });
   }
-  return depot;
+
+  if (!hasConfirmedPoint(depot) || depot.latMicro === null || depot.lonMicro === null) {
+    throw new AppError('CONFLICT', {
+      message: 'default depot has no confirmed point',
+      publicMessage:
+        'У склада не определены координаты. Выберите адрес склада из подсказок повторно.',
+      conflict: { kind: 'DEPOT_POINT_MISSING' },
+    });
+  }
+
+  return { ...depot, latMicro: depot.latMicro, lonMicro: depot.lonMicro };
 }
 
 export async function listDepots(db: Database): Promise<DepotRow[]> {

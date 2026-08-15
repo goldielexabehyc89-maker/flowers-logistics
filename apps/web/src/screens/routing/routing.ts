@@ -279,6 +279,17 @@ export const CONFLICT_MESSAGES: Record<string, string> = {
   EDIT_LOCK_REQUIRED: 'Возьмите маршрут в работу и повторите.',
   EDIT_LOCK_HELD_BY_OTHER: 'Маршрут сейчас редактирует другой пользователь.',
   EDIT_LOCK_STALE: 'Блокировка изменилась. Карточка обновлена.',
+
+  /*
+   * Причины, по которым расчёт не может начаться.
+   *
+   * Каждая требует своего действия, и общее «расчёт не удался» не подсказывает
+   * ни одного из них: человек не знает, создавать склад, выбирать его адрес
+   * заново или настраивать смену.
+   */
+  DEPOT_NOT_CONFIGURED: 'Не выбран основной склад',
+  DEPOT_POINT_MISSING: 'У склада не определены координаты',
+  SHIFT_NOT_CONFIGURED: 'Не настроена рабочая смена',
 };
 
 export function conflictMessage(kind: string | undefined, fallback: string): string {
