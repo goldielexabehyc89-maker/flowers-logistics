@@ -15,6 +15,17 @@
 .shell {
   display: grid;
   /*
+   * Колонка объявлена `minmax(0, 1fr)`, а не `1fr`.
+   *
+   * По умолчанию строка сетки не уже своего минимального содержимого, и один
+   * элемент, который не умеет сжиматься, растягивает КОЛОНКУ — а вместе с ней
+   * и всё остальное. Так и происходило: длинное имя сотрудника в кнопке
+   * учётной записи задавало верхней строке ширину под 490 px, страница
+   * получала горизонтальную прокрутку на телефоне, и виноватым выглядел
+   * произвольный раздел, который просто оказался открыт.
+   */
+  grid-template-columns: minmax(0, 1fr);
+  /*
    * Нижняя полоса — `auto`, а не фиксированная высота: к ней добавляется
    * безопасная зона iPhone, и жёсткая строка сетки обрезала бы подписи.
    */
@@ -172,12 +183,59 @@
   position: sticky;
   top: 0;
   z-index: 10;
+  /*
+   * Последняя защита от горизонтальной прокрутки.
+   *
+   * Ниже каждый элемент строки умеет сжиматься и обрезаться многоточием, но
+   * сумма их минимальных ширин всё равно зависит от длины имени сотрудника
+   * и текста состояния связи — то есть от данных, а не от вёрстки. Обрезанная
+   * подпись в служебной строке — приемлемая потеря; уехавшая за экран страница
+   * на телефоне — нет.
+   */
+  overflow: hidden;
 }
 
 .shell__title {
   flex: 1 1 auto;
   min-width: 0;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Правая часть верхней строки: связь и учётная запись.
+ *
+ * Имя сотрудника бывает длинным, и кнопка обязана сжиматься вместе с ним —
+ * иначе она отбирает ширину у заголовка раздела, а на телефоне выталкивает
+ * страницу за экран.
+ */
+.shell__topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* Сжимается раньше заголовка: раздел важнее служебных подписей. */
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.shell__topbar-right > * {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.shell__topbar-right .btn {
+  display: block;
+  min-width: 0;
+  max-width: 40vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: var(--control-height);
+}
+
+.shell__topbar-right .badge {
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -313,7 +371,7 @@
 
 @media (min-width: 768px) {
   .shell {
-    grid-template-columns: var(--sidebar-width) 1fr;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
     grid-template-rows: var(--topbar-height) 1fr;
     grid-template-areas:
       'sidebar topbar'
@@ -322,7 +380,7 @@
 
   /* Единственный раздел не отменяет колонку меню — только нижнюю полосу. */
   .shell--single-section {
-    grid-template-columns: var(--sidebar-width) 1fr;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
     grid-template-rows: var(--topbar-height) 1fr;
     grid-template-areas:
       'sidebar topbar'
@@ -332,7 +390,7 @@
   /* Свёрнутое меню остаётся полосой с иконками, а не исчезает. */
   .shell--collapsed,
   .shell--collapsed.shell--single-section {
-    grid-template-columns: var(--sidebar-width-collapsed) 1fr;
+    grid-template-columns: var(--sidebar-width-collapsed) minmax(0, 1fr);
   }
 
   .shell__sidebar {

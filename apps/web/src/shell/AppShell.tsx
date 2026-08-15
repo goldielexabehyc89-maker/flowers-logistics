@@ -289,7 +289,7 @@ export function AppShell(): React.JSX.Element {
           )}
         </button>
         <h1 className="shell__title">{currentTitle}</h1>
-        <div className="row">
+        <div className="shell__topbar-right">
           <ConnectionIndicator client={client} realtime={realtime} />
           <Button variant="ghost" onClick={() => setAccountOpen(true)}>
             {user?.fullName ?? 'Пользователь'}
