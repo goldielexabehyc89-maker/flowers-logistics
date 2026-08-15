@@ -57,6 +57,7 @@ import {
   ErrorState,
   LoadingState,
   Modal,
+  SegmentedControl,
   StatusBadge,
 } from '../../ui/components';
 import { OrderCardPanel } from './OrderCardPanel';
@@ -534,45 +535,36 @@ export function FloristScreen(): React.JSX.Element {
        * и сложить их вместе значило бы показывать «10» тому, кому осталось
        * собрать один букет.
        */}
-      <nav className="florist__tabs" aria-label="Разделы флориста">
-        {TABS.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            className="florist__tab"
-            aria-pressed={tab === item.key}
-            data-testid={`florist-tab-${item.key}`}
-            onClick={() => setTab(item.key)}
-          >
-            {item.title}
-            {item.key === 'mine' && activeOrders !== null && (
-              <span
-                className="florist__tab-count"
-                data-testid="florist-active-count"
-                aria-label={`активных заказов: ${activeOrders}`}
-              >
-                {activeOrders}
-              </span>
-            )}
-          </button>
-        ))}
-      </nav>
+      <SegmentedControl
+        label="Разделы флориста"
+        value={tab}
+        onChange={setTab}
+        options={TABS.map((item) => ({
+          value: item.key,
+          label: item.title,
+          testId: `florist-tab-${item.key}`,
+          ...(item.key === 'mine' && activeOrders !== null
+            ? {
+                badge: activeOrders,
+                badgeTestId: 'florist-active-count',
+                badgeLabel: `активных заказов: ${activeOrders}`,
+              }
+            : {}),
+        }))}
+      />
 
       {tab !== 'print' && (
         <div className="florist__filters card">
-          <div className="row" role="group" aria-label="День">
-            {(['today', 'tomorrow'] as QueueDay[]).map((value) => (
-              <button
-                key={value}
-                type="button"
-                className="florist__day"
-                aria-pressed={day === value}
-                data-testid={`florist-day-${value}`}
-                onClick={() => setDay(value)}
-              >
-                {value === 'today' ? 'Сегодня' : 'Завтра'}
-              </button>
-            ))}
+          <div className="row">
+            <SegmentedControl
+              label="День"
+              value={day}
+              onChange={setDay}
+              options={[
+                { value: 'today', label: 'Сегодня', testId: 'florist-day-today' },
+                { value: 'tomorrow', label: 'Завтра', testId: 'florist-day-tomorrow' },
+              ]}
+            />
             <span className="muted text-sm">
               {queueDate === undefined ? '' : formatDay(queueDate)}
             </span>
@@ -746,20 +738,15 @@ export function FloristScreen(): React.JSX.Element {
 
       {tab === 'print' && (
         <div className="florist__filters card">
-          <div className="row" role="group" aria-label="Фильтр заданий печати">
-            {(['attention', 'printed'] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                className="florist__day"
-                aria-pressed={printFilter === value}
-                data-testid={`print-filter-${value}`}
-                onClick={() => setPrintFilter(value)}
-              >
-                {value === 'attention' ? 'Требуют внимания' : 'Напечатанные'}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            label="Фильтр заданий печати"
+            value={printFilter}
+            onChange={setPrintFilter}
+            options={[
+              { value: 'attention', label: 'Требуют внимания', testId: 'print-filter-attention' },
+              { value: 'printed', label: 'Напечатанные', testId: 'print-filter-printed' },
+            ]}
+          />
         </div>
       )}
 

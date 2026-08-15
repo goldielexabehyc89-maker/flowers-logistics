@@ -1,48 +1,70 @@
 /*
  * Design tokens интерфейса.
  *
- * Интерфейс рабочий: спокойный, плотный, светлый. Никаких декоративных градиентов
- * и анимаций — логист смотрит на эти экраны весь день, и они не должны утомлять.
- * Все значения задаются здесь; компоненты не содержат «магических» цветов и отступов.
+ * Целевой ориентир — спокойный рабочий интерфейс операционной CRM: светлый,
+ * компактный, рассчитанный на частые повторяющиеся действия с компьютера и
+ * телефона. Декора минимум, акцент на данных, статусах и текущем действии.
+ *
+ * Имена токенов намеренно СОХРАНЕНЫ прежними, а изменены только значения.
+ * Экраны логистики, склада, флориста и самовывоза ссылаются на эти имена из
+ * своих файлов стилей; переименование потребовало бы одновременной правки всех
+ * разделов, то есть ровно того детального редизайна, который выполняют
+ * профильные агенты, а не фундамент.
  */
 
 :root {
   /* --- Поверхности и границы --- */
-  --color-canvas: #f5f6f8;
+  --color-canvas: #eef0f8;
   --color-surface: #ffffff;
-  --color-surface-muted: #f0f2f5;
-  --color-surface-hover: #e9edf2;
-  --color-border: #d5dae1;
-  --color-border-strong: #b6bec9;
+  --color-surface-muted: #f7f8fc;
+  --color-surface-hover: #e9ecfb;
+  /* Боковая панель светлее полотна, но темнее карточек: она фон, а не объект. */
+  --color-sidebar: #f7f8fc;
+  --color-border: #e4e4f0;
+  --color-border-soft: #e7e8f2;
+  /* Граница элементов ввода: заметнее рамки карточки, иначе поле теряется. */
+  --color-border-strong: #d3d4e4;
 
   /* --- Текст --- */
-  --color-text: #1c2430;
-  --color-text-muted: #5b6675;
+  --color-text: #1a1a1a;
+  --color-text-muted: #555555;
+  /*
+   * Приглушённый фиолетово-серый. Отдельный уровень нужен подписям групп меню
+   * и служебным пометкам: на белом он читается, но не спорит с данными.
+   * Контраста для основного текста он НЕ даёт и для него не применяется.
+   */
+  --color-text-subtle: #9e97c0;
   --color-text-inverse: #ffffff;
+  /* Фон активного пункта меню и активной вкладки: почти чёрный, не брендовый. */
+  --color-selected: #1a1a1a;
 
   /* --- Акцент --- */
-  --color-accent: #1f5f9e;
-  --color-accent-hover: #17517f;
-  --color-accent-soft: #e6eef7;
+  --color-accent: #667eea;
+  --color-accent-hover: #4c5fd7;
+  /* Конец градиента основной кнопки. Самостоятельно как заливка не используется. */
+  --color-accent-end: #764ba2;
+  --color-accent-soft: #e9ecfb;
 
   /* --- Статусы --- */
-  --color-success: #1f7a4d;
-  --color-success-soft: #e4f2ea;
-  --color-warning: #8a5a00;
-  --color-warning-soft: #fbf1dd;
-  --color-error: #b42318;
-  --color-error-soft: #fbe9e7;
-  --color-info: #1f5f9e;
-  --color-info-soft: #e6eef7;
+  --color-success: #2e7d32;
+  --color-success-soft: #e8f5e9;
+  --color-warning: #e65100;
+  --color-warning-soft: #fff3e0;
+  --color-error: #c62828;
+  --color-error-soft: #ffebee;
+  --color-info: #4c5fd7;
+  --color-info-soft: #e9ecfb;
 
   /* --- Типографика --- */
-  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  --font-family: -apple-system, blinkmacsystemfont, 'Segoe UI', Roboto, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-size-xs: 12px;
   --font-size-sm: 13px;
   --font-size-md: 14px;
   --font-size-lg: 16px;
   --font-size-xl: 20px;
+  /* Ключевое значение: код ячейки, количество, сумма. */
+  --font-size-2xl: 24px;
   --line-height: 1.45;
 
   /* --- Отступы --- */
@@ -54,26 +76,50 @@
   --space-6: 32px;
 
   /* --- Радиусы и тени --- */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
-  --shadow-sm: 0 1px 2px rgb(28 36 48 / 8%);
-  --shadow-md: 0 6px 20px rgb(28 36 48 / 14%);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  /* Окно на desktop скруглено заметно сильнее рабочих панелей. */
+  --radius-xl: 24px;
+  --shadow-sm: 0 2px 8px rgb(20 20 60 / 6%);
+  --shadow-md: 0 8px 28px rgb(20 20 60 / 14%);
+  /* Тень основной кнопки: мягкая брендовая, а не общая серая. */
+  --shadow-accent: 0 4px 12px rgb(102 126 234 / 30%);
 
   /* --- Интерактивные размеры --- */
-  --control-height: 36px;
-  /* На мобильном палец требует площади не меньше 44 px. */
+  /*
+   * 44px и на desktop тоже. Прежние 36px были компактнее, но те же кнопки
+   * нажимаются с телефона в цехе и в машине, а два разных размера одного
+   * элемента означали бы две разные вёрстки каждой рабочей карточки.
+   */
+  --control-height: 44px;
   --control-height-touch: 44px;
-  --focus-ring: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+  /* Focus: брендовая рамка и светлое кольцо. */
+  --focus-ring: 0 0 0 1px var(--color-accent), 0 0 0 4px var(--color-accent-soft);
 
   /* --- Каркас --- */
-  --sidebar-width: 232px;
-  --topbar-height: 52px;
-  --bottombar-height: 60px;
+  --sidebar-width: 224px;
+  /* Свёрнутое меню остаётся полосой с иконками, а не исчезает. */
+  --sidebar-width-collapsed: 56px;
+  --drawer-width: min(288px, 85vw);
+  --topbar-height: 48px;
+  --bottombar-height: 56px;
+  /*
+   * Обычная страница ограничена по ширине: строка данных во весь монитор
+   * читается хуже, чем та же строка в колонке. Карты, «Сделки»,
+   * «Маршрутизация» и крупные рабочие таблицы ограничение снимают — см.
+   * `shell--wide`.
+   */
+  --page-max-width: 1152px;
+  --content-pad-x: var(--space-6);
+  --content-pad-y: var(--space-5);
+  /* Окно рабочего процесса: одна задача, один шаг. */
+  --sheet-max-width: 448px;
 }
 
 /*
  * Точки перехода:
- *   до 767px  — мобильная раскладка с нижней навигацией;
- *   от 768px  — боковая панель.
+ *   до 767px  — мобильная раскладка с верхней панелью и нижней навигацией;
+ *   от 768px  — боковая панель;
+ *   до 900px  — боковая панель перекрывает содержимое и получает подложку.
  */

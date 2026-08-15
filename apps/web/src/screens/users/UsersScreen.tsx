@@ -23,10 +23,13 @@ import {
   Button,
   ConfirmDialog,
   EmptyState,
+  DataSurface,
   ErrorState,
   Field,
+  FilterPanel,
   LoadingState,
   Modal,
+  PageHeader,
   Pagination,
   Select,
   StatusBadge,
@@ -240,67 +243,63 @@ export function UsersScreen(): React.JSX.Element {
 
   return (
     <div className="stack">
-      <div className="page-header">
-        <div>
-          <h2>Сотрудники и курьеры</h2>
-          <p className="muted text-sm">
-            Сотрудники не удаляются: недоступность выражается заморозкой, её можно снять.
-          </p>
-        </div>
-        <Button
-          variant="primary"
-          onClick={() => {
-            setEditing(null);
-            setFormError(null);
-            setFormOpen(true);
-          }}
-        >
-          Добавить
-        </Button>
-      </div>
+      <PageHeader
+        title="Сотрудники и курьеры"
+        description="Сотрудники не удаляются: недоступность выражается заморозкой, её можно снять."
+        actions={
+          <Button
+            variant="primary"
+            onClick={() => {
+              setEditing(null);
+              setFormError(null);
+              setFormOpen(true);
+            }}
+          >
+            Добавить
+          </Button>
+        }
+      />
 
-      <section className="card">
-        <div className="filters">
-          <Field label="Статус">
+      <FilterPanel>
+        <Field label="Статус">
+          {(fieldProps) => (
+            <Select
+              {...fieldProps}
+              value={status}
+              onChange={(event) => {
+                setStatus(event.target.value as UserStatus);
+                setOffset(0);
+              }}
+            >
+              <option value="ACTIVE">Активные</option>
+              <option value="PENDING_ACTIVATION">Ожидают активации</option>
+              <option value="FROZEN">Замороженные</option>
+            </Select>
+          )}
+        </Field>
+
+        {isAdmin && (
+          <Field label="Роль">
             {(fieldProps) => (
               <Select
                 {...fieldProps}
-                value={status}
+                value={role}
                 onChange={(event) => {
-                  setStatus(event.target.value as UserStatus);
+                  setRole(event.target.value as Role | '');
                   setOffset(0);
                 }}
               >
-                <option value="ACTIVE">Активные</option>
-                <option value="PENDING_ACTIVATION">Ожидают активации</option>
-                <option value="FROZEN">Замороженные</option>
+                <option value="">Любая</option>
+                {Object.entries(ROLE_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </Select>
             )}
           </Field>
-
-          {isAdmin && (
-            <Field label="Роль">
-              {(fieldProps) => (
-                <Select
-                  {...fieldProps}
-                  value={role}
-                  onChange={(event) => {
-                    setRole(event.target.value as Role | '');
-                    setOffset(0);
-                  }}
-                >
-                  <option value="">Любая</option>
-                  {Object.entries(ROLE_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </Select>
-              )}
-            </Field>
-          )}
-        </div>
-      </section>
+        )}
+      </FilterPanel>
 
       {query.isLoading && <LoadingState />}
       {query.isError && (
@@ -316,7 +315,7 @@ export function UsersScreen(): React.JSX.Element {
 
       {query.isSuccess && items.length > 0 && (
         <>
-          <div className="table-wrap">
+          <DataSurface>
             <table className="table">
               <thead>
                 <tr>
@@ -397,7 +396,7 @@ export function UsersScreen(): React.JSX.Element {
                 ))}
               </tbody>
             </table>
-          </div>
+          </DataSurface>
 
           <Pagination
             offset={offset}
@@ -498,7 +497,7 @@ export function UsersScreen(): React.JSX.Element {
           <EmptyState title="Записей пока нет" />
         )}
         {historyQuery.data !== undefined && historyQuery.data.items.length > 0 && (
-          <div className="table-wrap">
+          <DataSurface>
             <table className="table">
               <thead>
                 <tr>
@@ -517,7 +516,7 @@ export function UsersScreen(): React.JSX.Element {
                 ))}
               </tbody>
             </table>
-          </div>
+          </DataSurface>
         )}
       </Modal>
     </div>

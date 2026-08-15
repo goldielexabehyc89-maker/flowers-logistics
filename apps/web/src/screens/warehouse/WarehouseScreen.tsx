@@ -24,6 +24,7 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  SegmentedControl,
   Select,
   StatusBadge,
   TextInput,
@@ -65,20 +66,23 @@ export function WarehouseScreen(): React.JSX.Element {
             выдача курьеру. Поля работают со сканером и с ручным вводом.
           </p>
         </div>
-        <div className="row" role="tablist">
-          {TABS.map((item) => (
-            <Button
-              key={item.key}
-              variant={tab === item.key ? 'primary' : 'ghost'}
-              role="tab"
-              aria-selected={tab === item.key}
-              data-testid={`wh-tab-${item.key}`}
-              onClick={() => setTab(item.key)}
-            >
-              {item.title}
-            </Button>
-          ))}
-        </div>
+        {/*
+          Переключатель режимов — тот же общий компонент, что у флориста.
+          Раньше это был ряд обычных кнопок: основная заливка на выбранной
+          и призрачная на остальных. Выглядело оно как три самостоятельных
+          действия, а не как выбор одного режима из трёх, и не совпадало
+          с соседним рабочим местом ни рамкой, ни высотой.
+        */}
+        <SegmentedControl
+          label="Разделы склада"
+          value={tab}
+          onChange={setTab}
+          options={TABS.map((item) => ({
+            value: item.key,
+            label: item.title,
+            testId: `wh-tab-${item.key}`,
+          }))}
+        />
       </div>
 
       {tab === 'storage' && <StorageTab />}

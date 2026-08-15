@@ -17,66 +17,6 @@
   justify-content: space-between;
 }
 
-.florist__tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.florist__tab,
-.florist__day {
-  display: inline-flex;
-  gap: var(--space-2);
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-size: var(--font-size-md);
-  cursor: pointer;
-  /* Цель нажатия пальцем: рука в перчатке промахивается по мелкой кнопке. */
-  min-height: 40px;
-}
-
-.florist__tab[aria-pressed='true'],
-.florist__day[aria-pressed='true'] {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-  font-weight: 600;
-}
-
-/*
- * Счётчик активных заказов на вкладке «Мои заказы».
- *
- * Стоит здесь, а не в заголовке раздела, потому что вкладки видны на всех
- * разделах: число не исчезает ни на «Очереди», ни на «Печати». Размер
- * намеренно небольшой — это спутник названия вкладки, а не отдельный элемент,
- * — но цифры моноширинные, чтобы «9» и «11» не дёргали ширину вкладки.
- */
-.florist__tab-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  padding: 0 var(--space-1);
-  border-radius: 999px;
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-  font-size: var(--font-size-sm);
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  line-height: 20px;
-}
-
-/* На выбранной вкладке фон уже мягко-акцентный: счётчик обязан остаться виден. */
-.florist__tab[aria-pressed='true'] .florist__tab-count {
-  background: var(--color-accent);
-  color: var(--color-text-inverse);
-}
-
 .florist__filters {
   display: flex;
   flex-wrap: wrap;

@@ -29,11 +29,14 @@ h3 {
   font-weight: 600;
 }
 
+/* Заголовок страницы: 20px и жирнее прочих заголовков, но не hero. */
 h1 {
   font-size: var(--font-size-xl);
+  font-weight: 700;
 }
 h2 {
   font-size: var(--font-size-lg);
+  font-weight: 700;
 }
 h3 {
   font-size: var(--font-size-md);
@@ -44,7 +47,7 @@ p {
 }
 
 a {
-  color: var(--color-accent);
+  color: var(--color-accent-hover);
 }
 
 /* Заметный фокус обязателен: без него интерфейс недоступен с клавиатуры. */
@@ -86,18 +89,75 @@ a {
   font-size: var(--font-size-sm);
 }
 
+/*
+ * Ключевое значение: код ячейки, количество, номер.
+ *
+ * Моноширинные цифры нужны не для вида: таймер и счётчик меняются каждую
+ * секунду, и пропорциональные цифры дёргали бы ширину карточки при каждом
+ * изменении.
+ */
+.key-value {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
   padding: var(--space-4);
 }
 
+/* Компактная рабочая карточка: те же границы, меньше воздуха. */
+.card--compact {
+  padding: var(--space-3);
+}
+
+/*
+ * Заголовок страницы.
+ *
+ * Класс остался прежним намеренно: на него уже ссылаются существующие экраны,
+ * и переименование заставило бы править каждый раздел ради одной панели.
+ * Компонент `PageHeader` рисует ровно эту же разметку.
+ *
+ * Панель закрепляется под верхней строкой каркаса. Смещение обязательно:
+ * прокручивается документ, верхняя строка сама закреплена на нуле, и заголовок
+ * с `top: 0` уезжал бы под неё вместо того, чтобы встать следом.
+ */
 .page-header {
+  position: sticky;
+  top: var(--topbar-height);
+  z-index: 5;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   flex-wrap: wrap;
   margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.page-header__title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }

@@ -1,11 +1,35 @@
 /*
- * Каркас: на мобильном — верхняя строка, содержимое и нижняя навигация;
- * от 768px появляется боковая панель.
+ * Каркас приложения.
+ *
+ * Одна точка перехода — 768px. Раньше их было две: боковая панель появлялась
+ * с 768px, а перекрывала содержимое до 900px, и между этими значениями
+ * существовала раскладка, которую никто не проектировал: колонка меню уже
+ * занимала место в сетке, но при этом лежала поверх страницы. Теперь до 768px
+ * меню — выдвижная шторка, начиная с 768px — колонка, и промежутка нет.
+ *
+ * Мобильная раскладка: верхняя панель, содержимое, нижняя навигация.
+ * Широкий экран: колонка меню слева, закреплённая строка заголовка и
+ * прокручиваемое содержимое справа.
  */
 
 .shell {
   display: grid;
-  grid-template-rows: var(--topbar-height) 1fr var(--bottombar-height);
+  /*
+   * Колонка объявлена `minmax(0, 1fr)`, а не `1fr`.
+   *
+   * По умолчанию строка сетки не уже своего минимального содержимого, и один
+   * элемент, который не умеет сжиматься, растягивает КОЛОНКУ — а вместе с ней
+   * и всё остальное. Так и происходило: длинное имя сотрудника в кнопке
+   * учётной записи задавало верхней строке ширину под 490 px, страница
+   * получала горизонтальную прокрутку на телефоне, и виноватым выглядел
+   * произвольный раздел, который просто оказался открыт.
+   */
+  grid-template-columns: minmax(0, 1fr);
+  /*
+   * Нижняя полоса — `auto`, а не фиксированная высота: к ней добавляется
+   * безопасная зона iPhone, и жёсткая строка сетки обрезала бы подписи.
+   */
+  grid-template-rows: var(--topbar-height) 1fr auto;
   grid-template-areas:
     'topbar'
     'content'
@@ -17,7 +41,7 @@
  * Единственный раздел: нижней полосы нет, и высоту она не занимает.
  *
  * Одного `display: none` мало — строка сетки осталась бы и содержимое всё равно
- * потеряло бы шестьдесят пикселей внизу. Поэтому убирается сама строка.
+ * потеряло бы высоту внизу. Поэтому убирается сама строка.
  */
 .shell--single-section {
   grid-template-rows: var(--topbar-height) 1fr;
@@ -26,67 +50,52 @@
     'content';
 }
 
+/* --- Боковая панель -------------------------------------------------------- */
+
 .shell__sidebar {
-  display: none;
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2);
+  background: var(--color-sidebar);
+  border-right: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
 }
 
-.shell__topbar {
-  grid-area: topbar;
+.shell__brand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: 0 var(--space-4);
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
-  position: sticky;
-  top: 0;
-  z-index: 10;
-}
-
-.shell__title {
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-3);
+  font-weight: 700;
   font-size: var(--font-size-lg);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.shell__content {
-  grid-area: content;
-  padding: var(--space-4);
-  /* Содержимое прокручивается внутри себя; страница по горизонтали не едет. */
-  overflow-x: hidden;
-}
-
-.shell__bottombar {
-  grid-area: bottombar;
-  display: flex;
-  align-items: stretch;
-  background: var(--color-surface);
-  border-top: 1px solid var(--color-border);
-  position: sticky;
-  bottom: 0;
-}
-
-.shell__tab {
-  flex: 1;
-  display: flex;
+/*
+ * Знак продукта. В свёрнутом меню он остаётся единственным, что видно наверху,
+ * поэтому он квадратный и одного размера с иконками разделов — иначе полоса
+ * сверху «дёргалась» бы при сворачивании.
+ */
+.shell__brand-mark {
+  flex: 0 0 auto;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: var(--control-height-touch);
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  font: inherit;
-  font-size: var(--font-size-xs);
-  text-decoration: none;
-  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-end));
+  color: var(--color-text-inverse);
+  font-size: var(--font-size-md);
 }
 
-.shell__tab--active {
-  color: var(--color-accent);
-  font-weight: 600;
-  box-shadow: inset 0 2px 0 var(--color-accent);
+.shell__nav-area {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .shell__nav {
@@ -99,57 +108,373 @@
 }
 
 .shell__link {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-height);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  color: var(--color-text);
+  color: var(--color-text-muted);
   text-decoration: none;
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-md);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.shell__link-icon {
+  flex: 0 0 auto;
+}
+
+.shell__link-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .shell__link:hover {
   background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
+/*
+ * Активный раздел выделяется контрастом, а не цветом: интерфейс читают
+ * при боковом свете в цехе и на солнце в машине, и брендовая заливка там
+ * различима хуже, чем почти чёрный фон.
+ */
 .shell__link--active {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
+  background: var(--color-selected);
+  color: var(--color-text-inverse);
   font-weight: 600;
 }
 
-.shell__brand {
-  padding: 0 var(--space-3) var(--space-4);
-  font-weight: 700;
-  font-size: var(--font-size-lg);
+.shell__link--active:hover {
+  background: var(--color-selected);
+  color: var(--color-text-inverse);
 }
+
+.shell__account {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+/*
+ * Имя сотрудника — кнопка, а не подпись.
+ *
+ * На телефоне верхняя строка учётной записи больше не показывает, поэтому окно
+ * с телефоном, ролями и выходом со всех устройств должно открываться отсюда:
+ * иначе завершить чужую сессию с телефона стало бы нечем.
+ */
+.shell__account-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.shell__account-name:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/*
+ * Состояние связи внутри меню — только на телефоне.
+ *
+ * На широком экране индикатор остаётся в верхней строке и не дублируется:
+ * два одинаковых значка на одном экране заставляли бы сверять их между собой.
+ */
+.shell__connection {
+  display: none;
+  padding: 0 var(--space-2) var(--space-2);
+}
+
+/* --- Верхняя строка -------------------------------------------------------- */
+
+.shell__topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  /*
+   * Последняя защита от горизонтальной прокрутки.
+   *
+   * Ниже каждый элемент строки умеет сжиматься и обрезаться многоточием, но
+   * сумма их минимальных ширин всё равно зависит от длины имени сотрудника
+   * и текста состояния связи — то есть от данных, а не от вёрстки. Обрезанная
+   * подпись в служебной строке — приемлемая потеря; уехавшая за экран страница
+   * на телефоне — нет.
+   */
+  overflow: hidden;
+}
+
+.shell__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Правая часть верхней строки: связь и учётная запись.
+ *
+ * Имя сотрудника бывает длинным, и кнопка обязана сжиматься вместе с ним —
+ * иначе она отбирает ширину у заголовка раздела, а на телефоне выталкивает
+ * страницу за экран.
+ */
+.shell__topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* Сжимается раньше заголовка: раздел важнее служебных подписей. */
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.shell__topbar-right > * {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.shell__topbar-right .btn {
+  display: block;
+  min-width: 0;
+  max-width: 40vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: var(--control-height);
+}
+
+.shell__topbar-right .badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shell__menu-button,
+.shell__drawer-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.shell__menu-button:hover,
+.shell__drawer-button:hover {
+  background: var(--color-surface-hover);
+}
+
+/* --- Содержимое ------------------------------------------------------------ */
+
+.shell__content {
+  grid-area: content;
+  padding: var(--space-4);
+  /* Содержимое прокручивается внутри себя; страница по горизонтали не едет. */
+  overflow-x: hidden;
+}
+
+/*
+ * Обычная страница — колонка по центру.
+ *
+ * Ограничение ширины не декоративное: строка таблицы во весь монитор заставляет
+ * глаз проходить весь путь от номера заказа до его статуса, и промахи по строке
+ * начинаются именно там.
+ */
+.shell__page {
+  max-width: var(--page-max-width);
+  margin: 0 auto;
+}
+
+/* Карта и крупная рабочая таблица ограничение снимают. */
+.shell__page--wide {
+  max-width: none;
+}
+
+/* --- Нижняя навигация ------------------------------------------------------ */
+
+.shell__bottombar {
+  grid-area: bottombar;
+  display: flex;
+  align-items: stretch;
+  min-height: var(--bottombar-height);
+  /* Нижний край iPhone: без этого подписи уезжают под системную полосу. */
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+}
+
+.shell__tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--bottombar-height);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.shell__tab--active {
+  color: var(--color-accent-hover);
+  font-weight: 600;
+}
+
+/* Активная вкладка выделяется и толщиной знака, а не только цветом. */
+.shell__tab--active svg {
+  stroke-width: 2.5;
+}
+
+/* --- Мобильная раскладка --------------------------------------------------- */
+
+@media (max-width: 767px) {
+  /*
+   * До 768px меню — выдвижная шторка. Закрытая шторка убрана из потока
+   * целиком, а не сдвинута за край: сдвинутая, она осталась бы в порядке
+   * обхода с клавиатуры, и Tab уводил бы фокус в невидимое меню.
+   */
+  .shell__sidebar {
+    display: none;
+  }
+
+  .shell--drawer-open .shell__sidebar {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: var(--drawer-width);
+    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+
+  .shell__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    background: rgb(20 20 60 / 45%);
+    border: 0;
+  }
+
+  /* На телефоне сворачивать нечего: меню либо открыто поверх, либо скрыто. */
+  .shell__menu-button {
+    display: none;
+  }
+
+  /*
+   * Верхняя строка телефона несёт ровно две вещи: кнопку меню и название
+   * текущего раздела.
+   *
+   * Имя сотрудника и состояние связи отсюда убраны намеренно. Ни то, ни другое
+   * не нужно постоянно: человек и так знает, кто он, а про связь важно узнать
+   * в момент обрыва, а не всю смену. Занимая же место рядом с заголовком, они
+   * отбирали у него ширину, и название раздела приходило к пользователю
+   * обрезанным. Оба переехали в меню.
+   */
+  .shell__topbar-right {
+    display: none;
+  }
+
+  .shell__connection {
+    display: block;
+  }
+}
+
+/* --- Широкий экран --------------------------------------------------------- */
 
 @media (min-width: 768px) {
   .shell {
-    grid-template-columns: var(--sidebar-width) 1fr;
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
     grid-template-rows: var(--topbar-height) 1fr;
     grid-template-areas:
       'sidebar topbar'
       'sidebar content';
   }
 
+  /* Единственный раздел не отменяет колонку меню — только нижнюю полосу. */
+  .shell--single-section {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+    grid-template-rows: var(--topbar-height) 1fr;
+    grid-template-areas:
+      'sidebar topbar'
+      'sidebar content';
+  }
+
+  /* Свёрнутое меню остаётся полосой с иконками, а не исчезает. */
+  .shell--collapsed,
+  .shell--collapsed.shell--single-section {
+    grid-template-columns: var(--sidebar-width-collapsed) minmax(0, 1fr);
+  }
+
   .shell__sidebar {
-    grid-area: sidebar;
-    display: block;
-    padding: var(--space-4) var(--space-2);
-    background: var(--color-surface);
-    border-right: 1px solid var(--color-border);
     position: sticky;
     top: 0;
     height: 100vh;
-    overflow-y: auto;
   }
 
-  .shell__bottombar {
+  .shell__bottombar,
+  .shell__drawer-button,
+  .shell__scrim {
     display: none;
   }
 
   .shell__content {
-    padding: var(--space-5);
+    padding: var(--content-pad-y) var(--content-pad-x);
+  }
+
+  /*
+   * Свёрнутое состояние: подписи скрыты, иконки по центру полосы.
+   *
+   * Подпись убирается `display: none`, а не нулевой шириной: невидимый, но
+   * присутствующий текст программа чтения с экрана всё равно прочитала бы,
+   * и человек слышал бы название дважды — из подписи и из подсказки ссылки.
+   */
+  .shell--collapsed .shell__link-text,
+  .shell--collapsed .shell__brand-text,
+  .shell--collapsed .shell__account-name {
+    display: none;
+  }
+
+  .shell--collapsed .shell__link,
+  .shell--collapsed .shell__brand,
+  .shell--collapsed .shell__account {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
   }
 }
 
@@ -178,6 +503,10 @@
   .shell__content {
     padding: 0;
     overflow: visible;
+  }
+
+  .shell__page,
+  .shell__page--wide {
     max-width: none;
   }
 }
@@ -187,7 +516,7 @@
 .logistics {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 /*
@@ -197,69 +526,27 @@
  */
 .logistics__tabs {
   display: flex;
-  gap: 4px;
+  gap: var(--space-1);
   overflow-x: auto;
   scrollbar-width: thin;
-  border-bottom: 1px solid var(--border, #d9d9d9);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .logistics__tab {
   flex: 0 0 auto;
-  padding: 10px 14px;
-  color: var(--text-muted, #666);
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-muted);
   text-decoration: none;
   white-space: nowrap;
   border-bottom: 2px solid transparent;
 }
 
 .logistics__tab--active {
-  color: var(--text, #111);
+  color: var(--color-text);
   font-weight: 600;
-  border-bottom-color: currentColor;
+  border-bottom-color: currentcolor;
 }
 
 .logistics__content {
   min-width: 0;
-}
-
-/* --- Сворачиваемое меню ---------------------------------------------------- */
-
-/*
- * Скрытое меню исчезает полностью: узкой полосы с иконками не остаётся —
- * решение владельца. Поэтому колонка сетки схлопывается, а не сужается.
- */
-.shell--collapsed .shell__sidebar {
-  display: none;
-}
-
-.shell__menu-button {
-  flex: 0 0 auto;
-  padding: 6px 10px;
-  background: none;
-  border: 1px solid var(--border, #d9d9d9);
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-/* Подложка overlay нужна только там, где меню перекрывает содержимое. */
-.shell__scrim {
-  display: none;
-}
-
-@media (max-width: 900px) {
-  .shell__sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    z-index: 20;
-    width: min(80vw, 320px);
-  }
-
-  .shell__scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 10;
-    background: rgb(0 0 0 / 35%);
-    border: 0;
-  }
 }
