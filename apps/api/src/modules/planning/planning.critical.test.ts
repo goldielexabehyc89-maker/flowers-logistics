@@ -326,6 +326,19 @@ const slot = (capacity = 10) => ({
 
 // --- Подготовка окружения ---------------------------------------------------
 
+/**
+ * Номер для маршрута-дубликата.
+ *
+ * Счётчик, а не `hrtime % N`: номера маршрутов переживают прогон в общей
+ * тестовой базе, и вероятностный выбор рано или поздно совпал бы с чужим.
+ * Буква отделяет фикстуру от номеров, которые выдаёт приложение.
+ */
+let duplicateRouteCounter = 0;
+function nextDuplicateRouteNumber(): string {
+  duplicateRouteCounter += 1;
+  return `R-DUP-T${String(duplicateRouteCounter).padStart(3, '0')}`;
+}
+
 describe('условия планирования', () => {
   it('без настроенной смены планирование отказывает и ничего не создаёт', async () => {
     const actor = await actorWith(['LOGISTICIAN']);
@@ -970,7 +983,7 @@ describe('применение превью', () => {
     await expect(
       ctx.db.deliveryRoute.create({
         data: {
-          number: `R-DUP-${process.hrtime.bigint() % 1_000_000n}`,
+          number: nextDuplicateRouteNumber(),
           deliveryDate: route.deliveryDate,
           vehicleType: 'CAR',
           createdById: route.createdById,

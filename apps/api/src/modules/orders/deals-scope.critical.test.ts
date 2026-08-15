@@ -120,12 +120,31 @@ describe('день и область', () => {
   });
 });
 
+/**
+ * Номер маршрута для фикстуры.
+ *
+ * Приложение выдаёт номера счётчиком дня и всегда цифрами: `formatRouteNumber`
+ * даёт `R-<день>-001`, `-002` и так далее. Фикстура берёт ту же форму, но
+ * с буквой — пересечься с настоящим номером она не может по построению.
+ *
+ * Счётчик, а не `hrtime % N`. Прежний вариант выбирал одно из девятисот
+ * значений на фиксированный день, а номера маршрутов переживают прогон
+ * в общей тестовой базе: совпадение было делом времени и роняло чужой файл
+ * при исправном коде. Уникальный индекс при этом не ослаблен — разведены
+ * только пространства номеров.
+ */
+let routeFixtureCounter = 0;
+function testRouteNumber(day: string): string {
+  routeFixtureCounter += 1;
+  return `R-${day}-T${String(routeFixtureCounter).padStart(3, '0')}`;
+}
+
 describe('участие в маршрутах', () => {
   async function seedRoute(state: 'DRAFT' | 'CONFIRMED', orderId: string): Promise<void> {
     const user = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
     const route = await ctx.db.deliveryRoute.create({
       data: {
-        number: `R-${DAY}-${String((process.hrtime.bigint() % 900n) + 100n)}`,
+        number: testRouteNumber(DAY),
         deliveryDate: toDateColumn(DAY),
         state,
         vehicleType: 'CAR',
