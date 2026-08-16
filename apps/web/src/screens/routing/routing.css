@@ -689,3 +689,105 @@
   margin-top: 4px;
   max-width: 320px;
 }
+
+/* Маршрутный лист в списке: свёрнут — одна строка, раскрыт — компактный состав. */
+.sheets__item {
+  display: block;
+  padding: 4px 0;
+}
+
+.sheets__item-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.sheets__item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sheets__item-toggle {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sheets__item-toggle:hover {
+  color: var(--log-selected-text);
+}
+
+.sheets__item-chevron {
+  border-top: 5px solid currentcolor;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+  transition: transform 0.12s ease;
+}
+
+.sheets__item[data-expanded='true'] .sheets__item-chevron {
+  transform: rotate(180deg);
+}
+
+.sheets__orders {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 4px 0 2px;
+  padding: 4px 6px;
+  border: 1px solid var(--log-border-soft);
+  border-radius: var(--log-radius-md);
+  background: var(--log-surface-soft);
+  list-style: none;
+}
+
+.sheets__order {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  min-width: 0;
+  padding: 3px 2px;
+  font-size: var(--log-font-sm);
+}
+
+.sheets__order + .sheets__order {
+  border-top: 1px solid var(--log-border-soft);
+}
+
+.sheets__order-position {
+  flex: none;
+  width: 18px;
+  color: var(--log-text-muted);
+  text-align: right;
+}
+
+.sheets__order-number {
+  flex: none;
+  font-weight: 500;
+}
+
+.sheets__order-address {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheets__order-interval,
+.sheets__order-state {
+  flex: none;
+}
+
+.sheets__order-state {
+  color: var(--log-status-ok);
+}

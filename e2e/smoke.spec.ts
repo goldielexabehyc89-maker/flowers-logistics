@@ -3249,8 +3249,26 @@ test('маршрутные листы: разделы, курьер, ручна�
   const unshipped = page.getByTestId('sheets-UNSHIPPED');
   const sheet = unshipped.locator('[data-testid="sheet-row"]').first();
   await expect(sheet).toBeVisible();
-  await expect(sheet.getByTestId('sheet-courier')).toContainText('не назначен');
+  /*
+   * Курьер не назначен — поле комбобокса пусто и подсказывает это плейсхолдером;
+   * текста внутри узла у поля ввода нет, проверяется именно значение.
+   */
+  await expect(sheet.getByTestId('sheet-courier-combobox-field')).toHaveValue('');
   await expect(sheet.getByTestId('sheet-ship')).toBeDisabled();
+
+  /*
+   * 3а. Свёрнутый лист не прячет пустое тело, а раскрытый показывает состав.
+   *
+   * Проверяется именно наш заказ: без этого «какие заказы внутри» оставалось бы
+   * вопросом, ответ на который есть только в печатной форме.
+   */
+  await expect(sheet).toHaveAttribute('data-expanded', 'false');
+  await expect(sheet.getByTestId('sheet-orders')).toHaveCount(0);
+  await sheet.getByTestId('sheet-expand').click();
+  await expect(sheet.getByTestId('sheet-orders')).toBeVisible();
+  await expect(sheet.locator(`[data-order-number="${own}"]`)).toBeVisible();
+  await sheet.getByTestId('sheet-expand').click();
+  await expect(sheet.getByTestId('sheet-orders')).toHaveCount(0);
 
   /*
    * 4. Курьер назначается прямо в листе.
@@ -3263,7 +3281,7 @@ test('маршрутные листы: разделы, курьер, ручна�
   const options = sheet.getByTestId('sheet-courier-combobox-option');
   await expect(options.first()).toBeVisible();
   await options.first().click();
-  await expect(sheet.getByTestId('sheet-courier')).not.toContainText('не назначен');
+  await expect(sheet.getByTestId('sheet-courier-combobox-field')).not.toHaveValue('');
 
   // 5. После назначения ручная отгрузка проходит.
   await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
