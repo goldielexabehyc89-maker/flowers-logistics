@@ -276,3 +276,65 @@ describe('отметки настоящей карты', () => {
     expect(after.map((plan) => plan.orderId)).toContain('n');
   });
 });
+
+describe('географическая привязка отметок', () => {
+  const point = (orderId: string, lat: string, lon: string): DealMapPoint => ({
+    orderId,
+    number: `N-${orderId}`,
+    lat,
+    lon,
+    address: 'Москва, Цветочная улица, 1',
+    startMinute: 600,
+    endMinute: 720,
+    assembled: false,
+    selectable: true,
+  });
+
+  it('координата отметки — ровно координата заказа', () => {
+    // MapLibre принимает пару в порядке долгота-широта. Перепутанный порядок
+    // увёз бы московский заказ в Индийский океан.
+    const plans = planMarkers(
+      [],
+      [{ key: 'a', points: [point('a', '55.751244', '37.618423')] }],
+      () => null,
+    );
+
+    expect(plans[0]?.lngLat).toEqual([37.618423, 55.751244]);
+  });
+
+  it('масштаб и группировка координату не меняют', () => {
+    /*
+     * Единственный вход раскладки — доменные данные. Ни zoom, ни pan, ни
+     * размер окна в неё не входят вовсе, поэтому изменить место заказа они
+     * не могут: масштаб меняет только проекцию.
+     *
+     * Экранную часть контракта — совпадение центра кружка с проекцией
+     * MapLibre — доказывает браузерная проверка: здесь её подделать нечем.
+     */
+    const p = point('a', '55.751244', '37.618423');
+    const separate = planMarkers([], [{ key: 'a', points: [p] }], () => null);
+    const grouped = planMarkers([], [{ key: 'bucket', points: [p] }], () => null);
+    const picked = planMarkers([p], [], () => 1);
+
+    expect(separate[0]?.lngLat).toEqual(grouped[0]?.lngLat);
+    expect(picked[0]?.lngLat).toEqual(separate[0]?.lngLat);
+  });
+
+  it('склад показан отдельной отметкой и кликом ничего не выбирает', () => {
+    const plans = planMarkers([], [], () => null, {
+      name: 'Основной склад',
+      lat: '55.700000',
+      lon: '37.500000',
+    });
+
+    expect(plans).toHaveLength(1);
+    expect(plans[0]?.className).toContain('depot');
+    expect(plans[0]?.lngLat).toEqual([37.5, 55.7]);
+    expect(plans[0]?.orderId).toBeNull();
+    expect(plans[0]?.hint).toContain('Основной склад');
+  });
+
+  it('отсутствие склада отметки не создаёт', () => {
+    expect(planMarkers([], [], () => null, null)).toHaveLength(0);
+  });
+});

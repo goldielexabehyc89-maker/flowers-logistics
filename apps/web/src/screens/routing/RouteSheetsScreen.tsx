@@ -1,26 +1,45 @@
 /**
- * Экран «Маршрутные листы»: подтверждённые маршруты выбранного дня и печать.
+ * Экран «Маршрутные листы».
+ *
+ * Три раздела подряд отвечают на один вопрос логиста: что ещё не уехало, что
+ * в пути и что закончено. Листы сгруппированы по московским дням; текущий день
+ * раскрыт, прошлые сворачиваются — вся история сразу превратила бы экран
+ * в бесконечную ленту.
+ *
+ * Отбор и поиск считает СЕРВЕР. Фильтровать загруженные строки нельзя: лист
+ * со второй страницы иначе исчезал бы из поиска вовсе.
  *
  * Печать сделана обычным CSS `@media print`, без отдельного генератора PDF:
- * лист — это тот же список остановок, а второй движок вёрстки означал бы вторую
- * версию правды о порядке доставки.
- *
- * Карты, расстояний и расчётного времени в листе нет: этих данных не существует,
- * а курьер поедет по напечатанному и поверит любой цифре.
+ * лист — это тот же список остановок, а второй движок вёрстки означал бы
+ * вторую версию правды о порядке доставки.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
+import { useToast } from '../../ui/ToastProvider';
 import {
   Button,
   EmptyState,
   ErrorState,
   Field,
   LoadingState,
+  Modal,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
+import { courierLabel, filterCouriers, type CourierOption } from '../deals/courier-picker';
+import {
+  canShip,
+  isDayOpen,
+  needsCancelWarning,
+  SECTION_TITLES,
+  SHEET_SECTIONS,
+  shipBlockedReason,
+  toggleDay,
+  type SheetSection,
+  type SheetView,
+} from './sheets-view';
 import {
   conflictLabel,
   formatDate,
@@ -29,123 +48,545 @@ import {
   stopInterval,
   VEHICLE_LABELS,
   type RouteCardView,
-  type RouteListResponse,
 } from './routing';
 import './routing.css';
 
+interface SheetsResponse {
+  days: { date: string; sheets: SheetView[] }[];
+  total: number;
+  hasMore: boolean;
+}
+
+interface CancelResponse {
+  createdSheet: { id: string; number: string } | null;
+  restoredOrders: number;
+  unchanged: boolean;
+}
+
+/** Сколько листов раздела грузить за раз. Продолжение — по кнопке. */
+const PAGE_SIZE = 20;
+
 export function RouteSheetsScreen(): React.JSX.Element {
   const { client } = useAuth();
-  const [date, setDate] = useState(moscowToday());
-  const [openId, setOpenId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  const today = moscowToday();
 
-  // Лист нужен и после того, как заказы уехали: курьер в дороге, а логисту
-  // приходится смотреть, что именно он повёз. Поэтому день показывается двумя
-  // запросами — подтверждённые и уже переданные курьеру, — а не одним
-  // состоянием, при котором маршрут исчезал бы с экрана в момент выдачи.
-  const confirmed = useQuery({
-    queryKey: ['routes', date, 'CONFIRMED'],
-    queryFn: () =>
-      client.get<RouteListResponse>(`/api/routes?deliveryDate=${date}&state=CONFIRMED&limit=100`),
+  const [date, setDate] = useState('');
+  const [search, setSearch] = useState('');
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [openedDays, setOpenedDays] = useState<ReadonlySet<string>>(new Set());
+  const [pages, setPages] = useState<Record<SheetSection, number>>({
+    UNSHIPPED: 1,
+    SHIPPED: 1,
+    DELIVERED: 1,
   });
-  const active = useQuery({
-    queryKey: ['routes', date, 'ACTIVE'],
+  /** Лист, созданный отменой незавершённых: о нём сообщается отдельно. */
+  const [createdSheet, setCreatedSheet] = useState<{ id: string; number: string } | null>(null);
+  const [cancelFor, setCancelFor] = useState<SheetView | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const [confirmAll, setConfirmAll] = useState(false);
+  /** Открытый выбор курьера и строка поиска в нём. */
+  const [courierFor, setCourierFor] = useState<string | null>(null);
+  const [courierQuery, setCourierQuery] = useState('');
+
+  const couriers = useQuery({
+    queryKey: ['couriers-for-routes'],
     queryFn: () =>
-      client.get<RouteListResponse>(`/api/routes?deliveryDate=${date}&state=ACTIVE&limit=100`),
+      client.get<{ items: CourierOption[] }>('/api/users?role=COURIER&status=ACTIVE&limit=100'),
   });
-  const routes = {
-    isPending: confirmed.isPending || active.isPending,
-    isError: confirmed.isError || active.isError,
-    refetch: () => {
-      void confirmed.refetch();
-      void active.refetch();
+
+  /** Ручную отгрузку включает администратор; логист только видит состояние. */
+  const settings = useQuery({
+    queryKey: ['planning-settings'],
+    queryFn: () =>
+      client.get<{ manualIssue: { value: { enabled: boolean } } }>('/api/settings/planning'),
+  });
+  const manualIssueEnabled = settings.data?.manualIssue.value.enabled ?? false;
+
+  /*
+   * Отдельный запрос на раздел, объявленный явно.
+   *
+   * Хуки нельзя создавать в цикле или помощнике: их число и порядок обязаны
+   * совпадать от рендера к рендеру, иначе React снимает приложение целиком.
+   */
+  const queryFor = (section: SheetSection, page: number) => ({
+    queryKey: ['route-sheets', section, date, search, page] as const,
+    queryFn: () => {
+      const params = new URLSearchParams({
+        section,
+        limit: String(PAGE_SIZE * page),
+        offset: '0',
+      });
+      if (date !== '') {
+        params.set('deliveryDate', date);
+      }
+      if (search.trim() !== '') {
+        params.set('search', search.trim());
+      }
+      return client.get<SheetsResponse>(`/api/route-sheets?${params.toString()}`);
     },
+  });
+
+  const unshipped = useQuery(queryFor('UNSHIPPED', pages.UNSHIPPED));
+  const shipped = useQuery(queryFor('SHIPPED', pages.SHIPPED));
+  const delivered = useQuery(queryFor('DELIVERED', pages.DELIVERED));
+
+  const sections = { UNSHIPPED: unshipped, SHIPPED: shipped, DELIVERED: delivered };
+
+  const refreshAll = (): void => {
+    void queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
+    void queryClient.invalidateQueries({ queryKey: ['routes'] });
   };
 
-  const sheet = useQuery({
+  const assignCourier = useMutation({
+    mutationFn: (input: { sheet: SheetView; courierUserId: string | null }) =>
+      client.put(`/api/routes/${input.sheet.id}/courier`, {
+        courierUserId: input.courierUserId,
+        expectedVersion: input.sheet.version,
+      }),
+    onSuccess: () => {
+      setCourierFor(null);
+      setCourierQuery('');
+      showToast('Курьер сохранён', 'success');
+      refreshAll();
+    },
+    onError: (error: unknown) => {
+      /*
+       * Чужая правка — не ошибка человека: данные обновляются, а сообщение
+       * объясняет, почему его выбор не сохранился.
+       */
+      showToast(
+        (error as { message?: string }).message ??
+          'Лист изменён другим пользователем. Данные обновлены, повторите выбор.',
+        'error',
+      );
+      refreshAll();
+    },
+  });
+
+  const ship = useMutation({
+    mutationFn: (sheet: SheetView) =>
+      client.post(`/api/routes/${sheet.id}/ship`, { expectedVersion: sheet.version }),
+    onSuccess: () => {
+      showToast('Маршрутный лист отгружен', 'success');
+      refreshAll();
+    },
+    onError: (error: unknown) =>
+      showToast((error as { message?: string }).message ?? 'Не удалось отгрузить лист', 'error'),
+  });
+
+  const returnToDraft = useMutation({
+    mutationFn: (sheet: SheetView) =>
+      client.post(`/api/routes/${sheet.id}/return-to-draft`, {
+        expectedVersion: sheet.version,
+        reason: 'Возврат в черновик из маршрутных листов',
+      }),
+    onSuccess: () => {
+      showToast('Лист вернулся в «Маршрутизацию» без потери состава', 'success');
+      refreshAll();
+    },
+    onError: (error: unknown) =>
+      showToast((error as { message?: string }).message ?? 'Не удалось вернуть лист', 'error'),
+  });
+
+  const cancelShipment = useMutation({
+    mutationFn: (input: { sheet: SheetView; mode: 'UNFINISHED' | 'ALL' }) =>
+      client.post<CancelResponse>(`/api/routes/${input.sheet.id}/cancel-shipment`, {
+        expectedVersion: input.sheet.version,
+        mode: input.mode,
+        ...(input.mode === 'ALL' ? { reason: cancelReason.trim() } : {}),
+      }),
+    onSuccess: (result) => {
+      setCancelFor(null);
+      setConfirmAll(false);
+      setCancelReason('');
+      refreshAll();
+      /*
+       * Номер нового листа приходит с сервера и показывается ТОЛЬКО после
+       * успешной операции: браузеру его вычислять неоткуда, а при ошибке
+       * показывать нечего.
+       */
+      if (result.createdSheet !== null) {
+        setCreatedSheet(result.createdSheet);
+      } else {
+        showToast('Отгрузка отменена', 'success');
+      }
+    },
+    onError: (error: unknown) =>
+      showToast((error as { message?: string }).message ?? 'Не удалось отменить отгрузку', 'error'),
+  });
+
+  const busy =
+    ship.isPending ||
+    returnToDraft.isPending ||
+    cancelShipment.isPending ||
+    assignCourier.isPending;
+
+  const sheetCard = useQuery({
     queryKey: ['route', openId],
     queryFn: () => client.get<RouteCardView>(`/api/routes/${openId ?? ''}`),
     enabled: openId !== null,
   });
 
-  const items = [...(confirmed.data?.items ?? []), ...(active.data?.items ?? [])].sort(
-    (left, right) => left.number.localeCompare(right.number, 'ru'),
-  );
-
   return (
     <section className="stack">
-      <header className="routes__header no-print">
-        <div>
-          <h2>Маршрутные листы</h2>
-          <p className="muted text-sm">
-            Подтверждённые и переданные курьеру маршруты выбранного дня. Лист печатается как есть,
-            без карты и расчётного времени.
-          </p>
-        </div>
-      </header>
-
-      <div className="routes__filters no-print">
-        <Field label="Дата доставки">
-          {(fieldProps) => (
+      <div className="no-print routes__sheet-filters">
+        <Field label="День" hint="Пусто — все дни">
+          {(props) => (
             <TextInput
-              {...fieldProps}
+              {...props}
               type="date"
               value={date}
-              onChange={(event) => {
-                setDate(event.target.value);
-                setOpenId(null);
-              }}
+              data-testid="sheets-date"
+              onChange={(event) => setDate(event.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="Поиск" hint="Номер листа, номер заказа, имя или телефон курьера">
+          {(props) => (
+            <TextInput
+              {...props}
+              value={search}
+              placeholder="Например, R-12 или Иванов"
+              data-testid="sheets-search"
+              onChange={(event) => setSearch(event.target.value)}
             />
           )}
         </Field>
       </div>
 
-      <div className="no-print">
-        {routes.isPending ? (
-          <LoadingState title="Загружаем маршруты…" />
-        ) : routes.isError ? (
-          <ErrorState title="Не удалось загрузить маршруты" onRetry={() => void routes.refetch()} />
-        ) : items.length === 0 ? (
-          <EmptyState
-            title="Маршрутов на этот день нет"
-            description="Подтвердите черновик в разделе «Маршрутизация», и он появится здесь."
-          />
-        ) : (
-          <ul className="routes__list">
-            {items.map((route) => (
-              <li key={route.id} className="routes__list-item">
-                <div>
-                  <span className="routes__number">{route.number}</span>{' '}
-                  <StatusBadge tone="info">{ROUTE_STATE_LABELS[route.state]}</StatusBadge>
-                  <div className="muted text-sm">
-                    {formatDate(route.deliveryDate)} · {VEHICLE_LABELS[route.vehicleType]} ·{' '}
-                    заказов: {route.orderCount}
+      {/*
+        Уведомление о созданном листе.
+
+        Появляется только после успешного разделения и ведёт ровно в тот лист,
+        который создан. Персональных данных здесь нет — только номер.
+      */}
+      {createdSheet !== null && (
+        <p className="routes__hint no-print" role="status" data-testid="sheets-created-notice">
+          Незавершённые заказы перенесены в новый маршрутный лист {createdSheet.number}.{' '}
+          <button
+            type="button"
+            className="deals__link"
+            data-testid="sheets-open-created"
+            onClick={() => {
+              setOpenId(createdSheet.id);
+              setCreatedSheet(null);
+            }}
+          >
+            Открыть МЛ {createdSheet.number}
+          </button>
+        </p>
+      )}
+
+      {SHEET_SECTIONS.map((section) => {
+        const query = sections[section];
+        const days = query.data?.days ?? [];
+        return (
+          <section key={section} className="routes__section" data-testid={`sheets-${section}`}>
+            <h3 className="routes__section-title">
+              {SECTION_TITLES[section]}{' '}
+              <span className="muted text-sm">({query.data?.total ?? 0})</span>
+            </h3>
+
+            {query.isPending ? (
+              <LoadingState title="Загружаем листы…" />
+            ) : query.isError ? (
+              <ErrorState title="Не удалось загрузить листы" onRetry={() => void query.refetch()} />
+            ) : days.length === 0 ? (
+              <EmptyState title="Листов в этом разделе нет" />
+            ) : (
+              days.map((day) => {
+                const open = isDayOpen(day.date, today, openedDays);
+                return (
+                  <div key={day.date} className="routes__day" data-testid="sheets-day">
+                    <button
+                      type="button"
+                      className="routes__day-toggle"
+                      aria-expanded={open}
+                      data-testid="sheets-day-toggle"
+                      data-day={day.date}
+                      onClick={() => setOpenedDays((current) => toggleDay(current, day.date))}
+                    >
+                      {formatDate(day.date)}
+                      <span className="muted text-sm"> · листов: {day.sheets.length}</span>
+                    </button>
+
+                    {open && (
+                      <ul className="routes__list">
+                        {day.sheets.map((sheet) => (
+                          <li
+                            key={sheet.id}
+                            className="routes__list-item"
+                            data-testid="sheet-row"
+                            data-sheet-number={sheet.number}
+                          >
+                            <div>
+                              <span className="routes__number">{sheet.number}</span>{' '}
+                              <StatusBadge tone="info">
+                                {ROUTE_STATE_LABELS[sheet.state as keyof typeof ROUTE_STATE_LABELS]}
+                              </StatusBadge>
+                              <div className="muted text-sm">
+                                заказов: {sheet.totalOrders}
+                                {sheet.deliveredOrders > 0
+                                  ? ` · доставлено: ${sheet.deliveredOrders}`
+                                  : ''}
+                              </div>
+                              <div className="muted text-sm" data-testid="sheet-courier">
+                                Курьер: {sheet.courier?.fullName ?? 'не назначен'}
+                                {section === 'UNSHIPPED' && (
+                                  <>
+                                    {' · '}
+                                    <button
+                                      type="button"
+                                      className="deals__link"
+                                      data-testid="sheet-courier-edit"
+                                      onClick={() => {
+                                        setCourierFor(courierFor === sheet.id ? null : sheet.id);
+                                        setCourierQuery('');
+                                      }}
+                                    >
+                                      {sheet.courier === null ? 'назначить' : 'изменить'}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                              {/*
+                                Курьер выбирается поиском по имени или телефону
+                                прямо в листе: возвращать лист в черновик ради
+                                одного поля незачем.
+                              */}
+                              {section === 'UNSHIPPED' && courierFor === sheet.id && (
+                                <div className="routes__courier-picker">
+                                  <TextInput
+                                    aria-label="Поиск курьера"
+                                    value={courierQuery}
+                                    placeholder="Имя или телефон"
+                                    data-testid="sheet-courier-search"
+                                    disabled={busy}
+                                    onChange={(event) => setCourierQuery(event.target.value)}
+                                  />
+                                  <ul className="routes__couriers">
+                                    {sheet.courier !== null && (
+                                      <li>
+                                        <button
+                                          type="button"
+                                          className="deals__link"
+                                          data-testid="sheet-courier-clear"
+                                          onClick={() =>
+                                            assignCourier.mutate({ sheet, courierUserId: null })
+                                          }
+                                        >
+                                          Снять назначение
+                                        </button>
+                                      </li>
+                                    )}
+                                    {filterCouriers(couriers.data?.items ?? [], courierQuery).map(
+                                      (option) => (
+                                        <li key={option.id}>
+                                          <button
+                                            type="button"
+                                            className="deals__link"
+                                            data-testid="sheet-courier-option"
+                                            onClick={() =>
+                                              assignCourier.mutate({
+                                                sheet,
+                                                courierUserId: option.id,
+                                              })
+                                            }
+                                          >
+                                            {courierLabel(option)}
+                                          </button>
+                                        </li>
+                                      ),
+                                    )}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="routes__actions">
+                              {section === 'UNSHIPPED' && (
+                                <>
+                                  <Button
+                                    variant="primary"
+                                    disabled={busy || !canShip(sheet, manualIssueEnabled)}
+                                    title={
+                                      shipBlockedReason(sheet, manualIssueEnabled) ?? undefined
+                                    }
+                                    data-testid="sheet-ship"
+                                    onClick={() => ship.mutate(sheet)}
+                                  >
+                                    Отгрузить
+                                  </Button>
+                                  <Button
+                                    disabled={busy}
+                                    data-testid="sheet-return-to-draft"
+                                    onClick={() => returnToDraft.mutate(sheet)}
+                                  >
+                                    Вернуть в черновик
+                                  </Button>
+                                </>
+                              )}
+                              {section === 'SHIPPED' && (
+                                <Button
+                                  disabled={busy}
+                                  data-testid="sheet-cancel-shipment"
+                                  onClick={() => {
+                                    setCancelFor(sheet);
+                                    setCancelReason('');
+                                    setConfirmAll(false);
+                                  }}
+                                >
+                                  Отменить отгрузку
+                                </Button>
+                              )}
+                              <Button data-testid="sheet-open" onClick={() => setOpenId(sheet.id)}>
+                                Открыть лист
+                              </Button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
-                  <div className="muted text-sm">
-                    Курьер: {route.courier?.fullName ?? 'не назначен'}
-                  </div>
+                );
+              })
+            )}
+
+            {(query.data?.hasMore ?? false) && (
+              <Button
+                data-testid="sheets-more"
+                onClick={() =>
+                  setPages((current) => ({ ...current, [section]: current[section] + 1 }))
+                }
+              >
+                Показать ещё
+              </Button>
+            )}
+          </section>
+        );
+      })}
+
+      {/*
+        Отмена отгрузки.
+
+        Без доставленных заказов это обычное подтверждение. С доставленными —
+        предупреждение с их номерами и тремя разными исходами: закрыть, вернуть
+        только незавершённые или вернуть всё административной коррекцией.
+      */}
+      <Modal
+        open={cancelFor !== null}
+        title={
+          cancelFor !== null && needsCancelWarning(cancelFor)
+            ? 'В листе есть доставленные заказы'
+            : 'Отменить отгрузку'
+        }
+        onClose={() => setCancelFor(null)}
+        dismissible={!cancelShipment.isPending}
+        testId="cancel-shipment-dialog"
+      >
+        {cancelFor !== null && (
+          <div className="stack">
+            {needsCancelWarning(cancelFor) ? (
+              <>
+                <p className="text-sm">
+                  Уже доставлены заказы: {cancelFor.deliveredNumbers.join(', ')}. Выберите, что с
+                  ними делать.
+                </p>
+
+                <Field label="Причина" hint="Обязательна для возврата доставленных заказов">
+                  {(props) => (
+                    <TextInput
+                      {...props}
+                      value={cancelReason}
+                      data-testid="cancel-reason"
+                      disabled={cancelShipment.isPending}
+                      onChange={(event) => setCancelReason(event.target.value)}
+                    />
+                  )}
+                </Field>
+
+                {confirmAll && (
+                  <p className="text-sm" data-testid="cancel-all-confirm">
+                    Доставленные заказы снова станут неотгруженными. Прежние факты доставки
+                    останутся в истории отменёнными. Подтвердите ещё раз.
+                  </p>
+                )}
+
+                <div className="modal__footer">
+                  <Button
+                    onClick={() => setCancelFor(null)}
+                    disabled={cancelShipment.isPending}
+                    data-testid="cancel-dismiss"
+                  >
+                    Отмена
+                  </Button>
+                  <Button
+                    disabled={cancelShipment.isPending}
+                    data-testid="cancel-unfinished"
+                    onClick={() => cancelShipment.mutate({ sheet: cancelFor, mode: 'UNFINISHED' })}
+                  >
+                    Отменить отгрузку незавершённых
+                  </Button>
+                  <Button
+                    variant="danger"
+                    disabled={cancelShipment.isPending || cancelReason.trim().length < 3}
+                    data-testid="cancel-all"
+                    onClick={() => {
+                      if (!confirmAll) {
+                        setConfirmAll(true);
+                        return;
+                      }
+                      cancelShipment.mutate({ sheet: cancelFor, mode: 'ALL' });
+                    }}
+                  >
+                    {confirmAll ? 'Подтвердить: отменить все' : 'Отменить все'}
+                  </Button>
                 </div>
-                <Button onClick={() => setOpenId(route.id)}>Открыть лист</Button>
-              </li>
-            ))}
-          </ul>
+              </>
+            ) : (
+              <>
+                <p className="text-sm">
+                  Лист {cancelFor.number} вернётся в неотгруженные. Состав и порядок сохранятся.
+                </p>
+                <div className="modal__footer">
+                  <Button onClick={() => setCancelFor(null)} data-testid="cancel-dismiss">
+                    Отмена
+                  </Button>
+                  <Button
+                    variant="primary"
+                    disabled={cancelShipment.isPending}
+                    data-testid="cancel-confirm"
+                    onClick={() => cancelShipment.mutate({ sheet: cancelFor, mode: 'UNFINISHED' })}
+                  >
+                    Отменить отгрузку
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
         )}
-      </div>
+      </Modal>
 
       {openId !== null && (
         <>
-          {sheet.isPending ? (
+          {sheetCard.isPending ? (
             <LoadingState title="Готовим маршрутный лист…" />
-          ) : sheet.isError || sheet.data === undefined ? (
-            <ErrorState title="Не удалось загрузить лист" onRetry={() => void sheet.refetch()} />
+          ) : sheetCard.isError || sheetCard.data === undefined ? (
+            <ErrorState
+              title="Не удалось загрузить лист"
+              onRetry={() => void sheetCard.refetch()}
+            />
           ) : (
             <article className="sheet">
               <header className="sheet__header">
                 <div>
-                  <h3>Маршрутный лист {sheet.data.number}</h3>
+                  <h3>Маршрутный лист {sheetCard.data.number}</h3>
                   <p className="text-sm">
-                    Дата: {formatDate(sheet.data.deliveryDate)} · Транспорт:{' '}
-                    {VEHICLE_LABELS[sheet.data.vehicleType]} · Курьер:{' '}
-                    {sheet.data.courier?.fullName ?? 'не назначен'}
+                    Дата: {formatDate(sheetCard.data.deliveryDate)} · Транспорт:{' '}
+                    {VEHICLE_LABELS[sheetCard.data.vehicleType]} · Курьер:{' '}
+                    {sheetCard.data.courier?.fullName ?? 'не назначен'}
                   </p>
                 </div>
                 <div className="no-print sheet__controls">
@@ -157,7 +598,7 @@ export function RouteSheetsScreen(): React.JSX.Element {
               </header>
 
               <ol className="sheet__stops">
-                {sheet.data.orders.map((item) => (
+                {sheetCard.data.orders.map((item) => (
                   <li key={item.routeOrderId} className="sheet__stop">
                     <div className="sheet__stop-head">
                       <span className="sheet__position">{item.position}</span>
@@ -188,12 +629,14 @@ export function RouteSheetsScreen(): React.JSX.Element {
                 ))}
               </ol>
 
-              {sheet.data.orders.length === 0 && <p className="text-sm">В маршруте нет заказов.</p>}
+              {sheetCard.data.orders.length === 0 && (
+                <p className="text-sm">В маршруте нет заказов.</p>
+              )}
 
               <footer className="sheet__footer text-sm">
-                Итого остановок: {sheet.data.orders.length}. Состояние маршрута:{' '}
+                Итого остановок: {sheetCard.data.orders.length}. Состояние маршрута:{' '}
                 <StatusBadge tone="info">
-                  {ROUTE_STATE_LABELS[sheet.data.state].toLocaleLowerCase('ru')}
+                  {ROUTE_STATE_LABELS[sheetCard.data.state].toLocaleLowerCase('ru')}
                 </StatusBadge>
               </footer>
             </article>

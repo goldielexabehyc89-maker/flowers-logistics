@@ -15,6 +15,7 @@ import {
   editingHint,
   formatDate,
   moscowToday,
+  moveTo,
   moveWithin,
   routeActionLabel,
   stopInterval,
@@ -245,5 +246,28 @@ describe('сердцебиение аренды', () => {
 
     await vi.advanceTimersByTimeAsync(30_000);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('перестановка перетаскиванием', () => {
+  const ids = ['a', 'b', 'c', 'd'];
+
+  it('заказ встаёт на место, куда его отпустили', () => {
+    expect(moveTo(ids, 0, 2)).toEqual(['b', 'c', 'a', 'd']);
+    expect(moveTo(ids, 3, 0)).toEqual(['d', 'a', 'b', 'c']);
+  });
+
+  it('прежний порядок сохранять нечего', () => {
+    // Лишний запрос сбросил бы линию маршрута ради того же результата.
+    expect(moveTo(ids, 1, 1)).toBeNull();
+  });
+
+  it('выход за границы списка ничего не меняет', () => {
+    expect(moveTo(ids, 0, 9)).toBeNull();
+    expect(moveTo(ids, -1, 2)).toBeNull();
+  });
+
+  it('состав списка не меняется, меняется только порядок', () => {
+    expect([...(moveTo(ids, 0, 3) ?? [])].sort()).toEqual([...ids].sort());
   });
 });

@@ -54,6 +54,10 @@ export const AUDIT_ACTIONS = [
   // намеренно: раз в тридцать секунд он превратил бы журнал в шум.
   'ROUTE_CONFIRMED',
   'ROUTE_RETURNED_TO_DRAFT',
+  /** Отгрузка отменена: лист вернулся в неотгруженное состояние. */
+  'ROUTE_SHIPMENT_CANCELLED',
+  /** Незавершённая часть отгруженного листа выделена в новый лист. */
+  'ROUTE_SPLIT_FROM_SHIPMENT',
   'ROUTE_CANCELLED',
   'ROUTE_EDIT_LOCK_ACQUIRED',
   'ROUTE_EDIT_LOCK_RELEASED',

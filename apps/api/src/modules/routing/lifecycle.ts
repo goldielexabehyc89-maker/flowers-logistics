@@ -36,8 +36,13 @@ import { writeAudit, type AuditAction } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import type { ConflictKind, Role } from '@fl/shared';
 import { calendarDate, ineligibleReason } from './eligibility.js';
+import { nextRouteNumber } from './numbering.js';
 import { assertReason, grantLease, releaseLeaseRow, requireLease } from './lease.js';
-import { markRoutePlacementsForRelocation } from '../warehouse/route-flow.js';
+import {
+  activateRouteWithinTransaction,
+  markRoutePlacementsForRelocation,
+} from '../warehouse/route-flow.js';
+import { readManualIssue } from '../settings/service.js';
 import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
 
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
@@ -61,6 +66,7 @@ interface LockedRoute {
   state: $Enums.RouteState;
   version: number;
   courierUserId: string | null;
+  vehicleType: $Enums.VehicleType;
 }
 
 /** Причина, по которой маршрут нельзя подтвердить. PII не содержит. */
@@ -71,7 +77,7 @@ export interface ConfirmBlocker {
 
 async function lockRoute(tx: TransactionClient, routeId: string): Promise<LockedRoute> {
   const rows = await tx.$queryRaw<LockedRoute[]>`
-    SELECT "id", "number", "deliveryDate", "state", "version", "courierUserId"
+    SELECT "id", "number", "deliveryDate", "state", "version", "courierUserId", "vehicleType"
     FROM "DeliveryRoute"
     WHERE "id" = ${routeId}::uuid
     FOR UPDATE
@@ -137,6 +143,43 @@ async function applyTransition(
       occurredAt: now,
       reason,
     },
+  });
+}
+
+/** Запись аудита маршрута с произвольным содержимым. */
+async function auditRouteValue(
+  tx: TransactionClient,
+  action: AuditAction,
+  routeId: string,
+  actor: AuthenticatedActor,
+  context: RequestContext,
+  value: Record<string, unknown>,
+): Promise<void> {
+  await writeAudit(tx, {
+    action,
+    entityType: 'DeliveryRoute',
+    entityId: routeId,
+    actorUserId: actor.userId,
+    actorRoles: actor.roles,
+    source: 'api',
+    // Только идентификаторы, номера и счётчики: ни адресов, ни телефонов.
+    oldValue: null,
+    newValue: value,
+    ip: context.ip,
+    userAgent: context.userAgent,
+  });
+}
+
+/** Событие маршрута без персональных данных: клиент перезапрашивает сам. */
+async function publishRouteEvent(
+  tx: TransactionClient,
+  topic: 'route.created' | 'route.updated',
+  routeId: string,
+): Promise<void> {
+  await publishRealtimeEvent(tx, {
+    topic,
+    payload: { routeId },
+    audienceRoles: ['ADMIN', 'LOGISTICIAN'],
   });
 }
 
@@ -254,6 +297,66 @@ export interface ConfirmInput {
   expectedVersion: number;
 }
 
+/**
+ * Подтверждение маршрута ВНУТРИ уже открытой транзакции.
+ *
+ * Вынесено отдельно, чтобы у перехода «черновик → маршрутный лист» была ровно
+ * одна реализация. Создание маршрутного листа сразу из выбора в «Сделках»
+ * обязано быть атомарным: черновик и его подтверждение случаются либо вместе,
+ * либо никак. Второй экземпляр этой логики неизбежно разошёлся бы с первым —
+ * а расходятся такие вещи молча.
+ *
+ * `expectedVersion` равен `null` только там, где маршрут создан этой же
+ * транзакцией: сверять версию с самим собой нечего, а чужого редактора
+ * у секундного черновика быть не может.
+ */
+export async function confirmWithinTransaction(
+  tx: TransactionClient,
+  actor: AuthenticatedActor,
+  routeId: string,
+  expectedVersion: number | null,
+  context: RequestContext,
+  now: Date,
+): Promise<{ state: $Enums.RouteState; version: number }> {
+  const route = await lockRoute(tx, routeId);
+  requireState(route, 'DRAFT');
+  if (expectedVersion !== null) {
+    requireVersion(route, expectedVersion);
+    // Подтверждает тот, кто держит маршрут в работе: иначе один человек
+    // подтвердил бы состав, который прямо сейчас меняет другой.
+    await requireLease(tx, routeId, actor, now);
+  }
+
+  const blockers = await confirmBlockers(tx, routeId);
+  if (blockers.length > 0) {
+    const first = blockers[0];
+    throw new AppError('CONFLICT', {
+      message: 'route cannot be confirmed',
+      publicMessage: describeBlocker(first?.kind),
+      conflict: {
+        kind: first?.kind ?? 'ROUTE_EMPTY',
+        ...(first !== undefined && first.orderIds.length > 0 ? { orderIds: first.orderIds } : {}),
+      },
+    });
+  }
+
+  await applyTransition(tx, route, 'CONFIRMED', actor, now, null);
+  // Подтверждённый маршрут не редактируется, поэтому держать его в работе незачем.
+  await releaseLeaseRow(tx, routeId, now);
+
+  await auditAndPublish(
+    tx,
+    'ROUTE_CONFIRMED',
+    'route.confirmed',
+    route,
+    'CONFIRMED',
+    actor,
+    context,
+  );
+
+  return { state: 'CONFIRMED', version: route.version + 1 };
+}
+
 export async function confirmRoute(
   deps: LifecycleDeps,
   actor: AuthenticatedActor,
@@ -263,43 +366,9 @@ export async function confirmRoute(
 ): Promise<{ state: $Enums.RouteState; version: number }> {
   const now = clockOf(deps)();
 
-  return deps.db.$transaction(async (tx) => {
-    const route = await lockRoute(tx, routeId);
-    requireState(route, 'DRAFT');
-    requireVersion(route, input.expectedVersion);
-    // Подтверждает тот, кто держит маршрут в работе: иначе один человек подтвердил бы
-    // состав, который прямо сейчас меняет другой.
-    await requireLease(tx, routeId, actor, now);
-
-    const blockers = await confirmBlockers(tx, routeId);
-    if (blockers.length > 0) {
-      const first = blockers[0];
-      throw new AppError('CONFLICT', {
-        message: 'route cannot be confirmed',
-        publicMessage: describeBlocker(first?.kind),
-        conflict: {
-          kind: first?.kind ?? 'ROUTE_EMPTY',
-          ...(first !== undefined && first.orderIds.length > 0 ? { orderIds: first.orderIds } : {}),
-        },
-      });
-    }
-
-    await applyTransition(tx, route, 'CONFIRMED', actor, now, null);
-    // Подтверждённый маршрут не редактируется, поэтому держать его в работе незачем.
-    await releaseLeaseRow(tx, routeId, now);
-
-    await auditAndPublish(
-      tx,
-      'ROUTE_CONFIRMED',
-      'route.confirmed',
-      route,
-      'CONFIRMED',
-      actor,
-      context,
-    );
-
-    return { state: 'CONFIRMED', version: route.version + 1 };
-  });
+  return deps.db.$transaction((tx) =>
+    confirmWithinTransaction(tx, actor, routeId, input.expectedVersion, context, now),
+  );
 }
 
 function describeBlocker(kind: ConflictKind | undefined): string {
@@ -315,6 +384,346 @@ function describeBlocker(kind: ConflictKind | undefined): string {
     default:
       return 'Маршрут нельзя подтвердить.';
   }
+}
+
+export interface ManualIssueInput {
+  expectedVersion: number;
+}
+
+/**
+ * Ручная отгрузка маршрутного листа логистом.
+ *
+ * Тот же доменный переход, что и складская отгрузка: реализация одна
+ * (`activateRouteWithinTransaction`), отличие ровно одно — заказы не сканируются.
+ * Параллельного изменения статуса здесь нет и быть не может.
+ *
+ * Три отказа, каждый из которых защищает факт, а не форму:
+ *
+ * 1. Выключенная глобальная настройка. Её меняет только администратор.
+ * 2. Не назначен курьер: маршрут «уехал» бы неизвестно с кем.
+ * 3. По маршруту уже идёт складская выдача. Тогда отгружает склад — иначе
+ *    часть заказов физически у курьера, часть на полке, а лист считается
+ *    отгруженным целиком.
+ *
+ * Повтор идемпотентен: уже отгруженный лист возвращает то же состояние
+ * и второй записи в истории не создаёт.
+ */
+export async function shipRouteManually(
+  deps: LifecycleDeps,
+  actor: AuthenticatedActor,
+  routeId: string,
+  input: ManualIssueInput,
+  context: RequestContext,
+): Promise<{ state: $Enums.RouteState; version: number; unchanged: boolean }> {
+  const now = clockOf(deps)();
+
+  const setting = await readManualIssue(deps.db);
+  if (!setting.value.enabled) {
+    throw new AppError('CONFLICT', {
+      message: 'manual issue disabled',
+      publicMessage:
+        'Ручная отгрузка выключена. Включить её может только администратор в настройках.',
+      conflict: { kind: 'MANUAL_ISSUE_DISABLED' },
+    });
+  }
+
+  return deps.db.$transaction(async (tx) => {
+    const route = await lockRoute(tx, routeId);
+
+    // Повтор потерянной команды не создаёт второй переход.
+    if (route.state === 'ACTIVE') {
+      return { state: route.state, version: route.version, unchanged: true };
+    }
+
+    requireState(route, 'CONFIRMED');
+    requireVersion(route, input.expectedVersion);
+
+    if (route.courierUserId === null) {
+      throw new AppError('CONFLICT', {
+        message: 'courier is not assigned',
+        publicMessage: 'Сначала назначьте курьера: без него маршрут отгрузить нельзя.',
+        conflict: { kind: 'ROUTE_COURIER_REQUIRED', routeNumber: route.number },
+      });
+    }
+
+    await assertIssueNotStarted(tx, routeId, route.number);
+
+    /*
+     * Признак ручной отгрузки уходит в аудит (`manual: true`), а не в историю
+     * состояний: там живут состояния, а не способы их достижения, и правило
+     * базы запрещает причину у перехода в «отгружен».
+     */
+    await activateRouteWithinTransaction(tx, route, actor, context, now, {
+      issued: 0,
+      orderId: null,
+    });
+
+    return { state: 'ACTIVE', version: route.version + 1, unchanged: false };
+  });
+}
+
+/**
+ * Отмена отгрузки маршрутного листа.
+ *
+ * Два разных действия под одним именем, и разница между ними — судьба уже
+ * доставленных заказов.
+ *
+ * `UNFINISHED` — доставленные остаются доставленными. Лист АТОМАРНО делится:
+ * исходный сохраняет свой номер, оставляет у себя доставленные заказы
+ * и уходит в «Доставленные»; незавершённые переезжают в НОВЫЙ неотгруженный
+ * лист с новым номером, сохраняя относительный порядок и курьера.
+ *
+ * Разделение выражено существующими средствами переноса: участие в исходном
+ * листе закрывается причиной `MOVED_TO_ANOTHER_ROUTE` со ссылкой
+ * `movedToRouteId`, а в аудит обоих листов пишется встречный номер. Новое
+ * значение перечисления не понадобилось: заказ действительно переехал
+ * в другой маршрут, и это ровно та причина, которая уже есть.
+ *
+ * `ALL` — административная коррекция. Доставленные заказы снова становятся
+ * неотгруженными, но прежний факт доставки НЕ удаляется: он остаётся в истории
+ * отменённым с причиной, автором и временем. Разделения не происходит.
+ *
+ * Если доставленных заказов нет, оба режима делают одно и то же: лист целиком
+ * возвращается в неотгруженное состояние.
+ */
+
+/**
+ * Возврат доставленных заказов в работу.
+ *
+ * Прежний факт доставки НЕ удаляется: снимается только технический ключ,
+ * а рядом появляется запись коррекции с видом `MANAGER_CORRECTION`, автором,
+ * временем и причиной. Именно так это уже делает исправление одного результата
+ * — здесь тот же механизм применяется ко всем результатам листа сразу.
+ */
+async function restoreDeliveredOrders(
+  tx: TransactionClient,
+  delivered: readonly { id: string }[],
+  actor: AuthenticatedActor,
+  reason: string,
+  now: Date,
+): Promise<number> {
+  for (const attempt of delivered) {
+    await tx.deliveryAttemptCancellation.create({
+      data: {
+        attemptId: attempt.id,
+        kind: 'MANAGER_CORRECTION',
+        reason: reason.trim(),
+        actorUserId: actor.userId,
+        occurredAt: now,
+      },
+    });
+    // Снимается только технический ключ: содержимое попытки остаётся прежним.
+    await tx.deliveryAttempt.update({ where: { id: attempt.id }, data: { activeKey: null } });
+  }
+  return delivered.length;
+}
+
+/**
+ * Разделение отгруженного листа на доставленную и незавершённую части.
+ *
+ * Исходный лист сохраняет свой номер и доставленные заказы и уходит
+ * в «Доставленные». Незавершённые переезжают в новый неотгруженный лист:
+ * тем же способом, что и обычный перенос между маршрутами, — участие
+ * закрывается причиной `MOVED_TO_ANOTHER_ROUTE` со ссылкой на новый лист.
+ * Относительный порядок сохраняется, курьер переносится и остаётся сменяемым.
+ *
+ * Либо появляются оба корректных состояния, либо не меняется ничего:
+ * всё происходит в одной транзакции.
+ */
+async function splitShippedRoute(
+  tx: TransactionClient,
+  route: LockedRoute,
+  delivered: readonly { routeOrderId: string }[],
+  actor: AuthenticatedActor,
+  context: RequestContext,
+  now: Date,
+): Promise<CancelShipmentResult> {
+  const deliveredIds = new Set(delivered.map((item) => item.routeOrderId));
+
+  const participations = await tx.routeOrder.findMany({
+    where: { routeId: route.id, removedAt: null },
+    orderBy: { position: 'asc' },
+    select: { id: true, orderId: true },
+  });
+  const unfinished = participations.filter((item) => !deliveredIds.has(item.id));
+
+  if (unfinished.length === 0) {
+    // Делить нечего: доставлено всё. Лист просто числится доставленным.
+    throw new AppError('CONFLICT', {
+      message: 'nothing to split',
+      publicMessage: 'В листе нет незавершённых заказов: отменять нечего.',
+      conflict: { kind: 'ROUTE_EMPTY', routeNumber: route.number },
+    });
+  }
+
+  const number = await nextRouteNumber(tx, calendarDate(route.deliveryDate));
+  const created = await tx.deliveryRoute.create({
+    data: {
+      number,
+      deliveryDate: route.deliveryDate,
+      vehicleType: route.vehicleType,
+      createdById: actor.userId,
+      // Курьер переносится, но остаётся сменяемым до повторной отгрузки.
+      ...(route.courierUserId === null ? {} : { courierUserId: route.courierUserId }),
+    },
+    select: { id: true, number: true },
+  });
+
+  let position = 0;
+  for (const item of unfinished) {
+    position += 1;
+    await tx.routeOrder.update({
+      where: { id: item.id },
+      data: {
+        removedAt: now,
+        removedById: actor.userId,
+        removalReason: 'MOVED_TO_ANOTHER_ROUTE',
+        movedToRouteId: created.id,
+      },
+    });
+    await tx.routeOrder.create({
+      data: {
+        routeId: created.id,
+        orderId: item.orderId,
+        position,
+        addedById: actor.userId,
+      },
+    });
+  }
+
+  // Новый лист сразу неотгружен: это тот же переход «черновик → лист».
+  await confirmWithinTransaction(tx, actor, created.id, null, context, now);
+
+  // Исходный лист остался с доставленными заказами и потому доставлен.
+  await applyTransition(tx, route, 'COMPLETED', actor, now, null);
+
+  // Прослеживаемая связь: в истории обоих листов виден встречный номер.
+  await auditRouteValue(tx, 'ROUTE_SPLIT_FROM_SHIPMENT', route.id, actor, context, {
+    direction: 'OUT',
+    counterpartRouteId: created.id,
+    counterpartRouteNumber: created.number,
+    movedOrders: unfinished.length,
+    deliveredOrders: delivered.length,
+    previousState: route.state,
+  });
+  await auditRouteValue(tx, 'ROUTE_SPLIT_FROM_SHIPMENT', created.id, actor, context, {
+    direction: 'IN',
+    counterpartRouteId: route.id,
+    counterpartRouteNumber: route.number,
+    movedOrders: unfinished.length,
+  });
+
+  // Оба раздела экрана обязаны обновиться без перезагрузки.
+  await publishRouteEvent(tx, 'route.updated', route.id);
+  await publishRouteEvent(tx, 'route.created', created.id);
+
+  return {
+    state: 'COMPLETED',
+    version: route.version + 1,
+    unchanged: false,
+    createdSheet: { id: created.id, number: created.number },
+    restoredOrders: 0,
+  };
+}
+
+export type CancelShipmentMode = 'UNFINISHED' | 'ALL';
+
+export interface CancelShipmentInput {
+  expectedVersion: number;
+  mode: CancelShipmentMode;
+  /** Обязательна для `ALL`: это исправление уже состоявшегося факта. */
+  reason?: string | undefined;
+}
+
+export interface CancelShipmentResult {
+  state: $Enums.RouteState;
+  version: number;
+  unchanged: boolean;
+  /** Созданный неотгруженный лист. `null` — разделения не потребовалось. */
+  createdSheet: { id: string; number: string } | null;
+  /** Сколько доставленных заказов вернулось в работу (`ALL`). */
+  restoredOrders: number;
+}
+
+export async function cancelShipment(
+  deps: LifecycleDeps,
+  actor: AuthenticatedActor,
+  routeId: string,
+  input: CancelShipmentInput,
+  context: RequestContext,
+): Promise<CancelShipmentResult> {
+  const now = clockOf(deps)();
+  if (input.mode === 'ALL') {
+    assertReason(input.reason ?? '');
+  }
+
+  return deps.db.$transaction(async (tx) => {
+    const route = await lockRoute(tx, routeId);
+
+    // Повтор потерянной команды ничего не создаёт заново.
+    if (route.state === 'CONFIRMED') {
+      return {
+        state: route.state,
+        version: route.version,
+        unchanged: true,
+        createdSheet: null,
+        restoredOrders: 0,
+      };
+    }
+    if (route.state !== 'ACTIVE' && route.state !== 'COMPLETED') {
+      throw new AppError('CONFLICT', {
+        message: 'route is not shipped',
+        publicMessage: 'Отменять нечего: маршрутный лист не отгружен.',
+        conflict: { kind: 'ROUTE_NOT_ACTIVE', routeNumber: route.number },
+      });
+    }
+    requireVersion(route, input.expectedVersion);
+
+    // Доставленные заказы листа: только действующие результаты.
+    const delivered = await tx.deliveryAttempt.findMany({
+      where: { routeId, activeKey: { not: null }, outcome: 'DELIVERED' },
+      select: { id: true, routeOrderId: true },
+    });
+
+    if (delivered.length === 0) {
+      await applyTransition(tx, route, 'CONFIRMED', actor, now, null);
+      await auditRouteValue(tx, 'ROUTE_SHIPMENT_CANCELLED', route.id, actor, context, {
+        mode: input.mode,
+        previousState: route.state,
+        state: 'CONFIRMED',
+        deliveredOrders: 0,
+      });
+      await publishRouteEvent(tx, 'route.updated', route.id);
+      return {
+        state: 'CONFIRMED',
+        version: route.version + 1,
+        unchanged: false,
+        createdSheet: null,
+        restoredOrders: 0,
+      };
+    }
+
+    if (input.mode === 'ALL') {
+      const restored = await restoreDeliveredOrders(tx, delivered, actor, input.reason ?? '', now);
+      await applyTransition(tx, route, 'CONFIRMED', actor, now, null);
+      await auditRouteValue(tx, 'ROUTE_SHIPMENT_CANCELLED', routeId, actor, context, {
+        mode: 'ALL',
+        reason: (input.reason ?? '').trim(),
+        restoredOrders: restored,
+        previousState: route.state,
+      });
+      await publishRouteEvent(tx, 'route.updated', routeId);
+      return {
+        state: 'CONFIRMED',
+        version: route.version + 1,
+        unchanged: false,
+        createdSheet: null,
+        restoredOrders: restored,
+      };
+    }
+
+    return splitShippedRoute(tx, route, delivered, actor, context, now);
+  });
 }
 
 export interface ReasonInput {

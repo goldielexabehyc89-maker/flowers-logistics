@@ -55,7 +55,7 @@ export function RoutingScreen(): React.JSX.Element {
   const missingDraft = draftId !== null && activeId === null && !routes.isPending;
 
   return (
-    <section className="stack">
+    <section className="stack routes" data-testid="routing-workspace">
       <header className="routes__header">
         <div>
           <h2>Маршрутизация</h2>

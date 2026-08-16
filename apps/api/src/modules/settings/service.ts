@@ -34,6 +34,7 @@ import { writeAudit } from '../audit/service.js';
 export const SETTING_KEYS = {
   shift: 'planning.shift',
   serviceTime: 'planning.serviceTime',
+  manualIssue: 'routing.manualIssue',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -89,6 +90,68 @@ async function readCurrent(
   });
 
   return row === null ? null : { version: row.version, value: row.value, updatedAt: row.createdAt };
+}
+
+/**
+ * Ручная отгрузка маршрутного листа без сканирования.
+ *
+ * Обычный путь отгрузки — складской, со сканированием каждого заказа: он
+ * доказывает, что заказ физически попал к курьеру. Ручная отгрузка этого
+ * доказательства не даёт, поэтому существует как явно включаемая возможность
+ * и управляется только администратором.
+ *
+ * По умолчанию включена — решение владельца: без склада в смене логист иначе
+ * не может отправить курьера вовсе.
+ */
+export const manualIssueSchema = z.object({ enabled: z.boolean() });
+
+export type ManualIssue = z.infer<typeof manualIssueSchema>;
+
+export const DEFAULT_MANUAL_ISSUE: ManualIssue = { enabled: true };
+
+export interface ManualIssueSetting {
+  value: ManualIssue;
+  version: number;
+}
+
+/**
+ * Текущее состояние ручной отгрузки.
+ *
+ * Отсутствующая или испорченная запись означает значение по умолчанию, а не
+ * запрет: настройку никто не сохранял, и работать это мешать не должно.
+ */
+export async function readManualIssue(
+  client: Database | TransactionClient,
+): Promise<ManualIssueSetting> {
+  const current = await readCurrent(client, SETTING_KEYS.manualIssue);
+  if (current === null) {
+    return { value: DEFAULT_MANUAL_ISSUE, version: 0 };
+  }
+
+  const parsed = manualIssueSchema.safeParse(current.value);
+  return {
+    value: parsed.success ? parsed.data : DEFAULT_MANUAL_ISSUE,
+    version: current.version,
+  };
+}
+
+export async function saveManualIssue(
+  db: Database,
+  actor: AuthenticatedActor,
+  input: {
+    value: ManualIssue;
+    expectedVersion: number;
+    ip: string | null;
+    userAgent: string | null;
+  },
+): Promise<{ version: number }> {
+  return writeSetting(db, actor, {
+    key: SETTING_KEYS.manualIssue,
+    value: { enabled: input.value.enabled },
+    expectedVersion: input.expectedVersion,
+    ip: input.ip,
+    userAgent: input.userAgent,
+  });
 }
 
 export interface ShiftSetting {
@@ -162,7 +225,14 @@ async function writeSetting(
   actor: AuthenticatedActor,
   input: {
     key: SettingKey;
-    value: Record<string, number>;
+    /*
+     * Значение настройки — плоский набор примитивов.
+     *
+     * Числа и признаки, и ничего больше: `SystemSetting` хранит только
+     * несекретные значения, а вложенные структуры превратили бы настройку
+     * в маленькую базу без схемы.
+     */
+    value: Record<string, number | boolean>;
     expectedVersion: number;
     ip: string | null;
     userAgent: string | null;

@@ -119,7 +119,15 @@ export function collapseToFirstPage<T>(data: T): T {
  * поэтому `['deals']` покрывает `['deals', scope, page]`.
  */
 const DEALS_SCREEN: string[][] = [['deals'], ['deals-map']];
-const ROUTING_SCREEN: string[][] = [['routes'], ['route'], ['route-history'], ['map-points']];
+const ROUTING_SCREEN: string[][] = [
+  ['routes'],
+  ['route'],
+  ['route-history'],
+  ['map-points'],
+  // Экран маршрутных листов слушает те же события: назначение курьера,
+  // отгрузка и отмена обязаны появляться во втором сеансе без перезагрузки.
+  ['route-sheets'],
+];
 const WAREHOUSE_SCREEN: string[][] = [
   ['warehouse-placements'],
   ['warehouse-routes'],

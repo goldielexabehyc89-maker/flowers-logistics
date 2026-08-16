@@ -14,7 +14,14 @@ import { lazy, Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ErrorState, LoadingState } from '../../ui/components';
 import type { MapConfig } from '../routing/geo';
-import { visiblePoints, type MapPoint, type TimeWindow } from './deals-view';
+import {
+  depotAbsenceReason,
+  depotMarkerOf,
+  visiblePoints,
+  type DepotView,
+  type MapPoint,
+  type TimeWindow,
+} from './deals-view';
 import { parseTimeFilter, selectionNumber } from './selection';
 
 /**
@@ -126,6 +133,19 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
     placeholderData: keepPreviousData,
   });
 
+  /*
+   * Основной склад.
+   *
+   * Маршрут начинается со склада, поэтому логист обязан видеть его на той же
+   * карте, что и заказы. Запрос отдельный и редкий: склады меняются гораздо
+   * реже, чем заказы дня.
+   */
+  const depots = useQuery({
+    queryKey: ['depots'],
+    queryFn: () => client.get<{ items: DepotView[] }>('/api/depots'),
+    staleTime: 60 * 1000,
+  });
+
   // Подложка своя: адрес стиля приходит из нашей конфигурации, публичные тайлы
   // не используются.
   const config = useQuery({
@@ -199,73 +219,12 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
 
   return (
     <section className="deals-map" data-testid="deals-map">
-      <div className="deals-map__head">
-        <span data-testid="deals-map-head-count">
-          На карте: {points.length}
-          {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
-          {refreshing && (
-            <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
-              {' '}
-              Обновляем…
-            </span>
-          )}
-        </span>
-
-        {/*
-          Два простых поля времени. Ничего не пересчитывают и никуда
-          не отправляются: только сужают то, что показано на карте.
-        */}
-        <label className="deals-map__time">
-          От
-          <input
-            type="time"
-            value={from}
-            data-testid="deals-map-from"
-            onChange={(event) => setFrom(event.target.value)}
-          />
-        </label>
-        <label className="deals-map__time">
-          До
-          <input
-            type="time"
-            value={to}
-            data-testid="deals-map-to"
-            onChange={(event) => setTo(event.target.value)}
-          />
-        </label>
-
-        <button
-          type="button"
-          className="deals__link"
-          data-testid="deals-map-zoom"
-          // Разделять нечего, пока точек нет: кнопка не должна обещать
-          // действие, которое ничего не изменит.
-          disabled={empty}
-          onClick={() => setZoomedOut((value) => !value)}
-        >
-          {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
-        </button>
-      </div>
-
-      {/*
-        Постоянная легенда: без неё цвет и форма ничего не значат. Состояния
-        различаются и цветом, и формой — одного цвета мало тому, кто его
-        не различает.
-      */}
-      <ul className="deals-map__legend" data-testid="deals-map-legend">
-        <li>
-          <span className="deals-map__dot deals-map__dot--free" /> доступен
-        </li>
-        <li>
-          <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером порядка
-        </li>
-        <li>
-          <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
-        </li>
-        <li>
-          <span className="deals-map__dot deals-map__dot--assembled" /> собран, с галочкой
-        </li>
-      </ul>
+      {depots.data !== undefined && depotAbsenceReason(depots.data.items) !== null && (
+        <p className="deals-map__notice-line" role="status" data-testid="deals-map-no-depot">
+          {depotAbsenceReason(depots.data.items)}: маршрут не с чего начинать. Координаты не
+          угадываются.
+        </p>
+      )}
 
       {refreshFailed && (
         <p className="deals-map__refresh-error" role="status" data-testid="deals-map-refresh-error">
@@ -283,6 +242,90 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
         координат лежит поверх карты и её не заменяет.
       */}
       <div className="deals-map__surface">
+        {/*
+          Управление картой лежит ПОВЕРХ холста.
+
+          Отдельная полоса над картой отнимала у неё высоту и разрывала рабочую
+          поверхность на разрозненные ряды. Карта — фон всей правой панели,
+          а её контролы плавают над ней.
+        */}
+        <div className="deals-map__overlay deals-map__overlay--top">
+          <div className="deals-map__controls">
+            {/*
+          Счётчик и его пояснения занимают постоянное место: иначе поля времени
+          и кнопка группировки прыгали бы при каждом фоновом обновлении.
+        */}
+            <span className="deals-map__head-count" data-testid="deals-map-head-count">
+              На карте: {points.length}
+              {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
+              {refreshing && (
+                <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
+                  {' '}
+                  Обновляем…
+                </span>
+              )}
+            </span>
+
+            {/*
+          Два простых поля времени. Ничего не пересчитывают и никуда
+          не отправляются: только сужают то, что показано на карте.
+        */}
+            <label className="deals-map__time">
+              От
+              <input
+                type="time"
+                value={from}
+                data-testid="deals-map-from"
+                onChange={(event) => setFrom(event.target.value)}
+              />
+            </label>
+            <label className="deals-map__time">
+              До
+              <input
+                type="time"
+                value={to}
+                data-testid="deals-map-to"
+                onChange={(event) => setTo(event.target.value)}
+              />
+            </label>
+
+            <button
+              type="button"
+              className="deals__link deals-map__zoom"
+              data-testid="deals-map-zoom"
+              // Разделять нечего, пока точек нет: кнопка не должна обещать
+              // действие, которое ничего не изменит.
+              disabled={empty}
+              onClick={() => setZoomedOut((value) => !value)}
+            >
+              {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
+            </button>
+          </div>
+
+          {/*
+        Постоянная легенда: без неё цвет и форма ничего не значат. Состояния
+        различаются и цветом, и формой — одного цвета мало тому, кто его
+        не различает.
+      */}
+          <ul className="deals-map__legend" data-testid="deals-map-legend">
+            <li>
+              <span className="deals-map__dot deals-map__dot--free" /> доступен
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером порядка
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--assembled" /> собран, с галочкой
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--depot" /> основной склад
+            </li>
+          </ul>
+        </div>
+
         {styleUrl === '' ? (
           <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
             Карта не настроена
@@ -298,6 +341,7 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
               attribution={config.data?.attribution ?? null}
               chosen={chosen}
               clusters={clusters}
+              depot={depotMarkerOf(depots.data?.items ?? [])}
               numberOf={numberOf}
               onToggle={(orderId) => {
                 const point = points.find((item) => item.orderId === orderId);

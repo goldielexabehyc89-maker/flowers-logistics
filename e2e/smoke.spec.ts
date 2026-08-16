@@ -126,6 +126,51 @@ async function logout(page: Page): Promise<void> {
  * ожидания `data-expanded` проверка иногда утверждала бы про свёрнутую
  * карточку, и «ноль остановок» означало бы не пустой состав, а закрытый блок.
  */
+
+/**
+ * Курьер, которым сценарий может пользоваться сразу.
+ *
+ * Раньше два сценария брали курьера у соседа и молча пропускались, если тот
+ * ещё не отработал. Пропущенная проверка ничего не доказывает и при этом
+ * выглядит в отчёте как успех, поэтому зависимости больше нет: сценарий,
+ * которому нужен курьер, создаёт его сам.
+ *
+ * Созданный курьер запоминается на прогон: заводить нового на каждый сценарий
+ * незачем, а один и тот же телефон переиспользуется без побочных эффектов.
+ */
+async function ensureCourier(browser: Browser): Promise<string> {
+  if (courierPhone !== '') {
+    return courierPhone;
+  }
+
+  const context = await browser.newContext();
+  const admin = await context.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+
+  const phone = uniquePhone();
+  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await admin.getByRole('button', { name: 'Добавить' }).click();
+  await admin.getByLabel('ФИО').fill('Курьер проверки');
+  await admin.getByLabel('Телефон').fill(phone);
+  await admin.getByRole('button', { name: 'Создать' }).click();
+
+  // Код показывается один раз. В отчёт он не печатается.
+  const code = (await admin.locator('.one-time-code').innerText()).trim();
+  expect(code).toMatch(/^\d{4}$/);
+  await admin.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+  await activate(courierPage, phone, code, COURIER_PIN);
+  await expect(courierPage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  await courierContext.close();
+  await context.close();
+
+  courierPhone = phone;
+  return phone;
+}
+
 async function openDraft(page: Page, number: string): Promise<void> {
   // Поиск по атрибуту, а не по тексту: раскрытая карточка содержит номера
   // ДРУГИХ черновиков в списке «Перенести в маршрут», и поиск по тексту
@@ -222,7 +267,9 @@ test('сквозной сценарий этапа 1', async ({ page, browser }:
 });
 
 test('курьерская навигация на мобильном экране', async ({ browser }: { browser: Browser }) => {
-  test.skip(courierPhone === '', 'курьер не создан предыдущим сценарием');
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Собственная фикстура: сценарий не зависит от того, отработал ли сосед.
+  const phone = await ensureCourier(browser);
 
   // Узкий экран телефона: у курьера рабочий инструмент — именно он.
   const context = await browser.newContext({
@@ -232,7 +279,7 @@ test('курьерская навигация на мобильном экран
   });
   const mobilePage = await context.newPage();
 
-  await login(mobilePage, courierPhone, COURIER_PIN);
+  await login(mobilePage, phone, COURIER_PIN);
   await expect(mobilePage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
 
   // Нижняя панель — основной способ перемещения на телефоне.
@@ -255,7 +302,8 @@ test('заморозка доходит до открытых сеансов б�
   page: Page;
   browser: Browser;
 }) => {
-  test.skip(courierPhone === '', 'курьер не создан предыдущим сценарием');
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const phone = await ensureCourier(browser);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
@@ -263,7 +311,7 @@ test('заморозка доходит до открытых сеансов б�
   // проверяется именно самостоятельный уход на экран входа.
   const courierContext = await browser.newContext();
   const courierPage = await courierContext.newPage();
-  await login(courierPage, courierPhone, COURIER_PIN);
+  await login(courierPage, phone, COURIER_PIN);
   await expect(courierPage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
 
   // Второй сеанс администратора: он должен узнать об изменении сам.
@@ -328,7 +376,10 @@ test('Сделки: день, поиск, выбор из списка и руч
   await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 1');
 
   // Ручной черновик создаётся ровно из выбора и открывается в «Маршрутизации».
+  // Кнопка открывает подтверждение состава: до явного выбора ничего не создаётся.
   await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-draft').click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
   await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
 });
@@ -731,7 +782,10 @@ test('маршрут: черновик → состав → порядок → �
     await expect(deal).toHaveAttribute('data-selectable', 'yes');
     await deal.getByTestId('deal-pick').click();
   }
+  // Кнопка открывает подтверждение состава: до явного выбора ничего не создаётся.
   await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-draft').click();
 
   // Переход ведёт в созданный черновик: он раскрыт, а не потерян в списке.
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
@@ -771,7 +825,10 @@ test('маршрут: черновик → состав → порядок → �
   const thirdDeal = page.locator(`[data-testid="deal-card"][data-order-number="${third}"]`);
   await expect(thirdDeal).toHaveAttribute('data-selectable', 'yes');
   await thirdDeal.getByTestId('deal-pick').click();
+  // Кнопка открывает подтверждение состава: до явного выбора ничего не создаётся.
   await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-draft').click();
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
   const secondCardNumber = (
     await page.locator('.routes__card').getByRole('heading').innerText()
@@ -808,7 +865,9 @@ test('маршрут: черновик → состав → порядок → �
   await expect(card.locator('.routes__stop')).toHaveCount(2);
 
   // Подтверждение с назначением курьера в том же окне.
-  await card.getByRole('button', { name: 'Подтвердить маршрут' }).click();
+  // Черновик становится маршрутным листом тем же доменным переходом; кнопка
+  // называет результат, а не техническое состояние.
+  await card.getByRole('button', { name: 'Создать МЛ' }).click();
   await page.getByTestId('route-confirm-submit').click();
 
   // Подтверждённый черновик исчезает из «Маршрутизации».
@@ -856,7 +915,10 @@ test('перехват блокировки переводит прежнего 
   const ownDeal = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
   await expect(ownDeal).toHaveAttribute('data-selectable', 'yes');
   await ownDeal.getByTestId('deal-pick').click();
+  // Кнопка открывает подтверждение состава: до явного выбора ничего не создаётся.
   await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-draft').click();
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
 
   const card = page.locator('.routes__card');
@@ -896,17 +958,40 @@ test('печатная версия листа не содержит навиг�
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
-  await login(page, ADMIN_PHONE, ADMIN_PIN);
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
-  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  /*
+   * Собственный маршрутный лист.
+   *
+   * Раньше сценарий брал первый попавшийся лист соседнего сценария и молча
+   * пропускался, когда его не было. Пропущенная проверка ничего не доказывает,
+   * поэтому лист создаётся здесь же — тем самым путём, которым его создаёт
+   * логист: выбор в «Сделках» → диалог → «Создать МЛ».
+   */
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
 
-  // Дожидаемся ответа списка: пустой count сразу после перехода означал бы
-  // «ещё грузится», а не «маршрутов нет».
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  const ownCard = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(ownCard).toBeVisible();
+  await ownCard.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-sheet').click();
+
+  // «Создать МЛ» приводит прямо в «Маршрутные листы».
+  await expect(page).toHaveURL(/\/logistics\/route-sheets/);
   await page.waitForSelector('.routes__list-item, .state', { state: 'visible' });
-  const sheets = page.locator('.routes__list-item');
-  test.skip((await sheets.count()) === 0, 'подтверждённых маршрутов нет');
-  await sheets.first().getByRole('button', { name: 'Открыть лист' }).click();
+  const sheets = page.locator('.routes__list-item', { hasText: own ?? '' });
+  const anySheet = (await sheets.count()) > 0 ? sheets : page.locator('.routes__list-item');
+  if ((await anySheet.count()) === 0) {
+    throw new Error(
+      'маршрутный лист не создан: печатную форму проверять не на чем. ' +
+        'Лист создаётся выбором в «Сделках» и кнопкой «Создать МЛ».',
+    );
+  }
+  await anySheet.first().getByRole('button', { name: 'Открыть лист' }).click();
 
   const sheet = page.locator('.sheet');
   await expect(sheet).toBeVisible();
@@ -1502,7 +1587,17 @@ test('флорист на телефоне: без нижней полосы, к
 }: {
   browser: Browser;
 }) => {
-  test.skip(floristPhoneForMobile === '', 'флорист не создан предыдущим сценарием');
+  /*
+   * Тот же принцип, что и с курьером: пропуск ничего не доказывает.
+   * Флориста заводит сценарий сборки — если его нет, это отказ с понятным
+   * текстом, а не тихо зелёная проверка.
+   */
+  if (floristPhoneForMobile === '') {
+    throw new Error(
+      'флорист не создан: мобильную карточку проверять некому. ' +
+        'Флориста заводит сценарий «флорист: смена, захват, сборка, бланк и отметка печати».',
+    );
+  }
 
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -2277,8 +2372,9 @@ test('карта «Сделок»: подложка Москвы при нуле
   );
   // Приближать нечего: кнопка не обещает действие, которое ничего не изменит.
   await expect(page.getByTestId('deals-map-zoom')).toBeDisabled();
-  // Отметок нет ни одной.
-  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
+  // Отметок заказов нет ни одной. Склад при этом показан всегда: маршрут
+  // начинается с него, и его место логист обязан видеть и в пустой день.
+  await expect(page.locator('[data-testid="map-marker"][data-order-id]')).toHaveCount(0);
   // Список и легенда продолжают работать.
   await expect(page.getByTestId('deals-list')).toBeVisible();
   await expect(page.getByTestId('deals-map-legend')).toBeVisible();
@@ -2293,7 +2389,9 @@ test('карта «Сделок»: подложка Москвы при нуле
   const drafts = page.getByTestId('deals-include-drafts');
   await drafts.click();
 
-  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator('[data-testid="map-marker"][data-order-id]')).toHaveCount(1, {
+    timeout: 15_000,
+  });
   await expect(page.getByTestId('deals-map-empty')).toHaveCount(0);
   await expect(page.getByTestId('deals-map-zoom')).toBeEnabled();
   // Страница та же самая: метка, поставленная до появления координат, жива.
@@ -2305,7 +2403,7 @@ test('карта «Сделок»: подложка Москвы при нуле
   // И обратно: точка ушла — отметка исчезла, сообщение вернулось. Всё так же
   // без перезагрузки.
   await drafts.click();
-  await expect(page.locator('[data-testid="map-marker"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="map-marker"][data-order-id]')).toHaveCount(0);
   await expect(page.getByTestId('deals-map-empty')).toBeVisible();
   expect(await page.evaluate(() => (globalThis as { name?: string }).name)).toBe(RELOAD_SENTINEL);
 });
@@ -2390,7 +2488,11 @@ test('«Сделки» на большом экране: доли, своя пр
       selectable: false,
     }),
     item(2, { assembled: true }),
-    ...Array.from({ length: 38 }, (_unused, index) => item(index + 3)),
+    item(3, {
+      comment:
+        'Позвонить за час.\nПодъезд со двора, домофон не работает, встречает охрана у шлагбаума.',
+    }),
+    ...Array.from({ length: 37 }, (_unused, index) => item(index + 4)),
   ];
 
   await page.route(
@@ -2407,6 +2509,19 @@ test('«Сделки» на большом экране: доли, своя пр
           offset: 0,
           hasMore: false,
           deliveryDate: '2026-08-15',
+        }),
+      }),
+  );
+
+  // Пригодные заказы всего отбора: их и выбирает кнопка «Выбрать все».
+  await page.route(
+    (url) => url.pathname === '/api/deals/selectable',
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          orderIds: items.filter((row) => row['selectable'] === true).map((row) => row['id']),
         }),
       }),
   );
@@ -2487,7 +2602,14 @@ test('«Сделки» на большом экране: доли, своя пр
   expect(mapAfter?.y).toBe(mapBefore?.y);
   expect(filtersAfter?.y).toBe(filtersBefore?.y);
 
-  // 4. Панель действий закреплена, видна без прокрутки и лежит ВНЕ списка.
+  // 4. Пустого выбора нет — нет и панели: она не занимает высоту зря.
+  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+
+  // Появляется после первого выбранного заказа.
+  await page
+    .locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-2"]')
+    .getByTestId('deal-pick')
+    .click();
   const summary = page.getByTestId('deals-summary');
   await expect(summary).toBeVisible();
   const summaryBox = await summary.boundingBox();
@@ -2512,6 +2634,10 @@ test('«Сделки» на большом экране: доли, своя пр
   expect(Math.round(manual?.width ?? 0)).toBe(Math.round(auto?.width ?? 0));
   expect((manual?.width ?? 0) / columnWidth).toBeGreaterThan(0.8);
 
+  // Снятие всего выбора снова убирает панель.
+  await page.getByTestId('deals-clear').click();
+  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+
   // 5. Счётчик называет и общее число, и заказы без координат.
   await expect(page.getByTestId('deals-total')).toContainText('Заказов: 40');
   await expect(page.getByTestId('deals-total')).toContainText('без координат: 3');
@@ -2526,8 +2652,137 @@ test('«Сделки» на большом экране: доли, своя пр
   const assembled = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-2"]');
   await expect(assembled.getByTestId('deal-assembled')).toHaveText('Собран');
 
+  /*
+   * 1а. Одна рабочая поверхность из двух соединённых панелей.
+   *
+   * Отдельного ряда фильтров над панелями нет: всё, что относится к списку,
+   * лежит внутри левой панели, всё, что относится к карте, — поверх холста.
+   */
+  const boxOf = async (
+    selector: string,
+  ): Promise<{ x: number; y: number; w: number; h: number }> => {
+    const box = await page.locator(selector).first().boundingBox();
+    return { x: box?.x ?? 0, y: box?.y ?? 0, w: box?.width ?? 0, h: box?.height ?? 0 };
+  };
+
+  const leftBox = await boxOf('[data-testid="deals-column"]');
+  const rightBox = await boxOf('[data-testid="deals-map-column"]');
+  const leftEdge = leftBox.x + leftBox.w;
+
+  // Панели начинаются и заканчиваются на одних линиях.
+  expect(Math.abs(leftBox.y - rightBox.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(leftBox.y + leftBox.h - (rightBox.y + rightBox.h))).toBeLessThanOrEqual(1);
+  // Между ними ровно одна граница: зазора нет.
+  expect(Math.abs(rightBox.x - leftEdge)).toBeLessThanOrEqual(1);
+
+  // Всё управление списком — внутри левой панели.
+  for (const selector of [
+    '[data-testid="deals-day"]',
+    '[data-testid="deals-search"]',
+    '[data-testid="deals-include-drafts"]',
+    '[data-testid="deals-total"]',
+    '[data-testid="deals-select-all"]',
+    '[data-testid="deals-scroll"]',
+  ]) {
+    const box = await boxOf(selector);
+    expect(box.x).toBeGreaterThanOrEqual(leftBox.x - 1);
+    expect(box.x + box.w).toBeLessThanOrEqual(leftEdge + 1);
+    expect(box.y).toBeGreaterThanOrEqual(leftBox.y - 1);
+  }
+
+  // Контролы карты лежат ПОВЕРХ холста, а не полосой над ним.
+  const canvas = await boxOf('[data-testid="deals-map-canvas"]');
+  for (const selector of [
+    '[data-testid="deals-map-head-count"]',
+    '[data-testid="deals-map-from"]',
+    '[data-testid="deals-map-zoom"]',
+    '[data-testid="deals-map-legend"]',
+  ]) {
+    const box = await boxOf(selector);
+    expect(box.y).toBeGreaterThanOrEqual(canvas.y - 1);
+    expect(box.y + box.h).toBeLessThanOrEqual(canvas.y + canvas.h + 1);
+  }
+
+  // Карта — фон всей правой панели.
+  expect(Math.abs(canvas.y - rightBox.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(canvas.x - rightBox.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(canvas.h - rightBox.h)).toBeLessThanOrEqual(2);
+
+  // 7а. Плотность списка: сколько сделок видно в начале списка без прокрутки.
+  await scroll.evaluate((element: { scrollTop: number }) => {
+    element.scrollTop = 0;
+  });
+  const visibleCards = await page.evaluate(() => {
+    const doc = (
+      globalThis as unknown as {
+        document: {
+          querySelector: (selector: string) => {
+            getBoundingClientRect: () => { top: number; bottom: number };
+          } | null;
+          querySelectorAll: (selector: string) => ArrayLike<{
+            getBoundingClientRect: () => { top: number; bottom: number };
+          }>;
+        };
+      }
+    ).document;
+    const area = doc.querySelector('[data-testid="deals-scroll"]');
+    if (area === null) {
+      return 0;
+    }
+    const window_ = area.getBoundingClientRect();
+    return Array.from(doc.querySelectorAll('[data-testid="deal-card"]')).filter((card) => {
+      const box = card.getBoundingClientRect();
+      return box.top >= window_.top - 1 && box.bottom <= window_.bottom + 1;
+    }).length;
+  });
+  // Полезная высота окна списка: измеряется, а не предполагается.
+  const geometry = await page.evaluate(() => {
+    const doc = (
+      globalThis as unknown as {
+        document: {
+          querySelector: (s: string) => { getBoundingClientRect: () => { height: number } } | null;
+        };
+      }
+    ).document;
+    const area = doc.querySelector('[data-testid="deals-scroll"]');
+    return { window: area?.getBoundingClientRect().height ?? 0 };
+  });
+  expect(geometry.window).toBeGreaterThan(600);
+  // Владелец принял плотность 10–12 карточек на 1600×900.
+  expect(visibleCards).toBeGreaterThanOrEqual(10);
+
   // 8. Переключатель группировки назван действием, а не масштабом.
   await expect(page.getByTestId('deals-map-zoom')).toHaveText(/Показать отдельно|Сгруппировать/);
+
+  // 8а. Верхняя строка — сама навигация раздела, второго ряда нет.
+  const tabs = page.getByTestId('logistics-tabs');
+  await expect(tabs).toBeVisible();
+  for (const name of ['Сделки', 'Маршрутизация', 'Маршрутные листы', 'История', 'Отчёты']) {
+    await expect(tabs.getByRole('link', { name, exact: true })).toBeVisible();
+  }
+  await expect(tabs.getByRole('link', { name: 'Сделки', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  // Ровно один ряд: прежний дублирующий ряд вкладок удалён.
+  await expect(page.locator('nav[aria-label="Разделы логистики"]')).toHaveCount(1);
+
+  // 2а. Геометрия контролов карты не зависит от данных и обновлений.
+  const geometryBefore = await Promise.all([
+    page.getByTestId('deals-map-from').boundingBox(),
+    page.getByTestId('deals-map-to').boundingBox(),
+    page.getByTestId('deals-map-zoom').boundingBox(),
+  ]);
+  await page.getByTestId('deals-map-zoom').click();
+  const geometryAfter = await Promise.all([
+    page.getByTestId('deals-map-from').boundingBox(),
+    page.getByTestId('deals-map-to').boundingBox(),
+    page.getByTestId('deals-map-zoom').boundingBox(),
+  ]);
+  for (let index = 0; index < geometryBefore.length; index += 1) {
+    expect(geometryAfter[index]?.x).toBe(geometryBefore[index]?.x);
+    expect(geometryAfter[index]?.y).toBe(geometryBefore[index]?.y);
+  }
 
   // 9. Поля времени карты сужают только карту: список остаётся прежним.
   const cardsBefore = await page.locator('[data-testid="deal-card"]').count();
@@ -2535,6 +2790,26 @@ test('«Сделки» на большом экране: доли, своя пр
   await expect(page.getByTestId('deals-map-head-count')).toContainText('скрыто фильтром');
   expect(await page.locator('[data-testid="deal-card"]').count()).toBe(cardsBefore);
   await page.getByTestId('deals-map-from').fill('');
+
+  // 4а. Одна кнопка с двумя состояниями: выбрать весь отбор и снять его.
+  const selectAll = page.getByTestId('deals-select-all');
+  await expect(selectAll).toHaveText('Выбрать все');
+  await selectAll.click();
+  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 39');
+  await expect(selectAll).toHaveText('Снять все');
+  await selectAll.click();
+  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  await expect(selectAll).toHaveText('Выбрать все');
+
+  // 9а. Комментарий раскрывается доступной иконкой, а не отдельной строкой.
+  const commented = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-3"]');
+  const toggle = commented.getByTestId('deal-comment-toggle');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(toggle).toHaveAccessibleName(/комментарий/i);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
   // 10. Телефон: обе части на месте и страница не едет вбок.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -2608,4 +2883,387 @@ test('«Сделки»: правка интервала доходит до вт
 
   await first.close();
   await second.close();
+});
+
+/**
+ * Критический контракт карты: место заказа задаёт география, а не экран.
+ *
+ * Масштаб меняет только проекцию. Проверяется после каждого масштабирования,
+ * сдвига, изменения размера окна и переключения группировки: координата
+ * доменного объекта не изменилась, а центр кружка совпал с тем, куда эту
+ * координату проецирует сама MapLibre.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Точки и подложка подменены: проверяется геометрия, а не
+ * содержимое дня. Проекцию считает настоящая MapLibre — её здесь не подменяют,
+ * иначе ошибка кода совпала бы с ошибкой проверки.
+ */
+test('карта «Сделок»: отметка стоит на своей координате при любом масштабе', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const page = await context.newPage();
+
+  const styleUrl = 'https://maps.local.test/deals-geometry.json';
+  await page.route('**/api/map/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true, styleUrl, attribution: '© Проверка' }),
+    }),
+  );
+  await page.route(styleUrl, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: EMPTY_STYLE }),
+  );
+
+  const LNG = 37.617_3;
+  const LAT = 55.755_8;
+  await page.route(
+    (url) => url.pathname === '/api/deals/map',
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          points: [
+            {
+              orderId: '00000000-0000-4000-8000-00000000ab01',
+              number: 'E2E-ГЕО',
+              address: 'Москва, Красная площадь, 1',
+              lat: String(LAT),
+              lon: String(LNG),
+              startMinute: 600,
+              endMinute: 720,
+              assembled: false,
+              selectable: true,
+            },
+          ],
+          deliveryDate: '2026-08-15',
+        }),
+      }),
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
+
+  // Отметка заказа, а не склада: у склада своя отметка и нет заказа.
+  const marker = page.locator('[data-testid="map-marker"][data-order-id]').first();
+  await expect(marker).toBeVisible();
+  // Заодно видно, что склад показан отдельной отметкой (пункт 12).
+  await expect(page.locator('[data-testid="map-marker"]:not([data-order-id])')).toHaveCount(1);
+
+  /** Расхождение центра кружка с проекцией координаты, в пикселях. */
+  const drift = async (): Promise<{ dx: number; dy: number; lng: number; lat: number }> => {
+    await page.waitForTimeout(150);
+    const box = await marker.boundingBox();
+    const lng = Number(await marker.getAttribute('data-lng'));
+    const lat = Number(await marker.getAttribute('data-lat'));
+    const projected = await page.evaluate(
+      ([lngValue, latValue]: [number, number]) => {
+        const map = (
+          globalThis as unknown as {
+            __dealsMap: { project: (lngLat: [number, number]) => { x: number; y: number } };
+          }
+        ).__dealsMap;
+        const point = map.project([lngValue, latValue]);
+        return { x: point.x, y: point.y };
+      },
+      [lng, lat] as [number, number],
+    );
+    const canvas = await page.getByTestId('deals-map-canvas').boundingBox();
+    const centerX = (box?.x ?? 0) + (box?.width ?? 0) / 2 - (canvas?.x ?? 0);
+    const centerY = (box?.y ?? 0) + (box?.height ?? 0) / 2 - (canvas?.y ?? 0);
+    return { dx: centerX - projected.x, dy: centerY - projected.y, lng, lat };
+  };
+
+  const zoomBy = async (delta: number): Promise<void> => {
+    await page.evaluate((value: number) => {
+      const map = (
+        globalThis as unknown as {
+          __dealsMap: { setZoom: (z: number) => void; getZoom: () => number };
+        }
+      ).__dealsMap;
+      map.setZoom(map.getZoom() + value);
+    }, delta);
+  };
+
+  const start = await drift();
+  expect(start.lng).toBeCloseTo(LNG, 6);
+  expect(start.lat).toBeCloseTo(LAT, 6);
+  // Один и тот же допуск на всех шагах: полпикселя округления, не больше.
+  expect(Math.abs(start.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(start.dy)).toBeLessThanOrEqual(1);
+
+  for (const step of [4, -2, -3, 5]) {
+    await zoomBy(step);
+    const after = await drift();
+    // Координата доменного объекта неизменна: масштаб её не касается.
+    expect(after.lng).toBe(start.lng);
+    expect(after.lat).toBe(start.lat);
+    expect(Math.abs(after.dx)).toBeLessThanOrEqual(1);
+    expect(Math.abs(after.dy)).toBeLessThanOrEqual(1);
+  }
+
+  // Сдвиг карты.
+  await page.evaluate(() => {
+    const map = (
+      globalThis as unknown as {
+        __dealsMap: { panBy: (offset: [number, number], options: { duration: number }) => void };
+      }
+    ).__dealsMap;
+    map.panBy([180, -120], { duration: 0 });
+  });
+  const afterPan = await drift();
+  expect(afterPan.lng).toBe(start.lng);
+  expect(Math.abs(afterPan.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterPan.dy)).toBeLessThanOrEqual(1);
+
+  // Изменение размера окна.
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await page.evaluate(() => {
+    (globalThis as unknown as { __dealsMap: { resize: () => void } }).__dealsMap.resize();
+  });
+  const afterResize = await drift();
+  expect(afterResize.lat).toBe(start.lat);
+  expect(Math.abs(afterResize.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterResize.dy)).toBeLessThanOrEqual(1);
+
+  // Переключение группировки.
+  await page.getByTestId('deals-map-zoom').click();
+  const afterToggle = await drift();
+
+  expect(afterToggle.lng).toBe(start.lng);
+  expect(afterToggle.lat).toBe(start.lat);
+  expect(Math.abs(afterToggle.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterToggle.dy)).toBeLessThanOrEqual(1);
+
+  await context.close();
+});
+
+/**
+ * Линия маршрута: строится от склада и меняется вместе с порядком.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Подменён ТОЛЬКО транспорт маршрутизатора
+ * (`VALHALLA_TEST_ROUTE=true`, разрешён лишь при `APP_ENV=local`): дорожного
+ * графа в проверке нет. Клиент Valhalla, разбор закодированной геометрии,
+ * серверный контракт и отрисовка слоя — настоящие.
+ */
+test('маршрутизация: линия идёт от склада и меняется вместе с порядком', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [first, second] = seedOrders(2, { withPoint: true });
+  expect(first).toBeTruthy();
+  expect(second).toBeTruthy();
+
+  /*
+   * Подложка — пустой валидный стиль.
+   *
+   * Проверяется линия маршрута, а не отрисовка тайлов: крошечный проверочный
+   * набор PMTiles отдаёт не все запрошенные тайлы, карта честно сообщает
+   * об отказе подложки и снимает слои вместе с собой. Внешних обращений
+   * при этом по-прежнему нет.
+   */
+  const styleUrl = 'https://maps.local.test/routing-line.json';
+  await page.route('**/api/map/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ configured: true, styleUrl, attribution: '© Проверка' }),
+    }),
+  );
+  await page.route(styleUrl, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: EMPTY_STYLE }),
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+
+  for (const number of [first, second]) {
+    await page.getByLabel('Поиск в этом дне').fill(number ?? '');
+    const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+    await expect(card).toBeVisible();
+    await card.getByTestId('deal-pick').click();
+  }
+
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-draft').click();
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
+
+  /**
+   * Линия, которую слой получил последней.
+   *
+   * Спрашивается сама карта: отрисованные объекты видит только тот, кто попал
+   * в кадр, а описание источника возвращает данные его создания — и то и другое
+   * скрывало бы именно то, что проверка обязана поймать.
+   */
+  const drawnLine = async (): Promise<string> =>
+    page.evaluate(() => {
+      const map = (globalThis as unknown as { __routingMap?: { __routeLine?: unknown } })
+        .__routingMap;
+      return JSON.stringify(map?.__routeLine ?? []);
+    });
+
+  // 1. Сервер построил линию: столько точек пришло в браузер.
+  await expect
+    .poll(
+      async () => Number(await page.getByTestId('route-line-points').getAttribute('data-points')),
+      { timeout: 45_000 },
+    )
+    .toBeGreaterThan(2);
+
+  // 2. Склад показан отдельной отметкой: маршрут начинается с него.
+  await expect(page.locator('[data-testid="map-depot"]')).toHaveCount(1);
+
+  /*
+   * 3. Линия действительно нарисована, а не только получена.
+   *
+   * Срок с запасом: в полном наборе машина занята, и первая отрисовка карты
+   * законно занимает дольше, чем в одиночном прогоне. Проверяется факт, а не
+   * скорость.
+   */
+  /*
+   * Карта отдаляется до города.
+   *
+   * Отрисованные объекты видит только тот, кто попал в кадр: склад и остановки
+   * фикстуры могут стоять дальше друг от друга, чем видно на стартовом
+   * масштабе, и проверка доказывала бы не отсутствие линии, а край экрана.
+   */
+  await page.evaluate(() => {
+    (
+      globalThis as unknown as { __routingMap?: { setZoom: (value: number) => void } }
+    ).__routingMap?.setZoom(8);
+  });
+  await expect.poll(async () => (await drawnLine()).length, { timeout: 45_000 }).toBeGreaterThan(2);
+  const before = await drawnLine();
+
+  const stops = page.locator('.routes__card [data-testid="route-stop"]');
+  await expect(stops).toHaveCount(2);
+  const firstBefore = await stops.first().innerText();
+
+  // 4. Порядок меняется тем же атомарным сохранением, что и перетаскивание.
+  await page
+    .locator('.routes__card')
+    .getByRole('button', { name: `Опустить заказ ${first}` })
+    .click();
+  await expect(stops.first()).toContainText(second ?? '');
+
+  // 5. Линия догоняет новый порядок: иначе карта показывала бы прежний
+  //    маршрут как действующий.
+  await expect.poll(async () => (await drawnLine()) !== before, { timeout: 45_000 }).toBe(true);
+  expect(firstBefore).not.toBe(await stops.first().innerText());
+});
+
+/**
+ * Маршрутные листы: три раздела, дни, назначение курьера, отгрузка и отмена.
+ *
+ * Сквозной путь A+B+C одним сценарием: сделки → диалог → маршрутный лист →
+ * курьер → ручная отгрузка → отмена отгрузки. Ни один шаг не подменён:
+ * это те же серверные операции, которыми пользуется логист.
+ */
+test('маршрутные листы: разделы, курьер, ручная отгрузка и отмена', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
+  // Действующий курьер обязан существовать: без него отгружать нечем.
+  await ensureCourier(page.context().browser() as Browser);
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+
+  // 1. Сделки → диалог → сразу маршрутный лист (сквозной сценарий 2).
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-sheet').click();
+  await expect(page).toHaveURL(/\/logistics\/route-sheets/);
+
+  /*
+   * Поиск по номеру заказа изолирует ИМЕННО наш лист.
+   *
+   * Соседние сценарии оставляют свои неотгруженные листы, и «первая строка
+   * раздела» доказывала бы не то: сценарий обязан работать со своим листом,
+   * а не с тем, который случайно оказался сверху.
+   */
+  await page.getByTestId('sheets-search').fill(own ?? '');
+
+  // 2. Три раздела существуют и различимы.
+  for (const section of ['UNSHIPPED', 'SHIPPED', 'DELIVERED']) {
+    await expect(page.getByTestId(`sheets-${section}`)).toBeVisible();
+  }
+
+  // 3. Лист без курьера: отгрузка недоступна и причина названа.
+  const unshipped = page.getByTestId('sheets-UNSHIPPED');
+  const sheet = unshipped.locator('[data-testid="sheet-row"]').first();
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByTestId('sheet-courier')).toContainText('не назначен');
+  await expect(sheet.getByTestId('sheet-ship')).toBeDisabled();
+
+  /*
+   * 4. Курьер назначается прямо в листе.
+   *
+   * Берётся любой ДЕЙСТВУЮЩИЙ курьер из списка: соседний сценарий замораживает
+   * своего, и жёсткая привязка к конкретному телефону доказывала бы лишь
+   * порядок сценариев.
+   */
+  await sheet.getByTestId('sheet-courier-edit').click();
+  const options = sheet.getByTestId('sheet-courier-option');
+  await expect(options.first()).toBeVisible();
+  await options.first().click();
+  await expect(sheet.getByTestId('sheet-courier')).not.toContainText('не назначен');
+
+  // 5. После назначения ручная отгрузка проходит.
+  await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
+  const sheetNumber = (await sheet.getAttribute('data-sheet-number')) ?? '';
+  await sheet.getByTestId('sheet-ship').click();
+
+  const shipped = page.getByTestId('sheets-SHIPPED');
+  const shippedRow = shipped.locator(`[data-sheet-number="${sheetNumber}"]`);
+  await expect(shippedRow).toBeVisible({ timeout: 20_000 });
+
+  // 6. Отмена отгрузки без доставленных заказов: обычное подтверждение.
+  await shippedRow.getByTestId('sheet-cancel-shipment').click();
+  await expect(page.getByTestId('cancel-shipment-dialog')).toBeVisible();
+  await page.getByTestId('cancel-confirm').click();
+
+  await expect(unshipped.locator(`[data-sheet-number="${sheetNumber}"]`)).toBeVisible({
+    timeout: 20_000,
+  });
+
+  // 7. Поиск работает на полном серверном наборе: и по номеру заказа
+  //    (им мы пользовались всё время), и по номеру самого листа.
+  await page.getByTestId('sheets-search').fill(sheetNumber);
+  await expect(unshipped.locator('[data-testid="sheet-row"]')).toHaveCount(1);
+
+  // 8. Телефон: разделы и действия остаются доступны, страница не едет вбок.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByTestId('sheets-UNSHIPPED')).toBeVisible();
+  const overflow = await page.evaluate(() => {
+    const root = (
+      globalThis as unknown as {
+        document: { documentElement: { scrollWidth: number; clientWidth: number } };
+      }
+    ).document.documentElement;
+    return root.scrollWidth - root.clientWidth;
+  });
+  expect(overflow).toBeLessThanOrEqual(0);
 });

@@ -550,3 +550,47 @@
 .logistics__content {
   min-width: 0;
 }
+
+/* --- Вкладки раздела в верхней строке --------------------------------------- */
+
+/*
+ * В «Логистике» верхняя строка показывает сами разделы, а не название
+ * текущего. Второй ряд навигации под заголовком отнимал у карты и списка
+ * высоту, ничего не добавляя: активная вкладка и есть название раздела.
+ */
+.shell__tabs {
+  display: flex;
+  gap: var(--space-1, 4px);
+  align-items: center;
+  min-width: 0;
+  /* На узком экране строка прокручивается, а пункты не обрезаются. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.shell__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.shell__tab {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-2, 8px);
+  color: var(--color-text-muted);
+  font-size: 14px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.shell__tab:hover {
+  background: var(--color-surface-hover);
+}
+
+/* Активный раздел выглядит выбранной кнопкой, остальные — невыбранными. */
+.shell__tab--active {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: 600;
+}

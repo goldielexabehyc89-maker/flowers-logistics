@@ -188,3 +188,50 @@ export function markerInterval(point: MapPoint, format: (minute: number) => stri
 export function markerHint(point: MapPoint): string {
   return point.address === null ? point.number : `${point.number} · ${point.address}`;
 }
+
+// --- Склад на карте ---------------------------------------------------------
+
+/** Склад в том виде, в каком его отдаёт `/api/depots`. */
+export interface DepotView {
+  id: string;
+  name: string;
+  lat: number | null;
+  lon: number | null;
+  hasPoint: boolean;
+  isActive: boolean;
+  isDefault: boolean;
+}
+
+export interface DepotMarker {
+  name: string;
+  lat: string;
+  lon: string;
+}
+
+/**
+ * Какой склад показывать на карте «Сделок».
+ *
+ * Основной активный склад с ПОДТВЕРЖДЁННОЙ точкой — и никакой другой.
+ * Отсутствие такого склада не заменяется ни соседним складом, ни нулевыми
+ * координатами: маршрут начинается отсюда, и выдуманное начало увело бы
+ * курьера в Гвинейский залив. Экран в этом случае говорит правду словами.
+ */
+export function depotMarkerOf(depots: readonly DepotView[]): DepotMarker | null {
+  const main = depots.find((depot) => depot.isDefault && depot.isActive);
+  if (main === undefined || !main.hasPoint || main.lat === null || main.lon === null) {
+    return null;
+  }
+  return { name: main.name, lat: String(main.lat), lon: String(main.lon) };
+}
+
+/** Почему склада нет на карте. `null` — склад показан. */
+export function depotAbsenceReason(depots: readonly DepotView[]): string | null {
+  const main = depots.find((depot) => depot.isDefault && depot.isActive);
+  if (main === undefined) {
+    return 'Основной склад не выбран';
+  }
+  if (!main.hasPoint || main.lat === null || main.lon === null) {
+    return `У склада «${main.name}» нет подтверждённой точки`;
+  }
+  return null;
+}

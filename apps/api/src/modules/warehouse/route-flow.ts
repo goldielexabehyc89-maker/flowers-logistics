@@ -530,6 +530,92 @@ export interface IssueResult {
  * аудит и событие и освобождает привязку маршрутной ячейки (`FUL-003`):
  * физическая передача курьеру и есть начало маршрута.
  */
+
+/**
+ * Перевод маршрута в «отгружен» ВНУТРИ уже открытой транзакции.
+ *
+ * Единственная реализация этого перехода. Складская отгрузка доходит до него,
+ * выдав курьеру последний заказ; логист — кнопкой «Отгрузить» без сканирования.
+ * Второй экземпляр этой логики неизбежно разошёлся бы с первым, а расходятся
+ * такие вещи молча: маршрут уехал бы, а история состояний осталась пустой.
+ *
+ * `orderId` есть только у складского пути: он говорит, какой именно заказ
+ * оказался последним. Ручная отгрузка заказов не выдаёт и передаёт `null`.
+ */
+export async function activateRouteWithinTransaction(
+  tx: TransactionClient,
+  route: { id: string; number: string; version: number },
+  actor: AuthenticatedActor,
+  context: RequestContext,
+  now: Date,
+  input: { issued: number; orderId: string | null },
+): Promise<void> {
+  const updated = await tx.deliveryRoute.updateMany({
+    where: { id: route.id, version: route.version },
+    data: { state: 'ACTIVE', version: { increment: 1 } },
+  });
+  if (updated.count === 0) {
+    throw new AppError('CONFLICT', {
+      message: 'stale route version',
+      publicMessage: 'Маршрут изменён другим пользователем. Обновите экран и повторите.',
+      conflict: { kind: 'STALE_VERSION', routeNumber: route.number },
+    });
+  }
+
+  await tx.routeStateTransition.create({
+    data: {
+      routeId: route.id,
+      fromState: 'CONFIRMED',
+      toState: 'ACTIVE',
+      actorUserId: actor.userId,
+      occurredAt: now,
+      /*
+       * Причины нет намеренно, и это правило базы: переход в «отгружен»
+       * наступает от факта передачи маршрута курьеру. Чем он вызван —
+       * сканированием или решением логиста — говорит аудит, а не история
+       * состояний: там живут состояния, а не способы их достижения.
+       */
+      reason: null,
+    },
+  });
+
+  // Маршрутная ячейка освобождается: её можно отдать другому листу в тот же день.
+  await tx.routeCellBinding.updateMany({
+    where: { routeId: route.id, releasedAt: null },
+    data: { releasedAt: now, releasedById: actor.userId },
+  });
+
+  await writeAudit(tx, {
+    action: 'ROUTE_ISSUED_TO_COURIER',
+    entityType: 'DeliveryRoute',
+    entityId: route.id,
+    actorUserId: actor.userId,
+    actorRoles: actor.roles,
+    source: 'api',
+    oldValue: { state: 'CONFIRMED', version: route.version },
+    newValue: {
+      state: 'ACTIVE',
+      version: route.version + 1,
+      issued: input.issued,
+      manual: input.orderId === null,
+    },
+    ip: context.ip,
+    userAgent: context.userAgent,
+  });
+
+  await publishRealtimeEvent(tx, {
+    topic: 'warehouse.route_flow_changed',
+    payload: { routeId: route.id, orderId: input.orderId, action: 'ROUTE_ACTIVATED' },
+    audienceRoles: [...FLOW_AUDIENCE],
+  });
+  // Логист тоже обязан увидеть, что маршрут уехал.
+  await publishRealtimeEvent(tx, {
+    topic: 'route.updated',
+    payload: { routeId: route.id, state: 'ACTIVE' },
+    audienceRoles: [...ROUTE_AUDIENCE],
+  });
+}
+
 export async function issueOrder(
   deps: FlowDeps,
   actor: AuthenticatedActor,
@@ -655,66 +741,20 @@ export async function issueOrder(
       };
     }
 
-    // Последний заказ: всё ниже — та же транзакция.
-    const updated = await tx.deliveryRoute.updateMany({
-      where: { id: routeId, version: route.version },
-      data: { state: 'ACTIVE', version: { increment: 1 } },
-    });
-    if (updated.count === 0) {
-      throw new AppError('CONFLICT', {
-        message: 'stale route version',
-        publicMessage: 'Маршрут изменён другим пользователем. Обновите экран и повторите.',
-        conflict: { kind: 'STALE_VERSION', routeNumber: route.number },
-      });
-    }
-
-    await tx.routeStateTransition.create({
-      data: {
-        routeId,
-        fromState: 'CONFIRMED',
-        toState: 'ACTIVE',
-        actorUserId: actor.userId,
-        occurredAt: now,
-        // Причины нет намеренно: переход наступает от факта выдачи последнего
-        // заказа, а не от решения человека.
-        reason: null,
-      },
+    // Последний заказ: маршрут уезжает тем же переходом, что и при ручной
+    // отгрузке логистом. Реализация одна на оба пути.
+    await activateRouteWithinTransaction(tx, route, actor, context, now, {
+      issued: progress.issued,
+      orderId: order.id,
     });
 
+    /*
+     * Сеанс выдачи закрывается здесь, а не в общем переходе: сканирование —
+     * складская часть пути. У ручной отгрузки сеанса не бывает вовсе.
+     */
     await tx.routeIssueSession.update({
       where: { id: session.id },
       data: { state: 'COMPLETED', openKey: null, completedAt: now, version: { increment: 1 } },
-    });
-
-    // Маршрутная ячейка освобождается: её можно отдать другому листу в тот же день.
-    await tx.routeCellBinding.updateMany({
-      where: { routeId, releasedAt: null },
-      data: { releasedAt: now, releasedById: actor.userId },
-    });
-
-    await writeAudit(tx, {
-      action: 'ROUTE_ISSUED_TO_COURIER',
-      entityType: 'DeliveryRoute',
-      entityId: routeId,
-      actorUserId: actor.userId,
-      actorRoles: actor.roles,
-      source: 'api',
-      oldValue: { state: 'CONFIRMED', version: route.version },
-      newValue: { state: 'ACTIVE', version: route.version + 1, issued: progress.issued },
-      ip: context.ip,
-      userAgent: context.userAgent,
-    });
-
-    await publishRealtimeEvent(tx, {
-      topic: 'warehouse.route_flow_changed',
-      payload: { routeId, orderId: order.id, action: 'ROUTE_ACTIVATED' },
-      audienceRoles: [...FLOW_AUDIENCE],
-    });
-    // Логист тоже обязан увидеть, что маршрут уехал.
-    await publishRealtimeEvent(tx, {
-      topic: 'route.updated',
-      payload: { routeId, state: 'ACTIVE' },
-      audienceRoles: [...ROUTE_AUDIENCE],
     });
 
     return {

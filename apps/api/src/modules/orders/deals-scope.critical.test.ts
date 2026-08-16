@@ -467,3 +467,83 @@ describe('факты, по которым логист принимает реш
     expect(point?.address).toBe(ADDRESS);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Порядок отбора.
+ *
+ * Защищаемое свойство: заказы, которые нельзя везти, стоят выше во ВСЁМ
+ * результате, а не внутри уже загруженной страницы. Иначе логист разбирал бы
+ * проблемные заказы по мере прокрутки и часть из них не увидел бы вовсе.
+ */
+describe('«Требует внимания» идёт первым во всём отборе', () => {
+  const SORT_DAY = '2027-09-27';
+  const sortScope = { deliveryDate: SORT_DAY };
+
+  it('проблемный заказ впереди пригодного даже с более поздним интервалом', async () => {
+    const early = await seedRoutable({
+      deliveryPlannedMoment: `${SORT_DAY} 12:00:00.000`,
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'с 08:00 по 10:00' },
+        { id: IDS.recipientAttribute, value: 'Получатель Синтетический' },
+      ],
+    });
+    const late = await seedRoutable({ deliveryPlannedMoment: `${SORT_DAY} 12:00:00.000` });
+    await ctx.db.deliveryOrder.update({
+      where: { id: late },
+      data: { needsAttention: true, attentionReasons: ['UNRECOGNIZED_INTERVAL'] },
+    });
+
+    const ids = await dealsIds(ctx.db, sortScope);
+    expect(ids.indexOf(late)).toBeLessThan(ids.indexOf(early));
+  });
+
+  it('заказ без точки поднимается наверх так же, как названный сервером', async () => {
+    // Для логиста это одно состояние «этот заказ нельзя везти».
+    const noPoint = await seedRoutable({ deliveryPlannedMoment: `${SORT_DAY} 12:00:00.000` });
+    await ctx.db.deliveryOrder.update({
+      where: { id: noPoint },
+      data: {
+        geoState: 'PENDING',
+        geoSource: null,
+        geoPrecision: null,
+        geoLatMicro: null,
+        geoLonMicro: null,
+        geoResolvedAt: null,
+      },
+    });
+
+    const ids = await dealsIds(ctx.db, sortScope);
+    const routable = await dealsIds(ctx.db, { ...sortScope, group: 'ROUTABLE' });
+    const firstRoutable = ids.findIndex((id) => routable.includes(id));
+
+    expect(ids.indexOf(noPoint)).toBeLessThan(firstRoutable);
+  });
+
+  it('порядок держится на первой странице, а не внутри загруженной', async () => {
+    // Собственный день: соседние проверки этого файла оставляют свои проблемные
+    // заказы, и первая страница общего дня доказывала бы не то, что заявлено.
+    const PAGE_DAY = '2027-09-28';
+    const attention = await seedRoutable({ deliveryPlannedMoment: `${PAGE_DAY} 12:00:00.000` });
+    await ctx.db.deliveryOrder.update({
+      where: { id: attention },
+      data: { needsAttention: true, attentionReasons: ['MISSING_RECIPIENT'] },
+    });
+    for (let index = 0; index < 3; index += 1) {
+      await seedRoutable({ deliveryPlannedMoment: `${PAGE_DAY} 12:00:00.000` });
+    }
+
+    // Проблемный заказ обязан попасть на первую страницу независимо от того,
+    // сколько пригодных заказов в дне и каким по счёту он создан.
+    const firstPage = await dealsIds(ctx.db, { deliveryDate: PAGE_DAY }, { limit: 2, offset: 0 });
+    expect(firstPage[0]).toBe(attention);
+  });
+});
