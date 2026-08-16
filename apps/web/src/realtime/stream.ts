@@ -206,6 +206,13 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
   'delivery.result_cancelled': [...DELIVERY_SCREEN, ['routes'], ['route']],
   'pickup.issued': [['pickup-day'], ['warehouse-placements']],
 
+  /*
+   * Учёт изменился — перечитываются отчёты и балансы.
+   *
+   * Само событие сумм не несёт: экран идёт за цифрами своим запросом,
+   * и в потоке денег не появляется.
+   */
+  'finance.ledger_changed': [['settlements'], ['operations-report'], ['logistics-history']],
   'integration.status_changed': [['status']],
   'outbox.message_failed': [['outbox-failures']],
 };

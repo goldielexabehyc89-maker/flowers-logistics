@@ -1,0 +1,213 @@
+/*
+ * «История»: плотный журнал без карточек и без карты.
+ *
+ * Ширина ограничена: это перечень строк, а не рабочее место с картой — на всю
+ * ширину монитора строки растягивать незачем, читать их станет труднее.
+ */
+.history,
+.reports {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 1152px;
+}
+
+.history__filters,
+.reports__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.history__select,
+.reports__select {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-field);
+  background: var(--log-surface);
+  font-size: var(--log-font-md);
+}
+
+.history__total {
+  margin: 0;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-sm);
+}
+
+.history__day {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history__day-title {
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: var(--log-radius-group);
+  background: var(--log-surface-muted);
+  font-size: var(--log-font-md);
+  font-weight: 600;
+}
+
+.history__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__row {
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-card);
+  background: var(--log-surface-soft);
+  overflow: hidden;
+}
+
+.history__row[data-expanded='true'] {
+  border-color: var(--log-selected-text);
+  background: var(--log-surface);
+}
+
+.history__row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--log-font-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.history__number {
+  color: var(--log-text-strong);
+  font-weight: 700;
+}
+
+.history__time {
+  margin-left: auto;
+}
+
+.history__chevron {
+  width: 12px;
+  color: var(--log-text-faint);
+  font-size: var(--log-font-2xs);
+}
+
+.history__details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--log-border-hairline);
+}
+
+.history__block-title {
+  margin: 0 0 4px;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+}
+
+.history__orders,
+.history__events {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__order,
+.history__event {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--log-border-soft);
+  font-size: var(--log-font-sm);
+}
+
+.history__position {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--log-radius-pill);
+  background: var(--log-selected-text);
+  color: var(--log-surface);
+  font-size: var(--log-font-2xs);
+  font-weight: 700;
+}
+
+.history__order-number {
+  font-weight: 600;
+}
+
+.history__order-address {
+  overflow: hidden;
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--log-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history__order-recipient,
+.history__order-interval,
+.history__event-time,
+.history__event-actor {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+}
+
+.history__event-time {
+  flex: none;
+  width: 130px;
+}
+
+.history__event-label {
+  flex: 1 1 240px;
+  color: var(--log-text-strong);
+}
+
+.history__event-reason {
+  flex-basis: 100%;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-xs);
+}
+
+.history__ok {
+  color: var(--log-status-ok);
+  font-weight: 600;
+}
+
+.history__fail {
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+.history__tag {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+}
+
+@media (max-width: 720px) {
+  .history__event-time {
+    width: auto;
+  }
+}
