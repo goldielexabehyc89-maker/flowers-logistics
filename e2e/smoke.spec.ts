@@ -2642,6 +2642,35 @@ test('«Сделки» на большом экране: доли, своя пр
   await expect(page.getByTestId('deals-total')).toContainText('Заказов: 40');
   await expect(page.getByTestId('deals-total')).toContainText('без координат: 3');
 
+  /*
+   * 5а. Вся поверхность карточки переключает выбор, а её кнопки — нет.
+   *
+   * Раньше попасть требовалось точно в кружок 18 px. Кнопки при этом обязаны
+   * остаться своими: нажатие на «Интервал» не должно выбирать заказ.
+   */
+  const clickable = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-5"]');
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+  await clickable.click({ position: { x: 200, y: 8 } });
+  await expect(clickable).toHaveAttribute('data-selected', '1');
+  await expect(clickable).toHaveAttribute('aria-pressed', 'true');
+
+  // Повторное нажатие по свободному месту снимает выбор.
+  await clickable.click({ position: { x: 200, y: 8 } });
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+
+  // Кнопка внутри карточки выбор не трогает.
+  await clickable.getByTestId('deal-edit-interval').click();
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+  await expect(clickable.getByTestId('deal-interval-form')).toBeVisible();
+  await clickable.getByRole('button', { name: 'Отмена' }).click();
+
+  // Клавиатура делает то же самое.
+  await clickable.focus();
+  await clickable.press('Enter');
+  await expect(clickable).toHaveAttribute('data-selected', '1');
+  await clickable.press('Enter');
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+
   // 6. Требующий внимания заказ: красный в списке, названа причина и действие.
   const attention = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-1"]');
   await expect(attention).toHaveAttribute('data-attention', 'yes');

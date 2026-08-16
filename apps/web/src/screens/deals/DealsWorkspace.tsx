@@ -473,6 +473,31 @@ export function DealsWorkspace(): React.JSX.Element {
                       data-selected={number === null ? 'no' : String(number)}
                       data-selectable={blocked === null ? 'yes' : 'no'}
                       data-attention={attention === null ? 'no' : 'yes'}
+                      /*
+                        Вся свободная поверхность карточки переключает выбор:
+                        попадать в кружок 18 px мышью — работа ради работы.
+                        Внутренние кнопки и ссылки при этом остаются своими:
+                        нажатие на них до карточки не доходит.
+                      */
+                      role="button"
+                      tabIndex={blocked !== null && number === null ? -1 : 0}
+                      aria-pressed={number !== null}
+                      onClick={(event) => {
+                        if ((event.target as HTMLElement).closest('button, a, input, label')) {
+                          return;
+                        }
+                        setSelected((current) => toggleSelection(current, item));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== ' ' && event.key !== 'Enter') {
+                          return;
+                        }
+                        if (event.target !== event.currentTarget) {
+                          return;
+                        }
+                        event.preventDefault();
+                        setSelected((current) => toggleSelection(current, item));
+                      }}
                     >
                       <div className="deals__card-head">
                         <button
