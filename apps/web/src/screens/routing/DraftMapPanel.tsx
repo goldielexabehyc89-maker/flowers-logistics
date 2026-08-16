@@ -15,22 +15,19 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
-import {
-  Button,
-  EmptyState,
-  ErrorState,
-  Field,
-  LoadingState,
-  TextInput,
-} from '../../ui/components';
+import { EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { describeMap, trafficNote, type MapConfig, type MapPointsResponse } from './geo';
 import { pointAction, pointLabel, transferTargets, visiblePoints } from './draft-map';
 import { withRouteLease } from './lease-scope';
 import { conflictMessage, type RouteCardView, type RouteListItem } from './routing';
+
+/** Со скольких целей ряд кнопок перестаёт читаться и появляется поиск. */
+const SEARCH_FROM = 6;
 
 const OrdersMap = lazy(() =>
   import('./OrdersMap').then((module) => ({ default: module.OrdersMap })),
@@ -63,7 +60,6 @@ export function DraftMapPanel({
 
   const [showUnassigned, setShowUnassigned] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
-  const [targetRouteId, setTargetRouteId] = useState('');
   const [targetQuery, setTargetQuery] = useState('');
   const [basemapFailed, setBasemapFailed] = useState(false);
 
@@ -103,6 +99,20 @@ export function DraftMapPanel({
   );
 
   const selected = visible.find((point) => point.orderId === selectedOrderId) ?? null;
+
+  /*
+   * Адрес выбранного заказа.
+   *
+   * В точках карты его нет, а окно без адреса не отвечает на вопрос «тот ли
+   * это заказ». Берётся существующим read-only запросом заказа, своего
+   * контракта не заводим.
+   */
+  const selectedOrder = useQuery({
+    queryKey: ['order-address', selectedOrderId],
+    enabled: selectedOrderId !== null,
+    queryFn: () => client.get<{ address: string | null }>(`/api/orders/${selectedOrderId ?? ''}`),
+  });
+  const address = selectedOrder.data?.address ?? null;
 
   // Подпись стабильна между рендерами: иначе маркеры пересобирались бы
   // на каждом обновлении списка и карта дёргалась бы.
@@ -163,8 +173,30 @@ export function DraftMapPanel({
       ),
     onSuccess: () => {
       setSelectedOrderId(null);
-      setTargetRouteId('');
       showToast('Заказ перенесён в другой черновик', 'success');
+      refreshAll();
+    },
+    onError: failure,
+  });
+
+  /**
+   * Снятие заказа с маршрута прямо на карте.
+   *
+   * Та же серверная операция возврата, что и крестик в строке состава:
+   * заказ уходит в нераспределённые «Сделки», а не удаляется.
+   */
+  const removeOrder = useMutation({
+    mutationFn: (input: { orderId: string; fromRouteId: string }) =>
+      withRouteLease(lease, input.fromRouteId, async () => {
+        const source = await client.get<RouteCardView>(`/api/routes/${input.fromRouteId}`);
+        await client.post(`/api/routes/${input.fromRouteId}/orders/return`, {
+          orderIds: [input.orderId],
+          expectedVersion: source.version,
+        });
+      }),
+    onSuccess: () => {
+      setSelectedOrderId(null);
+      showToast('Заказ убран из маршрута', 'success');
       refreshAll();
     },
     onError: failure,
@@ -182,7 +214,6 @@ export function DraftMapPanel({
       }),
     onSuccess: () => {
       setSelectedOrderId(null);
-      setTargetRouteId('');
       showToast('Заказ добавлен в черновик', 'success');
       refreshAll();
     },
@@ -198,7 +229,7 @@ export function DraftMapPanel({
   }
 
   const traffic = trafficNote(config.data);
-  const busy = moveOrder.isPending || assignOrder.isPending;
+  const busy = moveOrder.isPending || assignOrder.isPending || removeOrder.isPending;
   const action = selected === null ? null : pointAction(selected);
   const targets = transferTargets(drafts, selected?.routeId ?? null);
 
@@ -276,7 +307,6 @@ export function DraftMapPanel({
               selectedOrderId={selectedOrderId}
               onSelect={(orderId) => {
                 setSelectedOrderId(orderId);
-                setTargetRouteId('');
               }}
               picking={false}
               onPick={() => undefined}
@@ -306,88 +336,98 @@ export function DraftMapPanel({
         Показываются номер и адрес, а не идентификатор: по обрезанному UUID
         проверить, тот ли это заказ, невозможно.
       */}
+      {/*
+        Окно заказа лежит ПОВЕРХ карты по центру.
+
+        Раньше эта панель вставала под картой и отнимала у неё высоту при
+        каждом нажатии на точку. Теперь карта не меняет размера, а окно
+        закрывается крестиком или выбором другой точки.
+      */}
       {selected !== null && action !== null && (
-        <div className="routes__map-selection" data-testid="map-selection">
-          <div className="stack">
-            <strong>{selected.number}</strong>
-            <span className="muted text-sm">
-              {selected.routeNumber === null
-                ? 'Нераспределённая сделка'
-                : `${selected.routeNumber} · остановка ${selected.position ?? '—'}`}
-            </span>
-          </div>
+        <div className="routes__map-window" data-testid="map-selection">
+          <header className="routes__map-window-head">
+            <span className="routes__map-window-number">{selected.number}</span>
+            {selected.routeNumber !== null && (
+              <span className="routes__map-window-route">{selected.routeNumber}</span>
+            )}
+            <button
+              type="button"
+              className="routes__map-window-close"
+              aria-label="Закрыть окно заказа"
+              data-testid="map-selection-close"
+              onClick={() => setSelectedOrderId(null)}
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
+          </header>
+
+          {/* Адрес читается из существующего заказа: на карте его нет. */}
+          <p className="routes__map-window-address" title={address ?? undefined}>
+            {address ?? '—'}
+          </p>
+
+          <p className="routes__map-window-label">
+            {action.kind === 'ASSIGN' ? 'Назначить в маршрут:' : 'Переназначить в маршрут:'}
+          </p>
 
           {/*
-            Цель выбирается поиском по номеру, а не набором отдельных кнопок:
-            в дне бывает два десятка черновиков и листов, и ряд кнопок
-            превращается в лотерею.
+            Когда черновиков много, ряд кнопок превращается в лотерею: сверху
+            появляется то же поле поиска, что и у выбора курьера.
           */}
-          <Field
-            label={action.kind === 'ASSIGN' ? 'Назначить в черновик' : 'Перенести в черновик'}
-            hint="Поиск по номеру"
-          >
-            {(fieldProps) => (
-              <TextInput
-                {...fieldProps}
-                value={targetQuery}
-                placeholder="Например, 3661"
-                disabled={busy}
-                data-testid="map-transfer-search"
-                onChange={(event) => {
-                  setTargetQuery(event.target.value);
-                  setTargetRouteId('');
-                }}
-              />
-            )}
-          </Field>
+          {targets.length > SEARCH_FROM && (
+            <TextInput
+              value={targetQuery}
+              placeholder="Поиск по номеру"
+              aria-label="Поиск маршрута"
+              disabled={busy}
+              className="routes__map-window-search"
+              data-testid="map-transfer-search"
+              onChange={(event) => setTargetQuery(event.target.value)}
+            />
+          )}
 
-          <ul className="routes__targets" data-testid="map-transfer-list">
+          <div className="routes__map-window-targets" data-testid="map-transfer-list">
             {matchingTargets.length === 0 ? (
-              <li className="muted">Подходящих черновиков нет</li>
+              <span className="muted text-sm">Подходящих черновиков нет</span>
             ) : (
               matchingTargets.map((draft) => (
-                <li key={draft.id}>
-                  <button
-                    type="button"
-                    className={
-                      draft.id === targetRouteId
-                        ? 'deals__link routes__target--picked'
-                        : 'deals__link'
+                <button
+                  key={draft.id}
+                  type="button"
+                  className="routes__map-window-target"
+                  data-testid="map-transfer-option"
+                  disabled={busy}
+                  onClick={() => {
+                    if (action.kind === 'ASSIGN') {
+                      assignOrder.mutate({ orderId: action.orderId, toRouteId: draft.id });
+                      return;
                     }
-                    data-testid="map-transfer-option"
-                    onClick={() => {
-                      setTargetRouteId(draft.id);
-                      setTargetQuery(draft.number);
-                    }}
-                  >
-                    {draft.number} · заказов: {draft.orderCount}
-                  </button>
-                </li>
+                    moveOrder.mutate({
+                      orderId: action.orderId,
+                      fromRouteId: action.fromRouteId,
+                      toRouteId: draft.id,
+                    });
+                  }}
+                >
+                  {draft.number}
+                </button>
               ))
             )}
-          </ul>
-
-          <div className="routes__actions">
-            <Button
-              variant="primary"
-              data-testid="map-transfer"
-              disabled={busy || targetRouteId === ''}
-              onClick={() => {
-                if (action.kind === 'ASSIGN') {
-                  assignOrder.mutate({ orderId: action.orderId, toRouteId: targetRouteId });
-                  return;
-                }
-                moveOrder.mutate({
-                  orderId: action.orderId,
-                  fromRouteId: action.fromRouteId,
-                  toRouteId: targetRouteId,
-                });
-              }}
-            >
-              {action.kind === 'ASSIGN' ? 'Назначить' : 'Перенести'}
-            </Button>
-            <Button onClick={() => setSelectedOrderId(null)}>Снять выбор</Button>
           </div>
+
+          {action.kind === 'MOVE' && (
+            <button
+              type="button"
+              className="routes__map-window-remove"
+              data-testid="map-order-remove"
+              disabled={busy}
+              onClick={() =>
+                removeOrder.mutate({ orderId: action.orderId, fromRouteId: action.fromRouteId })
+              }
+            >
+              Убрать из маршрута
+            </button>
+          )}
         </div>
       )}
 

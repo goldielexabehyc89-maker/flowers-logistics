@@ -17,19 +17,12 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
-import {
-  Button,
-  EmptyState,
-  ErrorState,
-  LoadingState,
-  StatusBadge,
-  TextInput,
-} from '../../ui/components';
+import { Button, EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { RouteCard } from './RouteCard';
 import { PreviewPanel } from './PreviewPanel';
 import { DraftMapPanel } from './DraftMapPanel';
 import { useWorkspace } from '../logistics/useWorkspace';
-import { formatDate, ROUTE_STATE_LABELS, VEHICLE_LABELS, type RouteListResponse } from './routing';
+import { formatDate, type RouteListResponse } from './routing';
 import './routing.css';
 
 export function RoutingScreen(): React.JSX.Element {
@@ -135,14 +128,26 @@ export function RoutingScreen(): React.JSX.Element {
                         // ровно один черновик или ни одного.
                         onClick={() => setDraftId(expanded ? null : draft.id)}
                       >
+                        {/*
+                          Свёрнутая строка несёт только опознавательные
+                          признаки: состояние — цветом точки, объём —
+                          счётчиком. Курьер и тип машины стоят сразу под ней
+                          в раскрытом виде; повторять их здесь значило бы
+                          занять вторую строку ради уже видимого.
+                        */}
+                        <span
+                          className={`routes__draft-dot${
+                            draft.state === 'CONFIRMED' ? ' routes__draft-dot--confirmed' : ''
+                          }`}
+                          aria-hidden="true"
+                        />
                         <span className="routes__number">{draft.number}</span>
-                        <StatusBadge tone="info">{ROUTE_STATE_LABELS[draft.state]}</StatusBadge>
-                        <span className="muted text-sm">
-                          {VEHICLE_LABELS[draft.vehicleType]} · заказов: {draft.orderCount}
+                        <span className="routes__draft-count">
+                          {draft.orderCount} зак.
                           {draft.conflictCount > 0 ? ` · расхождений: ${draft.conflictCount}` : ''}
                         </span>
-                        <span className="muted text-sm">
-                          Курьер: {draft.courier?.fullName ?? 'не назначен'}
+                        <span className="routes__draft-chevron" aria-hidden="true">
+                          {expanded ? '▲' : '▼'}
                         </span>
                       </button>
 

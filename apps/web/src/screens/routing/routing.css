@@ -1026,64 +1026,374 @@
 }
 
 /*
- * Раскрытый черновик: компактный список остановок.
+ * Карточка черновика по измеренным значениям источника.
  *
- * Внутри общей поверхности карточка не заводит своей рамки и живёт той же
- * плотностью, что список сделок: номер остановки — кружок 20px, адрес
- * обрезается, интервал не переносится.
+ * Свёрнутая — ровно одна строка 40px на слабой серо-голубой подложке; белым
+ * становится только раскрытое тело. Скрытого пустого тела под свёрнутой нет.
  */
-.routes__draft .routes__card {
-  padding: 6px;
-  border: 0;
-  border-radius: 0;
-}
-
-.routes__draft .routes__stop {
-  gap: 6px;
-  align-items: center;
-  padding: 3px 2px;
-  border-bottom: 1px solid var(--log-border-soft);
-  font-size: var(--log-font-sm);
-}
-
-.routes__draft .routes__stop-body {
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: baseline;
-}
-
-.routes__draft .routes__stop-head {
-  gap: 6px;
-  align-items: center;
-}
-
-.routes__draft .routes__stop-body-text {
+.routes__draft {
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-draft);
+  background: var(--log-surface-soft);
   overflow: hidden;
+}
+
+.routes__draft--open {
+  border-color: var(--log-selected-text);
+  background: var(--log-surface);
+  box-shadow: 0 0 0 2px rgb(102 126 234 / 18%);
+}
+
+.routes__draft-head {
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  font-size: var(--log-font-md);
+  line-height: 1.25;
+}
+
+.routes__draft--open .routes__draft-head {
+  border-bottom: 1px solid var(--log-border-hairline);
+  background: var(--log-header-tint);
+}
+
+/* Точка состояния: черновик — акцент, подтверждённый — зелёный. */
+.routes__draft-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--log-selected-text);
+}
+
+.routes__draft-dot--confirmed {
+  background: var(--log-status-ok);
+}
+
+.routes__draft-head .routes__number {
+  overflow: hidden;
+  flex: 1 1 auto;
   min-width: 0;
-  gap: 6px;
-}
-
-.routes__draft .routes__stop-body-text > span:first-child {
-  overflow: hidden;
+  color: var(--log-text-strong);
+  font-size: var(--log-font-md);
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Кружок номера остановки: измеренные 20px, 10px/700 белым на акценте. */
+.routes__draft-count,
+.routes__draft-chevron {
+  flex: none;
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+}
+
+.routes__draft-chevron {
+  width: 12px;
+  font-size: var(--log-font-2xs);
+  text-align: center;
+}
+
+/* Тело раскрытой карточки. */
+.routes__draft .routes__card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border: 0;
+  border-radius: 0;
+  background: var(--log-surface);
+}
+
+.routes__card-header {
+  align-items: center;
+}
+
+.routes__card-meta {
+  margin: 0;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-xs);
+}
+
+.routes__draft .routes__card-close {
+  width: 20px;
+  height: 20px;
+  border-color: var(--log-border);
+  color: var(--log-text-faint);
+}
+
+/* Поле курьера — 27px, как в эталоне. */
+.routes__draft .courier-combobox__field {
+  height: 27px;
+  min-height: 27px;
+  padding: 4px 8px;
+  font-size: var(--log-font-md);
+}
+
+.routes__draft .field__label,
+.routes__draft .field__hint {
+  display: none;
+}
+
+/* Мини-карточка остановки. */
+.routes__draft .routes__stops {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.routes__draft .routes__stop {
+  gap: 5px;
+  align-items: center;
+  padding: 5px 6px;
+  border: 1px solid var(--log-border);
+  border-bottom: 1px solid var(--log-border);
+  border-radius: var(--log-radius-control);
+  background: var(--log-surface-soft);
+  cursor: grab;
+}
+
+.routes__draft .routes__stop--dragging {
+  opacity: 0.4;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 15%);
+}
+
+.routes__stop-grip {
+  flex: none;
+  color: var(--log-border-strong);
+  font-size: var(--log-font-section);
+  line-height: 1;
+}
+
 .routes__draft .routes__position {
+  flex: none;
   min-width: 20px;
+  width: 20px;
   height: 20px;
   border: 0;
-  border-radius: var(--log-radius-pill);
+  border-radius: 50%;
   background: var(--log-selected-text);
   color: var(--log-surface);
   font-size: var(--log-font-2xs);
   font-weight: 700;
 }
 
+.routes__draft .routes__stop-body {
+  display: flex;
+  overflow: hidden;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.routes__draft .routes__stop-head {
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.routes__draft .routes__number {
+  color: var(--log-text-strong);
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+}
+
+/* Адрес — одна строка с обрезкой: перенос стоил бы трёх заказов на экране. */
+.routes__stop-address {
+  overflow: hidden;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routes__stop-time {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-2xs);
+}
+
+.routes__stop-remove {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--log-border);
+  border-radius: 5px;
+  background: var(--log-surface);
+  color: var(--log-text-muted);
+  cursor: pointer;
+}
+
+.routes__stop-remove:hover:not(:disabled) {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.routes__stop-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .routes__draft .routes__stop .badge {
   padding: 0 6px;
   font-size: var(--log-font-xs);
   line-height: 18px;
+}
+
+/* Две компактные кнопки внизу — по половине ширины. */
+.routes__draft .routes__actions {
+  gap: 8px;
+}
+
+.routes__draft .routes__actions button {
+  flex: 1 1 0;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: var(--log-radius-control);
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+}
+
+/*
+ * Окно заказа поверх карты.
+ *
+ * Раньше эта панель стояла под картой и отнимала у неё высоту при каждом
+ * нажатии на точку.
+ */
+.routes__map-window {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100% - 32px));
+  padding: 14px 16px;
+  transform: translate(-50%, -50%);
+  border-radius: var(--log-radius-window);
+  background: var(--log-surface);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+}
+
+.routes__map-window-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.routes__map-window-number {
+  color: var(--log-text-strong);
+  font-size: var(--log-font-card-title);
+  font-weight: 700;
+}
+
+.routes__map-window-route {
+  padding: 1px 8px;
+  border-radius: var(--log-radius-pill);
+  background: var(--log-selected-text);
+  color: var(--log-surface);
+  font-size: var(--log-font-xs);
+  font-weight: 600;
+}
+
+.routes__map-window-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--log-text-faint);
+  cursor: pointer;
+}
+
+.routes__map-window-close:hover {
+  background: var(--log-surface-muted);
+  color: var(--log-text);
+}
+
+.routes__map-window-address {
+  overflow: hidden;
+  margin: 0;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routes__map-window-label {
+  margin: 0;
+  color: var(--log-text-strong);
+  font-size: var(--log-font-md);
+  font-weight: 600;
+}
+
+.routes__map-window-search {
+  height: 30px;
+  min-height: 30px;
+  font-size: var(--log-font-md);
+}
+
+.routes__map-window-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.routes__map-window-target {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--log-selected-text);
+  border-radius: 9px;
+  background: var(--log-surface);
+  color: var(--log-selected-text);
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.routes__map-window-target:hover:not(:disabled) {
+  background: var(--log-selected-text);
+  color: var(--log-surface);
+}
+
+.routes__map-window-target:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Снятие с маршрута — единственное разрушающее действие окна, потому отдельно. */
+.routes__map-window-remove {
+  height: 36px;
+  border: 1px solid var(--color-error);
+  border-radius: 9px;
+  background: var(--log-surface);
+  color: var(--color-error);
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.routes__map-window-remove:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-error) 8%, #fff);
+}
+
+.routes__map-window-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

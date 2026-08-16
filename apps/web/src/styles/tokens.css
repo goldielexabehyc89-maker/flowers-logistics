@@ -110,6 +110,8 @@
 
   /* Состояния строк выбора. */
   --log-hover: #f0f4ff;
+  /* Шапка раскрытого черновика: акцент 8% на белом. */
+  --log-header-tint: #f3f5fd;
   --log-selected-bg: #eef2ff;
   --log-selected-text: #667eea;
 
@@ -140,6 +142,8 @@
 
   /* Радиусы и тень выпадающих списков. */
   --log-radius-control: 7px;
+  --log-radius-draft: 12px;
+  --log-radius-window: 16px;
   --log-radius-group: 8px;
   --log-radius-field: 8px;
   --log-radius-card: 10px;

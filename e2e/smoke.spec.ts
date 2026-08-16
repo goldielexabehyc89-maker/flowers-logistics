@@ -183,14 +183,6 @@ async function openDraft(page: Page, number: string): Promise<void> {
   await expect(draft).toHaveAttribute('data-expanded', 'true');
 }
 
-async function selectRouteByNumber(select: Locator, number: string): Promise<void> {
-  const option = select.locator(`option:has-text("${number}")`);
-  await expect(option).toHaveCount(1);
-  const value = await option.getAttribute('value');
-  expect(value, `в списке нет маршрута ${number}`).not.toBeNull();
-  await select.selectOption(value ?? '');
-}
-
 /**
  * Нажимает кнопку и дожидается ОТВЕТА на конкретную мутацию.
  *
@@ -794,7 +786,14 @@ test('маршрут: черновик → состав → порядок → �
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
-  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  /*
+   * Номер берётся из строки списка, которая карточку и раскрыла: собственного
+   * заголовка у карточки больше нет — он не повторяется дважды.
+   */
+  const routeNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
   expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
 
   const stops = card.locator('.routes__stop');
@@ -803,9 +802,9 @@ test('маршрут: черновик → состав → порядок → �
   // Раскрыт ровно один черновик.
   await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
 
-  // Порядок меняется кнопками: перетаскивание не требуется.
+  // Порядок меняется перетаскиванием: стрелок у остановок больше нет.
   await expect(stops.first()).toContainText(first);
-  await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
+  await stops.nth(0).dragTo(stops.nth(1));
   await expect(stops.first()).toContainText(second);
 
   /*
@@ -830,36 +829,56 @@ test('маршрут: черновик → состав → порядок → �
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
   await page.getByTestId('create-route-draft').click();
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
-  const secondCardNumber = (
-    await page.locator('.routes__card').getByRole('heading').innerText()
-  ).replace(/[^R\d-]/g, '');
+  const secondCardNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
+  expect(secondCardNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
 
-  // Перенос из списка: аренда обоих черновиков берётся клиентом.
-  // В первом черновике два собственных заказа, во втором — один.
+  /*
+   * Перенос делается окном заказа на карте.
+   *
+   * Групповых кнопок в составе больше нет: логист нажимает точку и видит,
+   * куда именно уезжает заказ. Операция та же самая — `POST /routes/move`
+   * с арендой обоих черновиков.
+   */
   await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
-  await card.getByLabel(`Выбрать заказ ${first}`).check();
-  await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), secondCardNumber);
+  /*
+   * Нажатие отправляется САМОЙ отметке, а не в точку экрана.
+   *
+   * Сеялка ставит проверочным заказам один и тот же адрес, и отметки лежат
+   * ровно друг на друге: обычное нажатие досталось бы верхней, и сценарий
+   * молча двигал бы не тот заказ. У настоящих заказов адреса разные.
+   */
+  await page.getByRole('button', { name: `Заказ ${first} на карте` }).dispatchEvent('click');
+  const window = page.getByTestId('map-selection');
+  await expect(window).toBeVisible();
   await clickAndAwait(
     page,
-    card.getByRole('button', { name: /Перенести/ }),
+    window.getByRole('button', { name: secondCardNumber }),
     'POST',
     '/routes/move',
   );
   // Заказ ушёл: перенос выполнен, а не отклонён блокировкой.
   await expect(card.locator('.routes__stop')).toHaveCount(1);
 
-  // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
+  /*
+   * Возврат и назначение — тем же окном.
+   *
+   * Крестик в окне снимает заказ с маршрута, а нераспределённая точка
+   * назначается в нужный черновик. Обе операции — существующие серверные.
+   */
   await openDraft(page, secondCardNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
-  await card.getByLabel(`Выбрать заказ ${first}`).check();
-  await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), routeNumber);
-  await clickAndAwait(
-    page,
-    card.getByRole('button', { name: /Перенести/ }),
-    'POST',
-    '/routes/move',
-  );
+  await page.getByRole('button', { name: `Заказ ${first} на карте` }).dispatchEvent('click');
+  await clickAndAwait(page, window.getByTestId('map-order-remove'), 'POST', '/orders/return');
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
+
+  await openDraft(page, routeNumber);
+  await page.getByTestId('map-unassigned-toggle').check();
+  await page.getByRole('button', { name: `Заказ ${first} на карте` }).click({ force: true });
+  await clickAndAwait(page, window.getByRole('button', { name: routeNumber }), 'POST', '/orders');
 
   await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
@@ -923,7 +942,12 @@ test('перехват блокировки переводит прежнего 
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
-  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  // Номер берётся из строки списка: собственного заголовка у карточки нет.
+  const routeNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
+  expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
   await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeEnabled();
 
   // Второй сеанс того же администратора — другое устройство, другая семья сессий.
@@ -3185,11 +3209,8 @@ test('маршрутизация: линия идёт от склада и ме�
   await expect(stops).toHaveCount(2);
   const firstBefore = await stops.first().innerText();
 
-  // 4. Порядок меняется тем же атомарным сохранением, что и перетаскивание.
-  await page
-    .locator('.routes__card')
-    .getByRole('button', { name: `Опустить заказ ${first}` })
-    .click();
+  // 4. Порядок меняется перетаскиванием — той же атомарной операцией.
+  await stops.nth(0).dragTo(stops.nth(1));
   await expect(stops.first()).toContainText(second ?? '');
 
   // 5. Линия догоняет новый порядок: иначе карта показывала бы прежний
