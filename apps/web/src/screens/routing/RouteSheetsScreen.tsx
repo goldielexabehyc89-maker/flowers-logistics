@@ -30,6 +30,7 @@ import {
 } from '../../ui/components';
 import type { CourierOption } from '../deals/courier-picker';
 import { CourierCombobox } from '../logistics/CourierCombobox';
+import { OrderWindow } from '../logistics/OrderWindow';
 import {
   canShip,
   isDayOpen,
@@ -77,9 +78,11 @@ const PAGE_SIZE = 20;
 function SheetOrders({
   routeId,
   deliveredNumbers,
+  onOpenOrder,
 }: {
   routeId: string;
   deliveredNumbers: readonly string[];
+  onOpenOrder: (orderId: string) => void;
 }): React.JSX.Element {
   const { client } = useAuth();
   const card = useQuery({
@@ -105,7 +108,15 @@ function SheetOrders({
           data-order-number={item.order.number}
         >
           <span className="sheets__order-position">{item.position}</span>
-          <span className="sheets__order-number">{item.order.number}</span>
+          {/* Номер — вход в окно заказа: там вся информация и правки. */}
+          <button
+            type="button"
+            className="sheets__order-number order-number-button"
+            data-testid="order-number"
+            onClick={() => onOpenOrder(item.order.id)}
+          >
+            {item.order.number}
+          </button>
           <span className="sheets__order-address">{item.order.address ?? '—'}</span>
           <span className="sheets__order-interval muted">{stopInterval(item.order.interval)}</span>
           {delivered.has(item.order.number) && (
@@ -127,6 +138,8 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  /** Заказ, открытый в окне: логист правит его адрес, интервал и точку. */
+  const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   const [openedDays, setOpenedDays] = useState<ReadonlySet<string>>(new Set());
   const [pages, setPages] = useState<Record<SheetSection, number>>({
     UNSHIPPED: 1,
@@ -494,6 +507,7 @@ export function RouteSheetsScreen(): React.JSX.Element {
                               <SheetOrders
                                 routeId={sheet.id}
                                 deliveredNumbers={sheet.deliveredNumbers}
+                                onOpenOrder={setOrderWindowId}
                               />
                             )}
                           </li>
@@ -693,6 +707,11 @@ export function RouteSheetsScreen(): React.JSX.Element {
             </article>
           )}
         </>
+      )}
+
+      {/* Окно заказа: одно и то же на всех вкладках. */}
+      {orderWindowId !== null && (
+        <OrderWindow orderId={orderWindowId} onClose={() => setOrderWindowId(null)} />
       )}
     </section>
   );

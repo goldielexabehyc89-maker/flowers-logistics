@@ -49,6 +49,7 @@ const HISTORY_PAGE_SIZE = 20;
 
 import type { CourierOption } from '../deals/courier-picker';
 import { CourierCombobox } from '../logistics/CourierCombobox';
+import { OrderWindow } from '../logistics/OrderWindow';
 
 export interface RouteCardProps {
   routeId: string;
@@ -78,6 +79,8 @@ export function RouteCard({
   const navigate = useNavigate();
   const { showToast } = useToast();
 
+  /** Заказ, открытый в окне. `null` — окно закрыто. */
+  const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   /** Что сейчас перетаскивают. `null` — перетаскивания нет. */
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
@@ -465,7 +468,15 @@ export function RouteCard({
 
               <div className="routes__stop-body">
                 <div className="routes__stop-head">
-                  <span className="routes__number">{item.order.number}</span>
+                  {/* Номер — вход в окно заказа со всей информацией. */}
+                  <button
+                    type="button"
+                    className="routes__number order-number-button"
+                    data-testid="order-number"
+                    onClick={() => setOrderWindowId(item.order.id)}
+                  >
+                    {item.order.number}
+                  </button>
                   {item.order.needsAttention && (
                     <StatusBadge tone="warning">Требует внимания</StatusBadge>
                   )}
@@ -709,6 +720,11 @@ export function RouteCard({
           </div>
         </div>
       </Modal>
+
+      {/* Окно заказа: одно и то же на всех вкладках. */}
+      {orderWindowId !== null && (
+        <OrderWindow orderId={orderWindowId} onClose={() => setOrderWindowId(null)} />
+      )}
     </section>
   );
 }

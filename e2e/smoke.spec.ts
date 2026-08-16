@@ -3326,6 +3326,23 @@ test('маршрутные листы: разделы, курьер, ручна�
   await sheet.getByTestId('sheet-expand').click();
   await expect(sheet.getByTestId('sheet-orders')).toBeVisible();
   await expect(sheet.locator(`[data-order-number="${own}"]`)).toBeVisible();
+
+  /*
+   * 3б. Номер заказа открывает окно со всей информацией.
+   *
+   * Проверяется и то, что деньги показаны только для чтения: их правит
+   * МойСклад, и кнопки изменения у них быть не должно.
+   */
+  await sheet.locator(`[data-order-number="${own}"]`).getByTestId('order-number').click();
+  const orderWindow = page.getByTestId('order-window');
+  await expect(orderWindow).toBeVisible();
+  await expect(orderWindow).toContainText('Сумма');
+  await expect(orderWindow).toContainText('меняется в МоёмСкладе');
+  await expect(orderWindow.getByTestId('order-window-address')).toBeVisible();
+  await expect(orderWindow.getByTestId('order-window-interval')).toBeVisible();
+  await page.getByRole('button', { name: 'Закрыть' }).first().click();
+  await expect(orderWindow).toHaveCount(0);
+
   await sheet.getByTestId('sheet-expand').click();
   await expect(sheet.getByTestId('sheet-orders')).toHaveCount(0);
 

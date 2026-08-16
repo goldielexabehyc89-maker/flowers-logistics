@@ -48,6 +48,7 @@ import {
 } from './auto-split';
 import { useWorkspace } from '../logistics/useWorkspace';
 import { GeoPointDialog } from '../logistics/GeoPointDialog';
+import { OrderWindow } from '../logistics/OrderWindow';
 import { previewHref, workspaceHref } from '../logistics/workspace-url';
 import {
   dropUnavailable,
@@ -103,6 +104,8 @@ export function DealsWorkspace(): React.JSX.Element {
   const [selected, setSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<DealCard | null>(null);
+  /** Заказ, открытый в окне. `null` — окно закрыто. */
+  const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   /** Заказ, которому ставят точку вручную. */
   const [pointFor, setPointFor] = useState<DealCard | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -509,7 +512,15 @@ export function DealsWorkspace(): React.JSX.Element {
                         >
                           {number ?? '+'}
                         </button>
-                        <span className="deals__number">{item.number}</span>
+                        {/* Номер — вход в окно заказа со всей информацией. */}
+                        <button
+                          type="button"
+                          className="deals__number order-number-button"
+                          data-testid="order-number"
+                          onClick={() => setOrderWindowId(item.id)}
+                        >
+                          {item.number}
+                        </button>
 
                         {/*
                           Готовность к отправке видна прямо в строке номера:
@@ -891,6 +902,10 @@ export function DealsWorkspace(): React.JSX.Element {
           onClose={() => setCreateOpen(false)}
           onCreate={(input) => manualDraft.mutate(input)}
         />
+      )}
+
+      {orderWindowId !== null && (
+        <OrderWindow orderId={orderWindowId} onClose={() => setOrderWindowId(null)} />
       )}
 
       {editing !== null && (
