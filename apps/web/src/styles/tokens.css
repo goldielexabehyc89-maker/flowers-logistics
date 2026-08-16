@@ -103,7 +103,10 @@
   --log-surface-soft: #f8fafc;
   --log-surface-muted: #f1f5f9;
   --log-border: #e2e8f0;
+  --log-border-strong: #cbd5e1;
   --log-border-hairline: #f1f5f9;
+  /* Разделитель внутри карточки — светлее внешней границы. */
+  --log-border-soft: #f8fafc;
 
   /* Состояния строк выбора. */
   --log-hover: #f0f4ff;
@@ -129,10 +132,15 @@
   /* Размеры шрифта, которых не было в общей шкале. */
   --log-font-2xs: 10px;
   --log-font-xs: 11px;
+  /* Основной размер строк и полей — измеренные 12 и 13 px. */
+  --log-font-sm: 12px;
+  --log-font-md: 13px;
+  --log-font-section: 14px;
   --log-font-card-title: 15px;
 
   /* Радиусы и тень выпадающих списков. */
   --log-radius-control: 7px;
+  --log-radius-group: 8px;
   --log-radius-field: 8px;
   --log-radius-card: 10px;
   --log-radius-pill: 20px;

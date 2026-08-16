@@ -747,7 +747,7 @@
   margin: 4px 0 2px;
   padding: 4px 6px;
   border: 1px solid var(--log-border-soft);
-  border-radius: var(--log-radius-md);
+  border-radius: var(--log-radius-field);
   background: var(--log-surface-soft);
   list-style: none;
 }
@@ -845,7 +845,7 @@
 
 .routes__draft {
   border-color: var(--log-border-soft);
-  border-radius: var(--log-radius-md);
+  border-radius: var(--log-radius-field);
 }
 
 .routes__draft:hover {
@@ -914,7 +914,7 @@
   max-width: calc(100% - 16px);
   padding: 5px 9px;
   border: 1px solid var(--log-border);
-  border-radius: var(--log-radius-md);
+  border-radius: var(--log-radius-field);
   background: var(--log-surface);
   box-shadow: var(--log-shadow-popover);
   font-size: var(--log-font-sm);
@@ -922,4 +922,58 @@
 
 .routes__map-hint {
   padding: 6px 8px;
+}
+
+/*
+ * Заголовок раздела маршрутных листов.
+ *
+ * Одна компактная полоса цвета состояния со счётчиком справа — по измеренным
+ * значениям источника (14px/600, счётчик 12px/600 на затемнении).
+ */
+.routes__section-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: var(--log-radius-card) var(--log-radius-card) 0 0;
+  background: var(--log-surface-muted);
+  font-size: var(--log-font-section);
+  font-weight: 600;
+}
+
+[data-testid='sheets-UNSHIPPED'] .routes__section-title {
+  background: var(--log-section-unshipped-bg);
+  color: var(--log-section-unshipped-text);
+}
+
+[data-testid='sheets-SHIPPED'] .routes__section-title,
+[data-testid='sheets-DELIVERED'] .routes__section-title {
+  background: var(--log-section-shipped-bg);
+  color: var(--log-section-shipped-text);
+}
+
+.routes__section-title .muted {
+  padding: 0 8px;
+  border-radius: var(--log-radius-pill);
+  background: var(--log-section-counter-bg);
+  color: inherit;
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+  line-height: 18px;
+}
+
+/* Группа дня: компактная строка-заголовок над листами. */
+.routes__day-toggle {
+  padding: 4px 8px;
+  border-radius: var(--log-radius-group);
+  background: var(--log-surface-muted);
+  font-size: var(--log-font-md);
+}
+
+.routes__section {
+  gap: 4px;
+}
+
+.routes__day {
+  gap: 2px;
 }
