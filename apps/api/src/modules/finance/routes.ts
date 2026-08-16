@@ -257,7 +257,9 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       ledgerActiveFrom: activation.activeFrom,
     });
 
-    const file = buildSettlementPdf(report);
+    // Буфер, а не промис и не Uint8Array: тело ответа обязано быть готовым
+    // байтовым массивом, иначе клиент получает не файл, а отказ.
+    const file = Buffer.from(await buildSettlementPdf(report));
 
     await writeAudit(deps.db, {
       action: 'FINANCE_REPORT_EXPORTED',

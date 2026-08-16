@@ -3465,3 +3465,239 @@ test('выбор курьера: открытие полем, фильтраци
   await page.getByTestId('create-route-count').click();
   await expect(list).toHaveCount(0);
 });
+
+/**
+ * Отдельный курьер для этого сценария.
+ *
+ * Общий курьер набора не годится: соседняя проверка его замораживает, и он
+ * пропадает из списка действующих — маршрут достался бы другому человеку,
+ * а экран курьера оказался бы пуст. Заводится через тот же API, которым
+ * пользуется администратор.
+ */
+async function seedOwnCourier(
+  page: Page,
+  token: string,
+): Promise<{ phone: string; pin: string; fullName: string }> {
+  const phone = uniquePhone();
+  const fullName = 'Курьер отчётов';
+
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName, phone, roles: ['COURIER'], defaultVehicleType: 'CAR' },
+  });
+  expect(created.status()).toBe(201);
+  const body = (await created.json()) as { activationCode: string };
+
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone, code: body.activationCode, pin: COURIER_PIN },
+  });
+  expect(activated.status()).toBe(200);
+
+  return { phone, pin: COURIER_PIN, fullName };
+}
+
+/**
+ * «История» и «Отчёты»: журнал прошлого и расчёты с курьером.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Подменяются только те же локальные флаги, что и раньше
+ * (решатель, подсказки, маршрутизатор). Деньги, тарифы и учёт настоящие:
+ * тариф заводится через API администратора, учёт включается им же, а
+ * начисления делает сам продукт при доставке.
+ */
+test('история и отчёты: тариф, доставка, расчёт с курьером и выгрузки', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  /*
+   * Тариф и включение учёта заводятся через API администратора.
+   *
+   * Экран настройки тарифов — отдельная работа; здесь важно, что ставки
+   * задаёт человек с правом ADMIN, а не сеялка и не значение по умолчанию.
+   */
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+
+  /*
+   * Запросы идут через контекст страницы с настоящим токеном.
+   *
+   * Токен приложения живёт в памяти вкладки и в браузерный `fetch` сам собой
+   * не попадает: без явного заголовка сервер честно отвечает 401, и проверка
+   * доказывала бы только это.
+   */
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  const courier = await seedOwnCourier(page, token);
+
+  const tariffResponse = await page.request.post('/api/logistics/tariffs', {
+    headers: authorized,
+    data: {
+      kind: 'REGULAR',
+      effectiveFrom: today,
+      effectiveTo: null,
+      perOrderMinor: '20000',
+      perKmMinor: '3000',
+      note: 'проверочный тариф',
+    },
+  });
+  expect(tariffResponse.status()).toBe(201);
+
+  const activation = await page.request.put('/api/logistics/ledger/activation', {
+    headers: authorized,
+    data: { activeFrom: today },
+  });
+  expect(activation.status()).toBe(200);
+
+  // 1. Обычный путь: сделка → лист → курьер → отгрузка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await page.getByTestId('create-route-sheet').click();
+  await expect(page).toHaveURL(/\/logistics\/route-sheets/);
+
+  await page.getByTestId('sheets-search').fill(own ?? '');
+  const sheet = page.getByTestId('sheets-UNSHIPPED').locator('[data-testid="sheet-row"]').first();
+  await expect(sheet).toBeVisible();
+  /*
+   * Курьер выбирается ИМЕННО тот, под которым дальше входит проверка.
+   *
+   * «Первый в списке» здесь не годится: соседние сценарии заводят своих
+   * курьеров, и маршрут достался бы чужому — экран курьера оказался бы пуст.
+   */
+  await sheet.getByTestId('sheet-courier-combobox-field').fill(courier.phone);
+  await expect(sheet.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
+  await sheet.getByTestId('sheet-courier-combobox-option').first().click();
+  await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
+  const sheetNumber = (await sheet.getAttribute('data-sheet-number')) ?? '';
+  await sheet.getByTestId('sheet-ship').click();
+  await expect(
+    page.getByTestId('sheets-SHIPPED').locator(`[data-sheet-number="${sheetNumber}"]`),
+  ).toBeVisible({ timeout: 20_000 });
+
+  // 2. Курьер сообщает результат: деньги в учёт попадают отсюда, а не из формы.
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+  await login(courierPage, courier.phone, courier.pin);
+  const courierCard = courierPage.locator(
+    `[data-testid="delivery-order"][data-order-number="${own}"]`,
+  );
+  await expect(courierCard).toBeVisible({ timeout: 20_000 });
+  await courierCard.getByTestId('delivery-open-delivered').click();
+  await courierCard.getByTestId('delivery-submit').click();
+  /*
+   * Состояние карточки не проверяется: это единственный заказ маршрута, его
+   * результат завершает маршрут, и список активных доставок пустеет. Факт
+   * доставки доказывается дальше — в истории и в расчёте с курьером.
+   */
+  await expect(courierPage.locator('.toast-region')).toContainText('Маршрут завершён', {
+    timeout: 20_000,
+  });
+  await courierContext.close();
+
+  // 3. «История» показывает маршрут, его состав и хронологию.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByTestId('history-screen')).toBeVisible();
+  await page.getByTestId('history-search').fill(own ?? '');
+
+  const historyRow = page.locator(
+    `[data-testid="history-route"][data-route-number="${sheetNumber}"]`,
+  );
+  await expect(historyRow).toBeVisible({ timeout: 20_000 });
+  await historyRow.getByTestId('history-expand').click();
+  await expect(historyRow.locator(`[data-order-number="${own}"]`)).toBeVisible();
+  await expect(historyRow.getByTestId('history-events')).toContainText('Отгружен курьеру');
+  await expect(historyRow.getByTestId('history-events')).toContainText('Доставлен');
+
+  // 4. «Отчёты»: расчёт с курьером и денежная операция.
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+  await expect(page.getByTestId('reports-summary')).toBeVisible();
+
+  const rows = page.getByTestId('reports-rows');
+  await expect(rows.locator(`[data-order-number="${own}"]`)).toBeVisible({ timeout: 20_000 });
+
+  /*
+   * Баланс до и после операции.
+   *
+   * Проверяется именно изменение: конкретная сумма зависит от наличных
+   * фикстуры, а вот направление и факт учёта операции — нет.
+   */
+  const before = (await page.getByTestId('reports-closing').innerText()).trim();
+  await page.getByTestId('reports-courier').selectOption({ label: courier.fullName });
+  await expect(page.getByTestId('reports-add-operation')).toBeEnabled();
+  await page.getByTestId('reports-add-operation').click();
+  await page.getByTestId('operation-kind').selectOption('CASH_HANDED_TO_LOGIST');
+  await page.getByTestId('operation-amount').fill('100');
+  await page.getByTestId('operation-reason').fill('сдача наличных по проверке');
+  await page.getByTestId('operation-submit').click();
+
+  const entries = page.getByTestId('reports-entries');
+  await expect(entries.locator('[data-entry-kind="CASH_HANDED_TO_LOGIST"]')).toBeVisible({
+    timeout: 20_000,
+  });
+  const after = (await page.getByTestId('reports-closing').innerText()).trim();
+  expect(after).not.toBe(before);
+
+  // 5. Выгрузки отдают настоящие файлы, а не HTML-страницу с ошибкой.
+  const period = `from=${today}&to=${today}`;
+  const xlsx = await page.request.get(`/api/logistics/reports/settlements.xlsx?${period}`, {
+    headers: authorized,
+  });
+  const pdf = await page.request.get(`/api/logistics/reports/settlements.pdf?${period}`, {
+    headers: authorized,
+  });
+
+  expect(xlsx.status()).toBe(200);
+  expect(pdf.status()).toBe(200);
+  // Сигнатуры файлов: XLSX — это zip, PDF — это PDF, а не страница с ошибкой.
+  expect((await xlsx.body()).subarray(0, 2).toString('latin1')).toBe('PK');
+  expect((await pdf.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
+  expect(pdf.headers()['content-type']).toContain('application/pdf');
+
+  // 6. Операционные показатели считаются тем же периодом.
+  await page.getByTestId('reports-mode-operations').click();
+  await expect(page.getByTestId('operations-summary')).toBeVisible();
+  await expect(page.getByTestId('operations-summary')).toContainText('Доставлено');
+
+  // 7. Телефон: обе вкладки без горизонтального выезда.
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const [name, testId] of [
+    ['История', 'history-screen'],
+    ['Отчёты', 'reports-screen'],
+  ]) {
+    await page
+      .getByRole('link', { name: name ?? '' })
+      .first()
+      .click();
+    await expect(page.getByTestId(testId ?? '')).toBeVisible();
+    const overflow = await page.evaluate(() => {
+      const root = (
+        globalThis as unknown as {
+          document: { documentElement: { scrollWidth: number; clientWidth: number } };
+        }
+      ).document.documentElement;
+      return root.scrollWidth - root.clientWidth;
+    });
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+});
