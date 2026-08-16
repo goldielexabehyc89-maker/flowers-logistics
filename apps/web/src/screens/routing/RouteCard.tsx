@@ -50,7 +50,8 @@ import {
 
 const HISTORY_PAGE_SIZE = 20;
 
-import { courierLabel, filterCouriers, type CourierOption } from '../deals/courier-picker';
+import type { CourierOption } from '../deals/courier-picker';
+import { CourierCombobox } from '../logistics/CourierCombobox';
 
 export interface RouteCardProps {
   routeId: string;
@@ -83,8 +84,7 @@ export function RouteCard({
   const [selected, setSelected] = useState<string[]>([]);
   /** Что сейчас перетаскивают. `null` — перетаскивания нет. */
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [courierQuery, setCourierQuery] = useState('');
-  const [courierListOpen, setCourierListOpen] = useState(false);
+
   const [historyOffset, setHistoryOffset] = useState(0);
   const [pendingAction, setPendingAction] = useState<'return-to-draft' | 'cancel' | null>(null);
   const [takeoverOpen, setTakeoverOpen] = useState(false);
@@ -493,64 +493,33 @@ export function RouteCard({
       </div>
 
       {/*
-        Курьер выбирается поиском по имени или телефону.
-        Выпадающий список из сотни фамилий заставлял логиста угадывать
-        написание; произвольная строка при этом никого не создаёт.
+        Курьер выбирается одним и тем же контролом на всех трёх вкладках:
+        нажатие в поле открывает список, ввод его сужает.
       */}
       <Field label="Курьер" hint="Поиск по имени или телефону">
-        {(fieldProps) => (
-          <TextInput
-            {...fieldProps}
-            value={courierQuery}
-            placeholder={route.courier?.fullName ?? 'Не назначен'}
+        {() => (
+          <CourierCombobox
+            options={couriers.data?.items ?? []}
+            /*
+              Назначенный курьер мог не попасть в загруженный список (сотню
+              активных курьеров список ограничивает): тогда он берётся из самого
+              маршрута — телефона в карточке нет, и это нормально.
+            */
+            value={
+              route.courier === null
+                ? null
+                : ((couriers.data?.items ?? []).find((item) => item.id === route.courier?.id) ?? {
+                    id: route.courier.id,
+                    fullName: route.courier.fullName,
+                    phone: null,
+                  })
+            }
             disabled={!editable || setCourier.isPending}
-            data-testid="route-courier-search"
-            onChange={(event) => {
-              setCourierQuery(event.target.value);
-              setCourierListOpen(true);
-            }}
-            onFocus={() => setCourierListOpen(true)}
+            testId="route-courier"
+            onChange={(courier) => setCourier.mutate(courier === null ? null : courier.id)}
           />
         )}
       </Field>
-
-      <p className="text-sm" data-testid="route-courier-current">
-        {route.courier === null ? 'Курьер не назначен' : route.courier.fullName}
-      </p>
-
-      {courierListOpen && editable && (
-        <ul className="routes__couriers" data-testid="route-courier-list">
-          <li>
-            <button
-              type="button"
-              className="deals__link"
-              onClick={() => {
-                setCourier.mutate(null);
-                setCourierQuery('');
-                setCourierListOpen(false);
-              }}
-            >
-              Снять назначение
-            </button>
-          </li>
-          {filterCouriers(couriers.data?.items ?? [], courierQuery).map((courier) => (
-            <li key={courier.id}>
-              <button
-                type="button"
-                className="deals__link"
-                data-testid="route-courier-option"
-                onClick={() => {
-                  setCourier.mutate(courier.id);
-                  setCourierQuery(courier.fullName);
-                  setCourierListOpen(false);
-                }}
-              >
-                {courierLabel(courier)}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
 
       {route.orders.length === 0 ? (
         <EmptyState

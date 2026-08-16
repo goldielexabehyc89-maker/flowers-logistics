@@ -3225,8 +3225,8 @@ test('маршрутные листы: разделы, курьер, ручна�
    * своего, и жёсткая привязка к конкретному телефону доказывала бы лишь
    * порядок сценариев.
    */
-  await sheet.getByTestId('sheet-courier-edit').click();
-  const options = sheet.getByTestId('sheet-courier-option');
+  await sheet.getByTestId('sheet-courier-combobox-field').click();
+  const options = sheet.getByTestId('sheet-courier-combobox-option');
   await expect(options.first()).toBeVisible();
   await options.first().click();
   await expect(sheet.getByTestId('sheet-courier')).not.toContainText('не назначен');
@@ -3266,4 +3266,74 @@ test('маршрутные листы: разделы, курьер, ручна�
     return root.scrollWidth - root.clientWidth;
   });
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+/**
+ * Выбор курьера: один контрол на всех вкладках.
+ *
+ * Проверяется поведение, а не оформление: поле открывает список, ввод его
+ * сужает, выбор закрывает, Escape закрывает без изменения, клик снаружи тоже
+ * закрывает, а список не растягивает карточку.
+ */
+test('выбор курьера: открытие полем, фильтрация вводом, Escape и клик снаружи', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
+  await ensureCourier(page.context().browser() as Browser);
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+
+  const field = page.getByTestId('create-route-courier-field');
+  const list = page.getByTestId('create-route-courier-list');
+
+  // 1. Список закрыт, пока в поле не нажали.
+  await expect(list).toHaveCount(0);
+
+  // 2. Нажатие в поле открывает список, а первой строкой идёт «не назначен».
+  await field.click();
+  await expect(list).toBeVisible();
+  await expect(page.getByTestId('create-route-courier-clear')).toBeVisible();
+  const total = await page.getByTestId('create-route-courier-option').count();
+  expect(total).toBeGreaterThan(0);
+
+  // 3. Ввод сужает список, не закрывая его.
+  await field.fill('Курьер');
+  await expect(list).toBeVisible();
+  const filtered = await page.getByTestId('create-route-courier-option').count();
+  expect(filtered).toBeLessThanOrEqual(total);
+
+  // 4. Заведомо несуществующий запрос оставляет честное сообщение.
+  await field.fill('такого курьера нет');
+  await expect(page.getByTestId('create-route-courier-nothing')).toBeVisible();
+
+  // 5. Escape закрывает и НИЧЕГО не выбирает.
+  await field.press('Escape');
+  await expect(list).toHaveCount(0);
+  // Ничего не выбрано: поле пусто, а значит назначения нет.
+  await expect(field).toHaveValue('');
+
+  // 6. Выбор строки закрывает список и подставляет курьера в поле.
+  await field.click();
+  await page.getByTestId('create-route-courier-option').first().click();
+  await expect(list).toHaveCount(0);
+  await expect(field).not.toHaveValue('');
+
+  // 7. Клик вне списка закрывает его.
+  await field.click();
+  await expect(list).toBeVisible();
+  await page.getByTestId('create-route-count').click();
+  await expect(list).toHaveCount(0);
 });

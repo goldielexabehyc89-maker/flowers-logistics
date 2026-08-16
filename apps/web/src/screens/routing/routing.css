@@ -685,10 +685,7 @@
 }
 
 /* Выбор курьера прямо в строке листа: без ухода в черновик. */
-.routes__courier-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.routes__sheet-courier {
   margin-top: 4px;
   max-width: 320px;
 }

@@ -28,7 +28,8 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
-import { courierLabel, filterCouriers, type CourierOption } from '../deals/courier-picker';
+import type { CourierOption } from '../deals/courier-picker';
+import { CourierCombobox } from '../logistics/CourierCombobox';
 import {
   canShip,
   isDayOpen,
@@ -86,9 +87,6 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const [cancelFor, setCancelFor] = useState<SheetView | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [confirmAll, setConfirmAll] = useState(false);
-  /** Открытый выбор курьера и строка поиска в нём. */
-  const [courierFor, setCourierFor] = useState<string | null>(null);
-  const [courierQuery, setCourierQuery] = useState('');
 
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
@@ -146,8 +144,6 @@ export function RouteSheetsScreen(): React.JSX.Element {
         expectedVersion: input.sheet.version,
       }),
     onSuccess: () => {
-      setCourierFor(null);
-      setCourierQuery('');
       showToast('Курьер сохранён', 'success');
       refreshAll();
     },
@@ -332,75 +328,40 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                   ? ` · доставлено: ${sheet.deliveredOrders}`
                                   : ''}
                               </div>
-                              <div className="muted text-sm" data-testid="sheet-courier">
-                                Курьер: {sheet.courier?.fullName ?? 'не назначен'}
-                                {section === 'UNSHIPPED' && (
-                                  <>
-                                    {' · '}
-                                    <button
-                                      type="button"
-                                      className="deals__link"
-                                      data-testid="sheet-courier-edit"
-                                      onClick={() => {
-                                        setCourierFor(courierFor === sheet.id ? null : sheet.id);
-                                        setCourierQuery('');
-                                      }}
-                                    >
-                                      {sheet.courier === null ? 'назначить' : 'изменить'}
-                                    </button>
-                                  </>
-                                )}
-                              </div>
                               {/*
-                                Курьер выбирается поиском по имени или телефону
-                                прямо в листе: возвращать лист в черновик ради
-                                одного поля незачем.
+                                Курьер выбирается прямо в листе тем же контролом,
+                                что и на других вкладках: нажатие в поле открывает
+                                список, ввод его сужает. Список рисуется поверх
+                                содержимого и карточку не растягивает.
                               */}
-                              {section === 'UNSHIPPED' && courierFor === sheet.id && (
-                                <div className="routes__courier-picker">
-                                  <TextInput
-                                    aria-label="Поиск курьера"
-                                    value={courierQuery}
-                                    placeholder="Имя или телефон"
-                                    data-testid="sheet-courier-search"
+                              {section === 'UNSHIPPED' ? (
+                                <div className="routes__sheet-courier" data-testid="sheet-courier">
+                                  <CourierCombobox
+                                    options={couriers.data?.items ?? []}
+                                    value={
+                                      sheet.courier === null
+                                        ? null
+                                        : ((couriers.data?.items ?? []).find(
+                                            (item) => item.id === sheet.courier?.id,
+                                          ) ?? {
+                                            id: sheet.courier.id,
+                                            fullName: sheet.courier.fullName,
+                                            phone: null,
+                                          })
+                                    }
                                     disabled={busy}
-                                    onChange={(event) => setCourierQuery(event.target.value)}
+                                    testId="sheet-courier-combobox"
+                                    onChange={(courier) =>
+                                      assignCourier.mutate({
+                                        sheet,
+                                        courierUserId: courier === null ? null : courier.id,
+                                      })
+                                    }
                                   />
-                                  <ul className="routes__couriers">
-                                    {sheet.courier !== null && (
-                                      <li>
-                                        <button
-                                          type="button"
-                                          className="deals__link"
-                                          data-testid="sheet-courier-clear"
-                                          onClick={() =>
-                                            assignCourier.mutate({ sheet, courierUserId: null })
-                                          }
-                                        >
-                                          Снять назначение
-                                        </button>
-                                      </li>
-                                    )}
-                                    {filterCouriers(couriers.data?.items ?? [], courierQuery).map(
-                                      (option) => (
-                                        <li key={option.id}>
-                                          <button
-                                            type="button"
-                                            className="deals__link"
-                                            data-testid="sheet-courier-option"
-                                            onClick={() =>
-                                              assignCourier.mutate({
-                                                sheet,
-                                                courierUserId: option.id,
-                                              })
-                                            }
-                                          >
-                                            {courierLabel(option)}
-                                          </button>
-                                        </li>
-                                      ),
-                                    )}
-                                  </ul>
+                                </div>
+                              ) : (
+                                <div className="muted text-sm" data-testid="sheet-courier">
+                                  Курьер: {sheet.courier?.fullName ?? 'не назначен'}
                                 </div>
                               )}
                             </div>

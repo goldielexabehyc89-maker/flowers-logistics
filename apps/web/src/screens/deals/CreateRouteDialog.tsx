@@ -12,8 +12,9 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
-import { Button, Field, Modal, TextInput } from '../../ui/components';
-import { courierIdFor, courierLabel, filterCouriers, type CourierOption } from './courier-picker';
+import { Button, Field, Modal } from '../../ui/components';
+import { CourierCombobox } from '../logistics/CourierCombobox';
+import { courierIdFor, type CourierOption } from './courier-picker';
 import type { DealCard } from './selection';
 
 export interface CreateRouteDialogProps {
@@ -34,17 +35,13 @@ export function CreateRouteDialog({
   onCreate,
 }: CreateRouteDialogProps): React.JSX.Element {
   const { client } = useAuth();
-  const [query, setQuery] = useState('');
   const [courier, setCourier] = useState<CourierOption | null>(null);
-  const [listOpen, setListOpen] = useState(false);
 
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
     queryFn: () =>
       client.get<{ items: CourierOption[] }>('/api/users?role=COURIER&status=ACTIVE&limit=100'),
   });
-
-  const options = filterCouriers(couriers.data?.items ?? [], query);
 
   /*
    * Состав будущего маршрута.
@@ -99,53 +96,16 @@ export function CreateRouteDialog({
           состояние, его назначают ближе к отгрузке.
         */}
         <Field label="Курьер" hint="Необязательно. Поиск по имени или телефону">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={query}
-              placeholder="Например, Иванов или 9990000001"
-              data-testid="create-route-courier-search"
+          {() => (
+            <CourierCombobox
+              options={couriers.data?.items ?? []}
+              value={courier}
               disabled={pending}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setCourier(null);
-                setListOpen(true);
-              }}
-              onFocus={() => setListOpen(true)}
+              testId="create-route-courier"
+              onChange={setCourier}
             />
           )}
         </Field>
-
-        <p className="text-sm" data-testid="create-route-courier">
-          {courierLabel(courier)}
-        </p>
-
-        {listOpen && (
-          <ul className="create-route__couriers" data-testid="create-route-courier-list">
-            {options.length === 0 ? (
-              <li className="muted">
-                Подходящих курьеров нет. Новый сотрудник здесь не создаётся.
-              </li>
-            ) : (
-              options.map((option) => (
-                <li key={option.id}>
-                  <button
-                    type="button"
-                    className="deals__link"
-                    data-testid="create-route-courier-option"
-                    onClick={() => {
-                      setCourier(option);
-                      setQuery(option.fullName);
-                      setListOpen(false);
-                    }}
-                  >
-                    {courierLabel(option)}
-                  </button>
-                </li>
-              ))
-            )}
-          </ul>
-        )}
 
         <div className="modal__footer">
           <Button onClick={onClose} disabled={pending} data-testid="create-route-cancel">
