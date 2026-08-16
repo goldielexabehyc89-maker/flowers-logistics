@@ -494,6 +494,10 @@
 }
 
 .deals-map__overlay--top {
+  /* Счётчик и легенда — одной строкой: две отнимали у карты вдвое больше. */
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   top: 8px;
   left: 8px;
   /* Справа сверху стоят кнопки масштаба самой MapLibre. */
@@ -502,7 +506,7 @@
 
 /* Вторая строка: чем менять показанное. Стоит под первой, тоже поверх холста. */
 .deals-map__overlay--controls {
-  top: 84px;
+  top: 64px;
   left: 8px;
   right: 56px;
 }
@@ -512,10 +516,10 @@
   pointer-events: auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   max-width: 100%;
-  padding: 4px 10px;
+  padding: 3px 10px;
   border: 1px solid var(--color-border, #d9d9d9);
   border-radius: 999px;
   background: rgb(255 255 255 / 92%);

@@ -695,7 +695,36 @@
 /* Маршрутный лист в списке: свёрнут — одна строка, раскрыт — компактный состав. */
 .sheets__item {
   display: block;
-  padding: 4px 0;
+  padding: 3px 0;
+}
+
+.sheets__item .routes__actions {
+  flex: none;
+}
+
+.sheets__item .routes__actions button {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: var(--log-font-md);
+}
+
+.sheets__item-toggle .muted {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheets__item-toggle .badge {
+  padding: 0 6px;
+  font-size: var(--log-font-xs);
+  line-height: 18px;
+}
+
+.sheets__item .routes__number {
+  font-size: var(--log-font-card-title);
+  font-weight: 700;
 }
 
 .sheets__item-head {
@@ -706,14 +735,32 @@
 }
 
 .sheets__item-main {
+  /*
+   * Свёрнутый лист — одна строка целиком: номер, состояние, счётчики и курьер
+   * стоят в ряд. Столбец добавлял листу вторую строку и делал раздел вдвое
+   * длиннее без единого нового слова.
+   */
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex: 1 1 auto;
+  gap: 8px;
+  align-items: center;
   min-width: 0;
+}
+
+.sheets__item-main .routes__sheet-courier {
+  width: 190px;
+  flex: none;
+}
+
+.sheets__item-head {
+  align-items: center;
 }
 
 .sheets__item-toggle {
   display: flex;
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
   gap: var(--space-2);
   align-items: center;
   padding: 2px 0;

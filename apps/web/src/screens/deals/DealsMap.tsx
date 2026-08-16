@@ -275,16 +275,16 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
               <span className="deals-map__dot deals-map__dot--free" /> доступен
             </li>
             <li>
-              <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером порядка
+              <span className="deals-map__dot deals-map__dot--picked" /> выбран
             </li>
             <li>
-              <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
+              <span className="deals-map__dot deals-map__dot--draft" /> в черновике
             </li>
             <li>
-              <span className="deals-map__dot deals-map__dot--assembled" /> собран, с галочкой
+              <span className="deals-map__dot deals-map__dot--assembled" /> собран
             </li>
             <li>
-              <span className="deals-map__dot deals-map__dot--depot" /> основной склад
+              <span className="deals-map__dot deals-map__dot--depot" /> склад
             </li>
           </ul>
         </div>
