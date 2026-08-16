@@ -382,56 +382,6 @@ export function RouteCard({
         </ul>
       )}
 
-      <div className="routes__actions">
-        {route.state === 'DRAFT' && (
-          <>
-            <Button
-              variant="primary"
-              disabled={!editable || route.confirmBlockers.length > 0}
-              onClick={() => {
-                // Окно открывается с уже назначенным курьером, а не пустым:
-                // иначе подтверждение молча снимало бы прежнего.
-                setConfirmCourierId(route.courier?.id ?? '');
-                setConfirmOpen(true);
-              }}
-            >
-              Создать МЛ
-            </Button>
-            <Button
-              variant="danger"
-              disabled={!editable}
-              onClick={() => {
-                setPendingAction('cancel');
-                setReason('');
-              }}
-            >
-              Отменить маршрут
-            </Button>
-          </>
-        )}
-        {route.state === 'CONFIRMED' && (
-          <>
-            <Button
-              onClick={() => {
-                setPendingAction('return-to-draft');
-                setReason('');
-              }}
-            >
-              Вернуть в черновик
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                setPendingAction('cancel');
-                setReason('');
-              }}
-            >
-              Отменить маршрут
-            </Button>
-          </>
-        )}
-      </div>
-
       {/*
         Курьер выбирается одним и тем же контролом на всех трёх вкладках:
         нажатие в поле открывает список, ввод его сужает.
@@ -557,6 +507,56 @@ export function RouteCard({
           ))}
         </ol>
       )}
+
+      <div className="routes__actions">
+        {route.state === 'DRAFT' && (
+          <>
+            <Button
+              variant="primary"
+              disabled={!editable || route.confirmBlockers.length > 0}
+              onClick={() => {
+                // Окно открывается с уже назначенным курьером, а не пустым:
+                // иначе подтверждение молча снимало бы прежнего.
+                setConfirmCourierId(route.courier?.id ?? '');
+                setConfirmOpen(true);
+              }}
+            >
+              Создать МЛ
+            </Button>
+            <Button
+              variant="danger"
+              disabled={!editable}
+              onClick={() => {
+                setPendingAction('cancel');
+                setReason('');
+              }}
+            >
+              Отменить маршрут
+            </Button>
+          </>
+        )}
+        {route.state === 'CONFIRMED' && (
+          <>
+            <Button
+              onClick={() => {
+                setPendingAction('return-to-draft');
+                setReason('');
+              }}
+            >
+              Вернуть в черновик
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                setPendingAction('cancel');
+                setReason('');
+              }}
+            >
+              Отменить маршрут
+            </Button>
+          </>
+        )}
+      </div>
 
       {/*
         Групповых действий в карточке больше нет.
