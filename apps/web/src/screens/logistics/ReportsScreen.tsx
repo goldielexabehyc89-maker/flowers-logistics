@@ -161,6 +161,14 @@ export function ReportsScreen(): React.JSX.Element {
   const [to, setTo] = useState(today);
   const [courierUserId, setCourierUserId] = useState('');
   const [operationOpen, setOperationOpen] = useState(false);
+  /**
+   * Курьер операции.
+   *
+   * Отдельно от фильтра отчёта: запись учёта всегда принадлежит конкретному
+   * человеку, а смотреть отчёт можно и по всем сразу. Раньше кнопка при отборе
+   * «Все курьеры» просто гасла, и причина была видна только подсказкой.
+   */
+  const [operationCourierId, setOperationCourierId] = useState('');
   const [kind, setKind] = useState<string>('CASH_HANDED_TO_LOGIST');
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
@@ -202,7 +210,7 @@ export function ReportsScreen(): React.JSX.Element {
   const addOperation = useMutation({
     mutationFn: (input: { idempotencyKey: string }) =>
       client.post('/api/logistics/ledger/operations', {
-        courierUserId,
+        courierUserId: operationCourierId,
         kind,
         amountMinor: String(Math.round(Number(amount.replace(',', '.')) * 100)),
         operationDate: to,
@@ -352,11 +360,12 @@ export function ReportsScreen(): React.JSX.Element {
             <div className="reports__actions">
               <Button
                 variant="primary"
-                disabled={courierUserId === ''}
-                title={courierUserId === '' ? 'Выберите курьера' : undefined}
                 data-testid="reports-add-operation"
                 onClick={() => {
                   setFormError(null);
+                  // Курьер из отбора — разумное начальное значение; при отборе
+                  // «Все курьеры» человек выбирает его прямо в окне.
+                  setOperationCourierId(courierUserId);
                   setOperationOpen(true);
                 }}
               >
@@ -506,6 +515,24 @@ export function ReportsScreen(): React.JSX.Element {
       {operationOpen && (
         <Modal open title="Денежная операция" onClose={() => setOperationOpen(false)}>
           <div className="stack">
+            <Field label="Курьер" hint="Операция записывается конкретному курьеру">
+              {(props) => (
+                <select
+                  {...props}
+                  className="reports__select"
+                  value={operationCourierId}
+                  data-testid="operation-courier"
+                  onChange={(event) => setOperationCourierId(event.target.value)}
+                >
+                  <option value="">Выберите курьера</option>
+                  {(couriers.data?.items ?? []).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.fullName}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
             <Field label="Операция">
               {(props) => (
                 <select
@@ -552,7 +579,9 @@ export function ReportsScreen(): React.JSX.Element {
             <div className="reports__actions">
               <Button
                 variant="primary"
-                disabled={addOperation.isPending || amount.trim() === ''}
+                disabled={
+                  addOperation.isPending || amount.trim() === '' || operationCourierId === ''
+                }
                 data-testid="operation-submit"
                 onClick={() => {
                   setFormError(null);
@@ -562,7 +591,7 @@ export function ReportsScreen(): React.JSX.Element {
                    * сервер вернёт уже существующую.
                    */
                   addOperation.mutate({
-                    idempotencyKey: `ui:${courierUserId}:${kind}:${to}:${amount}:${reason}`,
+                    idempotencyKey: `ui:${operationCourierId}:${kind}:${to}:${amount}:${reason}`,
                   });
                 }}
               >

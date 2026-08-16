@@ -12,12 +12,51 @@
   max-width: 1152px;
 }
 
+/*
+ * Строка отбора выровнена по трём уровням.
+ *
+ * У полей разный состав: у одних есть подсказка под полем, у других нет, и
+ * при обычном выравнивании по низу подписи и сами поля разъезжались по высоте.
+ * Поэтому каждое поле — сетка из трёх строк постоянной высоты: подпись, ввод
+ * и подсказка. Пустая подсказка место сохраняет, поэтому соседние поля стоят
+ * ровно, независимо от того, есть ли у них пояснение.
+ */
 .history__filters,
 .reports__filters {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: flex-end;
+  align-items: start;
+}
+
+.history__filters .field,
+.reports__filters .field {
+  display: grid;
+  gap: 4px;
+  grid-template-rows: 18px 32px 16px;
+  margin: 0;
+}
+
+.history__filters .field__label,
+.reports__filters .field__label {
+  align-self: center;
+  line-height: 18px;
+}
+
+.history__filters .field__hint,
+.reports__filters .field__hint {
+  align-self: center;
+  line-height: 16px;
+}
+
+/* Одна высота у всех полей ввода строки отбора. */
+.history__filters input,
+.history__filters select,
+.reports__filters input,
+.reports__filters select {
+  height: 32px;
+  min-height: 32px;
+  box-sizing: border-box;
 }
 
 .history__select,
@@ -29,12 +68,6 @@
   border-radius: var(--log-radius-field);
   background: var(--log-surface);
   font-size: var(--log-font-md);
-}
-
-.history__total {
-  margin: 0;
-  color: var(--log-text-muted);
-  font-size: var(--log-font-sm);
 }
 
 .history__day {

@@ -271,10 +271,6 @@ export function HistoryScreen(): React.JSX.Element {
         />
       ) : (
         <>
-          <p className="history__total" data-testid="history-total">
-            Маршрутов за период: {history.data.total}
-          </p>
-
           {history.data.days.map((day) => (
             <section key={day.date} className="history__day" data-testid="history-day">
               <h3 className="history__day-title">{formatDate(day.date)}</h3>
