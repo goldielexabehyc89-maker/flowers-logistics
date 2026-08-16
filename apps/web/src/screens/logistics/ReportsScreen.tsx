@@ -389,12 +389,12 @@ export function ReportsScreen(): React.JSX.Element {
                       <th>Дата</th>
                       <th>Лист</th>
                       <th>Заказ</th>
-                      <th>Итог</th>
+                      <th>Статус</th>
                       <th>Наличные</th>
                       <th>За заказ</th>
                       <th>За МКАД</th>
                       <th>Начислено</th>
-                      <th>Строка</th>
+                      <th>Итог</th>
                     </tr>
                   </thead>
                   <tbody>

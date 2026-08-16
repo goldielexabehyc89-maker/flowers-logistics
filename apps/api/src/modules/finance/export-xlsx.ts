@@ -83,7 +83,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Дата', key: 'date', width: 12 },
     { header: 'Маршрутный лист', key: 'route', width: 22 },
     { header: 'Заказ', key: 'order', width: 16 },
-    { header: 'Итог', key: 'outcome', width: 14 },
+    { header: 'Статус', key: 'outcome', width: 14 },
     { header: 'Способ оплаты', key: 'payment', width: 22 },
     { header: 'Наличные, ₽', key: 'cash', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Ставка за заказ, ₽', key: 'perOrder', width: 18, style: { numFmt: '#,##0.00' } },
@@ -94,7 +94,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Попытка, ₽', key: 'attempt', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Расходы, ₽', key: 'expenses', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Доплаты, ₽', key: 'bonuses', width: 14, style: { numFmt: '#,##0.00' } },
-    { header: 'Итог строки, ₽', key: 'total', width: 16, style: { numFmt: '#,##0.00' } },
+    { header: 'Итог, ₽', key: 'total', width: 16, style: { numFmt: '#,##0.00' } },
     { header: 'Примечание', key: 'note', width: 24 },
   ];
 
