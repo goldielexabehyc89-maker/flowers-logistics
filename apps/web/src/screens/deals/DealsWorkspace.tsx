@@ -13,6 +13,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { ChevronDown } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuth } from '../../auth/AuthContext';
@@ -34,6 +35,7 @@ import {
 } from './deals-view';
 import { DealsMap } from './DealsMap';
 import { AddressDialog } from './AddressDialog';
+import { CreateRouteDialog } from './CreateRouteDialog';
 import {
   capacityShortfall,
   parseSplitParams,
@@ -51,7 +53,10 @@ import {
   dropUnavailable,
   intervalProblem,
   parseTimeFilter,
+  clearSelection,
+  coversScope,
   selectAll,
+  selectAllLabel,
   selectionNumber,
   summarize,
   toggleMapPoint,
@@ -92,8 +97,6 @@ export function DealsWorkspace(): React.JSX.Element {
   // на одном рабочем месте расходились молча.
   const { day: date, setDay: setDate } = useWorkspace();
   const [search, setSearch] = useState('');
-  const [fromTime, setFromTime] = useState('');
-  const [toTime, setToTime] = useState('');
   const [includeDrafts, setIncludeDrafts] = useState(false);
   /** Накопленные страницы: список продолжается, а не перезагружается целиком. */
   const [pages, setPages] = useState(1);
@@ -115,6 +118,8 @@ export function DealsWorkspace(): React.JSX.Element {
    * планирования нет — там живут только смена и время обслуживания, — а
    * подставить «сколько-нибудь» значило бы принять бизнес-решение за человека.
    */
+  /** Подтверждение создания маршрута: до него ничего не создаётся. */
+  const [createOpen, setCreateOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   const [vehiclesInput, setVehiclesInput] = useState('');
   const [capacityInput, setCapacityInput] = useState('');
@@ -129,19 +134,11 @@ export function DealsWorkspace(): React.JSX.Element {
     if (search.trim() !== '') {
       params.set('search', search.trim());
     }
-    const from = parseTimeFilter(fromTime);
-    const to = parseTimeFilter(toTime);
-    if (from !== null) {
-      params.set('fromMinute', String(from));
-    }
-    if (to !== null) {
-      params.set('toMinute', String(to));
-    }
     if (includeDrafts) {
       params.set('includeDrafts', 'true');
     }
     return params;
-  }, [date, search, fromTime, toTime, includeDrafts]);
+  }, [date, search, includeDrafts]);
 
   const scopeKey = scope.toString();
 
@@ -179,26 +176,47 @@ export function DealsWorkspace(): React.JSX.Element {
     // этот эффект не перезапускает, иначе он никогда бы не сошёлся.
   }, [unavailable, selected]);
 
-  const selectAllMutation = useMutation({
-    mutationFn: () => client.get<{ orderIds: string[] }>(`/api/deals/selectable?${scopeKey}`),
-    onSuccess: (result) => {
-      setSelected((current) => selectAll(current, result.orderIds));
-      setNotice(null);
-    },
+  /*
+   * Пригодные заказы всего отбора.
+   *
+   * Нужны и кнопке общего выбора, и её надписи: пока набор неизвестен, кнопка
+   * не может честно называться «Снять все». Запрос лёгкий — только
+   * идентификаторы, — и живёт тем же ключом отбора, что список и карта.
+   */
+  const selectable = useQuery({
+    queryKey: ['deals-selectable', scopeKey],
+    queryFn: () => client.get<{ orderIds: string[] }>(`/api/deals/selectable?${scopeKey}`),
   });
+  const selectableIds = selectable.data?.orderIds ?? null;
+  const allSelected = coversScope(selected, selectableIds);
 
   const manualDraft = useMutation({
-    mutationFn: () =>
-      client.post<{ id: string; number: string; repeated: boolean }>('/api/routes/from-selection', {
-        deliveryDate: date,
-        vehicleType: 'CAR',
-        orderIds: selected,
-      }),
+    mutationFn: (input: { courierUserId: string | null; mode: 'DRAFT' | 'SHEET' }) =>
+      client.post<{ id: string; number: string; state: string; repeated: boolean }>(
+        '/api/routes/from-selection',
+        {
+          deliveryDate: date,
+          vehicleType: 'CAR',
+          orderIds: selected,
+          courierUserId: input.courierUserId,
+          mode: input.mode,
+        },
+      ),
     onSuccess: (route) => {
       setSelected([]);
+      setCreateOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
-      // Успех ведёт в созданный черновик, а не «куда-нибудь в маршрутизацию»:
-      // «Маршрутизация» раскрывает именно его и на тот же день.
+      void queryClient.invalidateQueries({ queryKey: ['deals-map'] });
+      void queryClient.invalidateQueries({ queryKey: ['deals-selectable'] });
+      /*
+       * Куда идти дальше, решает то, что создано. Маршрутный лист живёт
+       * в «Маршрутных листах», черновик — в «Маршрутизации»; отправить
+       * человека не туда значит заставить его искать свою же работу.
+       */
+      if (route.state === 'CONFIRMED') {
+        void navigate('/logistics/route-sheets');
+        return;
+      }
       void navigate(workspaceHref('/logistics/routing', { day: date, draftId: route.id }));
     },
     onError: (error: unknown) => {
@@ -213,6 +231,7 @@ export function DealsWorkspace(): React.JSX.Element {
         (error as { message?: string }).message ??
           'Часть заказов изменилась. Список обновлён, проверьте выбор.',
       );
+      setCreateOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
     },
   });
@@ -338,73 +357,6 @@ export function DealsWorkspace(): React.JSX.Element {
 
   return (
     <section className="deals" data-testid="deals-workspace">
-      <div className="deals__filters">
-        <Field label="День">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={date}
-              onChange={(event) => {
-                setDate(event.target.value);
-                setPages(1);
-              }}
-            />
-          )}
-        </Field>
-        <Field label="Поиск в этом дне" hint="Номер, адрес, получатель или комментарий">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={search}
-              placeholder="Например, номер заказа"
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setPages(1);
-              }}
-            />
-          )}
-        </Field>
-        <Field label="Интервал от">
-          {(props) => (
-            <TextInput
-              {...props}
-              placeholder="10:00"
-              value={fromTime}
-              onChange={(event) => {
-                setFromTime(event.target.value);
-                setPages(1);
-              }}
-            />
-          )}
-        </Field>
-        <Field label="Интервал до">
-          {(props) => (
-            <TextInput
-              {...props}
-              placeholder="18:00"
-              value={toTime}
-              onChange={(event) => {
-                setToTime(event.target.value);
-                setPages(1);
-              }}
-            />
-          )}
-        </Field>
-        <label className="deals__toggle">
-          <input
-            type="checkbox"
-            checked={includeDrafts}
-            data-testid="deals-include-drafts"
-            onChange={(event) => {
-              setIncludeDrafts(event.target.checked);
-              setPages(1);
-            }}
-          />
-          Показать заказы из черновиков
-        </label>
-      </div>
-
       {notice !== null && (
         <p className="deals__notice" role="status" data-testid="deals-notice">
           {notice}
@@ -418,25 +370,80 @@ export function DealsWorkspace(): React.JSX.Element {
           росла вместе с числом заказов, и карта уезжала вверх вместе с ней.
         */}
         <div className="deals__column" data-testid="deals-column">
-          <div className="deals__list-head">
-            <span data-testid="deals-total">
-              Заказов: {total}
+          {/*
+            Шапка списка.
+
+            Всё, что относится к списку, физически лежит внутри левой панели:
+            день, поиск, черновики, счётчики и массовый выбор. Отдельного ряда
+            фильтров над обеими панелями больше нет — из-за него список и карта
+            начинались ниже, а экран распадался на разрозненные полосы.
+          */}
+          <div className="deals__panel-head">
+            <div className="deals__filters">
+              <TextInput
+                type="date"
+                aria-label="День"
+                value={date}
+                data-testid="deals-day"
+                onChange={(event) => {
+                  setDate(event.target.value);
+                  setPages(1);
+                }}
+              />
+              <label className="deals__toggle">
+                <input
+                  type="checkbox"
+                  checked={includeDrafts}
+                  data-testid="deals-include-drafts"
+                  onChange={(event) => {
+                    setIncludeDrafts(event.target.checked);
+                    setPages(1);
+                  }}
+                />
+                Черновики
+              </label>
+            </div>
+
+            <div className="deals__list-head">
+              <span data-testid="deals-total">
+                Заказов: {total}
+                {/*
+                  Заказы без координат существуют и требуют работы, но на карте
+                  их нет. Счётчик называет оба числа, иначе разница между списком
+                  и картой выглядит как потеря заказов.
+                */}
+                {withoutPoint > 0 && (
+                  <span className="deals__muted"> · без координат: {withoutPoint}</span>
+                )}
+              </span>
+
               {/*
-                Заказы без координат существуют и требуют работы, но на карте
-                их нет. Счётчик называет оба числа, иначе разница между списком
-                и картой выглядит как потеря заказов.
+                Одна кнопка с двумя состояниями: пока выбран не весь отбор — она
+                выбирает его целиком, когда выбран весь — снимает выбор.
               */}
-              {withoutPoint > 0 && (
-                <span className="deals__muted"> · без координат: {withoutPoint}</span>
-              )}
-            </span>
-            <Button
-              onClick={() => selectAllMutation.mutate()}
-              disabled={selectAllMutation.isPending}
-              data-testid="deals-select-all"
-            >
-              Выбрать все
-            </Button>
+              <Button
+                onClick={() =>
+                  setSelected((current) =>
+                    allSelected ? clearSelection() : selectAll(current, selectableIds ?? []),
+                  )
+                }
+                disabled={selectable.isPending || (selectableIds?.length ?? 0) === 0}
+                data-testid="deals-select-all"
+              >
+                {selectAllLabel(selected, selectableIds)}
+              </Button>
+            </div>
+
+            <TextInput
+              aria-label="Поиск в этом дне"
+              value={search}
+              placeholder="Номер, адрес, получатель или комментарий"
+              data-testid="deals-search"
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPages(1);
+              }}
+            />
           </div>
 
           <div className="deals__scroll" data-testid="deals-scroll">
@@ -540,10 +547,14 @@ export function DealsWorkspace(): React.JSX.Element {
                         {item.recipient === null ? '' : ` · ${item.recipient}`}
                       </div>
 
-                      {/* Пустой комментарий не занимает места вовсе. */}
+                      {/*
+                        Пустой комментарий не занимает места вовсе, а непустой —
+                        не больше двух строк. Раскрытие живёт иконкой в самой
+                        строке: отдельная строка «Показать полностью» съедала
+                        высоту у каждой карточки с комментарием.
+                      */}
                       {item.comment !== null && (
                         <div className="deals__comment" data-testid="deal-comment">
-                          <span className="deals__comment-label">Комментарий по доставке</span>
                           <p
                             className={
                               expanded === item.id ? 'deals__comment-full' : 'deals__comment-short'
@@ -553,11 +564,22 @@ export function DealsWorkspace(): React.JSX.Element {
                           </p>
                           <button
                             type="button"
-                            className="deals__link"
+                            className="deals__comment-toggle"
                             data-testid="deal-comment-toggle"
+                            aria-expanded={expanded === item.id}
+                            aria-label={
+                              expanded === item.id
+                                ? 'Свернуть комментарий по доставке'
+                                : 'Показать комментарий по доставке полностью'
+                            }
+                            title={
+                              expanded === item.id
+                                ? 'Свернуть комментарий'
+                                : 'Показать комментарий полностью'
+                            }
                             onClick={() => setExpanded(expanded === item.id ? null : item.id)}
                           >
-                            {expanded === item.id ? 'Свернуть' : 'Показать полностью'}
+                            <ChevronDown size={14} aria-hidden="true" />
                           </button>
                         </div>
                       )}
@@ -688,48 +710,49 @@ export function DealsWorkspace(): React.JSX.Element {
             Сводка показывает ВЕСЬ выбор, включая скрытое фильтром, — иначе
             заказ уехал бы в расчёт незаметно для человека.
           */}
-          <div className="deals__summary" data-testid="deals-summary">
-            <div className="deals__summary-head">
-              <span data-testid="deals-selected-count">Выбрано: {summary.total}</span>
-              {summary.hiddenCount > 0 && (
-                <span className="deals__muted" data-testid="deals-hidden-count">
-                  скрыто фильтром: {summary.hiddenCount}
-                </span>
-              )}
-              <button
-                type="button"
-                className="deals__link"
-                data-testid="deals-clear"
-                disabled={selected.length === 0}
-                onClick={() => setSelected([])}
-              >
-                Очистить выбор
-              </button>
+          {selected.length > 0 && (
+            <div className="deals__summary" data-testid="deals-summary">
+              <div className="deals__summary-head">
+                <span data-testid="deals-selected-count">Выбрано: {summary.total}</span>
+                {summary.hiddenCount > 0 && (
+                  <span className="deals__muted" data-testid="deals-hidden-count">
+                    скрыто фильтром: {summary.hiddenCount}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="deals__link"
+                  data-testid="deals-clear"
+                  onClick={() => setSelected(clearSelection())}
+                >
+                  Очистить выбор
+                </button>
+              </div>
+              <div className="deals__summary-actions">
+                <Button
+                  variant="primary"
+                  data-testid="deals-manual-draft"
+                  disabled={manualDraft.isPending}
+                  onClick={() => setCreateOpen(true)}
+                >
+                  Создать маршрут вручную
+                </Button>
+                <Button
+                  data-testid="deals-auto-plan"
+                  loading={autoPlan.isPending}
+                  disabled={autoPlan.isPending}
+                  onClick={() => {
+                    // Тот же единственный сценарий: кнопка спрашивает параметры
+                    // и запускает тот же расчёт. Второго входа в разбивку нет.
+                    setSplitErrors({ vehicles: null, capacityOrders: null });
+                    setSplitOpen(true);
+                  }}
+                >
+                  {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
+                </Button>
+              </div>
             </div>
-            <div className="deals__summary-actions">
-              <Button
-                variant="primary"
-                data-testid="deals-manual-draft"
-                disabled={selected.length === 0 || manualDraft.isPending}
-                onClick={() => manualDraft.mutate()}
-              >
-                Создать маршрут вручную
-              </Button>
-              <Button
-                data-testid="deals-auto-plan"
-                loading={autoPlan.isPending}
-                disabled={selected.length === 0 || autoPlan.isPending}
-                onClick={() => {
-                  // Тот же единственный сценарий: кнопка спрашивает параметры
-                  // и запускает тот же расчёт. Второго входа в разбивку нет.
-                  setSplitErrors({ vehicles: null, capacityOrders: null });
-                  setSplitOpen(true);
-                }}
-              >
-                {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
-              </Button>
-            </div>
-          </div>
+          )}
         </div>
 
         <div className="deals__map" data-testid="deals-map-column">
@@ -834,6 +857,16 @@ export function DealsWorkspace(): React.JSX.Element {
           </div>
         </div>
       </Modal>
+
+      {createOpen && (
+        <CreateRouteDialog
+          selected={selected}
+          known={items}
+          pending={manualDraft.isPending}
+          onClose={() => setCreateOpen(false)}
+          onCreate={(input) => manualDraft.mutate(input)}
+        />
+      )}
 
       {editing !== null && (
         <AddressDialog

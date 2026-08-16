@@ -31,6 +31,13 @@ import { markerHint, markerInterval, markerLabel, type MapPoint } from './deals-
 /** Точка дня. Совпадает с ответом `/api/deals/map`. */
 export type DealMapPoint = MapPoint;
 
+/** Подтверждённая точка основного склада. Маршрут начинается отсюда. */
+export interface DepotPoint {
+  name: string;
+  lat: string;
+  lon: string;
+}
+
 /** Группа точек, показываемая одной отметкой. */
 export interface DealMapCluster {
   key: string;
@@ -44,12 +51,26 @@ export interface DealsMapCanvasProps {
   chosen: readonly DealMapPoint[];
   /** Остальные: одиночные отметки либо кластеры. */
   clusters: readonly DealMapCluster[];
+  /** Основной склад. `null` — склада или его точки нет, и выдумывать её нельзя. */
+  depot: DepotPoint | null;
   /** Номер заказа в выборке. Пусто — заказ не выбран. */
   numberOf: (orderId: string) => number | null;
   onToggle: (orderId: string) => void;
   /** Подложка не загрузилась: экран обязан сказать это, а не молчать. */
   onLoadError: () => void;
 }
+
+/**
+ * Сколько ждать подъёма карты, прежде чем признать подложку недоступной.
+ *
+ * Не «мгновенно»: набор тайлов читается по частям, и первые секунды карта
+ * законно молчит. И не «бесконечно»: нерабочая подложка обязана быть названа.
+ *
+ * Срок с запасом намеренно. На загруженной машине карта поднимается медленнее,
+ * и короткий срок объявлял бы отказ там, где нужно просто подождать: вместе
+ * с панелью отказа исчезали бы отметки, склад и линия маршрута.
+ */
+const BASEMAP_LOAD_TIMEOUT_MS = 30_000;
 
 /** Координаты точки в порядке MapLibre. `null` — координата непригодна. */
 function toLngLat(point: DealMapPoint): [number, number] | null {
@@ -86,8 +107,28 @@ export function planMarkers(
   chosen: readonly DealMapPoint[],
   clusters: readonly DealMapCluster[],
   numberOf: (orderId: string) => number | null,
+  depot: DepotPoint | null = null,
 ): MarkerPlan[] {
   const plans: MarkerPlan[] = [];
+
+  // Склад показывается всегда и отдельной формой: это не заказ, кликом
+  // он ничего не выбирает. Отсутствие склада или его точки — честное
+  // отсутствие отметки, а не догаданная координата.
+  if (depot !== null) {
+    const lngLat = toLngLat({ lat: depot.lat, lon: depot.lon } as DealMapPoint);
+    if (lngLat !== null) {
+      plans.push({
+        key: 'depot',
+        lngLat,
+        label: '',
+        interval: '',
+        hint: `Склад · ${depot.name}`,
+        className: 'deals-marker deals-marker--depot',
+        ariaLabel: `Основной склад: ${depot.name}`,
+        orderId: null,
+      });
+    }
+  }
 
   for (const point of chosen) {
     const lngLat = toLngLat(point);
@@ -163,17 +204,50 @@ export function planMarkers(
  * и не растягивать сам кружок.
  */
 function fillMarker(element: HTMLElement, plan: MarkerPlan): void {
-  element.className = plan.className;
-  element.title = plan.hint;
+  /*
+   * Свои классы заменяются, чужие остаются.
+   *
+   * Раньше здесь стояло `element.className = plan.className`, и обновление
+   * отметки стирало класс `maplibregl-marker`, который ставит сама библиотека.
+   * Вместе с ним элемент терял `position: absolute` и вставал в обычный поток:
+   * отметка съезжала относительно подложки на десятки пикселей, хотя её
+   * координата не менялась ни разу. Происходило это при КАЖДОМ обновлении
+   * данных, поэтому заказ «переезжал» сам собой.
+   */
+  for (const existing of Array.from(element.classList)) {
+    if (existing.startsWith('deals-marker')) {
+      element.classList.remove(existing);
+    }
+  }
+  for (const own of plan.className.split(' ')) {
+    if (own !== '') {
+      element.classList.add(own);
+    }
+  }
   element.setAttribute('aria-label', plan.ariaLabel);
+  /*
+   * Координата доменного объекта — прямо в разметке.
+   *
+   * Она и есть место заказа. Проверка сверяет с ней экранное положение
+   * кружка после каждого масштабирования и сдвига: если когда-нибудь отметку
+   * начнут двигать пикселями, расхождение станет видно сразу.
+   */
+  element.dataset['lng'] = String(plan.lngLat[0]);
+  element.dataset['lat'] = String(plan.lngLat[1]);
 
   const time = element.querySelector('.deals-marker__time');
   const dot = element.querySelector('.deals-marker__dot');
+  const hint = element.querySelector('.deals-marker__hint');
   if (time !== null) {
     time.textContent = plan.interval;
   }
   if (dot !== null) {
     dot.textContent = plan.label;
+  }
+  // Подсказка своя, а не нативный `title`: тот появляется через секунду
+  // с лишним, и логист успевает решить, что подсказки нет вовсе.
+  if (hint !== null) {
+    hint.textContent = plan.hint;
   }
 }
 
@@ -182,6 +256,7 @@ export function DealsMapCanvas({
   attribution,
   chosen,
   clusters,
+  depot,
   numberOf,
   onToggle,
   onLoadError,
@@ -190,6 +265,7 @@ export function DealsMapCanvas({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   // Колбэк живёт в ссылке: пересоздавать карту при каждом рендере списка
   // недопустимо — это сбрасывало бы масштаб и положение.
@@ -242,29 +318,64 @@ export function DealsMapCanvas({
       });
       map.addControl(new NavigationControl({ showCompass: false }), 'top-right');
 
-      // Отказом считается только то, что помешало карте подняться.
-      //
-      // MapLibre шлёт `error` и по мелочам: оборванный запрос тайла при
-      // прокрутке, отсутствующий глиф. Заменять по такому поводу работающую
-      // карту панелью отказа — значит терять её на ровном месте, и логист
-      // увидит «подложка не загрузилась» там, где всё в порядке.
-      let everLoaded = false;
-      map.on('error', () => {
-        if (!everLoaded) {
+      /*
+       * Отказом считается ТОЛЬКО то, что карта так и не поднялась.
+       *
+       * Раньше панель отказа показывалась по первой же ошибке MapLibre до
+       * события `load`. Но библиотека шлёт `error` и по мелочам: отсутствующий
+       * глиф, оборванный запрос тайла, пустая клетка набора. На большом экране
+       * такая мелочь находится почти всегда, и логист видел «подложка
+       * не загрузилась» там, где карта работала.
+       *
+       * Настоящий отказ при этом никуда не делся: сломанная подложка события
+       * `load` не даёт, и через отведённое время экран честно об этом скажет.
+       */
+      const loadTimer = globalThis.setTimeout(() => {
+        if (!cancelled) {
           loadErrorRef.current();
         }
-      });
-      map.once('load', () => {
-        everLoaded = true;
+      }, BASEMAP_LOAD_TIMEOUT_MS);
+      const markLoaded = (): void => {
+        globalThis.clearTimeout(loadTimer);
         if (!cancelled) {
           setMapReady(true);
         }
-      });
+      };
+      map.once('load', markLoaded);
+      // `idle` означает, что карта отрисовала всё, что могла: содержимое
+      // на экране есть, даже если какой-то тайл так и не пришёл.
+      map.once('idle', markLoaded);
       mapRef.current = map;
+      /*
+       * Ссылка на карту для браузерной проверки географической привязки.
+       *
+       * Проверке нужно спросить у самой MapLibre, куда проецируется координата
+       * заказа, — иначе «совпадает с проекцией» пришлось бы считать вручную
+       * той же формулой, что и в коде, и ошибка совпала бы с ошибкой.
+       */
+      (globalThis as { __dealsMap?: MapLibreMap }).__dealsMap = map;
+
+      /*
+       * Карта обязана знать свой настоящий размер.
+       *
+       * MapLibre следит за окном, но не за контейнером: любая перестройка
+       * раскладки — появившаяся строка сообщения, изменившаяся шапка, свёрнутое
+       * меню — меняет высоту холста, а карта продолжает считать проекцию по
+       * прежней. Отметки при этом смещаются относительно подложки: заказ
+       * «переезжает» без единого изменения своей координаты. Наблюдатель за
+       * контейнером закрывает это в корне, а не подгонкой пикселей.
+       */
+      const observer = new ResizeObserver(() => {
+        map?.resize();
+      });
+      observer.observe(container);
+      resizeObserverRef.current = observer;
     })();
 
     return () => {
       cancelled = true;
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
       for (const marker of markersRef.current.values()) {
         marker.remove();
       }
@@ -287,7 +398,7 @@ export function DealsMapCanvas({
     }
 
     const markers = markersRef.current;
-    const plans = planMarkers(chosen, clusters, numberOf);
+    const plans = planMarkers(chosen, clusters, numberOf, depot);
     const seen = new Set<string>();
 
     for (const plan of plans) {
@@ -306,7 +417,10 @@ export function DealsMapCanvas({
       time.className = 'deals-marker__time';
       const dot = document.createElement('span');
       dot.className = 'deals-marker__dot';
-      element.append(time, dot);
+      const hint = document.createElement('span');
+      hint.className = 'deals-marker__hint';
+      hint.setAttribute('role', 'tooltip');
+      element.append(time, dot, hint);
       fillMarker(element, plan);
       element.dataset['testid'] = 'map-marker';
       if (plan.orderId !== null) {
@@ -327,7 +441,7 @@ export function DealsMapCanvas({
         markers.delete(key);
       }
     }
-  }, [chosen, clusters, numberOf, mapReady]);
+  }, [chosen, clusters, depot, numberOf, mapReady]);
 
   /*
    * Класс контейнера карты постоянен намеренно: MapLibre дописывает в него

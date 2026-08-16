@@ -269,6 +269,22 @@ const configSchema = z.object({
     .transform((value) => value === 'true'),
 
   /**
+   * Подменённая дорожная геометрия вместо обращения к Valhalla.
+   *
+   * Нужна ровно для одного: чтобы линия маршрута была видна на локальном
+   * стенде, где дорожного графа нет. Подмена стоит на уровне HTTP — клиент,
+   * разбор ответа и весь контракт геометрии остаются настоящими.
+   *
+   * Значение допустимо ТОЛЬКО в локальном окружении: нарисованный путь,
+   * выданный за расчёт настоящего маршрутизатора, — это обещание времени
+   * и расстояния, которого никто не давал.
+   */
+  VALHALLA_TEST_ROUTE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
+  /**
    * Верхняя граница числа точек матрицы: она растёт квадратично.
    *
    * Значение по умолчанию берётся из общего источника, а не пишется числом:
@@ -387,6 +403,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   assertDadataEnvironment(parsed.data);
   assertTestSolverEnvironment(parsed.data);
   assertTestSuggestionsEnvironment(parsed.data);
+  assertTestRouteEnvironment(parsed.data);
   assertGeocodingSource(parsed.data);
 
   return Object.freeze({
@@ -553,6 +570,25 @@ function assertTestSolverEnvironment(data: z.infer<typeof configSchema>): void {
  * Выдуманный адрес, показанный как подсказка DaData, ничем не отличается
  * от настоящего — и склад встал бы по несуществующей точке.
  */
+/**
+ * Подменённая геометрия не должна покидать локальное окружение.
+ *
+ * Линия, нарисованная формулой, выглядит на карте ровно как рассчитанная
+ * по дорогам: логист принял бы её за факт и построил бы по ней смену.
+ */
+function assertTestRouteEnvironment(data: z.infer<typeof configSchema>): void {
+  if (!data.VALHALLA_TEST_ROUTE) {
+    return;
+  }
+
+  if (data.APP_ENV !== 'local' || data.APP_ENVIRONMENT_MARKER === 'production') {
+    throw new Error(
+      'VALHALLA_TEST_ROUTE=true допустим только при APP_ENV=local: подменённую ' +
+        'геометрию нельзя выдавать за расчёт маршрутизатора',
+    );
+  }
+}
+
 function assertTestSuggestionsEnvironment(data: z.infer<typeof configSchema>): void {
   if (!data.DADATA_TEST_SUGGESTIONS) {
     return;

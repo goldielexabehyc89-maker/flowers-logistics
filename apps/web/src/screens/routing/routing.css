@@ -40,16 +40,65 @@
  * иначе раскрытый черновик с двумя десятками остановок уводил бы её
  * за нижний край, и сверять номера остановок было бы не с чем.
  */
+/*
+ * Рабочая область той же формы, что и «Сделки».
+ *
+ * Раньше здесь было наоборот: список занимал три пятых, а карта — две. Логист
+ * переходит между вкладками десятки раз за смену, и разная геометрия одной
+ * и той же работы каждый раз заставляла заново искать глазами карту.
+ *
+ * Колонка держится в тех же границах 360–440 px, карта забирает остальное
+ * и всю рабочую высоту; прокручивается только список черновиков.
+ */
 .routes__workspace {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
   align-items: start;
+  min-height: 0;
 }
 
-@media (max-width: 1100px) {
+@media (min-width: 1100px) {
+  .routes {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    height: calc(100dvh - var(--topbar-height, 48px) - 2 * var(--space-3, 12px) - 20px);
+    min-height: 560px;
+  }
+
   .routes__workspace {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: clamp(360px, 27%, 440px) minmax(0, 1fr);
+    align-items: stretch;
+    flex: 1 1 auto;
+  }
+
+  .routes__drafts {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .routes__map-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  /* Карта во всю оставшуюся высоту колонки, как и в «Сделках». */
+  .routes__map-panel .map-surface,
+  .routes__map-panel .routes__map {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /* Та же плотность списка: служебные кнопки компактнее курсору. */
+  .routes__panel-header button,
+  .routes__panel-actions button {
+    min-height: 32px;
+    height: 32px;
+    padding: 0 10px;
   }
 }
 
@@ -508,4 +557,138 @@
  */
 .routes__preview {
   border-color: var(--color-warning, var(--color-border));
+}
+
+/* Склад — не остановка: другая форма, другой цвет и никакого клика. */
+.map-marker--depot {
+  width: 22px;
+  height: 22px;
+  border: 2px solid #fff;
+  border-radius: 4px;
+  background: #333;
+  transform: rotate(45deg);
+  cursor: default;
+}
+
+/* Перетаскиваемая остановка видна: иначе непонятно, что именно движется. */
+.routes__stop--dragging {
+  opacity: 0.5;
+}
+
+.routes__stop[draggable='true'] {
+  cursor: grab;
+}
+
+.routes__map-note {
+  color: var(--color-text-muted, #666);
+}
+
+/* Списки поиска: курьер и цель переноса выглядят и ведут себя одинаково. */
+.routes__couriers,
+.routes__targets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  list-style: none;
+  font-size: 13px;
+}
+
+.routes__target--picked {
+  font-weight: 600;
+}
+
+/*
+ * Крестик отмены черновика.
+ *
+ * Стоит в углу карточки и ведёт в ту же операцию, что и кнопка «Отменить
+ * маршрут»: причина обязательна, история сохраняется. Красным он не сделан
+ * намеренно — это не удаление.
+ */
+.routes__card-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2, 8px);
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.routes__card-close:hover:not(:disabled) {
+  color: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.routes__card-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --- Маршрутные листы: разделы и дни ---------------------------------------- */
+
+.routes__sheet-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3, 12px);
+  align-items: flex-start;
+}
+
+.routes__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+
+.routes__section-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+.routes__day {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* День раскрывается кнопкой: текущий открыт, прошлые сворачиваются. */
+.routes__day-toggle {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.routes__day-toggle::before {
+  content: '▸';
+  display: inline-block;
+  transition: transform 120ms ease-out;
+}
+
+.routes__day-toggle[aria-expanded='true']::before {
+  transform: rotate(90deg);
+}
+
+/* Выбор курьера прямо в строке листа: без ухода в черновик. */
+.routes__courier-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-width: 320px;
 }

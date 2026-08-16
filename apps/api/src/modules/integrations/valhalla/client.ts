@@ -20,6 +20,7 @@
  */
 
 import { z } from 'zod';
+import { decodePolyline, type LngLat } from './polyline.js';
 
 export type ValhallaErrorCode =
   | 'NOT_CONFIGURED'
@@ -98,6 +99,22 @@ const matrixResponseSchema = z.object({
   units: z.string().optional(),
 });
 
+/**
+ * Ответ построения маршрута.
+ *
+ * Нужна ровно одна вещь — геометрия участков. Указания поворотов, названия
+ * улиц и подсказки не запрашиваются и не разбираются: рисуется линия,
+ * а не навигация.
+ */
+const routeResponseSchema = z.object({
+  trip: z.object({
+    legs: z.array(z.object({ shape: z.string() })).min(1),
+    summary: z
+      .object({ time: z.number().nullable().optional(), length: z.number().nullable().optional() })
+      .optional(),
+  }),
+});
+
 const statusSchema = z.object({
   version: z.string().min(1),
   /**
@@ -111,6 +128,15 @@ const statusSchema = z.object({
   /** Есть ли у сервиса тайлы. Поле присутствует не во всех сборках. */
   has_tiles: z.boolean().optional(),
 });
+
+export interface RouteGeometry {
+  /** Линия маршрута целиком, в порядке объезда. Пусто — участков нет. */
+  line: LngLat[];
+  /** Секунды по всему маршруту. `null` — сервис не назвал. */
+  timeSeconds: number | null;
+  /** Метры по всему маршруту. `null` — сервис не назвал. */
+  distanceMeters: number | null;
+}
 
 export interface ValhallaStatus {
   version: string;
@@ -165,6 +191,64 @@ export class ValhallaClient {
       version: parsed.data.version,
       tilesetLastModified: parsed.data.tileset_last_modified ?? null,
       hasTiles: parsed.data.has_tiles ?? null,
+    };
+  }
+
+  /**
+   * Фактическая геометрия пути по дорогам.
+   *
+   * Точки передаются в порядке объезда: первая — склад, дальше остановки.
+   * Прямых отрезков между точками здесь нет: линия, нарисованная по прямой,
+   * читается как рассчитанный путь и как обещание времени, которого никто
+   * не давал.
+   *
+   * В сервис уходят ТОЛЬКО координаты — ни номера заказа, ни адреса.
+   */
+  async route(points: readonly LatLon[], costing: Costing): Promise<RouteGeometry> {
+    if (points.length < 2) {
+      // Маршрут из одной точки — это не маршрут. Пустая линия честнее отказа:
+      // черновик с единственной остановкой существует и работает.
+      return { line: [], timeSeconds: null, distanceMeters: null };
+    }
+
+    const body = await this.request('/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        locations: points.map((point) => ({ lat: point.lat, lon: point.lon, type: 'break' })),
+        costing,
+        // Единицы задаются явно по той же причине, что и в матрице.
+        units: 'km',
+        directions_options: { units: 'km' },
+      }),
+    });
+
+    const parsed = routeResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new ValhallaError('BAD_RESPONSE');
+    }
+
+    const line: LngLat[] = [];
+    for (const leg of parsed.data.trip.legs) {
+      let decoded: LngLat[];
+      try {
+        decoded = decodePolyline(leg.shape);
+      } catch {
+        throw new ValhallaError('BAD_RESPONSE');
+      }
+      // Стык участков приходит дважды: конец предыдущего и начало следующего.
+      const start = line.length === 0 ? 0 : 1;
+      line.push(...decoded.slice(start));
+    }
+
+    const summary = parsed.data.trip.summary;
+    return {
+      line,
+      timeSeconds: summary?.time ?? null,
+      distanceMeters:
+        summary?.length === null || summary?.length === undefined
+          ? null
+          : Math.round(summary.length * METERS_IN_KM),
     };
   }
 

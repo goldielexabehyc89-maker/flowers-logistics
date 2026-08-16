@@ -15,6 +15,8 @@ import {
   selectAll,
   selectionNumber,
   summarize,
+  coversScope,
+  selectAllLabel,
   toggleMapPoint,
   toggleSelection,
   unselectableReason,
@@ -173,5 +175,29 @@ describe('ручной интервал', () => {
   it('границы суток соблюдаются', () => {
     expect(intervalProblem('00:00', '23:59')).toBeNull();
     expect(intervalProblem('10:00', '24:00')).toMatch(/обе границы/i);
+  });
+});
+
+describe('одна кнопка общего выбора', () => {
+  it('пока выбран не весь отбор — это «Выбрать все»', () => {
+    expect(selectAllLabel(['a'], ['a', 'b'])).toBe('Выбрать все');
+    expect(coversScope(['a'], ['a', 'b'])).toBe(false);
+  });
+
+  it('когда выбран весь серверный отбор — это «Снять все»', () => {
+    // Считается по серверному набору, а не по загруженной странице: иначе
+    // кнопка меняла бы смысл от того, докрутил ли человек список.
+    expect(selectAllLabel(['b', 'a'], ['a', 'b'])).toBe('Снять все');
+  });
+
+  it('неизвестный отбор кнопку не переключает', () => {
+    expect(selectAllLabel(['a'], null)).toBe('Выбрать все');
+    expect(coversScope([], [])).toBe(false);
+  });
+
+  it('лишние выбранные покрытию не мешают', () => {
+    // Заказ мог уехать из отбора после смены фильтра: выбор его сохраняет,
+    // но кнопка обязана оставаться «Снять все».
+    expect(coversScope(['a', 'b', 'ушедший'], ['a', 'b'])).toBe(true);
   });
 });

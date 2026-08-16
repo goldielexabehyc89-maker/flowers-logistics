@@ -363,3 +363,114 @@ describe('автоматический расчёт замораживает р�
     expect(chosen.map((order) => order.id)).toEqual([ids[1]]);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Маршрутный лист прямо из выбора.
+ *
+ * Защищаемое свойство: это тот же доменный переход, что и подтверждение
+ * черновика, и он атомарен. «Наполовину созданного» листа, оставшегося
+ * черновиком, о котором никто не просил, быть не может.
+ */
+describe('маршрутный лист из выбора', () => {
+  async function courier(): Promise<string> {
+    const user = await seedUser(ctx.db, { roles: ['COURIER'] });
+    return user.id;
+  }
+
+  it('режим по умолчанию оставляет черновик', async () => {
+    const ids = [await seedSelectable()];
+    const route = await createDraftFromSelection(
+      deps(),
+      await actor(),
+      { deliveryDate: DAY, vehicleType: 'CAR', orderIds: ids },
+      CONTEXT,
+    );
+
+    expect(route.state).toBe('DRAFT');
+  });
+
+  it('режим SHEET доводит маршрут до подтверждённого одной операцией', async () => {
+    const ids = [await seedSelectable(), await seedSelectable()];
+
+    const route = await createDraftFromSelection(
+      deps(),
+      await actor(),
+      { deliveryDate: DAY, vehicleType: 'CAR', orderIds: ids, mode: 'SHEET' },
+      CONTEXT,
+    );
+
+    expect(route.state).toBe('CONFIRMED');
+    const stored = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.id },
+      select: { state: true, courierUserId: true },
+    });
+    expect(stored.state).toBe('CONFIRMED');
+    // Курьер может остаться неназначенным: его назначают ближе к отгрузке.
+    expect(stored.courierUserId).toBeNull();
+
+    // Состав и порядок сохранены целиком.
+    expect(await positionsOf(route.id)).toEqual([
+      { orderId: ids[0], position: 1 },
+      { orderId: ids[1], position: 2 },
+    ]);
+
+    // Переход записан историей состояний, а не молчаливым обновлением поля.
+    const transitions = await ctx.db.routeStateTransition.findMany({
+      where: { routeId: route.id },
+      select: { toState: true },
+    });
+    expect(transitions.map((row) => row.toState)).toContain('CONFIRMED');
+  });
+
+  it('выбранный заранее курьер назначается тем же созданием', async () => {
+    const ids = [await seedSelectable()];
+    const courierId = await courier();
+
+    const route = await createDraftFromSelection(
+      deps(),
+      await actor(),
+      {
+        deliveryDate: DAY,
+        vehicleType: 'CAR',
+        orderIds: ids,
+        courierUserId: courierId,
+        mode: 'SHEET',
+      },
+      CONTEXT,
+    );
+
+    const stored = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.id },
+      select: { courierUserId: true, state: true },
+    });
+    expect(stored.courierUserId).toBe(courierId);
+    expect(stored.state).toBe('CONFIRMED');
+  });
+
+  it('пользователь не той роли курьером не становится', async () => {
+    // Иначе маршрут уехал бы на человека, который его не повезёт.
+    const ids = [await seedSelectable()];
+    const notCourier = await seedUser(ctx.db, { roles: ['FLORIST'] });
+
+    await expect(
+      createDraftFromSelection(
+        deps(),
+        await actor(),
+        {
+          deliveryDate: DAY,
+          vehicleType: 'CAR',
+          orderIds: ids,
+          courierUserId: notCourier.id,
+          mode: 'SHEET',
+        },
+        CONTEXT,
+      ),
+    ).rejects.toThrow();
+
+    // Отказ атомарен: маршрута не осталось ни одного.
+    const routes = await ctx.db.routeOrder.findMany({ where: { orderId: ids[0] } });
+    expect(routes).toHaveLength(0);
+  });
+});

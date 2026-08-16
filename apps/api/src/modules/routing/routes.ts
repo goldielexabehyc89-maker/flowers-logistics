@@ -13,6 +13,11 @@ import { z } from 'zod';
 import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
+import { ValhallaClient } from '../integrations/valhalla/client.js';
+import { createTestRouterFetch } from '../integrations/valhalla/test-router.js';
+import { routeGeometry } from './geometry.js';
+import { cancelShipment, shipRouteManually } from './lifecycle.js';
+import { listSheets } from './sheets.js';
 import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
 import { fromDateColumn, isCalendarDate } from '../integrations/moysklad/delivery-date.js';
@@ -88,7 +93,36 @@ const selectionDraftSchema = z.object({
   deliveryDate: dateSchema,
   vehicleType: z.enum(['CAR', 'FOOT']),
   orderIds: z.array(uuid).min(1).max(MAX_SELECTION_SIZE),
+  /** Курьер выбирается заранее и необязателен: назначить его можно позже. */
+  courierUserId: uuid.nullable().optional(),
+  /** `SHEET` — сразу маршрутный лист одной транзакцией, `DRAFT` — черновик. */
+  mode: z.enum(['DRAFT', 'SHEET']).optional(),
 });
+
+/**
+ * Отмена отгрузки.
+ *
+ * Причина обязательна только для `ALL`: это исправление уже состоявшегося
+ * факта доставки, и без объяснения оно в истории бессмысленно.
+ */
+const sheetsQuerySchema = z.object({
+  section: z.enum(['UNSHIPPED', 'SHIPPED', 'DELIVERED']),
+  deliveryDate: dateSchema.optional(),
+  search: z.string().trim().max(120).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const cancelShipmentSchema = z
+  .object({
+    expectedVersion: z.number().int().min(0),
+    mode: z.enum(['UNFINISHED', 'ALL']),
+    reason: z.string().trim().min(3).max(500).optional(),
+  })
+  .refine((value) => value.mode !== 'ALL' || value.reason !== undefined, {
+    message: 'Возврат доставленных заказов требует причины',
+    path: ['reason'],
+  });
 
 const ordersSchema = z.object({
   orderIds: z.array(uuid).min(1).max(MAX_ORDERS_PER_OPERATION),
@@ -151,6 +185,45 @@ function contextOf(request: IncomingRequest): RequestContext {
 const courierSelect = { id: true, fullName: true } as const;
 
 export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): Promise<void> {
+  /*
+   * Маршрутизатор для линии пути.
+   *
+   * Клиент создаётся один раз на регистрацию: он не держит состояния, а его
+   * адрес известен только серверу. Незаданный адрес — не отказ: контракт
+   * геометрии честно скажет, что линия не строится, а ручная работа
+   * продолжится (`ROUTE-003`).
+   */
+  /*
+   * На локальном стенде дорожного графа нет, и линия не строилась бы вовсе.
+   * Подменяется ТОЛЬКО транспорт: клиент, разбор ответа и контракт остаются
+   * настоящими, а сама подмена запрещена конфигурацией вне `APP_ENV=local`.
+   */
+  const router = deps.config.VALHALLA_TEST_ROUTE
+    ? new ValhallaClient({
+        baseUrl: deps.config.VALHALLA_URL ?? 'http://valhalla.local.test',
+        fetch: createTestRouterFetch(),
+      })
+    : new ValhallaClient({ baseUrl: deps.config.VALHALLA_URL ?? null });
+
+  /**
+   * Маршрутные листы одного раздела: днями, страницами, с фильтром и поиском.
+   *
+   * Отбор считает сервер: лист, не попавший на первую страницу, обязан
+   * находиться поиском, а не исчезать из него.
+   */
+  app.get('/api/route-sheets', async (request) => {
+    await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const query = sheetsQuerySchema.parse(request.query);
+    return listSheets(deps.db, query);
+  });
+
+  /** Фактическая геометрия маршрута: склад, остановки по порядку и линия. */
+  app.get('/api/routes/:id/geometry', async (request) => {
+    await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return routeGeometry(deps.db, router, id);
+  });
+
   app.get('/api/routes', async (request) => {
     await authenticateWithRoles(request, deps, ROUTE_ROLES);
     const query = listQuerySchema.parse(request.query);
@@ -218,7 +291,12 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     return reply.code(201).send(created);
   });
 
-  /** Один черновик из выбранных заказов. Ничего не подтверждает. */
+  /**
+   * Один маршрут ровно из выбранных заказов.
+   *
+   * По умолчанию — черновик. `mode: 'SHEET'` доводит его до маршрутного листа
+   * той же доменной операцией подтверждения и в той же транзакции.
+   */
   app.post('/api/routes/from-selection', async (request, reply) => {
     const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
     const body = selectionDraftSchema.parse(request.body);
@@ -285,6 +363,47 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
   });
 
   // --- Жизненный цикл ------------------------------------------------------
+
+  /**
+   * Ручная отгрузка маршрутного листа без сканирования.
+   *
+   * Тот же доменный переход, что и складская выдача: параллельного изменения
+   * статуса здесь нет. Доступна логисту и администратору при включённой
+   * глобальной настройке, менять которую может только администратор.
+   */
+  app.post('/api/routes/:id/ship', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = versionSchema.parse(request.body);
+
+    await shipRouteManually(deps, actor, id, body, contextOf(request));
+    return routeCard(deps.db, id, actor);
+  });
+
+  /**
+   * Отмена отгрузки маршрутного листа.
+   *
+   * `UNFINISHED` делит лист: доставленные остаются в исходном, незавершённые
+   * переезжают в новый неотгруженный. Его номер возвращается ответом — клиент
+   * не вычисляет его сам и показывает только после успешной операции.
+   *
+   * `ALL` возвращает в работу и доставленные заказы: требует причины и
+   * оформляется административной коррекцией с сохранением прежнего факта.
+   */
+  app.post('/api/routes/:id/cancel-shipment', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = cancelShipmentSchema.parse(request.body);
+
+    const result = await cancelShipment(deps, actor, id, body, contextOf(request));
+    return {
+      route: await routeCard(deps.db, id, actor),
+      // Номер нового листа приходит с сервера: браузеру его вычислять неоткуда.
+      createdSheet: result.createdSheet,
+      restoredOrders: result.restoredOrders,
+      unchanged: result.unchanged,
+    };
+  });
 
   app.post('/api/routes/:id/confirm', async (request) => {
     const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);

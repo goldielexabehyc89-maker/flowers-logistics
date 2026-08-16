@@ -19,7 +19,14 @@ import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
-import { Button, EmptyState, ErrorState, Field, LoadingState, Select } from '../../ui/components';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Field,
+  LoadingState,
+  TextInput,
+} from '../../ui/components';
 import { describeMap, trafficNote, type MapConfig, type MapPointsResponse } from './geo';
 import { pointAction, pointLabel, transferTargets, visiblePoints } from './draft-map';
 import { withRouteLease } from './lease-scope';
@@ -35,6 +42,16 @@ export interface DraftMapPanelProps {
   drafts: readonly RouteListItem[];
 }
 
+/** Ответ контракта геометрии: линия пути, склад и остановки по порядку. */
+interface RouteGeometryResponse {
+  depot: { name: string; lng: number; lat: number } | null;
+  stops: { orderId: string; number: string; position: number }[];
+  line: [number, number][];
+  timeSeconds: number | null;
+  distanceMeters: number | null;
+  unavailableReason: string | null;
+}
+
 export function DraftMapPanel({
   deliveryDate,
   activeRouteId,
@@ -47,6 +64,7 @@ export function DraftMapPanel({
   const [showUnassigned, setShowUnassigned] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [targetRouteId, setTargetRouteId] = useState('');
+  const [targetQuery, setTargetQuery] = useState('');
   const [basemapFailed, setBasemapFailed] = useState(false);
 
   const config = useQuery({
@@ -64,6 +82,20 @@ export function DraftMapPanel({
   });
 
   const allPoints = useMemo(() => points.data?.points ?? [], [points.data]);
+
+  /*
+   * Фактическая геометрия активного маршрута.
+   *
+   * Считает собственная Valhalla на сервере. Запрос идёт только для раскрытого
+   * черновика: линия нужна там, где логист сейчас работает, а не для всех
+   * черновиков дня сразу. После сохранения нового порядка ключ запроса
+   * не меняется — линию пересчитывает явное обновление в списке.
+   */
+  const geometry = useQuery({
+    queryKey: ['route-geometry', activeRouteId],
+    queryFn: () => client.get<RouteGeometryResponse>(`/api/routes/${activeRouteId}/geometry`),
+    enabled: activeRouteId !== null && status.ready,
+  });
 
   const visible = useMemo(
     () => visiblePoints(allPoints, { activeRouteId, showUnassigned }),
@@ -173,12 +205,36 @@ export function DraftMapPanel({
   const action = selected === null ? null : pointAction(selected);
   const targets = transferTargets(drafts, selected?.routeId ?? null);
 
+  /*
+   * Обычное вычисление, а не хук.
+   *
+   * Эта часть кода живёт ПОСЛЕ раннего возврата «карта не настроена», и хук
+   * здесь означал бы разное число хуков на разных рендерах — React снимает
+   * такое приложение целиком. Список целей короткий, считать его каждый раз
+   * дешевле любой памятки.
+   */
+  const query = targetQuery.trim().toLocaleLowerCase('ru');
+  const matchingTargets = targets.filter((draft) =>
+    draft.number.toLocaleLowerCase('ru').includes(query),
+  );
+
   return (
     <section className="routes__panel routes__map-panel">
       <header className="routes__panel-header">
         <h3>Карта</h3>
-        <span className="muted text-sm">
+        <span
+          className="muted text-sm"
+          data-testid="route-line-points"
+          data-points={String(geometry.data?.line.length ?? -1)}
+        >
           {activeRouteId === null ? 'черновик не раскрыт' : `точек: ${visible.length}`}
+          {geometry.data?.unavailableReason !== undefined &&
+            geometry.data.unavailableReason !== null && (
+              <span className="routes__map-note" data-testid="route-line-missing">
+                {' · '}
+                {geometry.data.unavailableReason}
+              </span>
+            )}
         </span>
       </header>
 
@@ -224,6 +280,12 @@ export function DraftMapPanel({
             picking={false}
             onPick={() => undefined}
             labelOf={labelOf}
+            line={geometry.data?.line ?? []}
+            depot={
+              geometry.data?.depot === undefined || geometry.data.depot === null
+                ? null
+                : geometry.data.depot
+            }
             onLoadError={() => setBasemapFailed(true)}
           />
         </Suspense>
@@ -253,23 +315,55 @@ export function DraftMapPanel({
             </span>
           </div>
 
-          <Field label={action.kind === 'ASSIGN' ? 'Назначить в черновик' : 'Перенести в черновик'}>
+          {/*
+            Цель выбирается поиском по номеру, а не набором отдельных кнопок:
+            в дне бывает два десятка черновиков и листов, и ряд кнопок
+            превращается в лотерею.
+          */}
+          <Field
+            label={action.kind === 'ASSIGN' ? 'Назначить в черновик' : 'Перенести в черновик'}
+            hint="Поиск по номеру"
+          >
             {(fieldProps) => (
-              <Select
+              <TextInput
                 {...fieldProps}
-                value={targetRouteId}
+                value={targetQuery}
+                placeholder="Например, 3661"
                 disabled={busy}
-                onChange={(event) => setTargetRouteId(event.target.value)}
-              >
-                <option value="">Выберите черновик</option>
-                {targets.map((draft) => (
-                  <option key={draft.id} value={draft.id}>
-                    {draft.number} · заказов: {draft.orderCount}
-                  </option>
-                ))}
-              </Select>
+                data-testid="map-transfer-search"
+                onChange={(event) => {
+                  setTargetQuery(event.target.value);
+                  setTargetRouteId('');
+                }}
+              />
             )}
           </Field>
+
+          <ul className="routes__targets" data-testid="map-transfer-list">
+            {matchingTargets.length === 0 ? (
+              <li className="muted">Подходящих черновиков нет</li>
+            ) : (
+              matchingTargets.map((draft) => (
+                <li key={draft.id}>
+                  <button
+                    type="button"
+                    className={
+                      draft.id === targetRouteId
+                        ? 'deals__link routes__target--picked'
+                        : 'deals__link'
+                    }
+                    data-testid="map-transfer-option"
+                    onClick={() => {
+                      setTargetRouteId(draft.id);
+                      setTargetQuery(draft.number);
+                    }}
+                  >
+                    {draft.number} · заказов: {draft.orderCount}
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
 
           <div className="routes__actions">
             <Button

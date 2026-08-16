@@ -184,6 +184,12 @@ export const CONFLICT_KINDS = [
   'ADDRESS_NOT_CORRECTED',
   /** У заказа нет расхождения адресов: решать нечего. */
   'ADDRESS_NO_CONFLICT',
+  /** Ручная отгрузка выключена глобальной настройкой администратора. */
+  'MANUAL_ISSUE_DISABLED',
+  /** Отгрузить маршрут без назначенного курьера нельзя. */
+  'ROUTE_COURIER_REQUIRED',
+  /** Отменять нечего: маршрут не отгружен. */
+  'ROUTE_NOT_ACTIVE',
 ] as const;
 
 export type ConflictKind = (typeof CONFLICT_KINDS)[number];

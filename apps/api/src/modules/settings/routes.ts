@@ -16,7 +16,10 @@ import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
 import { authenticateWithRoles } from '../auth/guards.js';
 import {
+  manualIssueSchema,
+  readManualIssue,
   readServiceTime,
+  saveManualIssue,
   readShift,
   saveServiceTime,
   saveShift,
@@ -30,6 +33,11 @@ export const SETTINGS_WRITE_ROLES = ['ADMIN'] as const;
 const shiftBodySchema = z.object({
   value: shiftSchema,
   /** Ноль означает «настройки ещё не было»: она создаётся впервые. */
+  expectedVersion: z.number().int().min(0),
+});
+
+const manualIssueBodySchema = z.object({
+  value: manualIssueSchema,
   expectedVersion: z.number().int().min(0),
 });
 
@@ -60,9 +68,19 @@ export async function registerSettingsRoutes(app: AppServer, deps: SettingsDeps)
   app.get('/api/settings/planning', async (request) => {
     await authenticateWithRoles(request, deps, SETTINGS_READ_ROLES);
 
-    const [shift, serviceTime] = await Promise.all([readShift(deps.db), readServiceTime(deps.db)]);
+    const [shift, serviceTime, manualIssue] = await Promise.all([
+      readShift(deps.db),
+      readServiceTime(deps.db),
+      readManualIssue(deps.db),
+    ]);
 
     return {
+      /*
+       * Ручная отгрузка видна логисту, но меняется только администратором:
+       * читать состояние обязаны оба, иначе кнопка появлялась бы и исчезала
+       * без объяснения.
+       */
+      manualIssue: { value: manualIssue.value, version: manualIssue.version },
       // `null` — смена не настроена. Значения по умолчанию у неё нет:
       // придуманный рабочий день дал бы придуманный план.
       shift: { value: shift.value, version: shift.version },
@@ -80,6 +98,22 @@ export async function registerSettingsRoutes(app: AppServer, deps: SettingsDeps)
     const context = contextOf(request);
 
     const saved = await saveShift(deps.db, actor, {
+      value: body.value,
+      expectedVersion: body.expectedVersion,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+
+    return { value: body.value, version: saved.version };
+  });
+
+  /** Ручная отгрузка без сканирования. Переключает только администратор. */
+  app.put('/api/settings/planning/manual-issue', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, SETTINGS_WRITE_ROLES);
+    const body = manualIssueBodySchema.parse(request.body);
+    const context = contextOf(request);
+
+    const saved = await saveManualIssue(deps.db, actor, {
       value: body.value,
       expectedVersion: body.expectedVersion,
       ip: context.ip,

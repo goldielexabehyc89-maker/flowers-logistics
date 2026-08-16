@@ -38,6 +38,7 @@ import { calendarDate, ineligibleReason, INELIGIBLE_MESSAGES } from './eligibili
 import { nextRouteNumber } from './numbering.js';
 import { grantLease, requireLease } from './lease.js';
 import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
+import { confirmWithinTransaction } from './lifecycle.js';
 
 /** Кому адресованы события маршрутов. Курьеру глобальная картина не нужна. */
 const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
@@ -699,16 +700,36 @@ export async function setCourier(
 ): Promise<{ version: number; courierUserId: string | null }> {
   return deps.db.$transaction(async (tx) => {
     const route = requireRoute(await lockRoutes(tx, [routeId]), routeId);
-    requireDraft(route);
+
+    /*
+     * Курьера меняют, пока лист не уехал.
+     *
+     * Черновик — как раньше, под арендой редактора: его состав прямо сейчас
+     * правит человек. Неотгруженный лист арендой не защищён и не редактируется
+     * по составу, но именно там курьера чаще всего и назначают: лист без
+     * курьера стоит первым в разделе и ждёт решения. Отгруженный, доставленный
+     * и отменённый не меняются вовсе — там курьер уже факт, а не намерение.
+     */
+    if (route.state !== 'DRAFT' && route.state !== 'CONFIRMED') {
+      throw new AppError('CONFLICT', {
+        message: 'route is not editable',
+        publicMessage: 'Маршрут уже отгружен: курьера в нём не меняют.',
+        conflict: { kind: 'ROUTE_NOT_DRAFT', routeNumber: route.number },
+      });
+    }
     requireVersion(route, input.expectedVersion);
-    await requireLease(tx, routeId, actor, clockOf(deps)());
+    if (route.state === 'DRAFT') {
+      await requireLease(tx, routeId, actor, clockOf(deps)());
+    }
+
+    /*
+     * Начатая складская выдача запрещает смену курьера в любом состоянии:
+     * часть заказов уже физически у человека, и подменять его записью
+     * в базе значило бы потерять след того, кто их увёз.
+     */
+    await assertIssueNotStarted(tx, routeId, route.number);
 
     if (input.courierUserId !== null) {
-      // После начала выдачи обычное переназначение курьера запрещено
-      // (`FUL-003`): нового курьера назначает администратор той же операцией,
-      // которой отменяет выдачу.
-      await assertIssueNotStarted(tx, routeId, route.number);
-
       await assertCourierAssignable(tx, actor, input.courierUserId);
     }
 
@@ -795,6 +816,20 @@ export interface SelectionDraftInput {
   vehicleType: $Enums.VehicleType;
   /** Упорядоченный набор заказов: позиция в маршруте равна позиции в массиве. */
   orderIds: string[];
+  /**
+   * Курьер, выбранный логистом заранее. `null` — назначат позже.
+   *
+   * Маршрутный лист без курьера — обычное рабочее состояние: он и создаётся,
+   * чтобы курьера назначили ближе к отгрузке.
+   */
+  courierUserId?: string | null | undefined;
+  /**
+   * `SHEET` — сразу маршрутный лист, `DRAFT` — черновик.
+   *
+   * Обе ветки идут одной транзакцией: маршрутный лист не может «наполовину
+   * создаться» и остаться черновиком, о котором никто не просил.
+   */
+  mode?: 'DRAFT' | 'SHEET' | undefined;
 }
 
 /** Сколько заказов можно отправить в один ручной черновик за раз. */
@@ -895,7 +930,14 @@ export async function createDraftFromSelection(
   actor: AuthenticatedActor,
   input: SelectionDraftInput,
   context: RequestContext,
-): Promise<{ id: string; number: string; version: number; positions: number; repeated: boolean }> {
+): Promise<{
+  id: string;
+  number: string;
+  version: number;
+  state: $Enums.RouteState;
+  positions: number;
+  repeated: boolean;
+}> {
   if (!isCalendarDate(input.deliveryDate)) {
     throw new AppError('VALIDATION_FAILED', {
       message: 'invalid calendar date',
@@ -952,7 +994,22 @@ export async function createDraftFromSelection(
         });
       }
 
-      await grantLease(tx, route.id, actor, clockOf(deps)());
+      const now = clockOf(deps)();
+      await grantLease(tx, route.id, actor, now);
+
+      // Курьер назначается тем же правилом, что и в карточке маршрута:
+      // существующий пользователь подходящей роли и в рабочем состоянии.
+      if (input.courierUserId !== undefined && input.courierUserId !== null) {
+        await assertCourierAssignable(tx, actor, input.courierUserId);
+        await tx.deliveryRoute.update({
+          where: { id: route.id },
+          data: { courierUserId: input.courierUserId },
+        });
+        await auditRoute(tx, 'ROUTE_COURIER_ASSIGNED', route.id, actor, context, {
+          previousCourierUserId: null,
+          courierUserId: input.courierUserId,
+        });
+      }
 
       await auditRoute(tx, 'ROUTE_CREATED', route.id, actor, context, {
         number: route.number,
@@ -963,21 +1020,42 @@ export async function createDraftFromSelection(
       });
       await publishRoute(tx, 'route.created', route.id, orderIds);
 
-      return { ...route, positions: orderIds.length, repeated: false };
+      /*
+       * Маршрутный лист — тот же самый доменный переход, что и подтверждение
+       * черновика в «Маршрутизации», а не второй способ получить `CONFIRMED`.
+       * Версию сверять не с чем: маршрут создан этой же транзакцией.
+       */
+      if (input.mode === 'SHEET') {
+        const confirmed = await confirmWithinTransaction(tx, actor, route.id, null, context, now);
+        return {
+          ...route,
+          version: confirmed.version,
+          state: confirmed.state,
+          positions: orderIds.length,
+          repeated: false,
+        };
+      }
+
+      return {
+        ...route,
+        state: 'DRAFT' as $Enums.RouteState,
+        positions: orderIds.length,
+        repeated: false,
+      };
     });
   } catch (error) {
     if (isActiveParticipationConflict(error)) {
       // Потерянный ответ: тот же состав уже стал черновиком — возвращаем его.
       const existing = await existingDraftFor(deps.db, orderIds);
       if (existing !== null) {
-        return { ...existing, positions: orderIds.length, repeated: true };
+        return { ...existing, state: 'DRAFT', positions: orderIds.length, repeated: true };
       }
       return conflictForOrders(deps.db, orderIds);
     }
     if (error instanceof AppError && error.conflict?.kind === 'ORDER_ALREADY_IN_ROUTE') {
       const existing = await existingDraftFor(deps.db, orderIds);
       if (existing !== null) {
-        return { ...existing, positions: orderIds.length, repeated: true };
+        return { ...existing, state: 'DRAFT', positions: orderIds.length, repeated: true };
       }
     }
     throw error;

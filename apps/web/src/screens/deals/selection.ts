@@ -130,6 +130,43 @@ export function selectAll(selected: readonly string[], ids: readonly string[]): 
   return [...selected, ...ids.filter((id) => !known.has(id))];
 }
 
+/**
+ * Покрыт ли весь пригодный отбор текущим выбором.
+ *
+ * От этого зависит, чем является одна и та же кнопка: «Выбрать все» или
+ * «Снять все». Считается по серверному набору пригодных заказов, а не по
+ * загруженной странице — иначе кнопка меняла бы смысл от того, докрутил ли
+ * человек список.
+ */
+export function coversScope(
+  selected: readonly string[],
+  selectableIds: readonly string[] | null,
+): boolean {
+  if (selectableIds === null || selectableIds.length === 0) {
+    return false;
+  }
+  const chosen = new Set(selected);
+  return selectableIds.every((id) => chosen.has(id));
+}
+
+/** Что написано на кнопке общего выбора. */
+export function selectAllLabel(
+  selected: readonly string[],
+  selectableIds: readonly string[] | null,
+): string {
+  return coversScope(selected, selectableIds) ? 'Снять все' : 'Выбрать все';
+}
+
+/**
+ * Снятие всего выбора.
+ *
+ * Снимаются и те заказы, которых нет в серверном наборе: человек нажал
+ * «Снять все», а не «снять то, что я вижу».
+ */
+export function clearSelection(): string[] {
+  return [];
+}
+
 export interface SelectionSummary {
   total: number;
   /** Выбранные заказы, которых нет на текущей странице/в текущем фильтре. */

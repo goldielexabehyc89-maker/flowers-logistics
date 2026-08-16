@@ -13,7 +13,7 @@
 .deals {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 6px;
 }
 
 /*
@@ -26,16 +26,33 @@
  */
 @media (min-width: 1100px) {
   .deals {
-    height: calc(100dvh - var(--topbar-height, 48px) - 2 * var(--space-4, 16px) - 92px);
+    /* Полезная высота отвоёвана у служебных отступов: остаётся верхняя полоса
+       с навигацией, строка фильтров и сама работа. */
+    /* Выше рабочего места только верхняя полоса с вкладками раздела. */
+    height: calc(100dvh - var(--topbar-height, 48px) - 2 * var(--space-4, 16px));
     min-height: 560px;
   }
 }
 
+/* Первая строка шапки: день и переключатель черновиков. */
 .deals__filters {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: flex-end;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.deals__filters input[type='date'] {
+  width: 150px;
+  height: 32px;
+  min-height: 32px;
+}
+
+/* Поле поиска — во всю ширину панели: искать проще, чем прокручивать. */
+.deals__panel-head > input {
+  width: 100%;
+  height: 32px;
+  min-height: 32px;
 }
 
 .deals__toggle {
@@ -71,9 +88,26 @@
 @media (min-width: 1100px) {
   .deals__body {
     grid-template-columns: clamp(360px, 27%, 440px) minmax(0, 1fr);
-    /* Обе колонки — во всю высоту окна, а не по высоте своего содержимого. */
+    /*
+     * Одна цельная рабочая поверхность из двух соединённых панелей.
+     *
+     * Зазора между ними нет — есть ровно одна вертикальная граница. Обе панели
+     * начинаются от общей верхней линии и доходят до нижней границы рабочей
+     * области. Отдельного ряда фильтров над ними не существует: он разрывал
+     * поверхность на полосы и опускал и список, и карту.
+     */
+    gap: 0;
     align-items: stretch;
     flex: 1 1 auto;
+    border: 1px solid var(--color-border, #d9d9d9);
+    border-radius: var(--radius-3, 12px);
+    overflow: hidden;
+    background: var(--color-surface, #fff);
+  }
+
+  /* Единственная граница между списком и картой. */
+  .deals__column {
+    border-right: 1px solid var(--color-border, #d9d9d9);
   }
 }
 
@@ -83,11 +117,27 @@
   min-height: 0;
 }
 
-/* Колонка списка: шапка и панель действий закреплены, середина прокручивается. */
+/* Панель списка: шапка и действия закреплены, прокручивается только середина. */
 .deals__column {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
+  min-width: 0;
+}
+
+/*
+ * Компактная шапка списка.
+ *
+ * День, черновики, счётчики, массовый выбор и поиск — всё это про список,
+ * поэтому и живёт внутри его панели, а не отдельной полосой над экраном.
+ */
+.deals__panel-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border, #d9d9d9);
 }
 
 /*
@@ -104,22 +154,39 @@
   .deals__scroll {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding-right: 4px;
+    padding: 8px;
   }
 }
 
+/* Вторая строка шапки: счётчики и массовый выбор. */
 .deals__list-head {
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
   align-items: center;
   justify-content: space-between;
   flex: 0 0 auto;
+  font-size: 13px;
+}
+
+/*
+ * На desktop служебные кнопки компактнее.
+ *
+ * Крупная цель нужна пальцу, а не курсору: на телефоне высота остаётся
+ * прежней, а на большом экране эти 12 пикселей — ещё одна видимая сделка.
+ */
+@media (min-width: 1100px) {
+  .deals__list-head button {
+    min-height: 32px;
+    height: 32px;
+    padding: 0 10px;
+  }
 }
 
 .deals__cards {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 3px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -132,8 +199,9 @@
 .deals__card {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
+  gap: 0;
+  padding: 1px 8px;
+  font-size: 12.5px;
   border: 1px solid var(--color-border, #d9d9d9);
   border-radius: 10px;
   background: var(--color-surface, #fff);
@@ -155,8 +223,9 @@
 
 .deals__card-head {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
+  line-height: 1.2;
 }
 
 /* Служебные действия прижаты вправо и не спорят с номером заказа. */
@@ -187,8 +256,9 @@
 /* Кнопка выбора несёт номер последовательности: он же виден на карте. */
 .deals__pick {
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
+  width: 18px;
+  height: 18px;
+  font-size: 11px;
   border: 1px solid var(--border, #d9d9d9);
   border-radius: 50%;
   background: none;
@@ -202,16 +272,17 @@
 
 .deals__number {
   font-weight: 600;
+  font-size: 13px;
 }
 
 .deals__line {
-  font-size: 14px;
-  overflow-wrap: anywhere;
-  /* Адрес занимает не больше двух строк: третья строка адреса ломает список. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  font-size: 12.5px;
+  line-height: 1.3;
+  /* Адрес — одна строка с обрезкой: вторая строка стоит трёх сделок в окне.
+     Полный адрес доступен подсказкой и в диалоге исправления. */
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .deals__muted {
@@ -220,29 +291,49 @@
 }
 
 .deals__comment {
-  padding: 6px 8px;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 3px 6px;
   border-left: 3px solid hsl(35 80% 55%);
-  background: var(--surface-muted, #f6f6f6);
-}
-
-.deals__comment-label {
-  display: block;
+  background: var(--color-surface-muted, #f6f6f6);
   font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted, #666);
 }
 
 .deals__comment-short {
-  margin: 2px 0 0;
+  margin: 0;
+  flex: 1 1 auto;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
+/* Раскрытие — иконка в самой строке, а не отдельная строка под ней. */
+.deals__comment-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.deals__comment-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
 /* Полный текст сохраняет переносы строк: логист их и расставлял. */
 .deals__comment-full {
-  margin: 2px 0 0;
+  margin: 0;
+  flex: 1 1 auto;
   white-space: pre-wrap;
 }
 
@@ -256,8 +347,8 @@
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
-  margin-top: 4px;
-  padding-top: 4px;
+  margin-top: 2px;
+  padding-top: 2px;
   border-top: 1px solid color-mix(in srgb, var(--color-error, #b3261e) 30%, transparent);
   font-size: 13px;
   color: var(--color-error, #b3261e);
@@ -291,11 +382,6 @@
   cursor: pointer;
 }
 
-.deals-map__legend {
-  margin: 4px 0 0;
-  font-size: 13px;
-}
-
 .deals__blocked {
   margin: 2px 0 0;
   font-size: 13px;
@@ -322,15 +408,12 @@
  * искать кнопки под сотней карточек больше не нужно.
  */
 .deals__summary {
-  position: sticky;
-  bottom: 0;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border, #d9d9d9);
-  border-radius: 10px;
+  padding: 8px;
+  border-top: 1px solid var(--color-border, #d9d9d9);
   background: var(--color-surface, #fff);
 }
 
@@ -353,28 +436,74 @@
   width: 100%;
 }
 
-/* Карта — во всю высоту колонки: подложка и есть рабочее поле. */
+/* Карта — фон всей правой панели: от верхней границы до нижней. */
 .deals-map {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: block;
   height: 100%;
   min-height: 0;
 }
 
-.deals-map__head {
+/*
+ * Управление картой — плавающие контролы поверх холста.
+ *
+ * Отдельная полоса над картой отнимала у неё высоту и разрывала рабочую
+ * поверхность на ряды. Теперь карта занимает правую панель целиком, а её
+ * контролы лежат на ней и не двигают её ни на пиксель.
+ */
+.deals-map__overlay {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  /* Пустое место оверлея кликам по карте не мешает. */
+  pointer-events: none;
+}
+
+.deals-map__overlay--top {
+  top: 8px;
+  left: 8px;
+  /* Справа сверху стоят кнопки масштаба самой MapLibre. */
+  right: 56px;
+}
+
+.deals-map__controls,
+.deals-map__legend {
+  pointer-events: auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
-  justify-content: space-between;
-  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border, #d9d9d9);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 92%);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+  font-size: 12px;
 }
 
 /*
- * Два простых поля времени. Ничего не пересчитывают и никуда не отправляются:
- * сужают только то, что показано на карте.
+ * Счётчик занимает своё место заранее.
+ *
+ * Число «На карте» меняется при каждом обновлении, а рядом появляются
+ * «Обновляем…» и «скрыто фильтром». Без зарезервированной ширины поля времени
+ * и кнопка группировки прыгали бы под курсором.
  */
+.deals-map__head-count {
+  flex: 0 0 auto;
+  min-width: 190px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deals-map__zoom {
+  flex: 0 0 auto;
+  min-width: 148px;
+}
+
 .deals-map__time {
   display: inline-flex;
   gap: 6px;
@@ -397,11 +526,7 @@
 }
 
 .deals-map__legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
   list-style: none;
-  padding: 0;
 }
 
 .deals-map__legend li {
@@ -436,6 +561,17 @@
   border: 2px dashed #6b7280;
 }
 
+.deals-map__dot--depot {
+  background: #333;
+  transform: rotate(45deg);
+}
+
+.deals-map__notice-line {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-muted, #666);
+}
+
 .deals-map__dot--assembled {
   background: hsl(150 55% 32%);
   border-radius: 50%;
@@ -460,6 +596,8 @@
  */
 .deals-map__surface {
   position: relative;
+  height: 100%;
+  border-radius: 0;
   /* На телефоне высота именно фиксированная, а не минимальная: холст занимает
      её целиком через `height: 100%`, а проценты требуют определённой высоты
      родителя. */
@@ -472,8 +610,7 @@
 /* На широком экране карта забирает всю оставшуюся высоту колонки. */
 @media (min-width: 1100px) {
   .deals-map__surface {
-    flex: 1 1 auto;
-    height: auto;
+    height: 100%;
     min-height: 0;
   }
 }
@@ -512,15 +649,24 @@
 /*
  * Отметка заказа.
  *
- * Кружок и подпись времени — разные узлы: подпись обязана оставаться читаемой
- * и не растягивать сам кружок. Невыбранный заказ номера не несёт — сотня
- * номеров на карте не читается и превращает её в текст; номер и адрес
- * показывает подсказка при наведении.
+ * КРИТИЧЕСКИЙ КОНТРАКТ. MapLibre ставит на координату ЦЕНТР элемента отметки.
+ * Пока подпись времени участвовала в потоке, центром связки «подпись + кружок»
+ * была точка между ними: сам кружок оказывался ниже настоящего места заказа
+ * на половину высоты подписи. Смещение постоянно в пикселях, а значит
+ * на карте оно означает разное расстояние при разном масштабе — заказ
+ * «переезжал» при zoom. Компенсировать это сдвигом нельзя: лечить надо
+ * коробку, а не проекцию.
+ *
+ * Поэтому коробка отметки равна кружку, а подпись вынесена из потока
+ * absolute-позиционированием: она видна, но на центр не влияет.
  */
 .deals-marker {
+  position: relative;
   display: flex;
-  flex-direction: column;
   align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border: 0;
   background: none;
@@ -528,7 +674,11 @@
 }
 
 .deals-marker__time {
-  margin-bottom: 2px;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 3px;
   padding: 0 4px;
   border-radius: 999px;
   background: rgb(255 255 255 / 90%);
@@ -544,8 +694,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 100%;
+  height: 100%;
   border: 2px solid #fff;
   border-radius: 50%;
   font-size: 11px;
@@ -554,14 +704,69 @@
   color: #fff;
 }
 
+/*
+ * Собственная подсказка отметки.
+ *
+ * Нативный `title` появляется через секунду с лишним — за это время логист
+ * успевает решить, что подсказки нет вовсе. Эта появляется сразу и достаётся
+ * клавиатурному фокусу наравне с мышью.
+ */
+.deals-marker__hint {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 20px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgb(17 17 17 / 92%);
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  /* Ориентир — не более 150 мс: подсказка обязана успеть за взглядом. */
+  transition: opacity 120ms ease-out;
+  z-index: 2;
+}
+
+.deals-marker:hover .deals-marker__hint,
+.deals-marker:focus-visible .deals-marker__hint {
+  opacity: 1;
+}
+
+/* Выбранная отметка крупнее: номер порядка обязан читаться. */
+.deals-marker--picked {
+  width: 24px;
+  height: 24px;
+}
+
+.deals-marker--cluster {
+  width: 26px;
+  height: 26px;
+  cursor: default;
+}
+
+/* Склад — не заказ: отдельная форма и отдельный цвет. */
+.deals-marker--depot {
+  width: 22px;
+  height: 22px;
+  cursor: default;
+}
+
+.deals-marker--depot .deals-marker__dot {
+  border-radius: 4px;
+  background: #333;
+  transform: rotate(45deg);
+}
+
 .deals-marker--free .deals-marker__dot {
   background: #6b7280;
 }
 
-/* Выбранный крупнее и с номером порядка: это будущий порядок остановок. */
+/* Выбранный несёт номер порядка: это будущий порядок остановок. */
 .deals-marker--picked .deals-marker__dot {
-  width: 24px;
-  height: 24px;
   background: hsl(210 70% 45%);
   font-size: 12px;
 }
@@ -580,19 +785,13 @@
 .deals-marker--picked.deals-marker--assembled .deals-marker__dot::after {
   content: '✓';
   position: absolute;
-  transform: translate(14px, -12px);
+  transform: translate(15px, -13px);
   font-size: 11px;
   color: hsl(150 55% 26%);
 }
 
 .deals-marker--cluster .deals-marker__dot {
-  width: 26px;
-  height: 26px;
   background: #444;
-}
-
-.deals-marker--cluster {
-  cursor: default;
 }
 
 /* Обновление идёт: прежние точки на месте, сообщение не мешает работать. */

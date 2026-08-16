@@ -37,6 +37,7 @@ import { ROLE_LABELS } from '@fl/shared';
 import { useAuth } from '../auth/AuthContext';
 import {
   LOGISTICS_TABS,
+  isLogisticsPath,
   isWideLayout,
   splitMobileNavigation,
   visibleSections,
@@ -307,7 +308,36 @@ export function AppShell(): React.JSX.Element {
             <PanelLeftClose size={ICON_SIZE} aria-hidden />
           )}
         </button>
-        <h1 className="shell__title">{currentTitle}</h1>
+        {/*
+          В «Логистике» верхняя строка — это сама навигация раздела.
+          Заголовок при этом не исчезает для чтения с экрана: он остаётся
+          скрытым текстом, иначе страница осталась бы вовсе без заголовка.
+        */}
+        {isLogisticsPath(location.pathname) ? (
+          <>
+            <h1 className="visually-hidden">{currentTitle}</h1>
+            <nav
+              className="shell__tabs"
+              aria-label="Разделы логистики"
+              data-testid="logistics-tabs"
+            >
+              {LOGISTICS_TABS.map((tab) => (
+                <NavLink
+                  key={tab.key}
+                  to={tab.path}
+                  className={({ isActive }) =>
+                    isActive ? 'shell__tab shell__tab--active' : 'shell__tab'
+                  }
+                  aria-current={location.pathname.startsWith(tab.path) ? 'page' : undefined}
+                >
+                  {tab.title}
+                </NavLink>
+              ))}
+            </nav>
+          </>
+        ) : (
+          <h1 className="shell__title">{currentTitle}</h1>
+        )}
         <div className="shell__topbar-right">
           <ConnectionIndicator client={client} realtime={realtime} />
           <Button variant="ghost" onClick={() => setAccountOpen(true)}>

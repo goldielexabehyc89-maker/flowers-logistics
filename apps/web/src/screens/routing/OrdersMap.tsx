@@ -24,6 +24,18 @@ import { markerKind, toLngLat, type MapPoint } from './geo';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, registerPmtiles } from './map-runtime';
 import { resolveStyleUrls, type StyleDocument } from './style-urls';
 
+/**
+ * Сколько ждать подъёма карты, прежде чем признать подложку недоступной.
+ *
+ * Не «мгновенно»: набор тайлов читается по частям, и первые секунды карта
+ * законно молчит. И не «бесконечно»: нерабочая подложка обязана быть названа.
+ *
+ * Срок с запасом намеренно. На загруженной машине карта поднимается медленнее,
+ * и короткий срок объявлял бы отказ там, где нужно просто подождать: вместе
+ * с панелью отказа исчезали бы отметки, склад и линия маршрута.
+ */
+const BASEMAP_LOAD_TIMEOUT_MS = 30_000;
+
 export interface OrdersMapProps {
   styleUrl: string;
   attribution: string | null;
@@ -41,6 +53,16 @@ export interface OrdersMapProps {
    * остановки: нумерация на карте и в списке обязана совпадать.
    */
   labelOf?: (point: MapPoint) => string;
+  /**
+   * Фактическая линия пути активного маршрута.
+   *
+   * Приходит с сервера от собственного маршрутизатора. Прямых отрезков между
+   * точками здесь не бывает: прямая читалась бы как рассчитанный путь и как
+   * обещание времени, которого никто не давал.
+   */
+  line?: readonly (readonly [number, number])[];
+  /** Подтверждённая точка склада начала. Маршрут начинается отсюда. */
+  depot?: { name: string; lng: number; lat: number } | null;
   /**
    * Подложка не загрузилась.
    *
@@ -60,6 +82,8 @@ export function OrdersMap({
   picking,
   onPick,
   labelOf,
+  line,
+  depot = null,
   onLoadError,
 }: OrdersMapProps): React.JSX.Element {
   /**
@@ -71,6 +95,7 @@ export function OrdersMap({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
+  const depotMarkerRef = useRef<Marker | null>(null);
 
   // Колбэки живут в ссылках: пересоздавать карту при каждом рендере списка
   // недопустимо — это сбрасывало бы масштаб и положение.
@@ -152,18 +177,37 @@ export function OrdersMap({
       });
       instance.addControl(new NavigationControl({ showCompass: false }), 'top-right');
 
-      // Ошибка загрузки стиля или тайлов. Внешнего запасного источника нет
-      // и быть не может: публичные серверы OSM в работе не используются.
-      instance.on('error', () => {
-        markState('error');
-        loadErrorRef.current();
-      });
+      /*
+       * Отказом считается ТОЛЬКО то, что карта так и не поднялась.
+       *
+       * Раньше панель отказа показывалась по ЛЮБОЙ ошибке MapLibre. Но
+       * библиотека шлёт `error` и по мелочам: отсутствующий глиф, оборванный
+       * запрос тайла, пустая клетка набора. На большом экране такая мелочь
+       * находится почти всегда, и логист видел «подложка не загрузилась» там,
+       * где карта работала — а вместе с панелью отказа исчезали и отметки,
+       * и линия маршрута.
+       *
+       * Настоящий отказ никуда не делся: сломанная подложка события `load`
+       * не даёт, и через отведённое время экран честно об этом скажет.
+       * Внешнего запасного источника при этом нет и быть не может: публичные
+       * серверы OSM в работе не используются.
+       */
+      const loadTimer = globalThis.setTimeout(() => {
+        if (!cancelled) {
+          markState('error');
+          loadErrorRef.current();
+        }
+      }, BASEMAP_LOAD_TIMEOUT_MS);
 
       instance.on('load', () => {
+        globalThis.clearTimeout(loadTimer);
         markState('ready');
       });
 
+      // `idle` означает, что карта отрисовала всё, что могла: содержимое
+      // на экране есть, даже если какой-то тайл так и не пришёл.
       instance.on('idle', () => {
+        globalThis.clearTimeout(loadTimer);
         if (container.dataset['mapState'] !== 'error') {
           markState('ready');
         }
@@ -177,6 +221,13 @@ export function OrdersMap({
 
       map = instance;
       mapRef.current = instance;
+      /*
+       * Ссылка на карту для браузерной проверки.
+       *
+       * Линия маршрута — это данные источника MapLibre, а не разметка: из DOM
+       * её не видно, и спросить о нарисованном можно только саму карту.
+       */
+      (globalThis as { __routingMap?: MapLibreMap }).__routingMap = instance;
       setMapReady(true);
     };
 
@@ -186,6 +237,8 @@ export function OrdersMap({
       cancelled = true;
       markersRef.current.forEach((marker) => marker.remove());
       markersRef.current.clear();
+      depotMarkerRef.current?.remove();
+      depotMarkerRef.current = null;
       map?.remove();
       map = null;
       mapRef.current = null;
@@ -247,6 +300,98 @@ export function OrdersMap({
       }
     }
   }, [points, selectedOrderId, mapReady, labelOf]);
+
+  /*
+   * Линия маршрута.
+   *
+   * Отдельный источник и отдельный слой: линия обновляется на месте, а не
+   * пересоздаётся вместе с картой — иначе каждое сохранение порядка сбрасывало
+   * бы масштаб и положение, и логист терял бы то место, куда только что смотрел.
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map === null || !mapReady) {
+      return;
+    }
+
+    const data = {
+      type: 'Feature' as const,
+      properties: {},
+      geometry: {
+        type: 'LineString' as const,
+        coordinates: (line ?? []).map((point) => [...point]),
+      },
+    };
+
+    /*
+     * Линия не имеет права уронить карту.
+     *
+     * Слой добавляется в живой стиль, и любая неожиданность здесь — от
+     * повторного добавления до незагруженного стиля — раньше выбрасывала бы
+     * исключение прямо в отрисовку и убирала бы карту с экрана целиком.
+     * Ручная работа при этом не должна прекращаться (`ROUTE-003`): без линии
+     * логист работает, без карты — нет.
+     */
+    try {
+      const existing = map.getSource('route-line') as unknown as
+        { setData: (value: unknown) => void } | undefined;
+      if (existing === undefined || existing === null) {
+        map.addSource('route-line', { type: 'geojson', data });
+        (map as unknown as { __routeLine?: unknown }).__routeLine = data.geometry.coordinates;
+        map.addLayer({
+          id: 'route-line',
+          type: 'line',
+          source: 'route-line',
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#4f6ef7', 'line-width': 5, 'line-opacity': 0.85 },
+        });
+        return;
+      }
+      existing.setData(data);
+      /*
+       * Что именно нарисовано — записывается на самой карте.
+       *
+       * Отрисованные объекты видит только тот, кто попал в кадр, а описание
+       * источника возвращает данные его создания. Проверке нужен факт: вот
+       * линия, которую слой получил последней.
+       */
+      (map as unknown as { __routeLine?: unknown }).__routeLine = data.geometry.coordinates;
+    } catch {
+      // Молча: причина отсутствия линии приходит с сервера и называется
+      // словами в панели, а не догадкой браузера.
+    }
+  }, [line, mapReady]);
+
+  /*
+   * Отметка склада.
+   *
+   * Форма и цвет отличаются от заказов: склад — не остановка, кликом он ничего
+   * не выбирает. Отсутствие подтверждённой точки означает отсутствие отметки,
+   * а не нулевые координаты.
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map === null || !mapReady) {
+      return;
+    }
+
+    if (depot === null) {
+      depotMarkerRef.current?.remove();
+      depotMarkerRef.current = null;
+      return;
+    }
+
+    if (depotMarkerRef.current === null) {
+      const element = document.createElement('div');
+      element.className = 'map-marker map-marker--depot';
+      element.dataset['testid'] = 'map-depot';
+      depotMarkerRef.current = new Marker({ element }).setLngLat([depot.lng, depot.lat]).addTo(map);
+    } else {
+      depotMarkerRef.current.setLngLat([depot.lng, depot.lat]);
+    }
+    depotMarkerRef.current.getElement().setAttribute('aria-label', `Склад: ${depot.name}`);
+    depotMarkerRef.current.getElement().title = `Склад: ${depot.name}`;
+  }, [depot, mapReady]);
 
   // Выбор строки в списке подсвечивает маркер и подводит к нему карту.
   useEffect(() => {

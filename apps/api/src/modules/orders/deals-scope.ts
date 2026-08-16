@@ -145,6 +145,24 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
  * по номеру. Без второго ключа страницы «плавали» бы между запросами, и заказ
  * мог бы не попасть ни на одну страницу.
  */
+/**
+ * Заказы, требующие внимания, идут первыми во ВСЁМ отборе.
+ *
+ * Сортировка живёт в запросе, а не в браузере: иначе «сверху» оказывались бы
+ * только те проблемные заказы, что попали на уже загруженную страницу, а
+ * остальные ждали бы своей очереди где-то на пятой. Логист начинает день
+ * с разбора именно этой группы.
+ *
+ * Условие совпадает с тем, что показывает карточка: серверный признак плюс
+ * отсутствие подтверждённой точки — для человека это одно состояние «этот
+ * заказ нельзя везти».
+ *
+ * Внутри каждой группы порядок дня не меняется: время, затем номер.
+ */
+const ATTENTION_FIRST = Prisma.sql`
+  CASE WHEN o."needsAttention" OR o."geoState" <> 'RESOLVED' THEN 0 ELSE 1 END
+`;
+
 export async function dealsIds(
   db: Database,
   scope: DealsScope,
@@ -157,7 +175,8 @@ export async function dealsIds(
     SELECT o."id"
     FROM "DeliveryOrder" o
     WHERE ${dealsWhere(scope)}
-    ORDER BY COALESCE(o."manualIntervalStartMinute", o."intervalStartMinute") NULLS FIRST,
+    ORDER BY ${ATTENTION_FIRST},
+             COALESCE(o."manualIntervalStartMinute", o."intervalStartMinute") NULLS FIRST,
              o."externalName" ASC
     ${limitClause}
   `;

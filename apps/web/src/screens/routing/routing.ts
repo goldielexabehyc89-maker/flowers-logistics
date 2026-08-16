@@ -298,3 +298,24 @@ export function conflictMessage(kind: string | undefined, fallback: string): str
   }
   return CONFLICT_MESSAGES[kind] ?? fallback;
 }
+
+/**
+ * Перестановка заказа на новое место списка.
+ *
+ * Используется перетаскиванием: заказ вынимается со своего места и вставляется
+ * перед тем, на который его отпустили. Возвращает `null`, когда порядок
+ * не изменился, — сохранять нечего, и лишний запрос только сбросил бы линию
+ * маршрута ради прежнего результата.
+ */
+export function moveTo(ids: readonly string[], from: number, to: number): string[] | null {
+  if (from === to || from < 0 || to < 0 || from >= ids.length || to >= ids.length) {
+    return null;
+  }
+  const next = [...ids];
+  const [moved] = next.splice(from, 1);
+  if (moved === undefined) {
+    return null;
+  }
+  next.splice(to, 0, moved);
+  return next;
+}

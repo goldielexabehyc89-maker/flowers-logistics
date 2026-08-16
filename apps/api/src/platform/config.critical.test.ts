@@ -88,6 +88,27 @@ describe('загрузка конфигурации', () => {
     }
   });
 
+  it('подменённая геометрия выключена по умолчанию и закрыта вне local', () => {
+    // Линия, нарисованная формулой, выглядит на карте ровно как рассчитанная
+    // по дорогам: на staging её приняли бы за факт.
+    expect(loadConfig({ ...BASE }).VALHALLA_TEST_ROUTE).toBe(false);
+
+    expect(() =>
+      loadConfig({ ...BASE, APP_ENV: 'local', VALHALLA_TEST_ROUTE: 'true' }),
+    ).not.toThrow();
+
+    for (const env of ['staging', 'production'] as const) {
+      expect(() =>
+        loadConfig({
+          ...BASE,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: env,
+          VALHALLA_TEST_ROUTE: 'true',
+        }),
+      ).toThrow(/VALHALLA_TEST_ROUTE/);
+    }
+  });
+
   it('применяет безопасные значения по умолчанию', () => {
     const config = loadConfig({ ...BASE });
 

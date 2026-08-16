@@ -10,6 +10,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   ATTENTION_ACTION_LABELS,
+  depotAbsenceReason,
+  depotMarkerOf,
   attentionReasonsOf,
   isAssembled,
   markerHint,
@@ -19,6 +21,7 @@ import {
   needsAttention,
   primaryAttention,
   visiblePoints,
+  type DepotView,
   type MapPoint,
 } from './deals-view';
 import type { DealCard } from './selection';
@@ -185,5 +188,46 @@ describe('подписи маркеров', () => {
   it('при наведении видны номер и адрес', () => {
     expect(markerHint(point())).toBe('A-1024 · Москва, Цветочная улица, 1');
     expect(markerHint(point({ address: null }))).toBe('A-1024');
+  });
+});
+
+describe('склад на карте «Сделок»', () => {
+  const depot = (patch: Partial<DepotView> = {}): DepotView => ({
+    id: 'depot-1',
+    name: 'Основной склад',
+    lat: 55.751244,
+    lon: 37.618423,
+    hasPoint: true,
+    isActive: true,
+    isDefault: true,
+    ...patch,
+  });
+
+  it('показывается основной активный склад с подтверждённой точкой', () => {
+    expect(depotMarkerOf([depot()])).toEqual({
+      name: 'Основной склад',
+      lat: '55.751244',
+      lon: '37.618423',
+    });
+    expect(depotAbsenceReason([depot()])).toBeNull();
+  });
+
+  it('склад без подтверждённой точки не заменяется нулями', () => {
+    // Ноль здесь означал бы Гвинейский залив, а маршрут начинается отсюда.
+    const noPoint = depot({ hasPoint: false, lat: null, lon: null });
+
+    expect(depotMarkerOf([noPoint])).toBeNull();
+    expect(depotAbsenceReason([noPoint])).toContain('нет подтверждённой точки');
+  });
+
+  it('соседний склад основным не подменяется', () => {
+    const other = depot({ id: 'depot-2', name: 'Второй', isDefault: false });
+
+    expect(depotMarkerOf([other])).toBeNull();
+    expect(depotAbsenceReason([other])).toBe('Основной склад не выбран');
+  });
+
+  it('выключенный основной склад на карту не попадает', () => {
+    expect(depotMarkerOf([depot({ isActive: false })])).toBeNull();
   });
 });

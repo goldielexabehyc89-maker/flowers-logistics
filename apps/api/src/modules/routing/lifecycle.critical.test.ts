@@ -243,7 +243,7 @@ describe('переходы состояния', () => {
     ).toBe(1);
   });
 
-  it('подтверждённый маршрут обычными операциями не редактируется', async () => {
+  it('у подтверждённого маршрута состав неизменен, а курьер назначается', async () => {
     const editor = await session();
     const route = await routeWithOrder(editor.token);
     const confirmed = await call('POST', `/api/routes/${route.id}/confirm`, editor.token, {
@@ -258,12 +258,20 @@ describe('переходы состояния', () => {
     });
     expect(add.statusCode).toBe(409);
 
+    /*
+     * Курьер — исключение, и это решение владельца.
+     *
+     * Неотгруженный лист без курьера стоит первым в разделе и ждёт именно
+     * этого действия; заставлять логиста возвращать лист в черновик ради
+     * одного поля значило бы ломать рабочий путь. Состав при этом остаётся
+     * неизменным — проверка выше это и подтверждает.
+     */
     const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
     const assign = await call('PUT', `/api/routes/${route.id}/courier`, editor.token, {
       courierUserId: courier.id,
       expectedVersion: version,
     });
-    expect(assign.statusCode).toBe(409);
+    expect(assign.statusCode).toBe(200);
   });
 
   it('возврат в черновик сохраняет состав и сразу выдаёт аренду инициатору', async () => {

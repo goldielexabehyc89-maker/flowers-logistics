@@ -183,6 +183,18 @@ export function firstAvailablePath(roles: readonly Role[]): string | null {
  */
 const WIDE_LAYOUT_PATHS: readonly string[] = ['/logistics/deals', '/logistics/routing'];
 
+/**
+ * Находимся ли мы внутри «Логистики».
+ *
+ * Верхняя строка этого раздела показывает не название текущей вкладки, а сами
+ * вкладки: логист переключается между «Сделками», «Маршрутизацией» и листами
+ * десятки раз за смену, и второй ряд навигации под заголовком отнимал у карты
+ * высоту, ничего не добавляя.
+ */
+export function isLogisticsPath(path: string): boolean {
+  return path === '/logistics' || path.startsWith('/logistics/');
+}
+
 export function isWideLayout(path: string): boolean {
   return WIDE_LAYOUT_PATHS.some((wide) => path === wide || path.startsWith(`${wide}/`));
 }
