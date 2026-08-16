@@ -263,12 +263,14 @@
 
 /* Готов к отправке: собран флористом либо уже лежит в ячейке склада. */
 .deals__assembled {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, hsl(150 55% 32%) 14%, transparent);
-  color: hsl(150 55% 26%);
-  font-size: 12px;
+  padding: 0 6px;
+  border: 1px solid var(--log-badge-assembled-border);
+  border-radius: var(--log-radius-pill);
+  background: var(--log-badge-assembled-bg);
+  color: var(--log-badge-assembled-text);
+  font-size: var(--log-font-xs);
   font-weight: 600;
+  line-height: 16px;
 }
 
 /* Строка времени и даты остаётся одной строкой при любой длине получателя. */
@@ -296,14 +298,16 @@
 }
 
 .deals__number {
+  /* Номер заказа — 12px/600 тёмным: главная опора строки. */
   font-weight: 600;
-  font-size: var(--font-size-sm);
-  color: var(--log-text-strong);
+  font-size: var(--log-font-sm);
+  color: var(--log-text);
 }
 
 .deals__line {
-  font-size: var(--font-size-xs);
-  color: var(--log-text);
+  /* Адрес — 12px/400 приглушённым: он читается вторым, после номера. */
+  font-size: var(--log-font-sm);
+  color: var(--log-text-muted);
   line-height: 1.3;
   /* Адрес — одна строка с обрезкой: вторая строка стоит трёх сделок в окне.
      Полный адрес доступен подсказкой и в диалоге исправления. */
@@ -313,8 +317,9 @@
 }
 
 .deals__muted {
-  color: var(--text-muted, #666);
-  font-size: 13px;
+  /* Интервал и служебные пометки — 11px/400 самым светлым тоном. */
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
 }
 
 .deals__comment {
