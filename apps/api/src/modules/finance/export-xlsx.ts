@@ -80,62 +80,124 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
 
   const rows = workbook.addWorksheet('Заказы');
   rows.columns = [
+    { header: 'Уровень', key: 'level', width: 12 },
     { header: 'Дата', key: 'date', width: 12 },
+    { header: 'Курьер', key: 'courier', width: 26 },
+    { header: 'Телефон', key: 'phone', width: 16 },
+    { header: 'Листы', key: 'sheets', width: 8 },
+    { header: 'Заказы', key: 'orders', width: 8 },
     { header: 'Маршрутный лист', key: 'route', width: 22 },
     { header: 'Заказ', key: 'order', width: 16 },
     { header: 'Статус', key: 'outcome', width: 14 },
     { header: 'Способ оплаты', key: 'payment', width: 22 },
     { header: 'Наличные, ₽', key: 'cash', width: 14, style: { numFmt: '#,##0.00' } },
-    { header: 'Ставка за заказ, ₽', key: 'perOrder', width: 18, style: { numFmt: '#,##0.00' } },
+    { header: 'За заказ, ₽', key: 'fee', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'За МКАД, км', key: 'km', width: 12, style: { numFmt: '#,##0.0' } },
-    { header: 'Ставка за км, ₽', key: 'perKm', width: 16, style: { numFmt: '#,##0.00' } },
-    { header: 'Начислено за доставку, ₽', key: 'fee', width: 22, style: { numFmt: '#,##0.00' } },
-    { header: 'Начислено за км, ₽', key: 'distance', width: 20, style: { numFmt: '#,##0.00' } },
-    { header: 'Попытка, ₽', key: 'attempt', width: 14, style: { numFmt: '#,##0.00' } },
-    { header: 'Расходы, ₽', key: 'expenses', width: 14, style: { numFmt: '#,##0.00' } },
-    { header: 'Доплаты, ₽', key: 'bonuses', width: 14, style: { numFmt: '#,##0.00' } },
-    { header: 'Итог, ₽', key: 'total', width: 16, style: { numFmt: '#,##0.00' } },
+    { header: 'За МКАД, ₽', key: 'distance', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Начислено, ₽', key: 'accrued', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Итог, ₽', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Примечание', key: 'note', width: 24 },
   ];
 
-  for (const row of report.rows) {
-    rows.addRow({
-      date: row.deliveryDate,
-      route: row.routeNumber,
-      order: row.orderNumber,
-      outcome: OUTCOME_LABELS[row.outcome] ?? row.outcome,
-      payment: row.paymentTypeName ?? '—',
-      cash: toRubles(row.cashMinor),
-      perOrder: row.perOrderMinor === null ? null : toRubles(row.perOrderMinor),
-      km: row.beyondMkadKmTenths === null ? null : row.beyondMkadKmTenths / 10,
-      perKm: row.perKmMinor === null ? null : toRubles(row.perKmMinor),
-      fee: toRubles(row.deliveryFeeMinor),
-      distance: toRubles(row.distanceFeeMinor),
-      attempt: toRubles(row.attemptFeeMinor),
-      expenses: toRubles(row.expensesMinor),
-      bonuses: toRubles(row.bonusesMinor),
-      total: toRubles(row.totalMinor),
-      note: row.settlementMissing ? 'Расчёт отсутствует' : row.cancelled ? 'Результат отменён' : '',
-    });
+  /*
+   * Иерархия сохраняется и в файле: строка группы, затем её подробности.
+   *
+   * Столбец «Уровень» нужен, чтобы фильтром в Excel можно было оставить только
+   * итоги или только детализацию: без него две разные сущности в одной таблице
+   * не различить.
+   */
+  for (const day of report.days) {
+    for (const group of day.couriers) {
+      rows.addRow({
+        level: 'Итог дня',
+        date: day.date,
+        courier: group.fullName,
+        phone: group.phone ?? '',
+        sheets: group.sheets,
+        orders: group.orders,
+        cash: toRubles(group.cashMinor),
+        fee: toRubles(group.deliveryFeesMinor),
+        km: group.distanceKmTenths / 10,
+        distance: toRubles(group.distanceFeesMinor),
+        accrued: toRubles(group.accruedMinor),
+        total: toRubles(group.totalMinor),
+        note: group.settlementMissing ? 'Расчёт отсутствует' : '',
+      }).font = { bold: true };
+
+      for (const row of group.rows) {
+        rows.addRow({
+          level: 'Заказ',
+          date: row.deliveryDate,
+          courier: group.fullName,
+          phone: group.phone ?? '',
+          route: row.routeNumber,
+          order: row.orderNumber,
+          outcome: OUTCOME_LABELS[row.outcome] ?? row.outcome,
+          payment: row.paymentTypeName ?? '—',
+          cash: toRubles(row.cashMinor),
+          fee: toRubles(row.deliveryFeeMinor),
+          km: row.beyondMkadKmTenths === null ? null : row.beyondMkadKmTenths / 10,
+          distance: toRubles(row.distanceFeeMinor),
+          accrued: toRubles(
+            (
+              BigInt(row.deliveryFeeMinor) +
+              BigInt(row.distanceFeeMinor) +
+              BigInt(row.attemptFeeMinor)
+            ).toString(),
+          ),
+          total: toRubles(row.totalMinor),
+          note: row.settlementMissing
+            ? 'Расчёт отсутствует'
+            : row.cancelled
+              ? 'Результат отменён'
+              : '',
+        });
+      }
+    }
   }
   rows.getRow(1).font = { bold: true };
 
   const operations = workbook.addWorksheet('Операции');
   operations.columns = [
+    { header: 'Уровень', key: 'level', width: 12 },
     { header: 'День', key: 'date', width: 12 },
+    { header: 'Курьер', key: 'courier', width: 26 },
+    { header: 'Телефон', key: 'phone', width: 16 },
+    { header: 'Операций', key: 'count', width: 10 },
     { header: 'Операция', key: 'kind', width: 32 },
     { header: 'Сумма, ₽', key: 'amount', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Основание', key: 'reason', width: 40 },
     { header: 'Отменена', key: 'reversed', width: 12 },
   ];
-  for (const entry of report.entries) {
-    operations.addRow({
-      date: entry.operationDate,
-      kind: ledgerKindLabel(entry.kind),
-      amount: toRubles(entry.amountMinor),
-      reason: entry.reason ?? '',
-      reversed: entry.reversed ? 'да' : '',
-    });
+
+  for (const day of report.days) {
+    for (const group of day.couriers) {
+      if (group.operations.count === 0) {
+        continue;
+      }
+
+      operations.addRow({
+        level: 'Итог дня',
+        date: day.date,
+        courier: group.fullName,
+        phone: group.phone ?? '',
+        count: group.operations.count,
+        amount: toRubles(group.operations.totalMinor),
+      }).font = { bold: true };
+
+      for (const entry of group.operations.entries) {
+        operations.addRow({
+          level: 'Операция',
+          date: entry.operationDate,
+          courier: group.fullName,
+          phone: group.phone ?? '',
+          kind: ledgerKindLabel(entry.kind),
+          amount: toRubles(entry.amountMinor),
+          reason: entry.reason ?? '',
+          reversed: entry.reversed ? 'да' : '',
+        });
+      }
+    }
   }
   operations.getRow(1).font = { bold: true };
 

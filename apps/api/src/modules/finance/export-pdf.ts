@@ -134,6 +134,41 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   const closing = formatRubles(report.totals.closingBalanceMinor);
   write(`Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`, 13);
 
+  /*
+   * Групповые итоги на бумаге: день, курьер, заказы и итог.
+   *
+   * Подробные строки заказов остаются в XLSX: их сотни, и печатать их значит
+   * переводить бумагу на то, что смотрят на экране.
+   */
+  if (report.days.length > 0) {
+    cursor -= 10;
+    write('Итоги по дням и курьерам', 13);
+    for (const day of report.days) {
+      for (const group of day.couriers) {
+        if (cursor < MARGIN + LINE * 2) {
+          break;
+        }
+        const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
+        const right = `${group.orders} зак. · ${formatRubles(group.totalMinor)}`;
+        page.drawText(left, {
+          x: MARGIN,
+          y: cursor,
+          size: BODY_SIZE,
+          font,
+          color: rgb(0.4, 0.45, 0.5),
+        });
+        page.drawText(right, {
+          x: PAGE_WIDTH - MARGIN - font.widthOfTextAtSize(right, BODY_SIZE),
+          y: cursor,
+          size: BODY_SIZE,
+          font,
+          color: rgb(0.12, 0.16, 0.23),
+        });
+        cursor -= LINE;
+      }
+    }
+  }
+
   const missing = report.rows.filter((row) => row.settlementMissing).length;
   if (missing > 0) {
     cursor -= 4;

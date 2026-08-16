@@ -3544,24 +3544,35 @@ test('история и отчёты: тариф, доставка, расчёт
 
   const courier = await seedOwnCourier(page, token);
 
-  const tariffResponse = await page.request.post('/api/logistics/tariffs', {
-    headers: authorized,
-    data: {
-      kind: 'REGULAR',
-      effectiveFrom: today,
-      effectiveTo: null,
-      perOrderMinor: '20000',
-      perKmMinor: '3000',
-      note: 'проверочный тариф',
-    },
-  });
-  expect(tariffResponse.status()).toBe(201);
+  /*
+   * Тариф, включение учёта и геометрия МКАД заводятся ЭКРАНОМ настроек:
+   * проверяется тот путь, которым пользуется администратор, а не только API.
+   */
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await expect(page.getByTestId('finance-settings')).toBeVisible();
 
-  const activation = await page.request.put('/api/logistics/ledger/activation', {
-    headers: authorized,
-    data: { activeFrom: today },
-  });
-  expect(activation.status()).toBe(200);
+  await page.getByTestId('tariff-from').fill(today);
+  await page.getByTestId('tariff-per-order').fill('200');
+  await page.getByTestId('tariff-per-km').fill('30');
+  await page.getByTestId('tariff-note').fill('проверочный тариф');
+  await page.getByTestId('tariff-submit').click();
+  await expect(page.getByTestId('tariff-list')).toContainText('200,00 ₽');
+
+  await page.getByTestId('finance-activation-date').fill(today);
+  await page.getByTestId('finance-activate').click();
+  await expect(page.getByTestId('finance-ledger-off')).toHaveCount(0);
+
+  // Геометрия загружается с источником, лицензией и датой актуальности.
+  await page.getByTestId('mkad-source').fill('Синтетическое кольцо проверки');
+  await page.getByTestId('mkad-license').fill('Только для проверки');
+  await page.getByTestId('mkad-date').fill(today);
+  await page
+    .getByTestId('mkad-geometry')
+    .fill(
+      '{"type":"LineString","coordinates":[[37.35,55.57],[37.85,55.57],[37.85,55.92],[37.35,55.92],[37.35,55.57]]}',
+    );
+  await page.getByTestId('mkad-submit').click();
+  await expect(page.getByTestId('mkad-active')).toContainText('Только для проверки');
 
   // 1. Обычный путь: сделка → лист → курьер → отгрузка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
@@ -3633,8 +3644,20 @@ test('история и отчёты: тариф, доставка, расчёт
   await expect(page.getByTestId('reports-screen')).toBeVisible();
   await expect(page.getByTestId('reports-summary')).toBeVisible();
 
+  /*
+   * Иерархия: свёрнутая группа курьера с итогами дня, подробности —
+   * по раскрытию.
+   */
   const rows = page.getByTestId('reports-rows');
-  await expect(rows.locator(`[data-order-number="${own}"]`)).toBeVisible({ timeout: 20_000 });
+  const group = rows.locator(`[data-testid="reports-group"][data-group-date="${today}"]`).first();
+  await expect(group).toBeVisible({ timeout: 20_000 });
+  await expect(group).toHaveAttribute('data-expanded', 'false');
+  await expect(rows.locator(`[data-order-number="${own}"]`)).toHaveCount(0);
+  await expect(group).toContainText(courier.fullName);
+  await expect(group).toContainText(courier.phone.replace(/\s/g, ''));
+
+  await group.getByTestId('reports-group-toggle').click();
+  await expect(rows.locator(`[data-order-number="${own}"]`)).toBeVisible();
 
   /*
    * Баланс до и после операции.
@@ -3652,9 +3675,13 @@ test('история и отчёты: тариф, доставка, расчёт
   await page.getByTestId('operation-submit').click();
 
   const entries = page.getByTestId('reports-entries');
-  await expect(entries.locator('[data-entry-kind="CASH_HANDED_TO_LOGIST"]')).toBeVisible({
-    timeout: 20_000,
-  });
+  const operationsGroup = entries.getByTestId('reports-operations-group').first();
+  await expect(operationsGroup).toBeVisible({ timeout: 20_000 });
+  // Свёрнутая группа расходов показывает число операций и их сумму.
+  await expect(operationsGroup).toContainText('1');
+  await expect(entries.locator('[data-entry-kind="CASH_HANDED_TO_LOGIST"]')).toHaveCount(0);
+  await operationsGroup.getByTestId('reports-operations-toggle').click();
+  await expect(entries.locator('[data-entry-kind="CASH_HANDED_TO_LOGIST"]')).toBeVisible();
   const after = (await page.getByTestId('reports-closing').innerText()).trim();
   expect(after).not.toBe(before);
 

@@ -191,7 +191,12 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
   'route.cancelled': [...ROUTING_SCREEN, ...DEALS_SCREEN],
   'route.edit_lock_changed': [['route']],
   'route.edit_lock_taken_over': [['route']],
-  'route.completed': [...ROUTING_SCREEN, ...DELIVERY_SCREEN],
+  'route.completed': [
+    ...ROUTING_SCREEN,
+    ...DELIVERY_SCREEN,
+    ['settlements'],
+    ['operations-report'],
+  ],
   // Ход расчёта: без этого ключа превью не узнавало о собственном завершении.
   'route_plan.updated': [['route-plan'], ['route-plans']],
   // Склад планирования: и список складов, и условия расчёта.
@@ -202,8 +207,27 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
   'warehouse.placement_changed': [...WAREHOUSE_SCREEN, ...DEALS_SCREEN],
   'warehouse.route_flow_changed': [...WAREHOUSE_SCREEN, ['routes'], ['route']],
 
-  'delivery.result_recorded': [...DELIVERY_SCREEN, ['routes'], ['route']],
-  'delivery.result_cancelled': [...DELIVERY_SCREEN, ['routes'], ['route']],
+  /*
+   * Результат доставки — это ещё и деньги: наличные и начисления попадают
+   * в учёт в той же транзакции, поэтому открытый отчёт обязан обновиться
+   * без перезагрузки страницы.
+   */
+  'delivery.result_recorded': [
+    ...DELIVERY_SCREEN,
+    ['routes'],
+    ['route'],
+    ['settlements'],
+    ['operations-report'],
+    ['logistics-history'],
+  ],
+  'delivery.result_cancelled': [
+    ...DELIVERY_SCREEN,
+    ['routes'],
+    ['route'],
+    ['settlements'],
+    ['operations-report'],
+    ['logistics-history'],
+  ],
   'pickup.issued': [['pickup-day'], ['warehouse-placements']],
 
   /*

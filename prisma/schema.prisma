@@ -2398,7 +2398,13 @@ model MkadRingVersion {
   points     Json
   pointCount Int
   sha256     String @unique
+
+  /// Откуда взята геометрия, чем разрешено пользоваться и на какое число она
+  /// актуальна. Три поля обязательны: от геометрии зависят деньги, и через год
+  /// «откуда это взялось» должно отвечаться записью, а не памятью.
   source     String
+  license    String?
+  sourceDate DateTime? @db.Date
 
   createdAt DateTime @default(now())
 

@@ -17,7 +17,11 @@ import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
-import { isCalendarDate, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import {
+  fromDateColumn,
+  isCalendarDate,
+  toDateColumn,
+} from '../integrations/moysklad/delivery-date.js';
 import { moscowCalendarDate } from '@fl/shared';
 import { listHistory, routeHistory } from '../history/service.js';
 import {
@@ -52,6 +56,12 @@ const periodSchema = z.object({
   from: dateSchema,
   to: dateSchema,
   courierUserId: z.string().uuid().optional(),
+});
+
+/** Постраничность отчёта считается ГРУППАМИ «день + курьер», а не строками. */
+const settlementQuerySchema = periodSchema.extend({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 const historyQuerySchema = periodSchema.extend({
@@ -106,6 +116,12 @@ const activationSchema = z.object({ activeFrom: dateSchema });
 const ringSchema = z.object({
   points: z.array(z.tuple([z.number(), z.number()])).min(4),
   source: z.string().trim().min(3).max(200),
+  /*
+   * Лицензия и дата актуальности обязательны: геометрия влияет на деньги,
+   * и через год «откуда это взялось» должно отвечаться записью, а не памятью.
+   */
+  license: z.string().trim().min(2).max(200),
+  sourceDate: dateSchema,
 });
 
 const distanceSchema = z.object({
@@ -156,7 +172,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
 
   app.get('/api/logistics/reports/settlements', async (request) => {
     await authenticateWithRoles(request, deps, FINANCE_ROLES);
-    const query = periodSchema.parse(request.query);
+    const query = settlementQuerySchema.parse(request.query);
     assertPeriod(query.from, query.to);
 
     const activation = await readLedgerActivation(deps.db);
@@ -165,6 +181,8 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       to: query.to,
       courierUserId: query.courierUserId,
       ledgerActiveFrom: activation.activeFrom,
+      limit: query.limit,
+      offset: query.offset,
     });
   });
 
@@ -498,8 +516,46 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
 
   app.get('/api/logistics/mkad', async (request) => {
     await authenticateWithRoles(request, deps, FINANCE_ROLES);
-    const ring = await activeRing(deps.db);
-    return { configured: ring !== null, pointCount: ring?.points.length ?? 0 };
+
+    const versions = await deps.db.mkadRingVersion.findMany({
+      orderBy: [{ createdAt: 'desc' }],
+      take: 20,
+      select: {
+        id: true,
+        pointCount: true,
+        sha256: true,
+        source: true,
+        license: true,
+        sourceDate: true,
+        createdAt: true,
+      },
+    });
+
+    const current = versions[0] ?? null;
+    return {
+      configured: current !== null,
+      active:
+        current === null
+          ? null
+          : {
+              id: current.id,
+              pointCount: current.pointCount,
+              sha256: current.sha256,
+              source: current.source,
+              license: current.license,
+              sourceDate: current.sourceDate === null ? null : fromDateColumn(current.sourceDate),
+              createdAt: current.createdAt.toISOString(),
+            },
+      versions: versions.map((row) => ({
+        id: row.id,
+        pointCount: row.pointCount,
+        sha256: row.sha256,
+        source: row.source,
+        license: row.license,
+        sourceDate: row.sourceDate === null ? null : fromDateColumn(row.sourceDate),
+        createdAt: row.createdAt.toISOString(),
+      })),
+    };
   });
 
   app.post('/api/logistics/mkad', async (request, reply) => {
@@ -507,7 +563,12 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const body = ringSchema.parse(request.body);
 
     const points = parseRing(body.points);
-    const version = await storeRing(deps.db, { points, source: body.source });
+    const version = await storeRing(deps.db, {
+      points,
+      source: body.source,
+      license: body.license,
+      sourceDate: body.sourceDate,
+    });
 
     await writeAudit(deps.db, {
       action: 'FINANCE_MKAD_RING_STORED',

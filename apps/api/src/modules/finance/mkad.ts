@@ -175,6 +175,9 @@ export async function activeRing(
 export interface StoreRingInput {
   points: RingPoint[];
   source: string;
+  license: string;
+  /** Дата, на которую геометрия актуальна, в московском календаре. */
+  sourceDate: string;
 }
 
 /**
@@ -202,6 +205,8 @@ export async function storeRing(db: Database, input: StoreRingInput): Promise<Ri
       pointCount: input.points.length,
       sha256,
       source: input.source,
+      license: input.license,
+      sourceDate: new Date(`${input.sourceDate}T00:00:00.000Z`),
     },
   });
 

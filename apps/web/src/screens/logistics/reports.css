@@ -139,3 +139,54 @@
   color: var(--color-error);
   font-size: var(--log-font-sm);
 }
+
+/* Группа «день + курьер»: свёрнута по умолчанию, итоги считает сервер. */
+.reports__group td {
+  background: var(--log-surface-soft);
+  font-weight: 600;
+}
+
+.reports__group[data-expanded='true'] td {
+  background: var(--log-selected-bg);
+}
+
+.reports__group-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reports__group-chevron {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-2xs);
+}
+
+.reports__group-name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+/* Телефон — вторая строка вторичным текстом. */
+.reports__group-phone {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+  font-weight: 400;
+}
+
+.reports__detail td {
+  color: var(--log-text-muted);
+  font-weight: 400;
+}
+
+.reports__detail-order {
+  padding-left: 26px !important;
+  color: var(--log-text);
+}

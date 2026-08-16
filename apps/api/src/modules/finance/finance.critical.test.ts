@@ -31,6 +31,7 @@ import {
 } from './tariffs.js';
 import { accrueDeliveryResult, captureRouteTariff, reverseDeliveryAccruals } from './accrual.js';
 import { buildSettlementReport, dayBefore } from './reports.js';
+import { groupSettlement, pageOfGroups } from './grouping.js';
 import { isInsideRing, nearestRingPoint, parseRing, ringSha256, toKmTenths } from './mkad.js';
 import { buildSettlementWorkbook, toRubles } from './export-xlsx.js';
 import { buildSettlementPdf, debtDirection, formatRubles } from './export-pdf.js';
@@ -676,5 +677,158 @@ describe('включение учёта', () => {
     expect(ledgerCoversDate({ activeFrom: null }, '2027-01-01')).toBe(false);
     expect(ledgerCoversDate({ activeFrom: '2027-01-01' }, '2026-12-31')).toBe(false);
     expect(ledgerCoversDate({ activeFrom: '2027-01-01' }, '2027-01-01')).toBe(true);
+  });
+});
+
+describe('группировка отчёта', () => {
+  it('итоги группы считаются по всем строкам курьера за день', () => {
+    const rows = [
+      {
+        attemptId: 'a1',
+        orderId: 'o1',
+        orderNumber: 'N-1',
+        routeId: 'r1',
+        routeNumber: 'R-1',
+        deliveryDate: '2028-04-10',
+        courierUserId: 'c1',
+        outcome: 'DELIVERED',
+        cancelled: false,
+        cashCollectable: true,
+        cashMinor: '5000',
+        paymentTypeName: null,
+        perOrderMinor: '2000',
+        perKmMinor: '1000',
+        beyondMkadKmTenths: 24,
+        distanceSource: 'COMPUTED' as const,
+        deliveryFeeMinor: '2000',
+        distanceFeeMinor: '2400',
+        attemptFeeMinor: '0',
+        expensesMinor: '0',
+        bonusesMinor: '0',
+        totalMinor: '600',
+        settlementMissing: false,
+      },
+      {
+        attemptId: 'a2',
+        orderId: 'o2',
+        orderNumber: 'N-2',
+        routeId: 'r1',
+        routeNumber: 'R-1',
+        deliveryDate: '2028-04-10',
+        courierUserId: 'c1',
+        outcome: 'DELIVERED',
+        cancelled: false,
+        cashCollectable: false,
+        cashMinor: '0',
+        paymentTypeName: null,
+        perOrderMinor: '2000',
+        perKmMinor: '1000',
+        beyondMkadKmTenths: 6,
+        distanceSource: 'COMPUTED' as const,
+        deliveryFeeMinor: '2000',
+        distanceFeeMinor: '600',
+        attemptFeeMinor: '0',
+        expensesMinor: '0',
+        bonusesMinor: '0',
+        totalMinor: '-2600',
+        settlementMissing: false,
+      },
+    ];
+
+    const entries = [
+      {
+        id: 'e1',
+        courierUserId: 'c1',
+        kind: 'CASH_HANDED_TO_LOGIST' as const,
+        amountMinor: '-1000',
+        operationDate: '2028-04-10',
+        occurredAt: '2028-04-10T10:00:00.000Z',
+        actorUserId: 'l1',
+        reason: null,
+        comment: null,
+        routeId: null,
+        orderId: null,
+        attemptId: null,
+        reversesEntryId: null,
+        reversed: false,
+      },
+    ];
+
+    const days = groupSettlement(
+      rows,
+      entries,
+      new Map([['c1', { id: 'c1', fullName: 'Курьер', phone: '+79990000000' }]]),
+    );
+
+    expect(days).toHaveLength(1);
+    const group = days[0]?.couriers[0];
+    expect(group?.sheets).toBe(1);
+    expect(group?.orders).toBe(2);
+    expect(group?.cashMinor).toBe('5000');
+    expect(group?.deliveryFeesMinor).toBe('4000');
+    // Километры складываются как есть: 2,4 + 0,6 = 3,0 км.
+    expect(group?.distanceKmTenths).toBe(30);
+    expect(group?.distanceFeesMinor).toBe('3000');
+    expect(group?.accruedMinor).toBe('7000');
+    expect(group?.operations.count).toBe(1);
+    // Итог дня: строки доставок плюс операции этого дня.
+    expect(group?.totalMinor).toBe('-3000');
+  });
+
+  it('строка без снимка помечает всю группу', () => {
+    const base = {
+      attemptId: 'a1',
+      orderId: 'o1',
+      orderNumber: 'N-1',
+      routeId: 'r1',
+      routeNumber: 'R-1',
+      deliveryDate: '2028-04-11',
+      courierUserId: 'c1',
+      outcome: 'DELIVERED',
+      cancelled: false,
+      cashCollectable: true,
+      cashMinor: '0',
+      paymentTypeName: null,
+      perOrderMinor: null,
+      perKmMinor: null,
+      beyondMkadKmTenths: null,
+      distanceSource: null,
+      deliveryFeeMinor: '0',
+      distanceFeeMinor: '0',
+      attemptFeeMinor: '0',
+      expensesMinor: '0',
+      bonusesMinor: '0',
+      totalMinor: '0',
+      settlementMissing: true,
+    };
+
+    const days = groupSettlement([base], [], new Map());
+    expect(days[0]?.couriers[0]?.settlementMissing).toBe(true);
+    // Курьера нет в справочнике — группа всё равно называет себя честно.
+    expect(days[0]?.couriers[0]?.fullName).toBe('Курьер удалён из справочника');
+  });
+
+  it('страница режется по группам, а не по строкам', () => {
+    const days = [
+      {
+        date: '2028-04-12',
+        couriers: [
+          { courierUserId: 'c1', rows: [1, 2, 3] } as never,
+          { courierUserId: 'c2', rows: [4] } as never,
+        ],
+      },
+      { date: '2028-04-11', couriers: [{ courierUserId: 'c3', rows: [5, 6] } as never] },
+    ];
+
+    const first = pageOfGroups(days, 2, 0);
+    expect(first.totalGroups).toBe(3);
+    expect(first.hasMore).toBe(true);
+    expect(first.days).toHaveLength(1);
+    expect(first.days[0]?.couriers).toHaveLength(2);
+
+    const second = pageOfGroups(days, 2, 2);
+    expect(second.hasMore).toBe(false);
+    expect(second.days[0]?.date).toBe('2028-04-11');
+    expect(second.days[0]?.couriers).toHaveLength(1);
   });
 });

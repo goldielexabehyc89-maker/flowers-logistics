@@ -12,6 +12,7 @@
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { balanceOf, entriesOf, type LedgerEntryView } from './ledger.js';
+import { groupSettlement, pageOfGroups, type CourierProfile, type DayGroup } from './grouping.js';
 
 export interface Period {
   from: string;
@@ -68,6 +69,17 @@ export interface SettlementReport {
   totals: SettlementTotals;
   rows: SettlementRow[];
   entries: LedgerEntryView[];
+  /**
+   * Иерархия «день → курьер → строки».
+   *
+   * Итоги групп считаются по ПОЛНОМУ отфильтрованному набору, а страница
+   * нарезается по группам: группа одного курьера не делится между страницами.
+   */
+  days: DayGroup[];
+  totalGroups: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
   /** Дата включения учёта. `null` — учёт выключен. */
   ledgerActiveFrom: string | null;
 }
@@ -93,6 +105,9 @@ export function dayBefore(date: string): string {
 export interface SettlementInput extends Period {
   courierUserId?: string | undefined;
   ledgerActiveFrom: string | null;
+  /** Постраничность по группам. По умолчанию — вся выборка. */
+  limit?: number | undefined;
+  offset?: number | undefined;
 }
 
 export async function buildSettlementReport(
@@ -228,12 +243,38 @@ export async function buildSettlementReport(
     };
   });
 
+  /*
+   * Справочник курьеров для подписей группы.
+   *
+   * Имя и телефон берутся один раз пачкой: запрашивать их построчно значило бы
+   * десятки запросов ради подписи, которая у группы одна.
+   */
+  const courierIds = [
+    ...new Set([...rows.map((row) => row.courierUserId), ...entries.map((e) => e.courierUserId)]),
+  ];
+  const profiles = new Map<string, CourierProfile>(
+    (
+      await db.user.findMany({
+        where: { id: { in: courierIds } },
+        select: { id: true, fullName: true, phone: true },
+      })
+    ).map((user) => [user.id, { id: user.id, fullName: user.fullName, phone: user.phone }]),
+  );
+
+  const grouped = groupSettlement(rows, entries, profiles);
+  const page = pageOfGroups(grouped, input.limit ?? Number.MAX_SAFE_INTEGER, input.offset ?? 0);
+
   return {
     period: { from: input.from, to: input.to },
     courierUserId: input.courierUserId ?? null,
     totals,
     rows,
     entries,
+    days: page.days,
+    totalGroups: page.totalGroups,
+    limit: input.limit ?? page.totalGroups,
+    offset: input.offset ?? 0,
+    hasMore: page.hasMore,
     ledgerActiveFrom: input.ledgerActiveFrom,
   };
 }
