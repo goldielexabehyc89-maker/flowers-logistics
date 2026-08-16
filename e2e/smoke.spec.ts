@@ -3196,6 +3196,44 @@ test('маршрутизация: линия идёт от склада и ме�
   //    маршрут как действующий.
   await expect.poll(async () => (await drawnLine()) !== before, { timeout: 45_000 }).toBe(true);
   expect(firstBefore).not.toBe(await stops.first().innerText());
+
+  /*
+   * 6. Одна цельная рабочая поверхность, как в «Сделках».
+   *
+   * Проверяется геометрия, а не наличие классов: панели начинаются от общей
+   * верхней линии, между ними нет зазора, карта занимает всю высоту своей
+   * половины, а служебная строка лежит внутри полотна, а не над ним.
+   */
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const [list, mapPanel, surface, overlay] = await Promise.all([
+    page.getByTestId('routing-drafts').boundingBox(),
+    page.getByTestId('routing-map-panel').boundingBox(),
+    page.getByTestId('routing-map-surface').boundingBox(),
+    page.locator('.routes__map-overlay').boundingBox(),
+  ]);
+
+  expect(Math.abs((list?.y ?? 0) - (mapPanel?.y ?? -1))).toBeLessThanOrEqual(1);
+  expect(Math.abs((list?.height ?? 0) - (mapPanel?.height ?? -1))).toBeLessThanOrEqual(1);
+  // Зазора между половинами нет: правая начинается там, где кончилась левая.
+  expect(Math.abs((list?.x ?? 0) + (list?.width ?? 0) - (mapPanel?.x ?? -1))).toBeLessThanOrEqual(
+    1,
+  );
+  expect(list?.width ?? 0).toBeGreaterThanOrEqual(360);
+  expect(list?.width ?? 0).toBeLessThanOrEqual(440);
+
+  expect(surface?.height ?? 0).toBeGreaterThan(400);
+  expect((surface?.y ?? 0) + (surface?.height ?? 0)).toBeLessThanOrEqual(901);
+  expect(overlay?.y ?? 0).toBeGreaterThanOrEqual(surface?.y ?? 0);
+  expect((overlay?.y ?? 0) + (overlay?.height ?? 0)).toBeLessThanOrEqual(
+    (surface?.y ?? 0) + (surface?.height ?? 0),
+  );
+
+  // 7. Свёрнутый черновик — одна строка без скрытого пустого тела.
+  await page.locator('.routes__draft[data-expanded="true"] .routes__draft-head').click();
+  const collapsed = page.locator('.routes__draft[data-expanded="false"]').first();
+  await expect(collapsed).toBeVisible();
+  await expect(collapsed.locator('.routes__card')).toHaveCount(0);
+  expect((await collapsed.boundingBox())?.height ?? 0).toBeLessThanOrEqual(48);
 });
 
 /**

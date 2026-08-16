@@ -191,10 +191,7 @@ export function DraftMapPanel({
 
   if (!status.ready) {
     return (
-      <section className="routes__panel routes__map-panel">
-        <header className="routes__panel-header">
-          <h3>Карта</h3>
-        </header>
+      <section className="routes__map-panel" data-testid="routing-map-panel">
         <EmptyState title="Карта не настроена" description={status.message ?? ''} />
       </section>
     );
@@ -219,80 +216,85 @@ export function DraftMapPanel({
   );
 
   return (
-    <section className="routes__panel routes__map-panel">
-      <header className="routes__panel-header">
-        <h3>Карта</h3>
-        <span
-          className="muted text-sm"
-          data-testid="route-line-points"
-          data-points={String(geometry.data?.line.length ?? -1)}
-        >
-          {activeRouteId === null ? 'черновик не раскрыт' : `точек: ${visible.length}`}
-          {geometry.data?.unavailableReason !== undefined &&
-            geometry.data.unavailableReason !== null && (
-              <span className="routes__map-note" data-testid="route-line-missing">
-                {' · '}
-                {geometry.data.unavailableReason}
-              </span>
-            )}
-        </span>
-      </header>
+    <section className="routes__map-panel" data-testid="routing-map-panel">
+      {/*
+        Служебная строка лежит НАД полотном карты, а не отдельной полосой сверху.
 
-      <div className="routes__map-controls">
-        <label className="routes__toggle">
-          <input
-            type="checkbox"
-            checked={showUnassigned}
-            data-testid="map-unassigned-toggle"
-            onChange={(event) => {
-              setShowUnassigned(event.target.checked);
-              setSelectedOrderId(null);
+        Отдельный ряд отнимал у карты высоту, ради которой её и открывают:
+        счётчик точек и переключатель занимают несколько десятков пикселей,
+        а карта теряла их на всей ширине.
+      */}
+      <div className="routes__map-surface" data-testid="routing-map-surface">
+        <div className="routes__map-overlay">
+          <span
+            className="muted text-sm"
+            data-testid="route-line-points"
+            data-points={String(geometry.data?.line.length ?? -1)}
+          >
+            {activeRouteId === null ? 'черновик не раскрыт' : `точек: ${visible.length}`}
+            {geometry.data?.unavailableReason !== undefined &&
+              geometry.data.unavailableReason !== null && (
+                <span className="routes__map-note" data-testid="route-line-missing">
+                  {' · '}
+                  {geometry.data.unavailableReason}
+                </span>
+              )}
+          </span>
+          <label className="routes__toggle">
+            <input
+              type="checkbox"
+              checked={showUnassigned}
+              data-testid="map-unassigned-toggle"
+              onChange={(event) => {
+                setShowUnassigned(event.target.checked);
+                setSelectedOrderId(null);
+              }}
+            />
+            Нераспределённые сделки дня
+          </label>
+        </div>
+
+        {basemapFailed ? (
+          <ErrorState
+            title="Подложка карты не загрузилась"
+            description="Черновики и их состав работают как обычно. Внешние карты не используются намеренно."
+            onRetry={() => {
+              setBasemapFailed(false);
+              void config.refetch();
             }}
           />
-          Показать нераспределённые сделки дня
-        </label>
+        ) : points.isPending ? (
+          <LoadingState title="Загружаем точки…" />
+        ) : points.isError ? (
+          <ErrorState title="Не удалось загрузить точки" onRetry={() => void points.refetch()} />
+        ) : (
+          <Suspense fallback={<LoadingState title="Готовим карту…" />}>
+            <OrdersMap
+              styleUrl={config.data?.styleUrl ?? ''}
+              attribution={config.data?.attribution ?? null}
+              points={visible}
+              selectedOrderId={selectedOrderId}
+              onSelect={(orderId) => {
+                setSelectedOrderId(orderId);
+                setTargetRouteId('');
+              }}
+              picking={false}
+              onPick={() => undefined}
+              labelOf={labelOf}
+              line={geometry.data?.line ?? []}
+              depot={
+                geometry.data?.depot === undefined || geometry.data.depot === null
+                  ? null
+                  : geometry.data.depot
+              }
+              onLoadError={() => setBasemapFailed(true)}
+            />
+          </Suspense>
+        )}
       </div>
 
-      {basemapFailed ? (
-        <ErrorState
-          title="Подложка карты не загрузилась"
-          description="Черновики и их состав работают как обычно. Внешние карты не используются намеренно."
-          onRetry={() => {
-            setBasemapFailed(false);
-            void config.refetch();
-          }}
-        />
-      ) : points.isPending ? (
-        <LoadingState title="Загружаем точки…" />
-      ) : points.isError ? (
-        <ErrorState title="Не удалось загрузить точки" onRetry={() => void points.refetch()} />
-      ) : (
-        <Suspense fallback={<LoadingState title="Готовим карту…" />}>
-          <OrdersMap
-            styleUrl={config.data?.styleUrl ?? ''}
-            attribution={config.data?.attribution ?? null}
-            points={visible}
-            selectedOrderId={selectedOrderId}
-            onSelect={(orderId) => {
-              setSelectedOrderId(orderId);
-              setTargetRouteId('');
-            }}
-            picking={false}
-            onPick={() => undefined}
-            labelOf={labelOf}
-            line={geometry.data?.line ?? []}
-            depot={
-              geometry.data?.depot === undefined || geometry.data.depot === null
-                ? null
-                : geometry.data.depot
-            }
-            onLoadError={() => setBasemapFailed(true)}
-          />
-        </Suspense>
-      )}
-
       {activeRouteId === null && !showUnassigned && (
-        <p className="muted text-sm">
+        <p className="muted text-sm routes__map-hint">
           Раскройте черновик слева, чтобы увидеть его остановки, либо включите нераспределённые
           сделки.
         </p>

@@ -21,7 +21,6 @@ import {
   Button,
   EmptyState,
   ErrorState,
-  Field,
   LoadingState,
   StatusBadge,
   TextInput,
@@ -55,27 +54,7 @@ export function RoutingScreen(): React.JSX.Element {
   const missingDraft = draftId !== null && activeId === null && !routes.isPending;
 
   return (
-    <section className="stack routes" data-testid="routing-workspace">
-      <header className="routes__header">
-        <div>
-          <h2>Маршрутизация</h2>
-          <p className="muted text-sm">
-            Черновики выбранного дня. Состав, порядок остановок и курьер меняются здесь;
-            подтверждённый черновик уходит в «Маршрутные листы».
-          </p>
-        </div>
-        <Field label="День">
-          {(fieldProps) => (
-            <TextInput
-              {...fieldProps}
-              type="date"
-              value={day}
-              onChange={(event) => setDay(event.target.value)}
-            />
-          )}
-        </Field>
-      </header>
-
+    <section className="routes" data-testid="routing-workspace">
       {/*
         Предложенный расчёт.
 
@@ -103,69 +82,86 @@ export function RoutingScreen(): React.JSX.Element {
       )}
 
       <div className="routes__workspace">
-        <section className="routes__panel routes__drafts" data-testid="routing-drafts">
-          <header className="routes__panel-header">
-            <h3>Черновики дня</h3>
+        <section className="routes__drafts" data-testid="routing-drafts">
+          {/*
+            Компактная шапка внутри панели списка.
+
+            День относится к черновикам, поэтому и стоит в их панели: отдельная
+            полоса фильтров над рабочим местом разрывала бы поверхность и
+            опускала список вместе с картой.
+          */}
+          <header className="routes__panel-head">
+            <span className="routes__panel-title">Черновики дня</span>
             <span className="muted text-sm">{drafts.length}</span>
+            <TextInput
+              type="date"
+              aria-label="День"
+              value={day}
+              data-testid="routing-day"
+              onChange={(event) => setDay(event.target.value)}
+            />
           </header>
 
-          {routes.isPending ? (
-            <LoadingState title="Загружаем черновики…" />
-          ) : routes.isError ? (
-            <ErrorState
-              title="Не удалось загрузить черновики"
-              onRetry={() => void routes.refetch()}
-            />
-          ) : drafts.length === 0 ? (
-            <EmptyState
-              title="Черновиков на этот день нет"
-              description="Черновики создаются в «Сделках»: выбором заказов вручную или автоматической разбивкой."
-            />
-          ) : (
-            <ul className="routes__draft-list">
-              {drafts.map((draft) => {
-                const expanded = draft.id === activeId;
-                return (
-                  <li
-                    key={draft.id}
-                    className={`routes__draft${expanded ? ' routes__draft--open' : ''}`}
-                    data-draft-number={draft.number}
-                    data-expanded={expanded ? 'true' : 'false'}
-                  >
-                    <button
-                      type="button"
-                      className="routes__draft-head routes__number-button"
-                      aria-expanded={expanded}
-                      // Повторное нажатие сворачивает: раскрытым остаётся
-                      // ровно один черновик или ни одного.
-                      onClick={() => setDraftId(expanded ? null : draft.id)}
+          {/* Прокручивается только середина: шапка и действия остаются на месте. */}
+          <div className="routes__drafts-body">
+            {routes.isPending ? (
+              <LoadingState title="Загружаем черновики…" />
+            ) : routes.isError ? (
+              <ErrorState
+                title="Не удалось загрузить черновики"
+                onRetry={() => void routes.refetch()}
+              />
+            ) : drafts.length === 0 ? (
+              <EmptyState
+                title="Черновиков на этот день нет"
+                description="Черновики создаются в «Сделках»: выбором заказов вручную или автоматической разбивкой."
+              />
+            ) : (
+              <ul className="routes__draft-list">
+                {drafts.map((draft) => {
+                  const expanded = draft.id === activeId;
+                  return (
+                    <li
+                      key={draft.id}
+                      className={`routes__draft${expanded ? ' routes__draft--open' : ''}`}
+                      data-draft-number={draft.number}
+                      data-expanded={expanded ? 'true' : 'false'}
                     >
-                      <span className="routes__number">{draft.number}</span>
-                      <StatusBadge tone="info">{ROUTE_STATE_LABELS[draft.state]}</StatusBadge>
-                      <span className="muted text-sm">
-                        {VEHICLE_LABELS[draft.vehicleType]} · заказов: {draft.orderCount}
-                        {draft.conflictCount > 0 ? ` · расхождений: ${draft.conflictCount}` : ''}
-                      </span>
-                      <span className="muted text-sm">
-                        Курьер: {draft.courier?.fullName ?? 'не назначен'}
-                      </span>
-                    </button>
+                      <button
+                        type="button"
+                        className="routes__draft-head routes__number-button"
+                        aria-expanded={expanded}
+                        // Повторное нажатие сворачивает: раскрытым остаётся
+                        // ровно один черновик или ни одного.
+                        onClick={() => setDraftId(expanded ? null : draft.id)}
+                      >
+                        <span className="routes__number">{draft.number}</span>
+                        <StatusBadge tone="info">{ROUTE_STATE_LABELS[draft.state]}</StatusBadge>
+                        <span className="muted text-sm">
+                          {VEHICLE_LABELS[draft.vehicleType]} · заказов: {draft.orderCount}
+                          {draft.conflictCount > 0 ? ` · расхождений: ${draft.conflictCount}` : ''}
+                        </span>
+                        <span className="muted text-sm">
+                          Курьер: {draft.courier?.fullName ?? 'не назначен'}
+                        </span>
+                      </button>
 
-                    {expanded && (
-                      <RouteCard
-                        routeId={draft.id}
-                        embedded
-                        onClose={() => setDraftId(null)}
-                        // Подтверждённый черновик перестаёт быть черновиком
-                        // и обязан исчезнуть отсюда, а не остаться раскрытым.
-                        onConfirmed={() => setDraftId(null)}
-                      />
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+                      {expanded && (
+                        <RouteCard
+                          routeId={draft.id}
+                          embedded
+                          onClose={() => setDraftId(null)}
+                          // Подтверждённый черновик перестаёт быть черновиком
+                          // и обязан исчезнуть отсюда, а не остаться раскрытым.
+                          onConfirmed={() => setDraftId(null)}
+                        />
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
 
           <div className="routes__panel-actions">
             <Button onClick={() => void routes.refetch()}>Обновить список</Button>

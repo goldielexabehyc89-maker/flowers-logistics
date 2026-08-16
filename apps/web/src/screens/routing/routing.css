@@ -71,12 +71,25 @@
     grid-template-columns: clamp(360px, 27%, 440px) minmax(0, 1fr);
     align-items: stretch;
     flex: 1 1 auto;
+    /*
+     * Одна цельная поверхность из двух соединённых панелей — ровно та же, что
+     * в «Сделках»: общая внешняя граница, единственный разделитель посередине
+     * и никакого зазора. Логист ходит между вкладками десятки раз за смену,
+     * и разная геометрия одной работы каждый раз сбивала бы глаз.
+     */
+    gap: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-3, 12px);
+    overflow: hidden;
+    background: var(--color-surface);
   }
 
+  /* Единственная граница между списком и картой. */
   .routes__drafts {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
+    border-right: 1px solid var(--color-border);
+  }
+
+  .routes__drafts-body {
     overflow-y: auto;
   }
 
@@ -99,17 +112,6 @@
     min-height: 32px;
     height: 32px;
     padding: 0 10px;
-  }
-}
-
-.routes__map-panel {
-  position: sticky;
-  top: var(--space-3);
-}
-
-@media (max-width: 1100px) {
-  .routes__map-panel {
-    position: static;
   }
 }
 
@@ -790,4 +792,134 @@
 
 .sheets__order-state {
   color: var(--log-status-ok);
+}
+
+/*
+ * Панель черновиков внутри общей поверхности.
+ *
+ * Своей рамки и фона у неё нет: рамка одна на всё рабочее место. Шапка
+ * и действия закреплены, прокручивается только список.
+ */
+.routes__drafts {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.routes__drafts-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px 6px;
+}
+
+.routes__panel-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--log-border-soft);
+}
+
+.routes__panel-title {
+  font-size: var(--log-font-md);
+  font-weight: 600;
+}
+
+.routes__panel-head input[type='date'] {
+  width: 150px;
+  height: 30px;
+  min-height: 30px;
+  margin-left: auto;
+}
+
+.routes__drafts .routes__panel-actions {
+  padding: 6px 8px;
+  border-top: 1px solid var(--log-border-soft);
+}
+
+/* Компактная строка черновика: свёрнутый занимает ровно одну строку. */
+.routes__draft-list {
+  gap: 3px;
+}
+
+.routes__draft {
+  border-color: var(--log-border-soft);
+  border-radius: var(--log-radius-md);
+}
+
+.routes__draft:hover {
+  border-color: var(--log-selected-text);
+}
+
+.routes__draft-head {
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 6px;
+  font-size: var(--log-font-sm);
+  line-height: 1.3;
+}
+
+/* Значок состояния внутри строки — метка, а не отдельный блок. */
+.routes__draft-head .badge {
+  padding: 0 6px;
+  font-size: var(--log-font-xs);
+  line-height: 18px;
+}
+
+.routes__draft-head > .muted {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routes__draft--open .routes__draft-head {
+  border-bottom: 1px solid var(--log-border-soft);
+  background: var(--log-surface-soft);
+}
+
+/* Панель карты: полотно во всю панель, служебная строка — поверх него. */
+.routes__map-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.routes__map-surface {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.routes__map-surface .map-surface,
+.routes__map-surface .routes__map {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.routes__map-overlay {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  max-width: calc(100% - 16px);
+  padding: 5px 9px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-md);
+  background: var(--log-surface);
+  box-shadow: var(--log-shadow-popover);
+  font-size: var(--log-font-sm);
+}
+
+.routes__map-hint {
+  padding: 6px 8px;
 }
