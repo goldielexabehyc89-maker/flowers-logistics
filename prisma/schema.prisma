@@ -134,20 +134,25 @@ model User {
   createdStorageCells StorageCell[] @relation("StorageCellCreatedBy")
   changedStorageCells StorageCell[] @relation("StorageCellChangedBy")
 
-  placedOrders      OrderPlacement[]   @relation("PlacementPlacedBy")
-  releasedOrders    OrderPlacement[]   @relation("PlacementReleasedBy")
-  boundRouteCells   RouteCellBinding[] @relation("RouteCellBoundBy")
-  unboundRouteCells RouteCellBinding[] @relation("RouteCellReleasedBy")
-  issuedRoutes      RouteIssueSession[] @relation("IssueSessionCourier")
-  pickupIssues      OrderPickupIssue[]  @relation("PickupIssuedBy")
-  confirmedIssues   RouteIssueSession[] @relation("IssueSessionConfirmedBy")
-  cancelledIssues   RouteIssueSession[] @relation("IssueSessionCancelledBy")
-
-  @@index([status])
-  @@index([createdAt])
+  placedOrders          OrderPlacement[]              @relation("PlacementPlacedBy")
+  releasedOrders        OrderPlacement[]              @relation("PlacementReleasedBy")
+  boundRouteCells       RouteCellBinding[]            @relation("RouteCellBoundBy")
+  unboundRouteCells     RouteCellBinding[]            @relation("RouteCellReleasedBy")
+  issuedRoutes          RouteIssueSession[]           @relation("IssueSessionCourier")
+  pickupIssues          OrderPickupIssue[]            @relation("PickupIssuedBy")
+  confirmedIssues       RouteIssueSession[]           @relation("IssueSessionConfirmedBy")
+  cancelledIssues       RouteIssueSession[]           @relation("IssueSessionCancelledBy")
   deliveryAttempts      DeliveryAttempt[]             @relation("DeliveryAttemptCourier")
   deliveryCancellations DeliveryAttemptCancellation[] @relation("DeliveryCancelActor")
   deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
+
+  createdTariffs     CourierTariffVersion[] @relation("TariffAuthor")
+  ledgerEntries      CourierLedgerEntry[]   @relation("LedgerCourier")
+  ledgerOperations   CourierLedgerEntry[]   @relation("LedgerActor")
+  correctedDistances RouteOrderDistance[]   @relation("DistanceActor")
+
+  @@index([status])
+  @@index([createdAt])
 }
 
 /// Роли пользователя (many-to-many без отдельной таблицы ролей: набор ролей фиксирован).
@@ -540,7 +545,7 @@ model DeliveryOrder {
   /// Этим полем владеет синхронизация МоегоСклада. Локальная правка его НЕ
   /// перезаписывает: иначе следующий проход синхронизации молча вернул бы
   /// прежнее значение, а логист не узнал бы, что его работа исчезла.
-  address   String?
+  address String?
 
   /// Строка запроса к геокодеру, собранная из разобранного адреса источника.
   ///
@@ -558,7 +563,7 @@ model DeliveryOrder {
   /// отправки в МойСклад ещё нет, и делать вид, что она произошла, нельзя —
   /// поэтому исходное поле остаётся нетронутым (`docs/OWNER_DECISIONS.md`,
   /// `LOG-001`).
-  localAddress String?
+  localAddress        String?
   /// Кто и когда исправил. Заполняются только вместе с самим адресом:
   /// «адрес есть, автора нет» — состояние, которого не должно существовать.
   localAddressSetAt   DateTime?
@@ -582,9 +587,9 @@ model DeliveryOrder {
   /// Неизменяемая история локального адреса и разрешения конфликтов.
   addressHistory OrderAddressHistory[]
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
-  recipient String?
+  recipient      String?
   /// Только «Комментарий по доставке». Необязателен.
-  comment   String?
+  comment        String?
 
   paymentTypeId   String? @db.Uuid
   paymentTypeName String?
@@ -603,7 +608,7 @@ model DeliveryOrder {
   /// способ получения «Доставка» и не архивирован. Смысл поля не менялся —
   /// на него по-прежнему опираются экраны логиста, маршрутизация, планирование,
   /// конфликты и геокодирование.
-  inScope         Boolean               @default(true)
+  inScope            Boolean               @default(true)
   /// Относится ли заказ к ПРОИЗВОДСТВЕННОЙ области: утверждённый склад и заказ
   /// не архивирован, **независимо от способа получения**. Самовывоз, другое
   /// значение и незаполненный способ сюда входят (`docs/OWNER_DECISIONS.md`,
@@ -618,12 +623,12 @@ model DeliveryOrder {
   /// строку, а ограничение с тем же именем фиксирует само правило. Это нужно
   /// для отката: код прежней версии колонки не знает и записал бы `false`
   /// рядом с `inScope = true`.
-  fulfillmentInScope Boolean            @default(false)
-  scopeExitReason OrderScopeExitReason?
-  scopeExitedAt   DateTime?
-  sourceArchived  Boolean               @default(false)
+  fulfillmentInScope Boolean               @default(false)
+  scopeExitReason    OrderScopeExitReason?
+  scopeExitedAt      DateTime?
+  sourceArchived     Boolean               @default(false)
   /// Источник не найден контрольной сверкой: физическое удаление опросом не видно.
-  sourceMissing   Boolean               @default(false)
+  sourceMissing      Boolean               @default(false)
 
   needsAttention   Boolean                @default(false)
   attentionReasons OrderAttentionReason[]
@@ -723,17 +728,17 @@ model DeliveryOrder {
   fulfillmentProcessVersion Int                          @default(0)
 
   /// Единственный флорист, за которым закреплён заказ.
-  fulfillmentAssigneeId String? @db.Uuid
-  fulfillmentAssignee   User?   @relation("OrderFulfillmentAssignee", fields: [fulfillmentAssigneeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fulfillmentAssigneeId String?       @db.Uuid
+  fulfillmentAssignee   User?         @relation("OrderFulfillmentAssignee", fields: [fulfillmentAssigneeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   fulfillmentAssignedAt DateTime?
   /// Смена, в которой заказ взят. Нужна принудительному завершению смены:
   /// оно обязано найти незакрытые назначения, а не потерять их.
   fulfillmentShiftId    String?       @db.Uuid
   fulfillmentShift      FloristShift? @relation("OrderFulfillmentShift", fields: [fulfillmentShiftId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  fulfillmentAssembledAt   DateTime?
-  fulfillmentAssembledById String?   @db.Uuid
-  fulfillmentAssembledBy   User?     @relation("OrderFulfillmentAssembledBy", fields: [fulfillmentAssembledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fulfillmentAssembledAt         DateTime?
+  fulfillmentAssembledById       String?                   @db.Uuid
+  fulfillmentAssembledBy         User?                     @relation("OrderFulfillmentAssembledBy", fields: [fulfillmentAssembledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
   /// Ревизия состава, по которой заказ фактически собран. По ней же построен
   /// печатный бланк, и она же сравнивается при последующих изменениях.
   fulfillmentAssembledRevisionId String?                   @db.Uuid
@@ -940,7 +945,7 @@ model OrderFulfillmentRevision {
   reason        OrderFulfillmentRevisionReason
 
   printForms    OrderPrintForm[]
-  assembledFrom DeliveryOrder[] @relation("OrderAssembledRevision")
+  assembledFrom DeliveryOrder[]  @relation("OrderAssembledRevision")
 
   @@index([orderId, receivedAt])
   @@index([orderId, snapshotHash])
@@ -1058,7 +1063,7 @@ model OrderPrintJob {
   printFormId String         @db.Uuid
   printForm   OrderPrintForm @relation(fields: [printFormId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  state PrintJobState @default(PENDING)
+  state   PrintJobState @default(PENDING)
   /// Номер попытки для заказа, начиная с 1.
   attempt Int
 
@@ -1239,11 +1244,13 @@ model DeliveryRoute {
   editLease     RouteEditLease?
   cellBindings  RouteCellBinding[]
   issueSessions RouteIssueSession[]
+  attempts      DeliveryAttempt[]      @relation("DeliveryAttemptRoute")
+
+  tariffSnapshot RouteTariffSnapshot?
 
   @@index([deliveryDate, state])
   @@index([courierUserId])
   @@index([planRunId])
-  attempts DeliveryAttempt[] @relation("DeliveryAttemptRoute")
 }
 
 /// Участие заказа в маршруте с историей.
@@ -1279,6 +1286,7 @@ model RouteOrder {
 
   conflicts RouteOrderConflict[]
   attempts  DeliveryAttempt[]
+  distances RouteOrderDistance[]
 
   @@index([routeId, position])
   @@index([orderId])
@@ -1701,8 +1709,8 @@ model OrderAddressHistory {
   occurredAt DateTime           @default(now())
 
   /// Прежнее и новое значения ЭФФЕКТИВНОГО адреса: именно его видит логист.
-  oldAddress String?
-  newAddress String?
+  oldAddress    String?
+  newAddress    String?
   /// Каким был исходный адрес МоегоСклада в этот момент.
   sourceAddress String?
 
@@ -1994,9 +2002,9 @@ model StorageCell {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  placements   OrderPlacement[]   @relation("PlacementCell")
-  movedInto    OrderPlacement[]   @relation("PlacementMovedToCell")
-  movedFrom    OrderPlacement[]   @relation("PlacementFromCell")
+  placements    OrderPlacement[]   @relation("PlacementCell")
+  movedInto     OrderPlacement[]   @relation("PlacementMovedToCell")
+  movedFrom     OrderPlacement[]   @relation("PlacementFromCell")
   routeBindings RouteCellBinding[]
   pickupIssues  OrderPickupIssue[] @relation("PickupIssueCell")
 
@@ -2211,11 +2219,11 @@ model DeliveryFailureReason {
   id String @id @default(uuid(7)) @db.Uuid
 
   /// Машинный код: `NO_ANSWER`, `OTHER` и так далее. Не меняется никогда.
-  code String @unique
+  code            String  @unique
   /// Человеческое название. Именно оно копируется снимком в историю.
-  name String
+  name            String
   /// Порядок показа курьеру.
-  ordinal Int
+  ordinal         Int
   /// Требует ли причина обязательного комментария. Истинно для «Другое».
   requiresComment Boolean @default(false)
   isActive        Boolean @default(true)
@@ -2270,7 +2278,7 @@ model DeliveryAttempt {
   /// Снимок названия причины на момент результата.
   reasonNameSnapshot String?
   /// Комментарий курьера. Обязателен для причины «Другое».
-  comment String?
+  comment            String?
 
   courierUserId String @db.Uuid
   courier       User   @relation("DeliveryAttemptCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
@@ -2282,6 +2290,7 @@ model DeliveryAttempt {
   activeKey String? @unique @db.Uuid
 
   cancellation DeliveryAttemptCancellation?
+  moneyFact    DeliveryMoneyFact?
 
   @@index([routeId, occurredAt])
   @@index([courierUserId, occurredAt])
@@ -2306,4 +2315,229 @@ model DeliveryAttemptCancellation {
   occurredAt DateTime @default(now())
 
   @@index([actorUserId, occurredAt])
+}
+
+// ---------------------------------------------------------------------------
+// Этап 7. Тарифы, финансовый учёт курьера и снимки, на которых он стоит.
+//
+// Все деньги — целые минорные единицы. Ни одна запись учёта не изменяется
+// и не удаляется: ошибка исправляется связанной обратной операцией с причиной.
+// ---------------------------------------------------------------------------
+
+/// Вид тарифной версии: обычный день или праздничный период.
+enum CourierTariffKind {
+  REGULAR
+  HOLIDAY
+}
+
+/**
+ * Версия тарифа курьера.
+ * Строки неизменяемы: ошибка исправляется НОВОЙ версией того же вида, а не
+ * правкой старой. Тариф выбирается по дате доставки, поэтому у праздничной
+ * версии есть обе границы, а у обычной верхняя может отсутствовать.
+ */
+model CourierTariffVersion {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  kind CourierTariffKind
+
+  /// Московские календарные дни. Верхняя граница включительна.
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+
+  /// Ставка за доставленный заказ и за километр за МКАД.
+  perOrderMinor BigInt
+  perKmMinor    BigInt
+
+  note String?
+
+  createdById String   @db.Uuid
+  createdBy   User     @relation("TariffAuthor", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdAt   DateTime @default(now())
+
+  routeSnapshots RouteTariffSnapshot[]
+
+  @@index([kind, effectiveFrom])
+  @@index([createdAt])
+}
+
+/**
+ * Тарифный снимок маршрута.
+ * Снимается один раз при подтверждении маршрута по его дате доставки.
+ * Последующее изменение тарифов подтверждённый маршрут не пересчитывает:
+ * начисления обязаны совпадать с тем, что человек видел при подтверждении.
+ */
+model RouteTariffSnapshot {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeId String        @unique @db.Uuid
+  route   DeliveryRoute @relation(fields: [routeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  tariffVersionId String               @db.Uuid
+  tariffVersion   CourierTariffVersion @relation(fields: [tariffVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Значения копируются, а не читаются по ссылке: версия тарифа может быть
+  /// вытеснена более поздней, а снимок обязан остаться прежним.
+  perOrderMinor BigInt
+  perKmMinor    BigInt
+  deliveryDate  DateTime @db.Date
+
+  capturedAt DateTime @default(now())
+}
+
+/**
+ * Версия геометрии МКАД.
+ * Расстояние за МКАД считается от ближайшей точки кольца, поэтому само кольцо
+ * версионируется и попадает в снимок расчёта: иначе завтрашняя правка геометрии
+ * молча изменила бы вчерашние начисления.
+ */
+model MkadRingVersion {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Замкнутое кольцо в микроградусах: [[lonMicro, latMicro], …].
+  points     Json
+  pointCount Int
+  sha256     String @unique
+  source     String
+
+  createdAt DateTime @default(now())
+
+  distances RouteOrderDistance[]
+
+  @@index([createdAt])
+}
+
+/// Откуда взято расстояние за МКАД.
+enum BeyondMkadSource {
+  COMPUTED
+  MANUAL
+}
+
+/**
+ * Расстояние заказа за МКАД.
+ * Записи только добавляются: ручная правка логиста не переписывает расчёт,
+ * а становится новой действующей строкой. Действующая — та, у которой заполнен
+ * `activeKey`; уникальность ключа не даёт появиться двум действующим сразу.
+ */
+model RouteOrderDistance {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  ringVersionId String          @db.Uuid
+  ringVersion   MkadRingVersion @relation(fields: [ringVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Граф маршрутизатора на момент расчёта: с другим графом длина другая.
+  graphSha256 String?
+
+  /// Дорожное расстояние в метрах и оно же в десятых долях километра —
+  /// округление выполняется один раз и хранится, а не повторяется при чтении.
+  meters          Int
+  roundedKmTenths Int
+  insideMkad      Boolean
+
+  source      BeyondMkadSource
+  actorUserId String?          @db.Uuid
+  actor       User?            @relation("DistanceActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reason      String?
+
+  activeKey String? @unique @db.Uuid
+
+  capturedAt DateTime @default(now())
+
+  @@index([routeOrderId, capturedAt])
+}
+
+/**
+ * Денежный факт доставки.
+ * Снимается в момент результата: сумма к получению живёт в заказе и
+ * перезаписывается импортом МоегоСклада, поэтому по самому заказу восстановить
+ * вчерашний факт нельзя.
+ */
+model DeliveryMoneyFact {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  attemptId String          @unique @db.Uuid
+  attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  orderId       String @db.Uuid
+  routeId       String @db.Uuid
+  courierUserId String @db.Uuid
+
+  cashCollectable    Boolean
+  cashToCollectMinor BigInt
+  paymentTypeId      String? @db.Uuid
+  paymentTypeName    String?
+
+  capturedAt DateTime @default(now())
+
+  @@index([courierUserId, capturedAt])
+  @@index([routeId])
+}
+
+/// Вид записи финансового учёта курьера.
+enum CourierLedgerKind {
+  CASH_RECEIVED
+  DELIVERY_FEE
+  DISTANCE_FEE
+  ATTEMPT_FEE
+  CASH_HANDED_TO_LOGIST
+  CASH_ISSUED_TO_COURIER
+  EXPENSE_PARKING
+  EXPENSE_TOLL
+  EXPENSE_TRANSIT
+  EXPENSE_REPAIR
+  EXPENSE_LOADING
+  EXPENSE_OTHER
+  BONUS
+  ADJUSTMENT
+}
+
+/**
+ * Запись финансового учёта курьера.
+ * Знак задан одним правилом: ПЛЮС увеличивает долг курьера компании, МИНУС
+ * уменьшает. Наличные, полученные курьером, и выдача ему денег идут в плюс;
+ * оплата работы, километры, расходы и сдача логисту — в минус. Баланс курьера
+ * накопительный и равен сумме всех его записей.
+ * Записи неизменяемы. Ошибка исправляется обратной записью, которая ссылается
+ * на исходную; одна исходная запись может быть отменена только один раз.
+ */
+model CourierLedgerEntry {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  courierUserId String @db.Uuid
+  courier       User   @relation("LedgerCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  kind        CourierLedgerKind
+  amountMinor BigInt
+
+  /// Московский день, к которому относится операция: период отчёта считается
+  /// по нему, а не по времени записи в базу.
+  operationDate DateTime @db.Date
+  occurredAt    DateTime @default(now())
+
+  actorUserId String @db.Uuid
+  actor       User   @relation("LedgerActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  reason  String?
+  comment String?
+
+  routeId   String? @db.Uuid
+  orderId   String? @db.Uuid
+  attemptId String? @db.Uuid
+
+  reversesEntryId String?             @unique @db.Uuid
+  reversesEntry   CourierLedgerEntry? @relation("LedgerReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reversedBy      CourierLedgerEntry? @relation("LedgerReversal")
+
+  /// Ключ идемпотентности: повтор запроса не создаёт вторую запись.
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([courierUserId, operationDate])
+  @@index([routeId])
+  @@index([orderId])
+  @@index([occurredAt])
 }

@@ -31,6 +31,8 @@ import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { moscowCalendarDate } from '@fl/shared';
+import { accrueDeliveryResult, reverseDeliveryAccruals } from '../finance/accrual.js';
+import { readLedgerActivation } from '../finance/tariffs.js';
 
 /** Кто работает с доставкой. Курьер сообщает результат, остальные — наблюдают и правят. */
 export const DELIVERY_ROLES = ['ADMIN', 'LOGISTICIAN', 'COURIER'] as const;
@@ -514,6 +516,23 @@ export async function recordDeliveryResult(
       audienceRoles: [...DELIVERY_AUDIENCE],
     });
 
+    /*
+     * Денежный факт и начисления.
+     *
+     * Здесь же, в той самой транзакции, что и результат: иначе между записью
+     * доставки и начислением остаётся окно, в котором сумма заказа успевает
+     * измениться синхронизацией, и в учёт попадёт не то, что получил курьер.
+     */
+    await accrueDeliveryResult(tx, await readLedgerActivation(tx as unknown as Database), {
+      attemptId: created.id,
+      routeOrderId,
+      routeId: route.id,
+      orderId: participation.orderId,
+      courierUserId: actor.userId,
+      actorUserId: actor.userId,
+      outcome: created.outcome,
+    });
+
     const remaining = await remainingOrders(tx, route.id);
     const completed = remaining === 0;
 
@@ -731,6 +750,20 @@ export async function cancelDeliveryResult(
     // Снимается только технический ключ: содержимое попытки остаётся прежним,
     // и триггер базы это подтверждает.
     await tx.deliveryAttempt.update({ where: { id: attemptId }, data: { activeKey: null } });
+
+    /*
+     * Деньги отменённой доставки.
+     *
+     * Начисления не удаляются: у каждого появляется связанная обратная запись
+     * с причиной. По учёту видно и то, что деньги начислялись, и то, почему
+     * их сняли — это и есть требование неизменяемости.
+     */
+    await reverseDeliveryAccruals(tx, {
+      attemptId,
+      actorUserId: actor.userId,
+      reason: reason ?? 'Отмена результата доставки',
+      operationDate: moscowCalendarDate(now),
+    });
 
     const route = await tx.deliveryRoute.findUnique({
       where: { id: attempt.routeId },

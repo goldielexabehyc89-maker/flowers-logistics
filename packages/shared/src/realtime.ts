@@ -80,6 +80,10 @@ export const REALTIME_TOPICS = [
   // Выдача самовывоза (этап 6.7). Адресуется ADMIN и MANAGER. В payload
   // только идентификатор заказа: номер, ячейка и получатель туда не уходят.
   'pickup.issued',
+  // Финансовый учёт (этап 7). Адресуется ADMIN и LOGISTICIAN. В payload —
+  // ТОЛЬКО операционный день: ни сумм, ни курьера, ни вида операции. Экрану
+  // достаточно узнать, что учёт изменился, и перечитать отчёт своим запросом.
+  'finance.ledger_changed',
   'integration.status_changed',
   'outbox.message_failed',
 ] as const;
