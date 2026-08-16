@@ -249,12 +249,15 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
           поверхность на разрозненные ряды. Карта — фон всей правой панели,
           а её контролы плавают над ней.
         */}
-        <div className="deals-map__overlay deals-map__overlay--top">
-          <div className="deals-map__controls">
-            {/*
-          Счётчик и его пояснения занимают постоянное место: иначе поля времени
-          и кнопка группировки прыгали бы при каждом фоновом обновлении.
+        {/*
+          Управление картой двумя плавающими строками.
+
+          Сверху — что показано: счётчик и легенда. Ниже — чем это менять:
+          время и группировка. Обе строки лежат ПОВЕРХ холста и высоту у карты
+          не отнимают.
         */}
+        <div className="deals-map__overlay deals-map__overlay--top">
+          <div className="deals-map__panel deals-map__panel--info">
             <span className="deals-map__head-count" data-testid="deals-map-head-count">
               На карте: {points.length}
               {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
@@ -265,7 +268,33 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
                 </span>
               )}
             </span>
+          </div>
 
+          <ul className="deals-map__legend" data-testid="deals-map-legend">
+            <li>
+              <span className="deals-map__dot deals-map__dot--free" /> доступен
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером порядка
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--assembled" /> собран, с галочкой
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--depot" /> основной склад
+            </li>
+          </ul>
+        </div>
+
+        <div className="deals-map__overlay deals-map__overlay--controls">
+          <div className="deals-map__panel deals-map__panel--controls">
+            {/*
+          Счётчик и его пояснения занимают постоянное место: иначе поля времени
+          и кнопка группировки прыгали бы при каждом фоновом обновлении.
+        */}
             {/*
           Два простых поля времени. Ничего не пересчитывают и никуда
           не отправляются: только сужают то, что показано на карте.
@@ -307,23 +336,6 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
         различаются и цветом, и формой — одного цвета мало тому, кто его
         не различает.
       */}
-          <ul className="deals-map__legend" data-testid="deals-map-legend">
-            <li>
-              <span className="deals-map__dot deals-map__dot--free" /> доступен
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--picked" /> выбран, с номером порядка
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--draft" /> в черновике, только чтение
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--assembled" /> собран, с галочкой
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--depot" /> основной склад
-            </li>
-          </ul>
         </div>
 
         {styleUrl === '' ? (

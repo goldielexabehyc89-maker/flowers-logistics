@@ -468,7 +468,14 @@
   right: 56px;
 }
 
-.deals-map__controls,
+/* Вторая строка: чем менять показанное. Стоит под первой, тоже поверх холста. */
+.deals-map__overlay--controls {
+  top: 84px;
+  left: 8px;
+  right: 56px;
+}
+
+.deals-map__panel,
 .deals-map__legend {
   pointer-events: auto;
   display: flex;
@@ -805,4 +812,73 @@
   margin: 4px 0 0;
   font-size: 13px;
   color: var(--warning-text, #8a5a00);
+}
+
+/* --- Диалог создания маршрута ---------------------------------------------- */
+
+/*
+ * Состав будущего маршрута.
+ *
+ * Нумерация рисуется кружком, поэтому собственная нумерация списка не нужна:
+ * вместе они читались как «1. 1 заказ…».
+ */
+.create-route__orders {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.create-route__order {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--log-border-hairline);
+  font-size: var(--font-size-sm);
+}
+
+.create-route__position {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+  font-size: var(--log-font-2xs);
+  font-weight: 700;
+}
+
+.create-route__number {
+  flex: 0 0 auto;
+  color: var(--log-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+/* Адрес занимает остаток строки и обрезается: строка остаётся одной. */
+.create-route__address {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--log-text-muted);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.create-route__couriers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
 }

@@ -2690,6 +2690,11 @@ test('«Сделки» на большом экране: доли, своя пр
     expect(box.y).toBeGreaterThanOrEqual(leftBox.y - 1);
   }
 
+  // Сверху — что показано, ниже — чем это менять; обе строки поверх холста.
+  const infoRow = await boxOf('[data-testid="deals-map-head-count"]');
+  const controlRow = await boxOf('[data-testid="deals-map-from"]');
+  expect(infoRow.y).toBeLessThan(controlRow.y);
+
   // Контролы карты лежат ПОВЕРХ холста, а не полосой над ним.
   const canvas = await boxOf('[data-testid="deals-map-canvas"]');
   for (const selector of [
