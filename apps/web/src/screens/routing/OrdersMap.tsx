@@ -332,34 +332,57 @@ export function OrdersMap({
      * Ручная работа при этом не должна прекращаться (`ROUTE-003`): без линии
      * логист работает, без карты — нет.
      */
-    try {
-      const existing = map.getSource('route-line') as unknown as
-        { setData: (value: unknown) => void } | undefined;
-      if (existing === undefined || existing === null) {
-        map.addSource('route-line', { type: 'geojson', data });
+    const draw = (): void => {
+      try {
+        const existing = map.getSource('route-line') as unknown as
+          { setData: (value: unknown) => void } | undefined;
+        if (existing === undefined || existing === null) {
+          map.addSource('route-line', { type: 'geojson', data });
+          (map as unknown as { __routeLine?: unknown }).__routeLine = data.geometry.coordinates;
+          map.addLayer({
+            id: 'route-line',
+            type: 'line',
+            source: 'route-line',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#4f6ef7', 'line-width': 5, 'line-opacity': 0.85 },
+          });
+          return;
+        }
+        existing.setData(data);
+        /*
+         * Что именно нарисовано — записывается на самой карте.
+         *
+         * Отрисованные объекты видит только тот, кто попал в кадр, а описание
+         * источника возвращает данные его создания. Проверке нужен факт: вот
+         * линия, которую слой получил последней.
+         */
         (map as unknown as { __routeLine?: unknown }).__routeLine = data.geometry.coordinates;
-        map.addLayer({
-          id: 'route-line',
-          type: 'line',
-          source: 'route-line',
-          layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': '#4f6ef7', 'line-width': 5, 'line-opacity': 0.85 },
-        });
-        return;
+      } catch {
+        // Молча: причина отсутствия линии приходит с сервера и называется
+        // словами в панели, а не догадкой браузера.
       }
-      existing.setData(data);
-      /*
-       * Что именно нарисовано — записывается на самой карте.
-       *
-       * Отрисованные объекты видит только тот, кто попал в кадр, а описание
-       * источника возвращает данные его создания. Проверке нужен факт: вот
-       * линия, которую слой получил последней.
-       */
-      (map as unknown as { __routeLine?: unknown }).__routeLine = data.geometry.coordinates;
-    } catch {
-      // Молча: причина отсутствия линии приходит с сервера и называется
-      // словами в панели, а не догадкой браузера.
+    };
+
+    /*
+     * Слой добавляется только в ЗАГРУЖЕННЫЙ стиль.
+     *
+     * Карта считается доступной сразу после создания — маркеры стилю не нужны.
+     * Источник и слой нужны: в незагруженный стиль они не встают, и одна
+     * неудачная попытка раньше означала, что линии не будет уже никогда —
+     * зависимости эффекта больше не менялись. Поэтому неудача не проглатывается,
+     * а откладывается до готовности стиля.
+     */
+    if (map.isStyleLoaded()) {
+      draw();
+      return;
     }
+
+    map.on('styledata', draw);
+    map.on('load', draw);
+    return () => {
+      map.off('styledata', draw);
+      map.off('load', draw);
+    };
   }, [line, mapReady]);
 
   /*

@@ -183,14 +183,6 @@ async function openDraft(page: Page, number: string): Promise<void> {
   await expect(draft).toHaveAttribute('data-expanded', 'true');
 }
 
-async function selectRouteByNumber(select: Locator, number: string): Promise<void> {
-  const option = select.locator(`option:has-text("${number}")`);
-  await expect(option).toHaveCount(1);
-  const value = await option.getAttribute('value');
-  expect(value, `в списке нет маршрута ${number}`).not.toBeNull();
-  await select.selectOption(value ?? '');
-}
-
 /**
  * Нажимает кнопку и дожидается ОТВЕТА на конкретную мутацию.
  *
@@ -794,7 +786,14 @@ test('маршрут: черновик → состав → порядок → �
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
-  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  /*
+   * Номер берётся из строки списка, которая карточку и раскрыла: собственного
+   * заголовка у карточки больше нет — он не повторяется дважды.
+   */
+  const routeNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
   expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
 
   const stops = card.locator('.routes__stop');
@@ -803,9 +802,9 @@ test('маршрут: черновик → состав → порядок → �
   // Раскрыт ровно один черновик.
   await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
 
-  // Порядок меняется кнопками: перетаскивание не требуется.
+  // Порядок меняется перетаскиванием: стрелок у остановок больше нет.
   await expect(stops.first()).toContainText(first);
-  await card.getByRole('button', { name: `Опустить заказ ${first}` }).click();
+  await stops.nth(0).dragTo(stops.nth(1));
   await expect(stops.first()).toContainText(second);
 
   /*
@@ -830,36 +829,56 @@ test('маршрут: черновик → состав → порядок → �
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
   await page.getByTestId('create-route-draft').click();
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
-  const secondCardNumber = (
-    await page.locator('.routes__card').getByRole('heading').innerText()
-  ).replace(/[^R\d-]/g, '');
+  const secondCardNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
+  expect(secondCardNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
 
-  // Перенос из списка: аренда обоих черновиков берётся клиентом.
-  // В первом черновике два собственных заказа, во втором — один.
+  /*
+   * Перенос делается окном заказа на карте.
+   *
+   * Групповых кнопок в составе больше нет: логист нажимает точку и видит,
+   * куда именно уезжает заказ. Операция та же самая — `POST /routes/move`
+   * с арендой обоих черновиков.
+   */
   await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
-  await card.getByLabel(`Выбрать заказ ${first}`).check();
-  await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), secondCardNumber);
+  /*
+   * Нажатие отправляется САМОЙ отметке, а не в точку экрана.
+   *
+   * Сеялка ставит проверочным заказам один и тот же адрес, и отметки лежат
+   * ровно друг на друге: обычное нажатие досталось бы верхней, и сценарий
+   * молча двигал бы не тот заказ. У настоящих заказов адреса разные.
+   */
+  await page.getByRole('button', { name: `Заказ ${first} на карте` }).dispatchEvent('click');
+  const window = page.getByTestId('map-selection');
+  await expect(window).toBeVisible();
   await clickAndAwait(
     page,
-    card.getByRole('button', { name: /Перенести/ }),
+    window.getByRole('button', { name: secondCardNumber }),
     'POST',
     '/routes/move',
   );
   // Заказ ушёл: перенос выполнен, а не отклонён блокировкой.
   await expect(card.locator('.routes__stop')).toHaveCount(1);
 
-  // Возвращаем заказ обратно, чтобы подтвердить маршрут полным составом.
+  /*
+   * Возврат и назначение — тем же окном.
+   *
+   * Крестик в окне снимает заказ с маршрута, а нераспределённая точка
+   * назначается в нужный черновик. Обе операции — существующие серверные.
+   */
   await openDraft(page, secondCardNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
-  await card.getByLabel(`Выбрать заказ ${first}`).check();
-  await selectRouteByNumber(card.getByLabel('Перенести в маршрут'), routeNumber);
-  await clickAndAwait(
-    page,
-    card.getByRole('button', { name: /Перенести/ }),
-    'POST',
-    '/routes/move',
-  );
+  await page.getByRole('button', { name: `Заказ ${first} на карте` }).dispatchEvent('click');
+  await clickAndAwait(page, window.getByTestId('map-order-remove'), 'POST', '/orders/return');
+  await expect(card.locator('.routes__stop')).toHaveCount(1);
+
+  await openDraft(page, routeNumber);
+  await page.getByTestId('map-unassigned-toggle').check();
+  await page.getByRole('button', { name: `Заказ ${first} на карте` }).click({ force: true });
+  await clickAndAwait(page, window.getByRole('button', { name: routeNumber }), 'POST', '/orders');
 
   await openDraft(page, routeNumber);
   await expect(card.locator('.routes__stop')).toHaveCount(2);
@@ -923,7 +942,12 @@ test('перехват блокировки переводит прежнего 
 
   const card = page.locator('.routes__card');
   await expect(card).toBeVisible();
-  const routeNumber = (await card.getByRole('heading').innerText()).replace(/[^R\d-]/g, '');
+  // Номер берётся из строки списка: собственного заголовка у карточки нет.
+  const routeNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
+  expect(routeNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
   await expect(card.getByRole('button', { name: 'Отменить маршрут' })).toBeEnabled();
 
   // Второй сеанс того же администратора — другое устройство, другая семья сессий.
@@ -2642,6 +2666,35 @@ test('«Сделки» на большом экране: доли, своя пр
   await expect(page.getByTestId('deals-total')).toContainText('Заказов: 40');
   await expect(page.getByTestId('deals-total')).toContainText('без координат: 3');
 
+  /*
+   * 5а. Вся поверхность карточки переключает выбор, а её кнопки — нет.
+   *
+   * Раньше попасть требовалось точно в кружок 18 px. Кнопки при этом обязаны
+   * остаться своими: нажатие на «Интервал» не должно выбирать заказ.
+   */
+  const clickable = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-5"]');
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+  await clickable.click({ position: { x: 200, y: 8 } });
+  await expect(clickable).toHaveAttribute('data-selected', '1');
+  await expect(clickable).toHaveAttribute('aria-pressed', 'true');
+
+  // Повторное нажатие по свободному месту снимает выбор.
+  await clickable.click({ position: { x: 200, y: 8 } });
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+
+  // Кнопка внутри карточки выбор не трогает.
+  await clickable.getByTestId('deal-edit-interval').click();
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+  await expect(clickable.getByTestId('deal-interval-form')).toBeVisible();
+  await clickable.getByRole('button', { name: 'Отмена' }).click();
+
+  // Клавиатура делает то же самое.
+  await clickable.focus();
+  await clickable.press('Enter');
+  await expect(clickable).toHaveAttribute('data-selected', '1');
+  await clickable.press('Enter');
+  await expect(clickable).toHaveAttribute('data-selected', 'no');
+
   // 6. Требующий внимания заказ: красный в списке, названа причина и действие.
   const attention = page.locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-1"]');
   await expect(attention).toHaveAttribute('data-attention', 'yes');
@@ -2689,6 +2742,11 @@ test('«Сделки» на большом экране: доли, своя пр
     expect(box.x + box.w).toBeLessThanOrEqual(leftEdge + 1);
     expect(box.y).toBeGreaterThanOrEqual(leftBox.y - 1);
   }
+
+  // Сверху — что показано, ниже — чем это менять; обе строки поверх холста.
+  const infoRow = await boxOf('[data-testid="deals-map-head-count"]');
+  const controlRow = await boxOf('[data-testid="deals-map-from"]');
+  expect(infoRow.y).toBeLessThan(controlRow.y);
 
   // Контролы карты лежат ПОВЕРХ холста, а не полосой над ним.
   const canvas = await boxOf('[data-testid="deals-map-canvas"]');
@@ -3151,17 +3209,52 @@ test('маршрутизация: линия идёт от склада и ме�
   await expect(stops).toHaveCount(2);
   const firstBefore = await stops.first().innerText();
 
-  // 4. Порядок меняется тем же атомарным сохранением, что и перетаскивание.
-  await page
-    .locator('.routes__card')
-    .getByRole('button', { name: `Опустить заказ ${first}` })
-    .click();
+  // 4. Порядок меняется перетаскиванием — той же атомарной операцией.
+  await stops.nth(0).dragTo(stops.nth(1));
   await expect(stops.first()).toContainText(second ?? '');
 
   // 5. Линия догоняет новый порядок: иначе карта показывала бы прежний
   //    маршрут как действующий.
   await expect.poll(async () => (await drawnLine()) !== before, { timeout: 45_000 }).toBe(true);
   expect(firstBefore).not.toBe(await stops.first().innerText());
+
+  /*
+   * 6. Одна цельная рабочая поверхность, как в «Сделках».
+   *
+   * Проверяется геометрия, а не наличие классов: панели начинаются от общей
+   * верхней линии, между ними нет зазора, карта занимает всю высоту своей
+   * половины, а служебная строка лежит внутри полотна, а не над ним.
+   */
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const [list, mapPanel, surface, overlay] = await Promise.all([
+    page.getByTestId('routing-drafts').boundingBox(),
+    page.getByTestId('routing-map-panel').boundingBox(),
+    page.getByTestId('routing-map-surface').boundingBox(),
+    page.locator('.routes__map-overlay').boundingBox(),
+  ]);
+
+  expect(Math.abs((list?.y ?? 0) - (mapPanel?.y ?? -1))).toBeLessThanOrEqual(1);
+  expect(Math.abs((list?.height ?? 0) - (mapPanel?.height ?? -1))).toBeLessThanOrEqual(1);
+  // Зазора между половинами нет: правая начинается там, где кончилась левая.
+  expect(Math.abs((list?.x ?? 0) + (list?.width ?? 0) - (mapPanel?.x ?? -1))).toBeLessThanOrEqual(
+    1,
+  );
+  expect(list?.width ?? 0).toBeGreaterThanOrEqual(360);
+  expect(list?.width ?? 0).toBeLessThanOrEqual(440);
+
+  expect(surface?.height ?? 0).toBeGreaterThan(400);
+  expect((surface?.y ?? 0) + (surface?.height ?? 0)).toBeLessThanOrEqual(901);
+  expect(overlay?.y ?? 0).toBeGreaterThanOrEqual(surface?.y ?? 0);
+  expect((overlay?.y ?? 0) + (overlay?.height ?? 0)).toBeLessThanOrEqual(
+    (surface?.y ?? 0) + (surface?.height ?? 0),
+  );
+
+  // 7. Свёрнутый черновик — одна строка без скрытого пустого тела.
+  await page.locator('.routes__draft[data-expanded="true"] .routes__draft-head').click();
+  const collapsed = page.locator('.routes__draft[data-expanded="false"]').first();
+  await expect(collapsed).toBeVisible();
+  await expect(collapsed.locator('.routes__card')).toHaveCount(0);
+  expect((await collapsed.boundingBox())?.height ?? 0).toBeLessThanOrEqual(48);
 });
 
 /**
@@ -3215,8 +3308,43 @@ test('маршрутные листы: разделы, курьер, ручна�
   const unshipped = page.getByTestId('sheets-UNSHIPPED');
   const sheet = unshipped.locator('[data-testid="sheet-row"]').first();
   await expect(sheet).toBeVisible();
-  await expect(sheet.getByTestId('sheet-courier')).toContainText('не назначен');
+  /*
+   * Курьер не назначен — поле комбобокса пусто и подсказывает это плейсхолдером;
+   * текста внутри узла у поля ввода нет, проверяется именно значение.
+   */
+  await expect(sheet.getByTestId('sheet-courier-combobox-field')).toHaveValue('');
   await expect(sheet.getByTestId('sheet-ship')).toBeDisabled();
+
+  /*
+   * 3а. Свёрнутый лист не прячет пустое тело, а раскрытый показывает состав.
+   *
+   * Проверяется именно наш заказ: без этого «какие заказы внутри» оставалось бы
+   * вопросом, ответ на который есть только в печатной форме.
+   */
+  await expect(sheet).toHaveAttribute('data-expanded', 'false');
+  await expect(sheet.getByTestId('sheet-orders')).toHaveCount(0);
+  await sheet.getByTestId('sheet-expand').click();
+  await expect(sheet.getByTestId('sheet-orders')).toBeVisible();
+  await expect(sheet.locator(`[data-order-number="${own}"]`)).toBeVisible();
+
+  /*
+   * 3б. Номер заказа открывает окно со всей информацией.
+   *
+   * Проверяется и то, что деньги показаны только для чтения: их правит
+   * МойСклад, и кнопки изменения у них быть не должно.
+   */
+  await sheet.locator(`[data-order-number="${own}"]`).getByTestId('order-number').click();
+  const orderWindow = page.getByTestId('order-window');
+  await expect(orderWindow).toBeVisible();
+  await expect(orderWindow).toContainText('Сумма');
+  await expect(orderWindow).toContainText('меняется в МоёмСкладе');
+  await expect(orderWindow.getByTestId('order-window-address')).toBeVisible();
+  await expect(orderWindow.getByTestId('order-window-interval')).toBeVisible();
+  await page.getByRole('button', { name: 'Закрыть' }).first().click();
+  await expect(orderWindow).toHaveCount(0);
+
+  await sheet.getByTestId('sheet-expand').click();
+  await expect(sheet.getByTestId('sheet-orders')).toHaveCount(0);
 
   /*
    * 4. Курьер назначается прямо в листе.
@@ -3225,11 +3353,11 @@ test('маршрутные листы: разделы, курьер, ручна�
    * своего, и жёсткая привязка к конкретному телефону доказывала бы лишь
    * порядок сценариев.
    */
-  await sheet.getByTestId('sheet-courier-edit').click();
-  const options = sheet.getByTestId('sheet-courier-option');
+  await sheet.getByTestId('sheet-courier-combobox-field').click();
+  const options = sheet.getByTestId('sheet-courier-combobox-option');
   await expect(options.first()).toBeVisible();
   await options.first().click();
-  await expect(sheet.getByTestId('sheet-courier')).not.toContainText('не назначен');
+  await expect(sheet.getByTestId('sheet-courier-combobox-field')).not.toHaveValue('');
 
   // 5. После назначения ручная отгрузка проходит.
   await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
@@ -3266,4 +3394,74 @@ test('маршрутные листы: разделы, курьер, ручна�
     return root.scrollWidth - root.clientWidth;
   });
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+/**
+ * Выбор курьера: один контрол на всех вкладках.
+ *
+ * Проверяется поведение, а не оформление: поле открывает список, ввод его
+ * сужает, выбор закрывает, Escape закрывает без изменения, клик снаружи тоже
+ * закрывает, а список не растягивает карточку.
+ */
+test('выбор курьера: открытие полем, фильтрация вводом, Escape и клик снаружи', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
+  await ensureCourier(page.context().browser() as Browser);
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+
+  const field = page.getByTestId('create-route-courier-field');
+  const list = page.getByTestId('create-route-courier-list');
+
+  // 1. Список закрыт, пока в поле не нажали.
+  await expect(list).toHaveCount(0);
+
+  // 2. Нажатие в поле открывает список, а первой строкой идёт «не назначен».
+  await field.click();
+  await expect(list).toBeVisible();
+  await expect(page.getByTestId('create-route-courier-clear')).toBeVisible();
+  const total = await page.getByTestId('create-route-courier-option').count();
+  expect(total).toBeGreaterThan(0);
+
+  // 3. Ввод сужает список, не закрывая его.
+  await field.fill('Курьер');
+  await expect(list).toBeVisible();
+  const filtered = await page.getByTestId('create-route-courier-option').count();
+  expect(filtered).toBeLessThanOrEqual(total);
+
+  // 4. Заведомо несуществующий запрос оставляет честное сообщение.
+  await field.fill('такого курьера нет');
+  await expect(page.getByTestId('create-route-courier-nothing')).toBeVisible();
+
+  // 5. Escape закрывает и НИЧЕГО не выбирает.
+  await field.press('Escape');
+  await expect(list).toHaveCount(0);
+  // Ничего не выбрано: поле пусто, а значит назначения нет.
+  await expect(field).toHaveValue('');
+
+  // 6. Выбор строки закрывает список и подставляет курьера в поле.
+  await field.click();
+  await page.getByTestId('create-route-courier-option').first().click();
+  await expect(list).toHaveCount(0);
+  await expect(field).not.toHaveValue('');
+
+  // 7. Клик вне списка закрывает его.
+  await field.click();
+  await expect(list).toBeVisible();
+  await page.getByTestId('create-route-count').click();
+  await expect(list).toHaveCount(0);
 });

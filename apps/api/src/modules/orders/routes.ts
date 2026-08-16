@@ -177,6 +177,8 @@ function toListItem(order: {
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
   address: string | null;
+  localAddress: string | null;
+  addressConflict: boolean;
   recipient: string | null;
   comment: string | null;
   externalStateId: string | null;
@@ -216,7 +218,13 @@ function toListItem(order: {
       manualStartMinute: order.manualIntervalStartMinute,
       manualEndMinute: order.manualIntervalEndMinute,
     },
-    address: order.address,
+    // Рабочий адрес — тот, по которому поедет курьер: исправленный, если он
+    // есть, иначе адрес источника. Оба значения отдаются рядом: решение
+    // о правке принимается именно их сравнением.
+    address: addressState(order).effective,
+    sourceAddress: addressState(order).source,
+    addressCorrected: addressState(order).corrected,
+    addressConflict: addressState(order).conflict,
     recipient: order.recipient,
     comment: order.comment,
     externalState: {

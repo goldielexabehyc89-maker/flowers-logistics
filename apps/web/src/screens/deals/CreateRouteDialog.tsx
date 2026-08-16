@@ -12,8 +12,9 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
-import { Button, Field, Modal, TextInput } from '../../ui/components';
-import { courierIdFor, courierLabel, filterCouriers, type CourierOption } from './courier-picker';
+import { Button, Field, Modal } from '../../ui/components';
+import { CourierCombobox } from '../logistics/CourierCombobox';
+import { courierIdFor, type CourierOption } from './courier-picker';
 import type { DealCard } from './selection';
 
 export interface CreateRouteDialogProps {
@@ -34,9 +35,7 @@ export function CreateRouteDialog({
   onCreate,
 }: CreateRouteDialogProps): React.JSX.Element {
   const { client } = useAuth();
-  const [query, setQuery] = useState('');
   const [courier, setCourier] = useState<CourierOption | null>(null);
-  const [listOpen, setListOpen] = useState(false);
 
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
@@ -44,18 +43,48 @@ export function CreateRouteDialog({
       client.get<{ items: CourierOption[] }>('/api/users?role=COURIER&status=ACTIVE&limit=100'),
   });
 
-  const options = filterCouriers(couriers.data?.items ?? [], query);
-
   /*
    * Состав будущего маршрута.
    *
    * Выбор мог захватить заказы со страниц, которые ещё не загружены: о них
    * честно говорится числом, а не показывается пустая строка.
    */
-  const cards = useMemo(() => {
-    const byId = new Map(known.map((card) => [card.id, card]));
-    return selected.map((id) => byId.get(id) ?? null);
-  }, [selected, known]);
+  const knownById = useMemo(() => new Map(known.map((card) => [card.id, card])), [known]);
+  const missing = useMemo(() => selected.filter((id) => !knownById.has(id)), [selected, knownById]);
+
+  /*
+   * Заказы со страниц, которые ещё не загружены.
+   *
+   * Их номер и адрес берутся существующим read-only контрактом заказа:
+   * показывать в списке «заказ с незагруженной страницы» значило бы просить
+   * человека подтвердить состав, которого он не видит. Сервер при этом
+   * не менялся.
+   */
+  const fetched = useQuery({
+    queryKey: ['create-route-orders', missing],
+    enabled: missing.length > 0,
+    queryFn: async () => {
+      const rows = await Promise.all(
+        missing.map((id) =>
+          client.get<{ id: string; number: string; address: string | null }>(`/api/orders/${id}`),
+        ),
+      );
+      return new Map(rows.map((row) => [row.id, row]));
+    },
+  });
+
+  const cards = useMemo(
+    () =>
+      selected.map((id) => {
+        const card = knownById.get(id);
+        if (card !== undefined) {
+          return { number: card.number, address: card.address };
+        }
+        const row = fetched.data?.get(id);
+        return row === undefined ? null : { number: row.number, address: row.address };
+      }),
+    [selected, knownById, fetched.data],
+  );
   const unknownCount = cards.filter((card) => card === null).length;
 
   return (
@@ -71,21 +100,28 @@ export function CreateRouteDialog({
           Заказов в маршруте: {selected.length}. Порядок остановок — порядок выбора.
         </p>
 
-        <ol className="create-route__orders" data-testid="create-route-orders">
+        {/*
+          Порядковый номер рисуется сам — списку он не нужен.
+          Раньше здесь был `ol` со своей нумерацией поверх нашей, и строка
+          читалась как «1. 1 заказ…».
+        */}
+        <ul className="create-route__orders" data-testid="create-route-orders">
           {cards.map((card, index) => (
-            <li key={selected[index] ?? index}>
+            <li key={selected[index] ?? index} className="create-route__order">
               <span className="create-route__position">{index + 1}</span>
               {card === null ? (
-                <span className="muted">заказ с незагруженной страницы</span>
+                <span className="muted">
+                  {fetched.isPending ? 'загружаем…' : 'заказ недоступен'}
+                </span>
               ) : (
                 <>
                   <span className="create-route__number">{card.number}</span>
-                  <span className="muted">{card.address ?? 'Адрес не указан'}</span>
+                  <span className="create-route__address">{card.address ?? 'Адрес не указан'}</span>
                 </>
               )}
             </li>
           ))}
-        </ol>
+        </ul>
 
         {unknownCount > 0 && (
           <p className="text-sm muted">
@@ -99,53 +135,16 @@ export function CreateRouteDialog({
           состояние, его назначают ближе к отгрузке.
         */}
         <Field label="Курьер" hint="Необязательно. Поиск по имени или телефону">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={query}
-              placeholder="Например, Иванов или 9990000001"
-              data-testid="create-route-courier-search"
+          {() => (
+            <CourierCombobox
+              options={couriers.data?.items ?? []}
+              value={courier}
               disabled={pending}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setCourier(null);
-                setListOpen(true);
-              }}
-              onFocus={() => setListOpen(true)}
+              testId="create-route-courier"
+              onChange={setCourier}
             />
           )}
         </Field>
-
-        <p className="text-sm" data-testid="create-route-courier">
-          {courierLabel(courier)}
-        </p>
-
-        {listOpen && (
-          <ul className="create-route__couriers" data-testid="create-route-courier-list">
-            {options.length === 0 ? (
-              <li className="muted">
-                Подходящих курьеров нет. Новый сотрудник здесь не создаётся.
-              </li>
-            ) : (
-              options.map((option) => (
-                <li key={option.id}>
-                  <button
-                    type="button"
-                    className="deals__link"
-                    data-testid="create-route-courier-option"
-                    onClick={() => {
-                      setCourier(option);
-                      setQuery(option.fullName);
-                      setListOpen(false);
-                    }}
-                  >
-                    {courierLabel(option)}
-                  </button>
-                </li>
-              ))
-            )}
-          </ul>
-        )}
 
         <div className="modal__footer">
           <Button onClick={onClose} disabled={pending} data-testid="create-route-cancel">

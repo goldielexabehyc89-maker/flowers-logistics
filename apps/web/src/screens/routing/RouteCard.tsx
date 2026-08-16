@@ -29,7 +29,6 @@ import {
   TextInput,
 } from '../../ui/components';
 import { useRouteLease } from './useRouteLease';
-import { withRouteLease } from './lease-scope';
 import {
   blockerLabel,
   canEdit,
@@ -38,19 +37,19 @@ import {
   editingHint,
   formatDate,
   moveTo,
-  moveWithin,
   ROUTE_STATE_LABELS,
   routeActionLabel,
   stopInterval,
   VEHICLE_LABELS as VEHICLES,
   type HistoryResponse,
   type RouteCardView,
-  type RouteListResponse,
 } from './routing';
 
 const HISTORY_PAGE_SIZE = 20;
 
-import { courierLabel, filterCouriers, type CourierOption } from '../deals/courier-picker';
+import type { CourierOption } from '../deals/courier-picker';
+import { CourierCombobox } from '../logistics/CourierCombobox';
+import { OrderWindow } from '../logistics/OrderWindow';
 
 export interface RouteCardProps {
   routeId: string;
@@ -80,11 +79,11 @@ export function RouteCard({
   const navigate = useNavigate();
   const { showToast } = useToast();
 
-  const [selected, setSelected] = useState<string[]>([]);
+  /** Заказ, открытый в окне. `null` — окно закрыто. */
+  const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   /** Что сейчас перетаскивают. `null` — перетаскивания нет. */
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [courierQuery, setCourierQuery] = useState('');
-  const [courierListOpen, setCourierListOpen] = useState(false);
+
   const [historyOffset, setHistoryOffset] = useState(0);
   const [pendingAction, setPendingAction] = useState<'return-to-draft' | 'cancel' | null>(null);
   const [takeoverOpen, setTakeoverOpen] = useState(false);
@@ -93,7 +92,6 @@ export function RouteCard({
   const [confirmOpen, setConfirmOpen] = useState(false);
   /** Курьер, выбранный в окне подтверждения. Пустая строка — «не назначен». */
   const [confirmCourierId, setConfirmCourierId] = useState('');
-  const [moveTargetId, setMoveTargetId] = useState('');
 
   const routeQuery = useQuery({
     queryKey: ['route', routeId],
@@ -139,7 +137,6 @@ export function RouteCard({
         : 'Не удалось выполнить операцию. Повторите попытку.';
 
     showToast(message, 'error');
-    setSelected([]);
     void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
     void queryClient.invalidateQueries({ queryKey: ['routes'] });
     void queryClient.invalidateQueries({ queryKey: ['unassigned-orders'] });
@@ -154,7 +151,6 @@ export function RouteCard({
    */
   const afterSuccess = (message: string, card?: RouteCardView): void => {
     showToast(message, 'success');
-    setSelected([]);
     if (card !== undefined) {
       queryClient.setQueryData(['route', routeId], card);
     }
@@ -163,58 +159,6 @@ export function RouteCard({
     void queryClient.invalidateQueries({ queryKey: ['routes'] });
     void queryClient.invalidateQueries({ queryKey: ['unassigned-orders'] });
   };
-
-  // Список черновиков того же дня нужен для переноса: маршрут другого дня
-  // сервер всё равно отвергнет, и предлагать его бессмысленно.
-  const siblings = useQuery({
-    queryKey: ['routes', route?.deliveryDate ?? ''],
-    queryFn: () =>
-      client.get<RouteListResponse>(
-        `/api/routes?deliveryDate=${route?.deliveryDate ?? ''}&state=DRAFT&limit=100`,
-      ),
-    enabled: route !== undefined && route.state === 'DRAFT',
-  });
-
-  /**
-   * Перенос между черновиками.
-   *
-   * Сервер требует аренду ОБОИХ маршрутов: перенос меняет состав и там, и там.
-   * Поэтому целевой маршрут берётся в работу на время операции и освобождается
-   * сразу после неё — но только если аренду выдали именно под эту операцию.
-   * Если та же вкладка уже держала целевой маршрут открытым, освобождать его
-   * нельзя: пользователь потерял бы собственную блокировку.
-   *
-   * Версия целевого маршрута читается здесь же, после захвата: значение из списка
-   * могло устареть, пока логист выбирал заказы.
-   */
-  const moveOrders = useMutation({
-    mutationFn: (input: { targetId: string; orderIds: string[] }) =>
-      withRouteLease(
-        {
-          acquire: (id) =>
-            client.post<{ granted: boolean }>(`/api/routes/${id}/edit-lock/acquire`, {}),
-          release: async (id) => {
-            await client.post(`/api/routes/${id}/edit-lock/release`, {});
-          },
-        },
-        input.targetId,
-        async () => {
-          const target = await client.get<RouteCardView>(`/api/routes/${input.targetId}`);
-          return client.post<{ source: RouteCardView; target: RouteCardView }>('/api/routes/move', {
-            fromRouteId: routeId,
-            toRouteId: input.targetId,
-            orderIds: input.orderIds,
-            expectedSourceVersion: route?.version ?? 0,
-            expectedTargetVersion: target.version,
-          });
-        },
-      ),
-    onSuccess: (result) => {
-      setMoveTargetId('');
-      afterSuccess('Заказы перенесены в другой маршрут', result.source);
-    },
-    onError: handleFailure,
-  });
 
   const returnOrders = useMutation({
     mutationFn: (orderIds: string[]) =>
@@ -375,25 +319,24 @@ export function RouteCard({
 
   return (
     <section className="stack routes__card">
+      {/*
+        Заголовок карточки не повторяется.
+
+        Номер и состояние уже стоят в строке списка, которая эту карточку
+        и раскрыла: второй такой же заголовок отнимал строку у состава
+        и заставлял читать одно и то же дважды.
+      */}
       <header className="routes__card-header">
-        <div>
-          <h3>
-            Маршрут {route.number}{' '}
-            <StatusBadge tone={route.state === 'CANCELLED' ? 'neutral' : 'info'}>
-              {ROUTE_STATE_LABELS[route.state]}
-            </StatusBadge>
-          </h3>
-          <p className="muted text-sm">
-            {formatDate(route.deliveryDate)} · {VEHICLES[route.vehicleType]} · {route.orders.length}{' '}
-            заказ(ов)
-            {route.conflictCount > 0 ? ` · расхождений: ${route.conflictCount}` : ''}
-          </p>
-        </div>
+        <p className="muted routes__card-meta">
+          {formatDate(route.deliveryDate)} · {VEHICLES[route.vehicleType]} · заказов:{' '}
+          {route.orders.length}
+          {route.conflictCount > 0 ? ` · расхождений: ${route.conflictCount}` : ''}
+        </p>
         {/*
-          Крестик в правом верхнем углу — ВТОРОЙ вход в ту же операцию отмены,
-          а не удаление. Данные не удаляются никогда: маршрут отменяется
-          с обязательной причиной, запись остаётся в истории, а заказы одной
-          транзакцией возвращаются в нераспределённые «Сделки».
+          Крестик — ВТОРОЙ вход в ту же операцию отмены, а не удаление. Данные
+          не удаляются никогда: маршрут отменяется с обязательной причиной,
+          запись остаётся в истории, а заказы одной транзакцией возвращаются
+          в нераспределённые «Сделки».
         */}
         {route.state === 'DRAFT' && (
           <button
@@ -413,7 +356,7 @@ export function RouteCard({
               setReason('');
             }}
           >
-            <X size={16} aria-hidden="true" />
+            <X size={14} aria-hidden="true" />
           </button>
         )}
         {/* Встроенную карточку сворачивает сам список: вторая кнопка была бы лишней. */}
@@ -440,6 +383,140 @@ export function RouteCard({
             </li>
           ))}
         </ul>
+      )}
+
+      {/*
+        Курьер выбирается одним и тем же контролом на всех трёх вкладках:
+        нажатие в поле открывает список, ввод его сужает.
+      */}
+      <Field label="Курьер" hint="Поиск по имени или телефону">
+        {() => (
+          <CourierCombobox
+            options={couriers.data?.items ?? []}
+            /*
+              Назначенный курьер мог не попасть в загруженный список (сотню
+              активных курьеров список ограничивает): тогда он берётся из самого
+              маршрута — телефона в карточке нет, и это нормально.
+            */
+            value={
+              route.courier === null
+                ? null
+                : ((couriers.data?.items ?? []).find((item) => item.id === route.courier?.id) ?? {
+                    id: route.courier.id,
+                    fullName: route.courier.fullName,
+                    phone: null,
+                  })
+            }
+            disabled={!editable || setCourier.isPending}
+            testId="route-courier"
+            onChange={(courier) => setCourier.mutate(courier === null ? null : courier.id)}
+          />
+        )}
+      </Field>
+
+      {route.orders.length === 0 ? (
+        <EmptyState
+          title="В маршруте нет заказов"
+          description="Отметьте нераспределённые заказы слева и добавьте их в маршрут."
+        />
+      ) : (
+        <ol className="routes__stops">
+          {route.orders.map((item, index) => (
+            <li
+              key={item.routeOrderId}
+              className={
+                dragIndex === index ? 'routes__stop routes__stop--dragging' : 'routes__stop'
+              }
+              data-testid="route-stop"
+              /*
+               * Перетаскивание — основной способ менять порядок. Стрелки рядом
+               * остаются для клавиатуры: обе дороги ведут в одну и ту же
+               * атомарную операцию с проверкой версии.
+               */
+              draggable={editable && !reorder.isPending}
+              onDragStart={() => setDragIndex(index)}
+              onDragEnd={() => setDragIndex(null)}
+              onDragOver={(event) => {
+                if (dragIndex !== null) {
+                  event.preventDefault();
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (dragIndex === null) {
+                  return;
+                }
+                const next = moveTo(orderIds, dragIndex, index);
+                setDragIndex(null);
+                if (next !== null) {
+                  reorder.mutate(next);
+                }
+              }}
+            >
+              {/*
+                Ручка перетаскивания.
+
+                Порядок меняется перетаскиванием строки — стрелки убраны
+                по решению владельца. Ручка не кнопка: она показывает, за что
+                тянуть, а сам захват живёт на всей строке.
+              */}
+              <span className="routes__stop-grip" aria-hidden="true">
+                ⠿
+              </span>
+
+              <span className="routes__position">{item.position}</span>
+
+              <div className="routes__stop-body">
+                <div className="routes__stop-head">
+                  {/* Номер — вход в окно заказа со всей информацией. */}
+                  <button
+                    type="button"
+                    className="routes__number order-number-button"
+                    data-testid="order-number"
+                    onClick={() => setOrderWindowId(item.order.id)}
+                  >
+                    {item.order.number}
+                  </button>
+                  {item.order.needsAttention && (
+                    <StatusBadge tone="warning">Требует внимания</StatusBadge>
+                  )}
+                  {!item.order.deliveryDateMatchesRoute && (
+                    <StatusBadge tone="error">Дата не совпадает</StatusBadge>
+                  )}
+                </div>
+                {/* Адрес — одна строка с обрезкой; полный виден подсказкой. */}
+                <div className="routes__stop-address" title={item.order.address ?? undefined}>
+                  {item.order.address ?? '—'}
+                </div>
+                <div className="routes__stop-time">{stopInterval(item.order.interval)}</div>
+                {item.conflicts.length > 0 && (
+                  <ul className="routes__conflicts">
+                    {item.conflicts.map((conflict) => (
+                      <li key={conflict.kind}>{conflictLabel(conflict.kind)}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {/*
+                Крестик возвращает ОДИН заказ в нераспределённые той же
+                операцией, что прежняя кнопка «Вернуть выбранные»: групповой
+                выбор убран, действие осталось прежним.
+              */}
+              <button
+                type="button"
+                className="routes__stop-remove"
+                data-testid="route-stop-remove"
+                aria-label={`Убрать заказ ${item.order.number} из маршрута`}
+                title="Убрать из маршрута: заказ вернётся в «Сделки»"
+                disabled={!editable || returnOrders.isPending}
+                onClick={() => returnOrders.mutate([item.order.id])}
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ol>
       )}
 
       <div className="routes__actions">
@@ -493,227 +570,11 @@ export function RouteCard({
       </div>
 
       {/*
-        Курьер выбирается поиском по имени или телефону.
-        Выпадающий список из сотни фамилий заставлял логиста угадывать
-        написание; произвольная строка при этом никого не создаёт.
+        Групповых действий в карточке больше нет.
+
+        Возврат делает крестик в строке, а перенос в другой маршрут — окно
+        заказа на карте: там видно, куда именно едет заказ.
       */}
-      <Field label="Курьер" hint="Поиск по имени или телефону">
-        {(fieldProps) => (
-          <TextInput
-            {...fieldProps}
-            value={courierQuery}
-            placeholder={route.courier?.fullName ?? 'Не назначен'}
-            disabled={!editable || setCourier.isPending}
-            data-testid="route-courier-search"
-            onChange={(event) => {
-              setCourierQuery(event.target.value);
-              setCourierListOpen(true);
-            }}
-            onFocus={() => setCourierListOpen(true)}
-          />
-        )}
-      </Field>
-
-      <p className="text-sm" data-testid="route-courier-current">
-        {route.courier === null ? 'Курьер не назначен' : route.courier.fullName}
-      </p>
-
-      {courierListOpen && editable && (
-        <ul className="routes__couriers" data-testid="route-courier-list">
-          <li>
-            <button
-              type="button"
-              className="deals__link"
-              onClick={() => {
-                setCourier.mutate(null);
-                setCourierQuery('');
-                setCourierListOpen(false);
-              }}
-            >
-              Снять назначение
-            </button>
-          </li>
-          {filterCouriers(couriers.data?.items ?? [], courierQuery).map((courier) => (
-            <li key={courier.id}>
-              <button
-                type="button"
-                className="deals__link"
-                data-testid="route-courier-option"
-                onClick={() => {
-                  setCourier.mutate(courier.id);
-                  setCourierQuery(courier.fullName);
-                  setCourierListOpen(false);
-                }}
-              >
-                {courierLabel(courier)}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {route.orders.length === 0 ? (
-        <EmptyState
-          title="В маршруте нет заказов"
-          description="Отметьте нераспределённые заказы слева и добавьте их в маршрут."
-        />
-      ) : (
-        <ol className="routes__stops">
-          {route.orders.map((item, index) => (
-            <li
-              key={item.routeOrderId}
-              className={
-                dragIndex === index ? 'routes__stop routes__stop--dragging' : 'routes__stop'
-              }
-              data-testid="route-stop"
-              /*
-               * Перетаскивание — основной способ менять порядок. Стрелки рядом
-               * остаются для клавиатуры: обе дороги ведут в одну и ту же
-               * атомарную операцию с проверкой версии.
-               */
-              draggable={editable && !reorder.isPending}
-              onDragStart={() => setDragIndex(index)}
-              onDragEnd={() => setDragIndex(null)}
-              onDragOver={(event) => {
-                if (dragIndex !== null) {
-                  event.preventDefault();
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (dragIndex === null) {
-                  return;
-                }
-                const next = moveTo(orderIds, dragIndex, index);
-                setDragIndex(null);
-                if (next !== null) {
-                  reorder.mutate(next);
-                }
-              }}
-            >
-              <label className="routes__stop-select">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(item.order.id)}
-                  disabled={!editable}
-                  onChange={(event) =>
-                    setSelected((current) =>
-                      event.target.checked
-                        ? [...current, item.order.id]
-                        : current.filter((id) => id !== item.order.id),
-                    )
-                  }
-                  aria-label={`Выбрать заказ ${item.order.number}`}
-                />
-              </label>
-
-              <div className="routes__stop-body">
-                <div className="routes__stop-head">
-                  <span className="routes__position">{item.position}</span>
-                  <span className="routes__number">{item.order.number}</span>
-                  <span>{stopInterval(item.order.interval)}</span>
-                  {item.order.needsAttention && (
-                    <StatusBadge tone="warning">Требует внимания</StatusBadge>
-                  )}
-                  {!item.order.deliveryDateMatchesRoute && (
-                    <StatusBadge tone="error">Дата не совпадает</StatusBadge>
-                  )}
-                </div>
-                <div className="routes__stop-body-text">
-                  <span>{item.order.address ?? '—'}</span>
-                  <span className="muted">{item.order.recipient ?? '—'}</span>
-                </div>
-                {item.conflicts.length > 0 && (
-                  <ul className="routes__conflicts">
-                    {item.conflicts.map((conflict) => (
-                      <li key={conflict.kind}>{conflictLabel(conflict.kind)}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-
-              <div className="routes__stop-actions">
-                {/*
-                  Перетаскивание — основной способ менять порядок; стрелки
-                  остаются рядом для клавиатуры и для тех, кому мышью тащить
-                  неудобно. Обе дороги ведут в одну и ту же атомарную операцию.
-                */}
-                <Button
-                  aria-label={`Поднять заказ ${item.order.number}`}
-                  disabled={!editable || index === 0 || reorder.isPending}
-                  onClick={() => {
-                    const next = moveWithin(orderIds, item.order.id, -1);
-                    if (next !== null) {
-                      reorder.mutate(next);
-                    }
-                  }}
-                >
-                  ↑
-                </Button>
-                <Button
-                  aria-label={`Опустить заказ ${item.order.number}`}
-                  disabled={!editable || index === route.orders.length - 1 || reorder.isPending}
-                  onClick={() => {
-                    const next = moveWithin(orderIds, item.order.id, 1);
-                    if (next !== null) {
-                      reorder.mutate(next);
-                    }
-                  }}
-                >
-                  ↓
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-
-      {route.orders.length > 0 && (
-        <div className="routes__actions routes__actions--wrap">
-          <Button
-            disabled={!editable || selected.length === 0 || returnOrders.isPending}
-            onClick={() => returnOrders.mutate(selected)}
-          >
-            Вернуть выбранные ({selected.length})
-          </Button>
-
-          <Field label="Перенести в маршрут">
-            {(fieldProps) => (
-              <Select
-                {...fieldProps}
-                value={moveTargetId}
-                disabled={!editable}
-                onChange={(event) => setMoveTargetId(event.target.value)}
-              >
-                <option value="">Выберите черновик</option>
-                {(siblings.data?.items ?? [])
-                  .filter((item) => item.id !== route.id)
-                  .map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.number} · заказов: {item.orderCount}
-                    </option>
-                  ))}
-              </Select>
-            )}
-          </Field>
-          <Button
-            disabled={
-              !editable || selected.length === 0 || moveTargetId === '' || moveOrders.isPending
-            }
-            onClick={() => {
-              const target = (siblings.data?.items ?? []).find((item) => item.id === moveTargetId);
-              if (target !== undefined) {
-                // Если целевой маршрут занят другим редактором, захват вернёт 409,
-                // перенос не выполнится и локальный состав не изменится.
-                moveOrders.mutate({ targetId: target.id, orderIds: selected });
-              }
-            }}
-          >
-            Перенести ({selected.length})
-          </Button>
-        </div>
-      )}
-
       <details className="routes__history">
         <summary>История маршрута</summary>
         {history.isPending ? (
@@ -859,6 +720,11 @@ export function RouteCard({
           </div>
         </div>
       </Modal>
+
+      {/* Окно заказа: одно и то же на всех вкладках. */}
+      {orderWindowId !== null && (
+        <OrderWindow orderId={orderWindowId} onClose={() => setOrderWindowId(null)} />
+      )}
     </section>
   );
 }

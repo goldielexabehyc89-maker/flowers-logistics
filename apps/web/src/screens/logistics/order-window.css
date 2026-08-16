@@ -1,0 +1,98 @@
+/*
+ * Окно заказа: строки «название — значение — действие».
+ *
+ * Сетка одна на все строки, поэтому названия выстроены по левому краю,
+ * а кнопки правки — по правому: глаз не ищет их заново в каждой строке.
+ */
+.order-window {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: min(520px, 80vw);
+}
+
+.order-window__row {
+  display: grid;
+  gap: 10px;
+  align-items: baseline;
+  grid-template-columns: 150px minmax(0, 1fr) auto;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--log-border-hairline);
+}
+
+.order-window__row:last-of-type {
+  border-bottom: 0;
+}
+
+.order-window__label {
+  color: var(--log-text-muted);
+  font-size: var(--log-font-sm);
+}
+
+.order-window__value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+  color: var(--log-text-strong);
+  font-size: var(--log-font-md);
+}
+
+/* Пометка о ручной правке и значение источника — тише самого значения. */
+.order-window__note,
+.order-window__source,
+.order-window__hint {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+}
+
+.order-window__source {
+  flex-basis: 100%;
+}
+
+.order-window__row .btn,
+.order-window__row button {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: var(--log-font-sm);
+}
+
+.order-window__updated {
+  margin: 6px 0 0;
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+}
+
+@media (max-width: 640px) {
+  .order-window {
+    min-width: 0;
+  }
+
+  .order-window__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * Номер заказа как вход в окно.
+ *
+ * Выглядит текстом, а не кнопкой: в плотном списке рамка вокруг каждого
+ * номера сама стала бы шумом. Что номер нажимается, показывает наведение.
+ */
+.order-number-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.order-number-button:hover,
+.order-number-button:focus-visible {
+  color: var(--log-selected-text);
+  text-decoration: underline;
+}

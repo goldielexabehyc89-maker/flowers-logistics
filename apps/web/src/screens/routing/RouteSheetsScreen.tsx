@@ -28,7 +28,9 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
-import { courierLabel, filterCouriers, type CourierOption } from '../deals/courier-picker';
+import type { CourierOption } from '../deals/courier-picker';
+import { CourierCombobox } from '../logistics/CourierCombobox';
+import { OrderWindow } from '../logistics/OrderWindow';
 import {
   canShip,
   isDayOpen,
@@ -66,6 +68,66 @@ interface CancelResponse {
 /** Сколько листов раздела грузить за раз. Продолжение — по кнопке. */
 const PAGE_SIZE = 20;
 
+/**
+ * Состав раскрытого листа.
+ *
+ * Берёт тот же существующий read-only маршрут `GET /api/routes/:id`, что и
+ * печатная форма, — своего контракта не заводит. Факт доставки не выдумывается:
+ * он приходит номерами заказов в самом листе (`deliveredNumbers`).
+ */
+function SheetOrders({
+  routeId,
+  deliveredNumbers,
+  onOpenOrder,
+}: {
+  routeId: string;
+  deliveredNumbers: readonly string[];
+  onOpenOrder: (orderId: string) => void;
+}): React.JSX.Element {
+  const { client } = useAuth();
+  const card = useQuery({
+    queryKey: ['route', routeId],
+    queryFn: () => client.get<RouteCardView>(`/api/routes/${routeId}`),
+  });
+
+  if (card.isPending) {
+    return <LoadingState title="Загружаем состав…" />;
+  }
+  if (card.isError) {
+    return <ErrorState title="Не удалось загрузить состав" onRetry={() => void card.refetch()} />;
+  }
+
+  const delivered = new Set(deliveredNumbers);
+  return (
+    <ul className="sheets__orders" data-testid="sheet-orders">
+      {card.data.orders.map((item) => (
+        <li
+          key={item.routeOrderId}
+          className="sheets__order"
+          data-testid="sheet-order"
+          data-order-number={item.order.number}
+        >
+          <span className="sheets__order-position">{item.position}</span>
+          {/* Номер — вход в окно заказа: там вся информация и правки. */}
+          <button
+            type="button"
+            className="sheets__order-number order-number-button"
+            data-testid="order-number"
+            onClick={() => onOpenOrder(item.order.id)}
+          >
+            {item.order.number}
+          </button>
+          <span className="sheets__order-address">{item.order.address ?? '—'}</span>
+          <span className="sheets__order-interval muted">{stopInterval(item.order.interval)}</span>
+          {delivered.has(item.order.number) && (
+            <span className="sheets__order-state">Доставлен</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function RouteSheetsScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -75,6 +137,9 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const [date, setDate] = useState('');
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  /** Заказ, открытый в окне: логист правит его адрес, интервал и точку. */
+  const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   const [openedDays, setOpenedDays] = useState<ReadonlySet<string>>(new Set());
   const [pages, setPages] = useState<Record<SheetSection, number>>({
     UNSHIPPED: 1,
@@ -86,9 +151,6 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const [cancelFor, setCancelFor] = useState<SheetView | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [confirmAll, setConfirmAll] = useState(false);
-  /** Открытый выбор курьера и строка поиска в нём. */
-  const [courierFor, setCourierFor] = useState<string | null>(null);
-  const [courierQuery, setCourierQuery] = useState('');
 
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
@@ -146,8 +208,6 @@ export function RouteSheetsScreen(): React.JSX.Element {
         expectedVersion: input.sheet.version,
       }),
     onSuccess: () => {
-      setCourierFor(null);
-      setCourierQuery('');
       showToast('Курьер сохранён', 'success');
       refreshAll();
     },
@@ -317,134 +377,139 @@ export function RouteSheetsScreen(): React.JSX.Element {
                         {day.sheets.map((sheet) => (
                           <li
                             key={sheet.id}
-                            className="routes__list-item"
+                            className="routes__list-item sheets__item"
                             data-testid="sheet-row"
                             data-sheet-number={sheet.number}
+                            data-expanded={expandedId === sheet.id ? 'true' : 'false'}
                           >
-                            <div>
-                              <span className="routes__number">{sheet.number}</span>{' '}
-                              <StatusBadge tone="info">
-                                {ROUTE_STATE_LABELS[sheet.state as keyof typeof ROUTE_STATE_LABELS]}
-                              </StatusBadge>
-                              <div className="muted text-sm">
-                                заказов: {sheet.totalOrders}
-                                {sheet.deliveredOrders > 0
-                                  ? ` · доставлено: ${sheet.deliveredOrders}`
-                                  : ''}
-                              </div>
-                              <div className="muted text-sm" data-testid="sheet-courier">
-                                Курьер: {sheet.courier?.fullName ?? 'не назначен'}
-                                {section === 'UNSHIPPED' && (
-                                  <>
-                                    {' · '}
-                                    <button
-                                      type="button"
-                                      className="deals__link"
-                                      data-testid="sheet-courier-edit"
-                                      onClick={() => {
-                                        setCourierFor(courierFor === sheet.id ? null : sheet.id);
-                                        setCourierQuery('');
-                                      }}
-                                    >
-                                      {sheet.courier === null ? 'назначить' : 'изменить'}
-                                    </button>
-                                  </>
+                            <div className="sheets__item-head">
+                              <div className="sheets__item-main">
+                                {/*
+                                  Свёрнутый лист — ровно одна строка: номер,
+                                  состояние и счётчики. Скрытого пустого тела
+                                  под ней нет, состав грузится только при
+                                  раскрытии.
+                                */}
+                                <button
+                                  type="button"
+                                  className="sheets__item-toggle"
+                                  aria-expanded={expandedId === sheet.id}
+                                  data-testid="sheet-expand"
+                                  onClick={() =>
+                                    setExpandedId((current) =>
+                                      current === sheet.id ? null : sheet.id,
+                                    )
+                                  }
+                                >
+                                  <span className="routes__number">{sheet.number}</span>
+                                  <StatusBadge tone="info">
+                                    {
+                                      ROUTE_STATE_LABELS[
+                                        sheet.state as keyof typeof ROUTE_STATE_LABELS
+                                      ]
+                                    }
+                                  </StatusBadge>
+                                  <span className="muted text-sm">
+                                    заказов: {sheet.totalOrders}
+                                    {sheet.deliveredOrders > 0
+                                      ? ` · доставлено: ${sheet.deliveredOrders}`
+                                      : ''}
+                                  </span>
+                                  <span className="sheets__item-chevron" aria-hidden="true" />
+                                </button>
+                                {/*
+                                Курьер выбирается прямо в листе тем же контролом,
+                                что и на других вкладках: нажатие в поле открывает
+                                список, ввод его сужает. Список рисуется поверх
+                                содержимого и карточку не растягивает.
+                              */}
+                                {section === 'UNSHIPPED' ? (
+                                  <div
+                                    className="routes__sheet-courier"
+                                    data-testid="sheet-courier"
+                                  >
+                                    <CourierCombobox
+                                      options={couriers.data?.items ?? []}
+                                      value={
+                                        sheet.courier === null
+                                          ? null
+                                          : ((couriers.data?.items ?? []).find(
+                                              (item) => item.id === sheet.courier?.id,
+                                            ) ?? {
+                                              id: sheet.courier.id,
+                                              fullName: sheet.courier.fullName,
+                                              phone: null,
+                                            })
+                                      }
+                                      disabled={busy}
+                                      testId="sheet-courier-combobox"
+                                      onChange={(courier) =>
+                                        assignCourier.mutate({
+                                          sheet,
+                                          courierUserId: courier === null ? null : courier.id,
+                                        })
+                                      }
+                                    />
+                                  </div>
+                                ) : (
+                                  <div className="muted text-sm" data-testid="sheet-courier">
+                                    Курьер: {sheet.courier?.fullName ?? 'не назначен'}
+                                  </div>
                                 )}
                               </div>
-                              {/*
-                                Курьер выбирается поиском по имени или телефону
-                                прямо в листе: возвращать лист в черновик ради
-                                одного поля незачем.
-                              */}
-                              {section === 'UNSHIPPED' && courierFor === sheet.id && (
-                                <div className="routes__courier-picker">
-                                  <TextInput
-                                    aria-label="Поиск курьера"
-                                    value={courierQuery}
-                                    placeholder="Имя или телефон"
-                                    data-testid="sheet-courier-search"
+
+                              <div className="routes__actions">
+                                {section === 'UNSHIPPED' && (
+                                  <>
+                                    <Button
+                                      variant="primary"
+                                      disabled={busy || !canShip(sheet, manualIssueEnabled)}
+                                      title={
+                                        shipBlockedReason(sheet, manualIssueEnabled) ?? undefined
+                                      }
+                                      data-testid="sheet-ship"
+                                      onClick={() => ship.mutate(sheet)}
+                                    >
+                                      Отгрузить
+                                    </Button>
+                                    <Button
+                                      disabled={busy}
+                                      data-testid="sheet-return-to-draft"
+                                      onClick={() => returnToDraft.mutate(sheet)}
+                                    >
+                                      Вернуть в черновик
+                                    </Button>
+                                  </>
+                                )}
+                                {section === 'SHIPPED' && (
+                                  <Button
                                     disabled={busy}
-                                    onChange={(event) => setCourierQuery(event.target.value)}
-                                  />
-                                  <ul className="routes__couriers">
-                                    {sheet.courier !== null && (
-                                      <li>
-                                        <button
-                                          type="button"
-                                          className="deals__link"
-                                          data-testid="sheet-courier-clear"
-                                          onClick={() =>
-                                            assignCourier.mutate({ sheet, courierUserId: null })
-                                          }
-                                        >
-                                          Снять назначение
-                                        </button>
-                                      </li>
-                                    )}
-                                    {filterCouriers(couriers.data?.items ?? [], courierQuery).map(
-                                      (option) => (
-                                        <li key={option.id}>
-                                          <button
-                                            type="button"
-                                            className="deals__link"
-                                            data-testid="sheet-courier-option"
-                                            onClick={() =>
-                                              assignCourier.mutate({
-                                                sheet,
-                                                courierUserId: option.id,
-                                              })
-                                            }
-                                          >
-                                            {courierLabel(option)}
-                                          </button>
-                                        </li>
-                                      ),
-                                    )}
-                                  </ul>
-                                </div>
-                              )}
+                                    data-testid="sheet-cancel-shipment"
+                                    onClick={() => {
+                                      setCancelFor(sheet);
+                                      setCancelReason('');
+                                      setConfirmAll(false);
+                                    }}
+                                  >
+                                    Отменить отгрузку
+                                  </Button>
+                                )}
+                                <Button
+                                  data-testid="sheet-open"
+                                  onClick={() => setOpenId(sheet.id)}
+                                >
+                                  Открыть лист
+                                </Button>
+                              </div>
                             </div>
 
-                            <div className="routes__actions">
-                              {section === 'UNSHIPPED' && (
-                                <>
-                                  <Button
-                                    variant="primary"
-                                    disabled={busy || !canShip(sheet, manualIssueEnabled)}
-                                    title={
-                                      shipBlockedReason(sheet, manualIssueEnabled) ?? undefined
-                                    }
-                                    data-testid="sheet-ship"
-                                    onClick={() => ship.mutate(sheet)}
-                                  >
-                                    Отгрузить
-                                  </Button>
-                                  <Button
-                                    disabled={busy}
-                                    data-testid="sheet-return-to-draft"
-                                    onClick={() => returnToDraft.mutate(sheet)}
-                                  >
-                                    Вернуть в черновик
-                                  </Button>
-                                </>
-                              )}
-                              {section === 'SHIPPED' && (
-                                <Button
-                                  disabled={busy}
-                                  data-testid="sheet-cancel-shipment"
-                                  onClick={() => {
-                                    setCancelFor(sheet);
-                                    setCancelReason('');
-                                    setConfirmAll(false);
-                                  }}
-                                >
-                                  Отменить отгрузку
-                                </Button>
-                              )}
-                              <Button data-testid="sheet-open" onClick={() => setOpenId(sheet.id)}>
-                                Открыть лист
-                              </Button>
-                            </div>
+                            {expandedId === sheet.id && (
+                              <SheetOrders
+                                routeId={sheet.id}
+                                deliveredNumbers={sheet.deliveredNumbers}
+                                onOpenOrder={setOrderWindowId}
+                              />
+                            )}
                           </li>
                         ))}
                       </ul>
@@ -642,6 +707,11 @@ export function RouteSheetsScreen(): React.JSX.Element {
             </article>
           )}
         </>
+      )}
+
+      {/* Окно заказа: одно и то же на всех вкладках. */}
+      {orderWindowId !== null && (
+        <OrderWindow orderId={orderWindowId} onClose={() => setOrderWindowId(null)} />
       )}
     </section>
   );

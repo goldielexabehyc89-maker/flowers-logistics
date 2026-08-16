@@ -1,3 +1,5 @@
+@import '../logistics/order-window.css';
+
 /*
  * Рабочее пространство «Сделки»: список слева, карта справа.
  *
@@ -186,7 +188,7 @@
 .deals__cards {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -196,15 +198,35 @@
  * Компактная карточка: строка номера и служебных действий, адрес, строка
  * времени. Всё остальное появляется, только если есть что показать.
  */
+/*
+ * Компактная карточка: строка номера и служебных действий, адрес, строка
+ * времени. Вся свободная поверхность переключает выбор, поэтому у карточки
+ * есть свои состояния наведения, выбора и клавиатурного фокуса.
+ */
 .deals__card {
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding: 1px 8px;
-  font-size: 12.5px;
-  border: 1px solid var(--color-border, #d9d9d9);
-  border-radius: 10px;
-  background: var(--color-surface, #fff);
+  padding: 2px 8px;
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-card);
+  background: var(--log-surface);
+  cursor: pointer;
+  transition:
+    border-color 100ms ease-out,
+    background 100ms ease-out;
+}
+
+.deals__card:hover {
+  border-color: var(--log-border-strong, #cbd5e1);
+  background: var(--log-surface-soft);
+}
+
+/* Клавиатурный фокус обозначен явно: в референсе его нет, и это его дефект. */
+.deals__card:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
 }
 
 /*
@@ -216,9 +238,14 @@
   background: color-mix(in srgb, var(--color-error, #b3261e) 5%, transparent);
 }
 
+/* Выбранная карточка выделена целиком, а не полоской слева. */
 .deals__card--selected {
-  border-color: hsl(210 70% 45%);
-  box-shadow: inset 3px 0 0 hsl(210 70% 45%);
+  border-color: var(--color-accent);
+  background: var(--log-selected-bg);
+}
+
+.deals__card--selected:hover {
+  background: var(--log-selected-bg);
 }
 
 .deals__card-head {
@@ -238,12 +265,14 @@
 
 /* Готов к отправке: собран флористом либо уже лежит в ячейке склада. */
 .deals__assembled {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, hsl(150 55% 32%) 14%, transparent);
-  color: hsl(150 55% 26%);
-  font-size: 12px;
+  padding: 0 6px;
+  border: 1px solid var(--log-badge-assembled-border);
+  border-radius: var(--log-radius-pill);
+  background: var(--log-badge-assembled-bg);
+  color: var(--log-badge-assembled-text);
+  font-size: var(--log-font-xs);
   font-weight: 600;
+  line-height: 16px;
 }
 
 /* Строка времени и даты остаётся одной строкой при любой длине получателя. */
@@ -271,12 +300,16 @@
 }
 
 .deals__number {
+  /* Номер заказа — 12px/600 тёмным: главная опора строки. */
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--log-font-sm);
+  color: var(--log-text);
 }
 
 .deals__line {
-  font-size: 12.5px;
+  /* Адрес — 12px/400 приглушённым: он читается вторым, после номера. */
+  font-size: var(--log-font-sm);
+  color: var(--log-text-muted);
   line-height: 1.3;
   /* Адрес — одна строка с обрезкой: вторая строка стоит трёх сделок в окне.
      Полный адрес доступен подсказкой и в диалоге исправления. */
@@ -286,8 +319,9 @@
 }
 
 .deals__muted {
-  color: var(--text-muted, #666);
-  font-size: 13px;
+  /* Интервал и служебные пометки — 11px/400 самым светлым тоном. */
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
 }
 
 .deals__comment {
@@ -462,21 +496,32 @@
 }
 
 .deals-map__overlay--top {
+  /* Счётчик и легенда — одной строкой: две отнимали у карты вдвое больше. */
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   top: 8px;
   left: 8px;
   /* Справа сверху стоят кнопки масштаба самой MapLibre. */
   right: 56px;
 }
 
-.deals-map__controls,
+/* Вторая строка: чем менять показанное. Стоит под первой, тоже поверх холста. */
+.deals-map__overlay--controls {
+  top: 64px;
+  left: 8px;
+  right: 56px;
+}
+
+.deals-map__panel,
 .deals-map__legend {
   pointer-events: auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   max-width: 100%;
-  padding: 4px 10px;
+  padding: 3px 10px;
   border: 1px solid var(--color-border, #d9d9d9);
   border-radius: 999px;
   background: rgb(255 255 255 / 92%);
@@ -805,4 +850,73 @@
   margin: 4px 0 0;
   font-size: 13px;
   color: var(--warning-text, #8a5a00);
+}
+
+/* --- Диалог создания маршрута ---------------------------------------------- */
+
+/*
+ * Состав будущего маршрута.
+ *
+ * Нумерация рисуется кружком, поэтому собственная нумерация списка не нужна:
+ * вместе они читались как «1. 1 заказ…».
+ */
+.create-route__orders {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.create-route__order {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--log-border-hairline);
+  font-size: var(--font-size-sm);
+}
+
+.create-route__position {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+  font-size: var(--log-font-2xs);
+  font-weight: 700;
+}
+
+.create-route__number {
+  flex: 0 0 auto;
+  color: var(--log-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+/* Адрес занимает остаток строки и обрезается: строка остаётся одной. */
+.create-route__address {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--log-text-muted);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.create-route__couriers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
 }
