@@ -977,3 +977,66 @@
 .routes__day {
   gap: 2px;
 }
+
+/*
+ * Раскрытый черновик: компактный список остановок.
+ *
+ * Внутри общей поверхности карточка не заводит своей рамки и живёт той же
+ * плотностью, что список сделок: номер остановки — кружок 20px, адрес
+ * обрезается, интервал не переносится.
+ */
+.routes__draft .routes__card {
+  padding: 6px;
+  border: 0;
+  border-radius: 0;
+}
+
+.routes__draft .routes__stop {
+  gap: 6px;
+  align-items: center;
+  padding: 3px 2px;
+  border-bottom: 1px solid var(--log-border-soft);
+  font-size: var(--log-font-sm);
+}
+
+.routes__draft .routes__stop-body {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.routes__draft .routes__stop-head {
+  gap: 6px;
+  align-items: center;
+}
+
+.routes__draft .routes__stop-body-text {
+  overflow: hidden;
+  min-width: 0;
+  gap: 6px;
+}
+
+.routes__draft .routes__stop-body-text > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Кружок номера остановки: измеренные 20px, 10px/700 белым на акценте. */
+.routes__draft .routes__position {
+  min-width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--log-radius-pill);
+  background: var(--log-selected-text);
+  color: var(--log-surface);
+  font-size: var(--log-font-2xs);
+  font-weight: 700;
+}
+
+.routes__draft .routes__stop .badge {
+  padding: 0 6px;
+  font-size: var(--log-font-xs);
+  line-height: 18px;
+}
