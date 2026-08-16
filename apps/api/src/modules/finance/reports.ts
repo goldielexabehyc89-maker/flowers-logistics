@@ -218,7 +218,19 @@ export async function buildSettlementReport(
       outcome: fact.attempt.outcome,
       cancelled: fact.attempt.cancellation !== null,
       cashCollectable: fact.cashCollectable,
-      cashMinor: fact.cashToCollectMinor.toString(),
+      /*
+       * Наличные строки — это ФАКТИЧЕСКИ полученные курьером деньги, то есть
+       * записи учёта, а не сумма к получению по заказу.
+       *
+       * Раньше сюда шёл снимок «сколько причиталось», и недоставленный заказ
+       * показывал те же 4990 ₽, хотя курьер их не брал: строка противоречила
+       * балансу, а итог группы завышался. Отменённая доставка тем же правилом
+       * обнуляет наличные: её запись отменена обратной операцией.
+       */
+      cashMinor: own
+        .filter((entry) => entry.kind === 'CASH_RECEIVED' && !entry.reversed)
+        .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
+        .toString(),
       paymentTypeName: fact.paymentTypeName,
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),

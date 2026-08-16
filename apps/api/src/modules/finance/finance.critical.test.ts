@@ -135,12 +135,28 @@ async function seedAttempt(input: {
   courierId: string;
   outcome?: 'DELIVERED' | 'NOT_DELIVERED';
 }): Promise<string> {
+  const outcome = input.outcome ?? 'DELIVERED';
+
+  /*
+   * У недоставки причина обязательна на уровне базы: берётся действующая
+   * из справочника, а не выдуманная строка.
+   */
+  const reason =
+    outcome === 'NOT_DELIVERED'
+      ? await ctx.db.deliveryFailureReason.findFirstOrThrow({
+          where: { isActive: true },
+          select: { id: true, name: true },
+        })
+      : null;
+
   const attempt = await ctx.db.deliveryAttempt.create({
     data: {
       routeOrderId: input.routeOrderId,
       orderId: input.orderId,
       routeId: input.routeId,
-      outcome: input.outcome ?? 'DELIVERED',
+      outcome,
+      reasonId: reason?.id ?? null,
+      reasonNameSnapshot: reason?.name ?? null,
       courierUserId: input.courierId,
       activeKey: input.routeOrderId,
     },
@@ -830,5 +846,109 @@ describe('группировка отчёта', () => {
     expect(second.hasMore).toBe(false);
     expect(second.days[0]?.date).toBe('2028-04-11');
     expect(second.days[0]?.couriers).toHaveLength(1);
+  });
+});
+
+describe('наличные в строке отчёта', () => {
+  it('недоставленный заказ не показывает наличных, и итог группы им не завышается', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-27';
+    await activateLedger(EARLIER);
+    await seedTariff({ from: day, perOrder: 40_000n, perKm: 0n });
+    const rates = await resolveTariff(ctx.db, day);
+
+    const delivered = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 499_000n });
+    await captureRouteTariff(ctx.db, {
+      routeId: delivered.routeId,
+      deliveryDate: day,
+      rates: rates!,
+    });
+    const failed = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 499_000n });
+    await captureRouteTariff(ctx.db, { routeId: failed.routeId, deliveryDate: day, rates: rates! });
+
+    const activation = await readLedgerActivation(ctx.db);
+
+    const deliveredAttempt = await seedAttempt({ ...delivered, courierId: courier.userId });
+    await accrueDeliveryResult(ctx.db, activation, {
+      attemptId: deliveredAttempt,
+      routeOrderId: delivered.routeOrderId,
+      routeId: delivered.routeId,
+      orderId: delivered.orderId,
+      courierUserId: courier.userId,
+      actorUserId: logist.userId,
+      outcome: 'DELIVERED',
+    });
+
+    const failedAttempt = await seedAttempt({
+      ...failed,
+      courierId: courier.userId,
+      outcome: 'NOT_DELIVERED',
+    });
+    await accrueDeliveryResult(ctx.db, activation, {
+      attemptId: failedAttempt,
+      routeOrderId: failed.routeOrderId,
+      routeId: failed.routeId,
+      orderId: failed.orderId,
+      courierUserId: courier.userId,
+      actorUserId: logist.userId,
+      outcome: 'NOT_DELIVERED',
+    });
+
+    const report = await buildSettlementReport(ctx.db, {
+      from: day,
+      to: day,
+      courierUserId: courier.userId,
+      ledgerActiveFrom: EARLIER,
+    });
+
+    const deliveredRow = report.rows.find((row) => row.attemptId === deliveredAttempt);
+    const failedRow = report.rows.find((row) => row.attemptId === failedAttempt);
+
+    // Курьер получил деньги только за доставленный заказ.
+    expect(deliveredRow?.cashMinor).toBe('499000');
+    expect(failedRow?.cashMinor).toBe('0');
+
+    const group = report.days[0]?.couriers[0];
+    expect(group?.cashMinor).toBe('499000');
+    // Итог группы сходится с балансом: наличные минус оплата за доставку.
+    expect(group?.totalMinor).toBe((499_000n - 40_000n).toString());
+    expect(await balanceOf(ctx.db, courier.userId, null)).toBe(499_000n - 40_000n);
+  });
+
+  it('отменённая доставка снимает наличные со строки', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-28';
+    await activateLedger(EARLIER);
+
+    const seeded = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 300_000n });
+    const attemptId = await seedAttempt({ ...seeded, courierId: courier.userId });
+    await accrueDeliveryResult(ctx.db, await readLedgerActivation(ctx.db), {
+      attemptId,
+      routeOrderId: seeded.routeOrderId,
+      routeId: seeded.routeId,
+      orderId: seeded.orderId,
+      courierUserId: courier.userId,
+      actorUserId: logist.userId,
+      outcome: 'DELIVERED',
+    });
+
+    await reverseDeliveryAccruals(ctx.db, {
+      attemptId,
+      actorUserId: logist.userId,
+      reason: 'результат отменён логистом',
+      operationDate: day,
+    });
+
+    const report = await buildSettlementReport(ctx.db, {
+      from: day,
+      to: day,
+      courierUserId: courier.userId,
+      ledgerActiveFrom: EARLIER,
+    });
+
+    expect(report.rows[0]?.cashMinor).toBe('0');
+    expect(report.days[0]?.couriers[0]?.cashMinor).toBe('0');
   });
 });
