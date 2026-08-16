@@ -12,13 +12,20 @@
 .courier-combobox__field {
   width: 100%;
   height: 34px;
-  padding: 0 var(--space-3, 12px);
-  border: 1px solid var(--color-border, #e4e4f0);
-  border-radius: var(--radius-sm, 8px);
-  background: var(--color-surface, #fff);
-  color: var(--color-text, #1a1a1a);
+  padding: 0 10px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-field);
+  background: var(--log-surface-soft);
+  color: var(--log-text);
   font: inherit;
-  font-size: var(--font-size-sm, 13px);
+  font-size: var(--font-size-sm);
+}
+
+/* В фокусе поле светлеет и берёт акцентную рамку. */
+.courier-combobox__field:focus {
+  border-color: var(--color-accent);
+  background: var(--log-surface);
+  outline: none;
 }
 
 .courier-combobox__field:disabled {
@@ -33,13 +40,13 @@
   left: 0;
   right: 0;
   z-index: 20;
-  max-height: 240px;
+  max-height: var(--log-popover-max-height);
   margin: 0;
-  padding: var(--space-1, 4px);
-  border: 1px solid var(--color-border, #e4e4f0);
-  border-radius: var(--radius-sm, 8px);
-  background: var(--color-surface, #fff);
-  box-shadow: var(--shadow-md, 0 8px 24px rgb(20 20 60 / 12%));
+  padding: var(--space-1);
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-field);
+  background: var(--log-surface);
+  box-shadow: var(--log-shadow-popover);
   list-style: none;
   overflow-y: auto;
 }
@@ -47,33 +54,39 @@
 .courier-combobox__option {
   display: block;
   width: 100%;
-  padding: 6px var(--space-2, 8px);
+  min-height: var(--log-option-height);
+  padding: 7px 10px;
   border: 0;
-  border-radius: var(--radius-sm, 8px);
+  border-radius: var(--radius-sm);
   background: none;
-  color: var(--color-text, #1a1a1a);
+  color: var(--log-text);
   font: inherit;
-  font-size: var(--font-size-sm, 13px);
+  font-size: var(--font-size-sm);
   text-align: left;
   cursor: pointer;
+  transition: background 100ms ease-out;
 }
 
 /* Одно и то же выделение под мышью и под клавиатурой. */
 .courier-combobox__option--active,
 .courier-combobox__option:hover {
-  background: var(--color-surface-hover, #e9ecfb);
+  background: var(--log-hover);
 }
 
+/* Уже назначенный курьер виден в списке сразу. */
 .courier-combobox__option[aria-selected='true'] {
-  font-weight: 600;
+  background: var(--log-selected-bg);
+  color: var(--log-selected-text);
+  font-weight: 500;
 }
 
 .courier-combobox__option--empty {
-  color: var(--color-text-muted, #555);
+  color: var(--log-text-faint);
 }
 
 .courier-combobox__empty {
-  padding: 6px var(--space-2, 8px);
-  color: var(--color-text-muted, #555);
-  font-size: var(--font-size-xs, 12px);
+  min-height: var(--log-option-height);
+  padding: 7px 10px;
+  color: var(--log-text-faint);
+  font-size: var(--font-size-sm);
 }

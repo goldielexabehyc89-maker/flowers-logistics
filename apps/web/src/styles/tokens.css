@@ -81,6 +81,66 @@
   --radius-lg: 16px;
   /* Окно на desktop скруглено заметно сильнее рабочих панелей. */
   --radius-xl: 24px;
+
+  /* --- Логистика: измеренные значения референсного интерфейса ---------------
+   *
+   * Значения не подобраны на глаз: это фактические `getComputedStyle`
+   * референса на 1600×900. Собственной темы там нет — всё записано литералами
+   * по месту, — поэтому система собирается здесь и используется всеми тремя
+   * вкладками сразу, а не копируется в каждый экран.
+   *
+   * Акцент совпал с нашим `--color-accent` до символа: #667eea.
+   */
+
+  /* Текст: от основного к самому приглушённому. */
+  --log-text-strong: #1e293b;
+  --log-text: #334155;
+  --log-text-muted: #64748b;
+  --log-text-faint: #94a3b8;
+
+  /* Поверхности и границы списков, карточек и полей. */
+  --log-surface: #ffffff;
+  --log-surface-soft: #f8fafc;
+  --log-surface-muted: #f1f5f9;
+  --log-border: #e2e8f0;
+  --log-border-hairline: #f1f5f9;
+
+  /* Состояния строк выбора. */
+  --log-hover: #f0f4ff;
+  --log-selected-bg: #eef2ff;
+  --log-selected-text: #667eea;
+
+  /* Разделы маршрутных листов. */
+  --log-section-unshipped-bg: #fef3c7;
+  --log-section-unshipped-text: #92400e;
+  --log-section-shipped-bg: #d1fae5;
+  --log-section-shipped-text: #065f46;
+  --log-section-counter-bg: rgb(0 0 0 / 12%);
+
+  /* Признаки заказа. */
+  --log-badge-assembled-bg: #dcfce7;
+  --log-badge-assembled-text: #15803d;
+  --log-badge-assembled-border: #86efac;
+  --log-badge-delivered-bg: #e8f5e9;
+  --log-badge-delivered-text: #2e7d32;
+  --log-badge-delivered-border: #a5d6a7;
+  --log-status-ok: #16a34a;
+
+  /* Размеры шрифта, которых не было в общей шкале. */
+  --log-font-2xs: 10px;
+  --log-font-xs: 11px;
+  --log-font-card-title: 15px;
+
+  /* Радиусы и тень выпадающих списков. */
+  --log-radius-control: 7px;
+  --log-radius-field: 8px;
+  --log-radius-card: 10px;
+  --log-radius-pill: 20px;
+  --log-shadow-popover: 0 4px 16px rgb(0 0 0 / 12%);
+
+  /* Высоты, измеренные на референсе. */
+  --log-option-height: 30px;
+  --log-popover-max-height: 200px;
   --shadow-sm: 0 2px 8px rgb(20 20 60 / 6%);
   --shadow-md: 0 8px 28px rgb(20 20 60 / 14%);
   /* Тень основной кнопки: мягкая брендовая, а не общая серая. */
