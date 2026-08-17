@@ -244,3 +244,30 @@
     width: auto;
   }
 }
+
+/* Денежные операции дня в истории. */
+.history__payments {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--log-border-hairline);
+  border-radius: var(--log-radius-group);
+  background: var(--log-surface-soft);
+  list-style: none;
+}
+
+.history__payment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--log-font-sm);
+}
+
+.history__payment-amount {
+  color: var(--log-text-strong);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}

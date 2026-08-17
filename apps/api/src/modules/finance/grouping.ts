@@ -35,7 +35,16 @@ export interface CourierGroup {
   distanceKmTenths: number;
   distanceFeesMinor: string;
   attemptFeesMinor: string;
-  /** Всё, что начислено курьеру за день: доставки, километры, попытки. */
+  /** Дополнительные расходы курьера за день: столбец «Доп.». */
+  extraExpensesMinor: string;
+  /** Наличные, переданные курьером логисту за день. */
+  handedMinor: string;
+  /** Деньги, выданные курьеру логистом за день. */
+  issuedMinor: string;
+  /**
+   * Всё, что начислено курьеру за день: доставки, километры, попытки и
+   * дополнительные расходы. Именно эта величина стоит в столбце «Начислено».
+   */
   accruedMinor: string;
   totalMinor: string;
   /** Хотя бы одна строка без тарифного снимка: расчёта у неё нет. */
@@ -94,6 +103,9 @@ export function groupSettlement(
       distanceKmTenths: 0,
       distanceFeesMinor: '0',
       attemptFeesMinor: '0',
+      extraExpensesMinor: '0',
+      handedMinor: '0',
+      issuedMinor: '0',
       accruedMinor: '0',
       totalMinor: '0',
       settlementMissing: false,
@@ -132,10 +144,38 @@ export function groupSettlement(
         (total, row) => total + (row.beyondMkadKmTenths ?? 0),
         0,
       );
+      /*
+       * Суммы столбцов «Доп.», «Курьер сдал» и «Выдано курьеру».
+       *
+       * Показываются положительными числами: направление задаёт столбец,
+       * а знак живёт в самой записи учёта и в итоге.
+       */
+      const abs = (value: bigint): bigint => (value < 0n ? -value : value);
+      const ofKinds = (kinds: readonly string[]): bigint =>
+        group.operations.entries
+          .filter((entry) => kinds.includes(entry.kind))
+          .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+
+      group.extraExpensesMinor = abs(
+        ofKinds([
+          'EXPENSE_PARKING',
+          'EXPENSE_TOLL',
+          'EXPENSE_TRANSIT',
+          'EXPENSE_REPAIR',
+          'EXPENSE_LOADING',
+          'EXPENSE_OTHER',
+          'BONUS',
+          'ATTEMPT_FEE',
+        ]),
+      ).toString();
+      group.handedMinor = abs(ofKinds(['CASH_HANDED_TO_LOGIST'])).toString();
+      group.issuedMinor = abs(ofKinds(['CASH_ISSUED_TO_COURIER'])).toString();
+
       group.accruedMinor = (
         BigInt(group.deliveryFeesMinor) +
         BigInt(group.distanceFeesMinor) +
-        BigInt(group.attemptFeesMinor)
+        BigInt(group.attemptFeesMinor) +
+        BigInt(group.extraExpensesMinor)
       ).toString();
       group.settlementMissing = group.rows.some((row) => row.settlementMissing);
 

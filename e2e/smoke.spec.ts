@@ -3666,26 +3666,55 @@ test('история и отчёты: тариф, доставка, расчёт
    * фикстуры, а вот направление и факт учёта операции — нет.
    */
   const before = (await page.getByTestId('reports-closing').innerText()).trim();
-  await page.getByTestId('reports-courier').selectOption({ label: courier.fullName });
-  await expect(page.getByTestId('reports-add-operation')).toBeEnabled();
-  await page.getByTestId('reports-add-operation').click();
-  await page.getByTestId('operation-kind').selectOption('CASH_HANDED_TO_LOGIST');
-  await page.getByTestId('operation-amount').fill('100');
-  await page.getByTestId('operation-reason').fill('сдача наличных по проверке');
-  await page.getByTestId('operation-submit').click();
 
-  const entries = page.getByTestId('reports-entries');
-  const operationsGroup = entries.getByTestId('reports-operations-group').first();
-  await expect(operationsGroup).toBeVisible({ timeout: 20_000 });
-  // Свёрнутая группа расходов показывает число операций и их сумму.
-  await expect(operationsGroup).toContainText('1');
-  await expect(entries.locator('[data-entry-kind="CASH_HANDED_TO_LOGIST"]')).toHaveCount(0);
-  await operationsGroup.getByTestId('reports-operations-toggle').click();
-  await expect(entries.locator('[data-entry-kind="CASH_HANDED_TO_LOGIST"]')).toBeVisible();
+  /*
+   * Операции заводятся ИЗ ЯЧЕЙКИ: день и курьер берутся из строки, поэтому
+   * ни того, ни другого выбирать не нужно. Универсальной кнопки больше нет.
+   */
+  await expect(page.getByTestId('reports-add-operation')).toHaveCount(0);
+
+  await group.getByTestId('reports-cell-handed').click();
+  await expect(page.getByTestId('cell-editor')).toBeVisible();
+  // Поле суммы работает как калькулятор: «1000+500=» даёт 1500.
+  await page.getByTestId('cell-amount').fill('1000+500=');
+  await expect(page.getByTestId('cell-preview')).toContainText('1500,00 ₽');
+  await page.getByTestId('cell-submit').click();
+  await expect(page.getByTestId('cell-editor')).toHaveCount(0);
+
+  // Ячейка и итог пересчитались без перезагрузки страницы.
+  await expect(group.getByTestId('reports-cell-handed')).toContainText('1500,00 ₽', {
+    timeout: 20_000,
+  });
+
+  // Дополнительный расход требует пояснения.
+  await group.getByTestId('reports-cell-expense').click();
+  await page.getByTestId('cell-amount').fill('200');
+  await page.getByTestId('cell-submit').click();
+  await expect(page.getByTestId('cell-error')).toBeVisible();
+  await page.getByTestId('cell-reason').fill('парковка у адреса');
+  await page.getByTestId('cell-submit').click();
+  await expect(group.getByTestId('reports-cell-expense')).toContainText('200,00 ₽', {
+    timeout: 20_000,
+  });
+
+  // Журнал платежей виден в раскрытой группе: вид, сумма и автор.
+  const payments = page.getByTestId('reports-payment');
+  await expect(payments.first()).toBeVisible();
+  await expect(payments.filter({ hasText: 'Курьер сдал' })).toHaveCount(1);
+  await expect(payments.filter({ hasText: 'Дополнительный расход' })).toHaveCount(1);
+
   const after = (await page.getByTestId('reports-closing').innerText()).trim();
   expect(after).not.toBe(before);
 
-  // 5. Выгрузки отдают настоящие файлы, а не HTML-страницу с ошибкой.
+  // Те же операции видны в «Истории» с датой, временем, суммой и автором.
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByTestId('history-payments').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('history-payments').first()).toContainText('Курьер сдал');
+  await expect(page.getByTestId('history-payments').first()).toContainText('1500,00 ₽');
+
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+
   const period = `from=${today}&to=${today}`;
   const xlsx = await page.request.get(`/api/logistics/reports/settlements.xlsx?${period}`, {
     headers: authorized,

@@ -190,3 +190,29 @@
   padding-left: 26px !important;
   color: var(--log-text);
 }
+
+/* Ячейка-кнопка: выглядит числом, нажимается как кнопка. */
+.reports__cell-button {
+  width: 100%;
+  padding: 2px 4px;
+  border: 1px dashed transparent;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reports__cell-button:hover,
+.reports__cell-button:focus-visible {
+  border-color: var(--log-selected-text);
+  color: var(--log-selected-text);
+}
+
+/* Журнал платежей внутри раскрытой группы. */
+.reports__payment td {
+  background: var(--log-surface-soft);
+  font-size: var(--log-font-xs);
+}

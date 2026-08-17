@@ -39,8 +39,19 @@ interface HistoryRouteRow {
   lastResultAt: string | null;
 }
 
+interface HistoryPayment {
+  id: string;
+  occurredAt: string;
+  kind: string;
+  amountMinor: string;
+  courierName: string;
+  actorName: string | null;
+  reason: string | null;
+  reversed: boolean;
+}
+
 interface HistoryPage {
-  days: { date: string; routes: HistoryRouteRow[] }[];
+  days: { date: string; routes: HistoryRouteRow[]; payments: HistoryPayment[] }[];
   total: number;
   hasMore: boolean;
 }
@@ -69,6 +80,26 @@ interface HistoryDetails {
 }
 
 const PAGE_SIZE = 20;
+
+/** Названия денежных операций в истории. */
+const PAYMENT_LABELS: Record<string, string> = {
+  EXPENSE_PARKING: 'Дополнительный расход',
+  EXPENSE_TOLL: 'Дополнительный расход',
+  EXPENSE_TRANSIT: 'Дополнительный расход',
+  EXPENSE_REPAIR: 'Дополнительный расход',
+  EXPENSE_LOADING: 'Дополнительный расход',
+  EXPENSE_OTHER: 'Дополнительный расход',
+  BONUS: 'Дополнительный расход',
+  ATTEMPT_FEE: 'Дополнительный расход',
+  CASH_HANDED_TO_LOGIST: 'Курьер сдал',
+  CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
+  ADJUSTMENT: 'Обратная корректировка',
+};
+
+/** Деньги в истории показываются так же, как в отчётах. */
+function money(minor: string): string {
+  return `${(Number(BigInt(minor)) / 100).toFixed(2).replace('.', ',')} ₽`;
+}
 
 /** Начало периода по умолчанию: неделя назад — обычный горизонт разбора. */
 function weekAgo(today: string): string {
@@ -274,6 +305,38 @@ export function HistoryScreen(): React.JSX.Element {
           {history.data.days.map((day) => (
             <section key={day.date} className="history__day" data-testid="history-day">
               <h3 className="history__day-title">{formatDate(day.date)}</h3>
+
+              {/*
+                Денежные операции дня: сдача, выдача и дополнительные расходы.
+                Это тоже прошлое, и «Историю» о нём обязаны спрашивать здесь,
+                а не в отчётах.
+              */}
+              {day.payments.length > 0 && (
+                <ul className="history__payments" data-testid="history-payments">
+                  {day.payments.map((payment) => (
+                    <li
+                      key={payment.id}
+                      className="history__payment"
+                      data-payment-kind={payment.kind}
+                    >
+                      <span className="history__event-time">
+                        {formatMoscowDateTime(payment.occurredAt)}
+                      </span>
+                      <span className="history__event-label">
+                        {PAYMENT_LABELS[payment.kind] ?? payment.kind}
+                      </span>
+                      <span className="history__payment-amount">{money(payment.amountMinor)}</span>
+                      <span className="history__event-actor">
+                        {payment.courierName} · {payment.actorName ?? 'автор неизвестен'}
+                      </span>
+                      {payment.reason !== null && (
+                        <span className="history__event-reason">{payment.reason}</span>
+                      )}
+                      {payment.reversed && <span className="history__tag">отменена</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
               <ul className="history__list">
                 {day.routes.map((route) => (
                   <li

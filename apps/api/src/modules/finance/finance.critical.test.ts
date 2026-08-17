@@ -32,6 +32,7 @@ import {
 import { accrueDeliveryResult, captureRouteTariff, reverseDeliveryAccruals } from './accrual.js';
 import { buildSettlementReport, dayBefore } from './reports.js';
 import { groupSettlement, pageOfGroups } from './grouping.js';
+import { assertPayloadIsSafe, publishRealtimeEvent } from '../realtime/events.js';
 import { isInsideRing, nearestRingPoint, parseRing, ringSha256, toKmTenths } from './mkad.js';
 import { buildSettlementWorkbook, toRubles } from './export-xlsx.js';
 import { buildSettlementPdf, debtDirection, formatRubles } from './export-pdf.js';
@@ -950,5 +951,146 @@ describe('наличные в строке отчёта', () => {
 
     expect(report.rows[0]?.cashMinor).toBe('0');
     expect(report.days[0]?.couriers[0]?.cashMinor).toBe('0');
+  });
+});
+
+describe('realtime денежных операций', () => {
+  it('событие несёт только операционный день: ни сумм, ни курьера, ни причин', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-26';
+
+    await ctx.db.$transaction(async (tx) => {
+      await appendEntry(tx, {
+        courierUserId: courier.userId,
+        kind: 'EXPENSE_OTHER',
+        amountMinor: 12_345n,
+        operationDate: day,
+        actorUserId: logist.userId,
+        reason: 'парковка у бизнес-центра',
+        idempotencyKey: unique('rt'),
+      });
+
+      // Тот же вызов, что делает эндпоинт операции.
+      await publishRealtimeEvent(tx, {
+        topic: 'finance.ledger_changed',
+        payload: { operationDate: day },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+      });
+    });
+
+    const event = await ctx.db.realtimeEvent.findFirst({
+      where: { topic: 'finance.ledger_changed' },
+      orderBy: [{ id: 'desc' }],
+      select: { payload: true },
+    });
+
+    expect(Object.keys((event?.payload ?? {}) as Record<string, unknown>)).toEqual([
+      'operationDate',
+    ]);
+
+    const serialized = JSON.stringify(event?.payload);
+    expect(serialized).not.toContain('12345');
+    expect(serialized).not.toContain(courier.userId);
+    expect(serialized).not.toContain('парковка');
+  });
+
+  it('денежные подробности в payload запрещены проверкой на записи', () => {
+    expect(() =>
+      assertPayloadIsSafe({ operationDate: '2028-04-26', phone: '+79990000000' }),
+    ).toThrow();
+    expect(() =>
+      assertPayloadIsSafe({ operationDate: '2028-04-26', comment: 'парковка' }),
+    ).toThrow();
+  });
+});
+
+describe('операции из ячеек таблицы', () => {
+  it('несколько операций одного вида за день суммируются и попадают в итог', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-29';
+    await activateLedger(EARLIER);
+
+    // Три расхода, две сдачи и одна выдача за один день.
+    const operations: [Parameters<typeof appendEntry>[1]['kind'], bigint, string][] = [
+      ['EXPENSE_OTHER', 15_000n, 'парковка'],
+      ['EXPENSE_OTHER', 5_000n, 'платная дорога'],
+      ['EXPENSE_OTHER', 2_500n, 'погрузка'],
+      ['CASH_HANDED_TO_LOGIST', 100_000n, 'сдача днём'],
+      ['CASH_HANDED_TO_LOGIST', 50_000n, 'сдача вечером'],
+      ['CASH_ISSUED_TO_COURIER', 20_000n, 'размен'],
+    ];
+
+    for (const [kind, amount, reason] of operations) {
+      await appendEntry(ctx.db, {
+        courierUserId: courier.userId,
+        kind,
+        amountMinor: amount,
+        operationDate: day,
+        actorUserId: logist.userId,
+        reason,
+        idempotencyKey: unique('cell'),
+      });
+    }
+
+    const report = await buildSettlementReport(ctx.db, {
+      from: day,
+      to: day,
+      courierUserId: courier.userId,
+      ledgerActiveFrom: EARLIER,
+    });
+
+    const group = report.days[0]?.couriers[0];
+    expect(group?.extraExpensesMinor).toBe('22500');
+    expect(group?.handedMinor).toBe('150000');
+    expect(group?.issuedMinor).toBe('20000');
+    // «Доп.» входит в начисления курьеру.
+    expect(group?.accruedMinor).toBe('22500');
+    // Итог дня: −22 500 (расходы) − 150 000 (сдал) + 20 000 (выдано).
+    expect(group?.totalMinor).toBe('-152500');
+    expect(await balanceOf(ctx.db, courier.userId, null)).toBe(-152_500n);
+
+    // Журнал: шесть операций с автором и временем.
+    expect(group?.operations.count).toBe(6);
+    expect(group?.operations.entries[0]?.actorName).not.toBeNull();
+    expect(group?.operations.entries[0]?.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('обратная корректировка операции ячейки убирает её из суммы столбца', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-30';
+    await activateLedger(EARLIER);
+
+    const entry = await appendEntry(ctx.db, {
+      courierUserId: courier.userId,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: 70_000n,
+      operationDate: day,
+      actorUserId: logist.userId,
+      idempotencyKey: unique('cell'),
+    });
+
+    await reverseEntry(ctx.db, {
+      entryId: entry.id,
+      actorUserId: logist.userId,
+      reason: 'сдача записана дважды',
+      operationDate: day,
+    });
+
+    const report = await buildSettlementReport(ctx.db, {
+      from: day,
+      to: day,
+      courierUserId: courier.userId,
+      ledgerActiveFrom: EARLIER,
+    });
+
+    const group = report.days[0]?.couriers[0];
+    // Исходная запись осталась в журнале и помечена отменённой.
+    expect(group?.operations.entries.some((item) => item.reversed)).toBe(true);
+    // Итог дня обнулился: обратная запись компенсировала исходную.
+    expect(group?.totalMinor).toBe('0');
+    expect(await balanceOf(ctx.db, courier.userId, null)).toBe(0n);
   });
 });

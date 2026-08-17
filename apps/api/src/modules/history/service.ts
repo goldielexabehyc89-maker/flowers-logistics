@@ -85,8 +85,20 @@ export interface HistoryRouteRow {
   lastResultAt: string | null;
 }
 
+/** Денежная операция в истории: без разбора по заказам, только факт. */
+export interface HistoryPayment {
+  id: string;
+  occurredAt: string;
+  kind: string;
+  amountMinor: string;
+  courierName: string;
+  actorName: string | null;
+  reason: string | null;
+  reversed: boolean;
+}
+
 export interface HistoryPage {
-  days: { date: string; routes: HistoryRouteRow[] }[];
+  days: { date: string; routes: HistoryRouteRow[]; payments: HistoryPayment[] }[];
   total: number;
   limit: number;
   offset: number;
@@ -175,6 +187,51 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
     db.deliveryRoute.count({ where }),
   ]);
 
+  /*
+   * Денежные операции периода.
+   *
+   * История обязана отвечать и на вопрос «кто и когда провёл платёж»: сдача
+   * наличных и выдача денег — такие же события прошлого, как отгрузка.
+   */
+  const payments = await db.courierLedgerEntry.findMany({
+    where: {
+      operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) },
+      attemptId: null,
+      ...(filters.courierUserId === undefined ? {} : { courierUserId: filters.courierUserId }),
+    },
+    orderBy: [{ occurredAt: 'desc' }],
+    take: 500,
+    select: {
+      id: true,
+      occurredAt: true,
+      operationDate: true,
+      kind: true,
+      amountMinor: true,
+      reason: true,
+      courier: { select: { fullName: true } },
+      actor: { select: { fullName: true } },
+      reversedBy: { select: { id: true } },
+    },
+  });
+
+  const paymentsByDay = new Map<string, HistoryPayment[]>();
+  for (const payment of payments) {
+    const date = fromDateColumn(payment.operationDate);
+    paymentsByDay.set(date, [
+      ...(paymentsByDay.get(date) ?? []),
+      {
+        id: payment.id,
+        occurredAt: payment.occurredAt.toISOString(),
+        kind: payment.kind,
+        amountMinor: payment.amountMinor.toString(),
+        courierName: payment.courier.fullName,
+        actorName: payment.actor.fullName,
+        reason: payment.reason,
+        reversed: payment.reversedBy !== null,
+      },
+    ]);
+  }
+
   const byDay = new Map<string, HistoryRouteRow[]>();
   for (const row of rows) {
     const date = fromDateColumn(row.deliveryDate);
@@ -202,10 +259,17 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
     ]);
   }
 
+  // День показывается, даже если в нём были только платежи и ни одного маршрута.
+  const dates = [...new Set([...byDay.keys(), ...paymentsByDay.keys()])];
+
   return {
-    days: [...byDay.entries()]
-      .sort((left, right) => right[0].localeCompare(left[0]))
-      .map(([date, routes]) => ({ date, routes })),
+    days: dates
+      .sort((left, right) => right.localeCompare(left))
+      .map((date) => ({
+        date,
+        routes: byDay.get(date) ?? [],
+        payments: paymentsByDay.get(date) ?? [],
+      })),
     total,
     limit: filters.limit,
     offset: filters.offset,

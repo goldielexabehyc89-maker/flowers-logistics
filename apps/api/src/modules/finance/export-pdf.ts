@@ -149,7 +149,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
           break;
         }
         const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
-        const right = `${group.orders} зак. · ${formatRubles(group.totalMinor)}`;
+        const right = `${group.orders} зак. · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)} · итог ${formatRubles(group.totalMinor)}`;
         page.drawText(left, {
           x: MARGIN,
           y: cursor,

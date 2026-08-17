@@ -36,7 +36,7 @@ const KIND_LABELS: Record<string, string> = {
   EXPENSE_TRANSIT: 'Расход: общественный транспорт',
   EXPENSE_REPAIR: 'Расход: ремонт',
   EXPENSE_LOADING: 'Расход: погрузка',
-  EXPENSE_OTHER: 'Расход: другое',
+  EXPENSE_OTHER: 'Дополнительный расход',
   BONUS: 'Доплата курьеру',
   ADJUSTMENT: 'Обратная корректировка',
 };
@@ -94,7 +94,10 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'За заказ, ₽', key: 'fee', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'За МКАД, км', key: 'km', width: 12, style: { numFmt: '#,##0.0' } },
     { header: 'За МКАД, ₽', key: 'distance', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Доп., ₽', key: 'extra', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Начислено, ₽', key: 'accrued', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Курьер сдал, ₽', key: 'handed', width: 16, style: { numFmt: '#,##0.00' } },
+    { header: 'Выдано курьеру, ₽', key: 'issued', width: 18, style: { numFmt: '#,##0.00' } },
     { header: 'Итог, ₽', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Примечание', key: 'note', width: 24 },
   ];
@@ -119,7 +122,10 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
         fee: toRubles(group.deliveryFeesMinor),
         km: group.distanceKmTenths / 10,
         distance: toRubles(group.distanceFeesMinor),
+        extra: toRubles(group.extraExpensesMinor),
         accrued: toRubles(group.accruedMinor),
+        handed: toRubles(group.handedMinor),
+        issued: toRubles(group.issuedMinor),
         total: toRubles(group.totalMinor),
         note: group.settlementMissing ? 'Расчёт отсутствует' : '',
       }).font = { bold: true };
@@ -164,9 +170,11 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Курьер', key: 'courier', width: 26 },
     { header: 'Телефон', key: 'phone', width: 16 },
     { header: 'Операций', key: 'count', width: 10 },
+    { header: 'Время', key: 'time', width: 20 },
     { header: 'Операция', key: 'kind', width: 32 },
     { header: 'Сумма, ₽', key: 'amount', width: 14, style: { numFmt: '#,##0.00' } },
-    { header: 'Основание', key: 'reason', width: 40 },
+    { header: 'Автор', key: 'author', width: 24 },
+    { header: 'Пояснение', key: 'reason', width: 40 },
     { header: 'Отменена', key: 'reversed', width: 12 },
   ];
 
@@ -191,8 +199,10 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           date: entry.operationDate,
           courier: group.fullName,
           phone: group.phone ?? '',
+          time: entry.occurredAt,
           kind: ledgerKindLabel(entry.kind),
           amount: toRubles(entry.amountMinor),
+          author: entry.actorName ?? '',
           reason: entry.reason ?? '',
           reversed: entry.reversed ? 'да' : '',
         });

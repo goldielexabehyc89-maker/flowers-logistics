@@ -66,6 +66,8 @@ export interface LedgerEntryView {
   operationDate: string;
   occurredAt: string;
   actorUserId: string;
+  /** Имя автора для журнала: логист должен видеть, кто провёл операцию. */
+  actorName: string | null;
   reason: string | null;
   comment: string | null;
   routeId: string | null;
@@ -112,6 +114,7 @@ function toView(row: {
   attemptId: string | null;
   reversesEntryId: string | null;
   reversedBy?: { id: string } | null;
+  actor?: { fullName: string } | null;
 }): LedgerEntryView {
   return {
     id: row.id,
@@ -121,6 +124,7 @@ function toView(row: {
     operationDate: row.operationDate.toISOString().slice(0, 10),
     occurredAt: row.occurredAt.toISOString(),
     actorUserId: row.actorUserId,
+    actorName: row.actor?.fullName ?? null,
     reason: row.reason,
     comment: row.comment,
     routeId: row.routeId,
@@ -272,7 +276,10 @@ export async function entriesOf(
       operationDate: { gte: toDateColumn(input.from), lte: toDateColumn(input.to) },
     },
     orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
-    include: { reversedBy: { select: { id: true } } },
+    include: {
+      reversedBy: { select: { id: true } },
+      actor: { select: { fullName: true } },
+    },
   });
   return rows.map(toView);
 }
