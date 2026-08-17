@@ -234,6 +234,39 @@ describe('активация одноразовым кодом', () => {
   });
 });
 
+/** Секреты фикстуры: код активации и PIN, которые не имеют права оказаться в базе. */
+const SECRETS = ['9137', '0428'] as const;
+
+/** Поля записи журнала попыток. Ни одно из них не предназначено для секрета. */
+const ATTEMPT_FIELDS = [
+  'id',
+  'phone',
+  'userId',
+  'kind',
+  'success',
+  'ip',
+  'userAgent',
+  'reason',
+  'createdAt',
+] as const;
+
+/**
+ * Утечка секрета в свободный текст записи.
+ *
+ * Смотрят только те поля, куда секрет может попасть по ошибке кода: причина
+ * отказа и сведения о клиенте. Номер записи, идентификатор пользователя,
+ * телефон и время исключены намеренно — они состоят из цифр и
+ * шестнадцатеричных символов, и четыре цифры кода совпадают там случайно
+ * примерно раз в несколько сотен прогонов. Такое совпадение не означает
+ * утечки, а красный прогон из-за него не доказывает ничего.
+ */
+function leakedSecrets(attempt: Record<string, unknown>, secrets: readonly string[]): string[] {
+  const text = (['ip', 'userAgent', 'reason'] as const)
+    .map((field) => (typeof attempt[field] === 'string' ? (attempt[field] as string) : ''))
+    .join('\u0000');
+  return secrets.filter((secret) => text.includes(secret));
+}
+
 describe('секреты не хранятся и не публикуются в открытом виде', () => {
   it('PIN и код активации отсутствуют в базе открытым текстом', async () => {
     const phone = uniquePhone();
@@ -279,13 +312,48 @@ describe('секреты не хранятся и не публикуются в
     expect(audit.some((entry) => entry.action === 'USER_ACTIVATED')).toBe(true);
 
     // Журнал попыток тоже не содержит секретов.
-    // Идентификатор записи — BigInt, поэтому сериализуется отдельным заменителем.
     const attempts = await ctx.db.authAttempt.findMany({ where: { userId: user.id } });
-    const attemptsSerialized = JSON.stringify(attempts, (_key, value: unknown) =>
-      typeof value === 'bigint' ? value.toString() : value,
-    );
-    expect(attemptsSerialized).not.toContain('9137');
-    expect(attemptsSerialized).not.toContain('0428');
+    expect(attempts.length).toBeGreaterThan(0);
+
+    for (const attempt of attempts) {
+      /*
+       * Состав записи закреплён.
+       *
+       * Поля для PIN или кода в журнале попыток нет и быть не должно. Новое
+       * поле обязано пройти через эту проверку осознанно, а не появиться
+       * молча вместе с секретом внутри.
+       */
+      expect(Object.keys(attempt).sort()).toEqual([...ATTEMPT_FIELDS].sort());
+      expect(leakedSecrets(attempt, SECRETS)).toEqual([]);
+    }
+  });
+
+  it('проверка утечки смотрит на текст, а не на случайные цифры идентификаторов', () => {
+    /*
+     * Проверка самой проверки, и она здесь не ради полноты.
+     *
+     * Прежний вариант искал код в сериализованной записи ЦЕЛИКОМ и падал,
+     * когда четыре цифры кода случайно встречались внутри UUID или телефона:
+     * `…-a1fb-9137190ed341`. Секрет при этом никуда не утекал, а красный CI
+     * означал только неудачное случайное число. Ослаблять защиту нельзя —
+     * поэтому свободный текст проверяется по-прежнему строго.
+     */
+    const technical = {
+      id: 9137n,
+      phone: '+79208730609',
+      userId: '01a00fd9-e81f-7752-a1fb-9137190ed341',
+      kind: 'ACTIVATION',
+      success: true,
+      ip: '10.0.0.1',
+      userAgent: 'vitest',
+      reason: null,
+      createdAt: new Date('2026-09-13T07:00:00.000Z'),
+    };
+    expect(leakedSecrets(technical, SECRETS)).toEqual([]);
+
+    // А настоящая утечка в свободный текст по-прежнему видна.
+    expect(leakedSecrets({ ...technical, reason: 'wrong code 9137' }, SECRETS)).toEqual(['9137']);
+    expect(leakedSecrets({ ...technical, userAgent: 'app pin=0428' }, SECRETS)).toEqual(['0428']);
   });
 });
 
