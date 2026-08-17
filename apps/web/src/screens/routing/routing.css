@@ -313,49 +313,6 @@
   box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
-.map-marker {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.75rem;
-  height: 1.75rem;
-  padding: 0 var(--space-1);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font: inherit;
-  font-size: var(--font-size-xs);
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-}
-
-/*
- * Три состояния маркера различаются не только цветом: часть логистов работает
- * при ярком свете на планшете, а различать оттенки в таких условиях трудно.
- */
-.map-marker--unassigned {
-  border-style: dashed;
-}
-
-.map-marker--assigned {
-  background: var(--color-accent-soft);
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.map-marker--attention {
-  background: var(--color-warning-soft);
-  border-color: var(--color-warning);
-  color: var(--color-warning);
-  font-weight: 700;
-}
-
-.map-marker--selected {
-  box-shadow: var(--focus-ring);
-  z-index: 1;
-}
-
 .routes__position,
 .sheet__position {
   display: inline-flex;
@@ -561,17 +518,6 @@
  */
 .routes__preview {
   border-color: var(--color-warning, var(--color-border));
-}
-
-/* Склад — не остановка: другая форма, другой цвет и никакого клика. */
-.map-marker--depot {
-  width: 22px;
-  height: 22px;
-  border: 2px solid #fff;
-  border-radius: 4px;
-  background: #333;
-  transform: rotate(45deg);
-  cursor: default;
 }
 
 /* Перетаскиваемая остановка видна: иначе непонятно, что именно движется. */
@@ -880,6 +826,37 @@
   height: 30px;
   min-height: 30px;
   margin-left: auto;
+}
+
+/*
+ * Кнопка пустого черновика: знак рядом с обычной кнопкой обновления.
+ *
+ * Размер тот же, что у кнопок этой полосы, — иначе она выпадала бы из строки
+ * на узком экране. Смысл несёт доступное имя, а не сам знак «+».
+ */
+.routes__draft-add {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-field);
+  background: var(--log-surface);
+  color: var(--log-text-muted);
+  cursor: pointer;
+}
+
+.routes__draft-add:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.routes__draft-add:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .routes__drafts .routes__panel-actions {

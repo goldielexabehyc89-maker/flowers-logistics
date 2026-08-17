@@ -343,14 +343,36 @@ async function publishRoute(
 export interface CreateDraftInput {
   deliveryDate: string;
   vehicleType: $Enums.VehicleType;
+  /**
+   * Ключ запроса. Повтор с тем же ключом возвращает уже созданный маршрут.
+   *
+   * У пустого черновика нет естественного ключа: заказов в нём нет, а два
+   * пустых черновика одного дня — законное состояние. Отличить потерянный
+   * ответ от осознанного второго нажатия можно только так.
+   */
+  creationKey?: string | undefined;
 }
 
-export async function createDraft(
+/**
+ * Создание ПУСТОГО черновика.
+ *
+ * Операция названа тем, что делает: маршрут без заказов, без курьера,
+ * в состоянии `DRAFT`. Это не «создание маршрута вообще» — маршрут из выбора
+ * создаёт `createDraftFromSelection`, и его требование непустого состава
+ * остаётся в силе. Пустой список заказов там по-прежнему ошибка: черновик
+ * без состава появляется только явным действием логиста, а не тем, что выбор
+ * случайно оказался пустым.
+ *
+ * Дальше пустой черновик живёт обычной жизнью: в него добавляют
+ * нераспределённые заказы, назначают курьера, подтверждают или отменяют
+ * с причиной — отдельных правил у него нет.
+ */
+export async function createEmptyDraft(
   deps: RoutingDeps,
   actor: AuthenticatedActor,
   input: CreateDraftInput,
   context: RequestContext,
-): Promise<{ id: string; number: string; version: number }> {
+): Promise<{ id: string; number: string; version: number; repeated: boolean }> {
   // Проверка повторяется на сервисном слое намеренно: корректность даты не должна
   // зависеть только от HTTP-схемы. Отказ происходит ДО транзакции, поэтому
   // ни маршрут, ни счётчик номеров, ни аудит, ни событие не создаются.
@@ -361,33 +383,65 @@ export async function createDraft(
     });
   }
 
-  return deps.db.$transaction(async (tx) => {
-    const number = await nextRouteNumber(tx, input.deliveryDate);
+  const existing =
+    input.creationKey === undefined
+      ? null
+      : await deps.db.deliveryRoute.findUnique({
+          where: { creationKey: input.creationKey },
+          select: { id: true, number: true, version: true },
+        });
+  if (existing !== null) {
+    return { ...existing, repeated: true };
+  }
 
-    const route = await tx.deliveryRoute.create({
-      data: {
-        number,
-        deliveryDate: toDateColumn(input.deliveryDate),
+  try {
+    return await deps.db.$transaction(async (tx) => {
+      const number = await nextRouteNumber(tx, input.deliveryDate);
+
+      const route = await tx.deliveryRoute.create({
+        data: {
+          number,
+          deliveryDate: toDateColumn(input.deliveryDate),
+          vehicleType: input.vehicleType,
+          createdById: actor.userId,
+          creationKey: input.creationKey ?? null,
+        },
+        select: { id: true, number: true, version: true },
+      });
+
+      // Создатель сразу получает маршрут в работу: иначе между созданием и первым
+      // добавлением заказа его успел бы занять другой редактор.
+      await grantLease(tx, route.id, actor, clockOf(deps)());
+
+      await auditRoute(tx, 'ROUTE_CREATED', route.id, actor, context, {
+        number: route.number,
+        deliveryDate: input.deliveryDate,
         vehicleType: input.vehicleType,
-        createdById: actor.userId,
-      },
-      select: { id: true, number: true, version: true },
+        state: 'DRAFT',
+        totalOrders: 0,
+      });
+      await publishRoute(tx, 'route.created', route.id, []);
+
+      return { ...route, repeated: false };
     });
-
-    // Создатель сразу получает маршрут в работу: иначе между созданием и первым
-    // добавлением заказа его успел бы занять другой редактор.
-    await grantLease(tx, route.id, actor, clockOf(deps)());
-
-    await auditRoute(tx, 'ROUTE_CREATED', route.id, actor, context, {
-      number: route.number,
-      deliveryDate: input.deliveryDate,
-      vehicleType: input.vehicleType,
-      state: 'DRAFT',
-    });
-    await publishRoute(tx, 'route.created', route.id, []);
-
-    return route;
-  });
+  } catch (error) {
+    /*
+     * Гонка двух одинаковых запросов: победил другой.
+     *
+     * Отдаём его маршрут, а не ошибку — для логиста это одно нажатие, и
+     * второй черновик появиться не должен.
+     */
+    if (input.creationKey !== undefined && (error as { code?: string }).code === 'P2002') {
+      const created = await deps.db.deliveryRoute.findUnique({
+        where: { creationKey: input.creationKey },
+        select: { id: true, number: true, version: true },
+      });
+      if (created !== null) {
+        return { ...created, repeated: true };
+      }
+    }
+    throw error;
+  }
 }
 
 export interface OrdersInput {

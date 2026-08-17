@@ -187,7 +187,10 @@ async function createRoute(
   token: string,
   deliveryDate = DAY,
 ): Promise<{ id: string; version: number }> {
-  const response = await call('POST', '/api/routes', token, { deliveryDate, vehicleType: 'CAR' });
+  const response = await call('POST', '/api/routes/empty', token, {
+    deliveryDate,
+    vehicleType: 'CAR',
+  });
   expect(response.statusCode).toBe(201);
   return response.json() as { id: string; version: number };
 }

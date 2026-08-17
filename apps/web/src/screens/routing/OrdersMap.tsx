@@ -20,7 +20,15 @@ import {
   type StyleSpecification,
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { markerKind, toLngLat, type MapPoint } from './geo';
+import { markerContentOf, toLngLat, type MapPoint } from './geo';
+// Тот же визуальный контракт, что и на карте «Сделок»: одна карта продукта.
+import {
+  createMarkerElement,
+  fillMarkerElement,
+  stampMarkerPoint,
+  MARKER_CLASS,
+} from '../map/marker';
+import { formatMinutes } from '../deals/deals';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, registerPmtiles } from './map-runtime';
 import { resolveStyleUrls, type StyleDocument } from './style-urls';
 
@@ -47,10 +55,11 @@ export interface OrdersMapProps {
   picking: boolean;
   onPick: (coordinates: { lat: number; lon: number }) => void;
   /**
-   * Что написать на маркере. По умолчанию — номер заказа.
+   * Что написать в кружке. По умолчанию — ничего.
    *
    * Рабочее место черновика подписывает точки активного маршрута позицией
-   * остановки: нумерация на карте и в списке обязана совпадать.
+   * остановки: нумерация на карте и в списке обязана совпадать. Номер заказа
+   * сюда не попадает никогда — цифра в кружке читается как позиция в маршруте.
    */
   labelOf?: (point: MapPoint) => string;
   /**
@@ -263,34 +272,35 @@ export function OrdersMap({
       }
       seen.add(point.orderId);
 
-      // Подпись маркера пересчитывается и у существующей точки: после
-      // перестановки остановок номера обязаны совпасть со списком, иначе
-      // карта показывала бы прежний порядок как действующий.
-      const label = labelOf === undefined ? point.number : labelOf(point);
+      /*
+       * Содержимое пересчитывается и у существующей точки: после перестановки
+       * остановок номера обязаны совпасть со списком, иначе карта показывала
+       * бы прежний порядок как действующий.
+       */
+      const content = markerContentOf(point, {
+        label: labelOf === undefined ? '' : labelOf(point),
+        selected: point.orderId === selectedOrderId,
+        formatMinute: formatMinutes,
+      });
 
       const existing = markers.get(point.orderId);
       if (existing !== undefined) {
         existing.setLngLat(lngLat);
-        existing.getElement().textContent = label;
-        applyKind(existing, point, selectedOrderId);
+        fillMarkerElement(existing.getElement(), content);
+        stampMarkerPoint(existing.getElement(), lngLat);
         continue;
       }
 
-      const element = document.createElement('button');
-      element.type = 'button';
-      element.className = 'map-marker';
-      element.textContent = label;
-      // Опознание всегда по номеру заказа: подпись может быть позицией
-      // остановки, и «Заказ 3» означало бы совсем другое.
-      element.setAttribute('aria-label', `Заказ ${point.number} на карте`);
+      const element = createMarkerElement();
+      fillMarkerElement(element, content);
+      stampMarkerPoint(element, lngLat);
+      element.dataset['orderId'] = point.orderId;
       element.addEventListener('click', (event) => {
         event.stopPropagation();
         selectRef.current(point.orderId);
       });
 
-      const marker = new Marker({ element }).setLngLat(lngLat).addTo(map);
-      applyKind(marker, point, selectedOrderId);
-      markers.set(point.orderId, marker);
+      markers.set(point.orderId, new Marker({ element }).setLngLat(lngLat).addTo(map));
     }
 
     for (const [orderId, marker] of markers) {
@@ -406,7 +416,10 @@ export function OrdersMap({
 
     if (depotMarkerRef.current === null) {
       const element = document.createElement('div');
-      element.className = 'map-marker map-marker--depot';
+      element.className = `${MARKER_CLASS} ${MARKER_CLASS}--depot`;
+      const dot = document.createElement('span');
+      dot.className = `${MARKER_CLASS}__dot`;
+      element.append(dot);
       element.dataset['testid'] = 'map-depot';
       depotMarkerRef.current = new Marker({ element }).setLngLat([depot.lng, depot.lat]).addTo(map);
     } else {
@@ -447,15 +460,4 @@ export function OrdersMap({
       />
     </div>
   );
-}
-
-function applyKind(marker: Marker, point: MapPoint, selectedOrderId: string | null): void {
-  const element = marker.getElement();
-  element.classList.remove(
-    'map-marker--assigned',
-    'map-marker--unassigned',
-    'map-marker--attention',
-  );
-  element.classList.add(`map-marker--${markerKind(point)}`);
-  element.classList.toggle('map-marker--selected', point.orderId === selectedOrderId);
 }

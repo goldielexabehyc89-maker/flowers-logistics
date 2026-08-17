@@ -8,7 +8,10 @@
 
 import { describe, expect, it } from 'vitest';
 import type { MapPoint } from './geo';
+import { markerContentOf } from './geo';
 import { pointAction, pointLabel, transferTargets, visiblePoints } from './draft-map';
+import { formatMinutes } from '../deals/deals';
+import { planMarkers, type DealMapPoint } from '../deals/DealsMapCanvas';
 
 const ACTIVE = 'route-active';
 const OTHER = 'route-other';
@@ -79,8 +82,80 @@ describe('подписи маркеров', () => {
     expect(pointLabel(point({ routeId: ACTIVE, position: 3, number: 'A-1024' }))).toBe('3');
   });
 
-  it('нераспределённая сделка подписана номером заказа', () => {
-    expect(pointLabel(point({ number: 'A-1024' }))).toBe('A-1024');
+  it('нераспределённая сделка не подписана вовсе', () => {
+    // Цифра в кружке читается как позиция в маршруте. У сделки, которая ещё
+    // никуда не входит, позиции нет: номер заказа там означал бы порядок
+    // объезда, которого никто не назначал.
+    expect(pointLabel(point({ number: 'A-1024' }))).toBe('');
+  });
+});
+
+describe('вид отметки на карте', () => {
+  function contentOf(patch: Partial<MapPoint>) {
+    const value = point(patch);
+    return markerContentOf(value, {
+      label: pointLabel(value),
+      selected: false,
+      formatMinute: formatMinutes,
+    });
+  }
+
+  it('нераспределённая сделка — круг без номера, со временем и подсказкой', () => {
+    const content = contentOf({
+      number: 'A-1024',
+      address: 'Москва, Тверская, 1',
+      startMinute: 600,
+      endMinute: 720,
+    });
+
+    // Внутри кружка пусто: номер заказа там читался бы как позиция в маршруте.
+    expect(content.label).toBe('');
+    expect(content.interval).toBe('10:00–12:00');
+    expect(content.hint).toBe('A-1024 · Москва, Тверская, 1');
+    // Опознание для клавиатуры и чтения с экрана остаётся по номеру заказа.
+    expect(content.ariaLabel).toContain('A-1024');
+  });
+
+  it('остановка активного черновика остаётся нумерованной', () => {
+    const content = contentOf({ routeId: ACTIVE, assigned: true, position: 3 });
+
+    expect(content.label).toBe('3');
+    expect(content.className).toContain('map-point--picked');
+  });
+
+  it('вид совпадает с невыбранной отметкой карты «Сделок»', () => {
+    /*
+     * Один заказ обязан выглядеть одинаково из любого раздела. Сравнение идёт
+     * с настоящей раскладкой «Сделок», а не с переписанной строкой классов:
+     * иначе однажды разойдутся именно они.
+     */
+    const deal: DealMapPoint = {
+      orderId: 'order-1',
+      number: 'A-1024',
+      address: 'Москва, Тверская, 1',
+      lat: '55.751244',
+      lon: '37.618423',
+      startMinute: 600,
+      endMinute: 720,
+      assembled: false,
+      selectable: true,
+    };
+    const reference = planMarkers([], [{ key: 'one', points: [deal] }], () => null)[0];
+    const routing = contentOf({
+      number: 'A-1024',
+      address: 'Москва, Тверская, 1',
+      startMinute: 600,
+      endMinute: 720,
+    });
+
+    expect(routing.className).toBe(reference?.className);
+    expect(routing.label).toBe(reference?.label);
+    expect(routing.interval).toBe(reference?.interval);
+    expect(routing.hint).toBe(reference?.hint);
+  });
+
+  it('время отсутствует честно, а не выдуманным интервалом', () => {
+    expect(contentOf({ startMinute: null, endMinute: null }).interval).toBe('время не задано');
   });
 });
 

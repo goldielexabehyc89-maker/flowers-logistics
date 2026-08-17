@@ -3850,3 +3850,239 @@ test('история и отчёты: тариф, доставка, расчёт
     expect(overflow).toBeLessThanOrEqual(1);
   }
 });
+
+/**
+ * «Маршрутизация»: нераспределённая сделка выглядит как в «Сделках»,
+ * а пустой черновик заводится кнопкой.
+ *
+ * Обе правки проверяются одним сеансом намеренно: заведённый пустой черновик
+ * тут же наполняется той самой нераспределённой точкой, вид которой проверен
+ * шагом раньше. Разнести это по двум сценариям значило бы дважды поднимать
+ * карту ради одного и того же дня.
+ */
+test('маршрутизация: точка дня без номера и пустой черновик кнопкой', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const own = seedOrders(1, { withPoint: true })[0] ?? '';
+  expect(own).not.toBe('');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  /*
+   * 1. Пустой черновик одним нажатием.
+   *
+   * Ждём именно ответа операции: список обновляется запросом, и без ожидания
+   * сценарий проверял бы состояние до её завершения.
+   */
+  /*
+   * Список сначала обязан загрузиться.
+   *
+   * Пока идёт запрос, черновиков на экране ноль, и посчитанное «до» означало
+   * бы не состояние дня, а незавершённую загрузку.
+   */
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  await expect
+    .poll(async () =>
+      (await page.locator('.routes__draft').count()) > 0
+        ? 'есть'
+        : (await page.getByText('Черновиков на этот день нет').count()) > 0
+          ? 'пусто'
+          : 'ждём',
+    )
+    .not.toBe('ждём');
+  const draftsBefore = await page.locator('.routes__draft').count();
+
+  const add = page.getByRole('button', { name: 'Добавить пустой черновик' });
+  await expect(add).toBeVisible();
+  await clickAndAwait(page, add, 'POST', '/api/routes/empty');
+
+  // Появился ровно один новый черновик — и без перезагрузки страницы.
+  await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 1);
+  // Он раскрыт и активен: логисту он нужен открытым, чтобы начать наполнять.
+  const opened = page.locator('.routes__draft[data-expanded="true"]');
+  await expect(opened).toHaveCount(1);
+  const emptyNumber = (await opened.getAttribute('data-draft-number')) ?? '';
+  expect(emptyNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
+  // Заказов в нём нет, курьера тоже.
+  await expect(page.locator('.routes__card .routes__stop')).toHaveCount(0);
+
+  /*
+   * 2. Вид нераспределённой точки.
+   *
+   * Круг пуст: номер внутри означал бы позицию остановки, которой у этой
+   * сделки нет. Время стоит подписью над кругом, номер и адрес — в подсказке.
+   */
+  await page.getByTestId('map-unassigned-toggle').check();
+  const marker = page.getByRole('button', { name: `Заказ ${own} на карте` });
+  await expect(marker).toBeVisible();
+  await expect(marker.locator('.map-point__dot')).toHaveText('');
+  await expect(marker.locator('.map-point__time')).toBeVisible();
+  await expect(marker.locator('.map-point__time')).not.toHaveText('');
+  const hint = marker.locator('.map-point__hint');
+  await expect(hint).toHaveAttribute('role', 'tooltip');
+  await expect(hint).toContainText(own);
+  await expect(hint).toContainText('Москва');
+
+  /*
+   * Подсказка появляется по наведению и достаётся клавиатуре.
+   *
+   * Наведение проверяется на ВЕРХНЕЙ отметке: у проверочных заказов сеялки
+   * один адрес, отметки лежат друг на друге, и мышь физически достаётся
+   * верхней. Правило показа общее для всех отметок, поэтому доказывает его
+   * любая из них. Видимость меряется прозрачностью, а не `toBeVisible`:
+   * скрытая подсказка занимает место и по размерам считалась бы видимой.
+   */
+  const opacityOf = (selector: string): Promise<string> =>
+    page.evaluate<string>(`getComputedStyle(document.querySelector('${selector}')).opacity`);
+
+  const ownHint = `[aria-label="Заказ ${own} на карте"] .map-point__hint`;
+  expect(await opacityOf(ownHint)).toBe('0');
+
+  const topMarker = page.locator('[data-testid="map-marker"][data-order-id]').last();
+  const topLabel = (await topMarker.getAttribute('aria-label')) ?? '';
+  await topMarker.hover();
+  await expect.poll(() => opacityOf(`[aria-label="${topLabel}"] .map-point__hint`)).toBe('1');
+
+  // Отметка — обычная кнопка: клавиатура до неё доходит и имя у неё есть.
+  await marker.focus();
+  expect(await page.evaluate<string>("document.activeElement.getAttribute('aria-label')")).toBe(
+    `Заказ ${own} на карте`,
+  );
+
+  /*
+   * 3. Координата точки не зависит от масштаба, сдвига и обновления данных.
+   *
+   * Сверяется положение кружка на экране с проекцией той самой координаты,
+   * которую отметка о себе объявляет.
+   */
+  const drift = async (): Promise<{ dx: number; dy: number; lng: number; lat: number }> => {
+    await page.waitForTimeout(150);
+    const box = await marker.boundingBox();
+    const lng = Number(await marker.getAttribute('data-lng'));
+    const lat = Number(await marker.getAttribute('data-lat'));
+    const projected = await page.evaluate(
+      ([lngValue, latValue]: [number, number]) => {
+        const map = (
+          globalThis as unknown as {
+            __routingMap: { project: (lngLat: [number, number]) => { x: number; y: number } };
+          }
+        ).__routingMap;
+        const point = map.project([lngValue, latValue]);
+        return { x: point.x, y: point.y };
+      },
+      [lng, lat] as [number, number],
+    );
+    const canvas = await page.getByTestId('orders-map').boundingBox();
+    const centerX = (box?.x ?? 0) + (box?.width ?? 0) / 2 - (canvas?.x ?? 0);
+    const centerY = (box?.y ?? 0) + (box?.height ?? 0) / 2 - (canvas?.y ?? 0);
+    return { dx: centerX - projected.x, dy: centerY - projected.y, lng, lat };
+  };
+
+  const start = await drift();
+  expect(Math.abs(start.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(start.dy)).toBeLessThanOrEqual(1);
+
+  for (const step of [3, -2]) {
+    await page.evaluate((value: number) => {
+      const map = (
+        globalThis as unknown as {
+          __routingMap: { setZoom: (z: number) => void; getZoom: () => number };
+        }
+      ).__routingMap;
+      map.setZoom(map.getZoom() + value);
+    }, step);
+    const after = await drift();
+    // Координата доменного объекта неизменна: масштаб её не касается.
+    expect(after.lng).toBe(start.lng);
+    expect(after.lat).toBe(start.lat);
+    expect(Math.abs(after.dx)).toBeLessThanOrEqual(1);
+    expect(Math.abs(after.dy)).toBeLessThanOrEqual(1);
+  }
+
+  await page.evaluate(() => {
+    const map = (
+      globalThis as unknown as {
+        __routingMap: { panBy: (offset: [number, number], options: { duration: number }) => void };
+      }
+    ).__routingMap;
+    map.panBy([160, -110], { duration: 0 });
+  });
+  const afterPan = await drift();
+  expect(afterPan.lng).toBe(start.lng);
+  expect(Math.abs(afterPan.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterPan.dy)).toBeLessThanOrEqual(1);
+
+  // Обновление данных списка отметку не двигает.
+  await page.getByRole('button', { name: 'Обновить список' }).click();
+  const afterRefresh = await drift();
+  expect(afterRefresh.lat).toBe(start.lat);
+  expect(Math.abs(afterRefresh.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterRefresh.dy)).toBeLessThanOrEqual(1);
+
+  /*
+   * 4. В пустой черновик кладётся нераспределённый заказ, и его точка
+   * становится нумерованной остановкой.
+   */
+  /*
+   * Нажатие отправляется САМОЙ отметке.
+   *
+   * У проверочных заказов сеялки один адрес, и отметки лежат друг на друге:
+   * обычное нажатие досталось бы верхней, и в черновик уехал бы чужой заказ.
+   */
+  await marker.dispatchEvent('click');
+  const window = page.getByTestId('map-selection');
+  await expect(window).toBeVisible();
+  await clickAndAwait(page, window.getByRole('button', { name: emptyNumber }), 'POST', '/orders');
+  await openDraft(page, emptyNumber);
+  await expect(page.locator('.routes__card .routes__stop')).toHaveCount(1);
+  // Остановка активного черновика — единственный случай цифры в кружке.
+  await expect(
+    page.getByRole('button', { name: `Заказ ${own} на карте` }).locator('.map-point__dot'),
+  ).toHaveText('1');
+
+  /*
+   * 5. Пустой черновик отменяется с причиной обычным способом.
+   */
+  const second = page.getByRole('button', { name: 'Добавить пустой черновик' });
+  await clickAndAwait(page, second, 'POST', '/api/routes/empty');
+  // Раскрытым становится именно новый черновик: ждём смены номера, а не
+  // мгновенного перерисовывания списка.
+  await expect
+    .poll(async () =>
+      page.locator('.routes__draft[data-expanded="true"]').getAttribute('data-draft-number'),
+    )
+    .not.toBe(emptyNumber);
+  const secondNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
+
+  await page.locator('.routes__card').getByRole('button', { name: 'Отменить маршрут' }).click();
+  await page.getByLabel('Причина').fill('Заведён по ошибке');
+  await clickAndAwait(page, page.getByRole('button', { name: 'Продолжить' }), 'POST', '/cancel');
+  await expect(page.locator(`.routes__draft[data-draft-number="${secondNumber}"]`)).toHaveCount(0);
+
+  // 6. Телефон и настольный экран: полоса действий не уезжает вбок.
+  for (const size of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(size);
+    await expect(page.getByRole('button', { name: 'Добавить пустой черновик' })).toBeVisible();
+    const overflow = await page.evaluate(() => {
+      const root = (
+        globalThis as unknown as {
+          document: { documentElement: { scrollWidth: number; clientWidth: number } };
+        }
+      ).document.documentElement;
+      return root.scrollWidth - root.clientWidth;
+    });
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+});

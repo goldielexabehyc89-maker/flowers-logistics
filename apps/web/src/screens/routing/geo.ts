@@ -6,6 +6,10 @@
  * нераспределённого заказа против уже включённого в маршрут.
  */
 
+// Вид отметки — общий контракт карт продукта, а не собственный у раздела.
+import { MARKER_CLASS, type MarkerContent } from '../map/marker';
+import { markerHint, markerInterval } from '../deals/deals-view';
+
 export type GeoState = 'UNRESOLVED' | 'PENDING' | 'RESOLVED' | 'NEEDS_REVIEW' | 'FAILED';
 
 export interface OrderGeo {
@@ -25,6 +29,15 @@ export interface MapPoint {
   lon: string | null;
   precision: string | null;
   needsAttention: boolean;
+  /**
+   * Интервал и адрес: те же поля, что у карты «Сделок».
+   *
+   * Необязательные: старые ответы без них не ломают экран, отметка просто
+   * скажет «время не задано» вместо выдуманного интервала.
+   */
+  startMinute?: number | null;
+  endMinute?: number | null;
+  address?: string | null;
   assigned: boolean;
   routeId: string | null;
   routeNumber: string | null;
@@ -115,20 +128,41 @@ export function roundCoordinate(value: number): string {
   return (Math.round(value * 1_000_000) / 1_000_000).toFixed(6);
 }
 
-export type MarkerKind = 'assigned' | 'unassigned' | 'attention';
-
 /**
- * Как выглядит маркер.
+ * Как выглядит точка на карте маршрутизации.
  *
- * Три состояния, а не цветовая шкала: логисту нужно с одного взгляда отличить
- * «этот заказ уже в маршруте» от «этот ещё никуда не попал», а требующий
- * внимания заметить раньше остальных.
+ * Тот же контракт, что и на карте «Сделок», и те же правила: цифра в кружке
+ * означает позицию остановки в маршруте. У нераспределённой сделки позиции
+ * нет — её кружок пуст, а номер и адрес показывает подсказка. Своей второй
+ * реализации отметки у маршрутизации нет: один заказ обязан выглядеть
+ * одинаково, из какого бы раздела на него ни смотрели.
  */
-export function markerKind(point: Pick<MapPoint, 'assigned' | 'needsAttention'>): MarkerKind {
-  if (point.needsAttention) {
-    return 'attention';
-  }
-  return point.assigned ? 'assigned' : 'unassigned';
+export function markerContentOf(
+  point: MapPoint,
+  options: { label: string; selected: boolean; formatMinute: (minute: number) => string },
+): MarkerContent {
+  const numbered = options.label !== '';
+  const classes = [
+    MARKER_CLASS,
+    // Нумерованный крупный кружок — только у остановки маршрута. Точке,
+    // которая ещё никуда не входит, номер приписывать нечему.
+    `${MARKER_CLASS}--${numbered ? 'picked' : 'free'}`,
+    ...(point.needsAttention ? [`${MARKER_CLASS}--attention`] : []),
+    ...(options.selected ? [`${MARKER_CLASS}--selected`] : []),
+  ];
+
+  return {
+    label: options.label,
+    interval: markerInterval(
+      { startMinute: point.startMinute ?? null, endMinute: point.endMinute ?? null },
+      options.formatMinute,
+    ),
+    hint: markerHint({ number: point.number, address: point.address ?? null }),
+    className: classes.join(' '),
+    // Опознание всегда по номеру заказа: подпись может быть позицией
+    // остановки, и «Заказ 3» означало бы совсем другое.
+    ariaLabel: `Заказ ${point.number} на карте`,
+  };
 }
 
 /** Состояние карты для интерфейса. */

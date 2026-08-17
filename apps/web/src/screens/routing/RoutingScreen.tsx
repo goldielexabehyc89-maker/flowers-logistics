@@ -15,7 +15,8 @@
  * и прямая ссылка возвращают тот же экран.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Plus } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { RouteCard } from './RouteCard';
@@ -27,6 +28,7 @@ import './routing.css';
 
 export function RoutingScreen(): React.JSX.Element {
   const { client } = useAuth();
+  const queryClient = useQueryClient();
   const { day, draftId, runId, setDay, setDraftId, closeRun } = useWorkspace();
 
   const routes = useQuery({
@@ -36,6 +38,32 @@ export function RoutingScreen(): React.JSX.Element {
   });
 
   const drafts = routes.data?.items ?? [];
+
+  /**
+   * Пустой черновик выбранного дня.
+   *
+   * Отдельная доменная операция сервера, а не «создание маршрута с пустым
+   * составом»: черновик из выбора по-прежнему требует хотя бы один заказ.
+   * Ключ запроса рождается на нажатии — повторная отправка того же запроса
+   * возвращает уже созданный черновик, а не заводит второй.
+   */
+  const createEmpty = useMutation({
+    mutationFn: () =>
+      client.post<{ id: string }>('/api/routes/empty', {
+        deliveryDate: day,
+        // Тип машины у пустого черновика — обычный: логист заводит его
+        // заранее, а машину и курьера назначает потом.
+        vehicleType: 'CAR',
+        creationKey: crypto.randomUUID(),
+      }),
+    onSuccess: async (created) => {
+      // Список обновляется запросом, а не догадкой: номер выдаёт сервер.
+      await queryClient.invalidateQueries({ queryKey: ['routes', day] });
+      // Новый черновик сразу раскрыт и активен: логисту он и нужен открытым,
+      // чтобы начать складывать в него заказы.
+      setDraftId(created.id);
+    },
+  });
 
   /**
    * Активный черновик проверяется по пришедшему списку.
@@ -107,7 +135,7 @@ export function RoutingScreen(): React.JSX.Element {
             ) : drafts.length === 0 ? (
               <EmptyState
                 title="Черновиков на этот день нет"
-                description="Черновики создаются в «Сделках»: выбором заказов вручную или автоматической разбивкой."
+                description="Черновики создаются в «Сделках» выбором заказов или автоматической разбивкой. Пустой черновик можно завести кнопкой «+» внизу списка."
               />
             ) : (
               <ul className="routes__draft-list">
@@ -170,6 +198,21 @@ export function RoutingScreen(): React.JSX.Element {
 
           <div className="routes__panel-actions">
             <Button onClick={() => void routes.refetch()}>Обновить список</Button>
+            {/*
+              Пустой черновик заводится одним нажатием и без диалога: спрашивать
+              нечего — день уже выбран сверху, заказов и курьера у него ещё нет.
+            */}
+            <button
+              type="button"
+              className="routes__draft-add"
+              data-testid="routing-add-draft"
+              aria-label="Добавить пустой черновик"
+              title="Добавить пустой черновик"
+              disabled={createEmpty.isPending}
+              onClick={() => createEmpty.mutate()}
+            >
+              <Plus size={15} aria-hidden="true" />
+            </button>
             <span className="muted text-sm">{formatDate(day)}</span>
           </div>
         </section>

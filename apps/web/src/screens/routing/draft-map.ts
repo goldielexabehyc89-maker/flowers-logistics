@@ -47,14 +47,15 @@ export function visiblePoints(
 }
 
 /**
- * Подпись маркера.
+ * Подпись в кружке отметки.
  *
  * У остановки активного маршрута это позиция: нумерация на карте и в списке
- * обязана совпадать. У нераспределённой сделки позиции нет — показывается
- * номер заказа.
+ * обязана совпадать. У нераспределённой сделки позиции нет, и кружок остаётся
+ * пустым — номер заказа там читался бы как порядок объезда, которого никто
+ * не назначал. Номер и адрес показывает подсказка при наведении.
  */
 export function pointLabel(point: MapPoint): string {
-  return point.routeId !== null && point.position !== null ? String(point.position) : point.number;
+  return point.routeId !== null && point.position !== null ? String(point.position) : '';
 }
 
 /**

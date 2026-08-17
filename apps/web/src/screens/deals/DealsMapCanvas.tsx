@@ -27,6 +27,13 @@ import { DEFAULT_CENTER, DEFAULT_ZOOM, registerPmtiles } from '../routing/map-ru
 import { resolveStyleUrls, type StyleDocument } from '../routing/style-urls';
 import { formatMinutes } from './deals';
 import { markerHint, markerInterval, markerLabel, type MapPoint } from './deals-view';
+import {
+  createMarkerElement,
+  fillMarkerElement,
+  stampMarkerPoint,
+  MARKER_CLASS,
+  type MarkerContent,
+} from '../map/marker';
 
 /** Точка дня. Совпадает с ответом `/api/deals/map`. */
 export type DealMapPoint = MapPoint;
@@ -82,18 +89,10 @@ function toLngLat(point: DealMapPoint): [number, number] | null {
   return [lon, lat];
 }
 
-/** Что рисуется в конкретной отметке. */
-interface MarkerPlan {
+/** Что рисуется в конкретной отметке. Вид отметки — общий контракт карт. */
+interface MarkerPlan extends MarkerContent {
   key: string;
   lngLat: [number, number];
-  /** Что написано в кружке. Пусто — невыбранный заказ без признаков. */
-  label: string;
-  /** Подпись над кружком. Показана всегда: по времени логист и группирует день. */
-  interval: string;
-  /** Подсказка при наведении: номер и адрес — то, чего на самой отметке нет. */
-  hint: string;
-  className: string;
-  ariaLabel: string;
   orderId: string | null;
 }
 
@@ -123,7 +122,7 @@ export function planMarkers(
         label: '',
         interval: '',
         hint: `Склад · ${depot.name}`,
-        className: 'deals-marker deals-marker--depot',
+        className: `${MARKER_CLASS} ${MARKER_CLASS}--depot`,
         ariaLabel: `Основной склад: ${depot.name}`,
         orderId: null,
       });
@@ -142,7 +141,7 @@ export function planMarkers(
       label: markerLabel(selection),
       interval: markerInterval(point, formatMinutes),
       hint: markerHint(point),
-      className: `deals-marker deals-marker--picked${point.assembled ? ' deals-marker--assembled' : ''}`,
+      className: `${MARKER_CLASS} ${MARKER_CLASS}--picked${point.assembled ? ` ${MARKER_CLASS}--assembled` : ''}`,
       ariaLabel: `Заказ ${point.number} выбран, номер ${selection ?? ''}`,
       orderId: point.orderId,
     });
@@ -169,9 +168,9 @@ export function planMarkers(
         interval: markerInterval(first, formatMinutes),
         hint: markerHint(first),
         className: [
-          'deals-marker',
-          first.selectable ? 'deals-marker--free' : 'deals-marker--draft',
-          ...(first.assembled ? ['deals-marker--assembled'] : []),
+          MARKER_CLASS,
+          `${MARKER_CLASS}--${first.selectable ? 'free' : 'draft'}`,
+          ...(first.assembled ? [`${MARKER_CLASS}--assembled`] : []),
         ].join(' '),
         ariaLabel: `${markerHint(first)}${first.assembled ? ', собран' : ''}`,
         orderId: first.orderId,
@@ -188,67 +187,13 @@ export function planMarkers(
       label: String(cluster.points.length),
       interval: '',
       hint: `Здесь ${cluster.points.length} заказов`,
-      className: 'deals-marker deals-marker--cluster',
+      className: `${MARKER_CLASS} ${MARKER_CLASS}--cluster`,
       ariaLabel: `Здесь ${cluster.points.length} заказов`,
       orderId: null,
     });
   }
 
   return plans;
-}
-
-/**
- * Содержимое отметки.
- *
- * Кружок и подпись времени — разные узлы: подпись обязана оставаться читаемой
- * и не растягивать сам кружок.
- */
-function fillMarker(element: HTMLElement, plan: MarkerPlan): void {
-  /*
-   * Свои классы заменяются, чужие остаются.
-   *
-   * Раньше здесь стояло `element.className = plan.className`, и обновление
-   * отметки стирало класс `maplibregl-marker`, который ставит сама библиотека.
-   * Вместе с ним элемент терял `position: absolute` и вставал в обычный поток:
-   * отметка съезжала относительно подложки на десятки пикселей, хотя её
-   * координата не менялась ни разу. Происходило это при КАЖДОМ обновлении
-   * данных, поэтому заказ «переезжал» сам собой.
-   */
-  for (const existing of Array.from(element.classList)) {
-    if (existing.startsWith('deals-marker')) {
-      element.classList.remove(existing);
-    }
-  }
-  for (const own of plan.className.split(' ')) {
-    if (own !== '') {
-      element.classList.add(own);
-    }
-  }
-  element.setAttribute('aria-label', plan.ariaLabel);
-  /*
-   * Координата доменного объекта — прямо в разметке.
-   *
-   * Она и есть место заказа. Проверка сверяет с ней экранное положение
-   * кружка после каждого масштабирования и сдвига: если когда-нибудь отметку
-   * начнут двигать пикселями, расхождение станет видно сразу.
-   */
-  element.dataset['lng'] = String(plan.lngLat[0]);
-  element.dataset['lat'] = String(plan.lngLat[1]);
-
-  const time = element.querySelector('.deals-marker__time');
-  const dot = element.querySelector('.deals-marker__dot');
-  const hint = element.querySelector('.deals-marker__hint');
-  if (time !== null) {
-    time.textContent = plan.interval;
-  }
-  if (dot !== null) {
-    dot.textContent = plan.label;
-  }
-  // Подсказка своя, а не нативный `title`: тот появляется через секунду
-  // с лишним, и логист успевает решить, что подсказки нет вовсе.
-  if (hint !== null) {
-    hint.textContent = plan.hint;
-  }
 }
 
 export function DealsMapCanvas({
@@ -407,22 +352,14 @@ export function DealsMapCanvas({
       const existing = markers.get(plan.key);
       if (existing !== undefined) {
         existing.setLngLat(plan.lngLat);
-        fillMarker(existing.getElement(), plan);
+        fillMarkerElement(existing.getElement(), plan);
+        stampMarkerPoint(existing.getElement(), plan.lngLat);
         continue;
       }
 
-      const element = document.createElement('button');
-      element.type = 'button';
-      const time = document.createElement('span');
-      time.className = 'deals-marker__time';
-      const dot = document.createElement('span');
-      dot.className = 'deals-marker__dot';
-      const hint = document.createElement('span');
-      hint.className = 'deals-marker__hint';
-      hint.setAttribute('role', 'tooltip');
-      element.append(time, dot, hint);
-      fillMarker(element, plan);
-      element.dataset['testid'] = 'map-marker';
+      const element = createMarkerElement();
+      fillMarkerElement(element, plan);
+      stampMarkerPoint(element, plan.lngLat);
       if (plan.orderId !== null) {
         element.dataset['orderId'] = plan.orderId;
         const orderId = plan.orderId;

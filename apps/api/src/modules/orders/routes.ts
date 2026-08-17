@@ -581,6 +581,15 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         geoLonMicro: true,
         geoPrecision: true,
         needsAttention: true,
+        // Интервал и адрес нужны отметке карты: над кружком стоит время,
+        // а в подсказке — номер и адрес. Это те же поля, что и в «Сделках»,
+        // поэтому обе карты говорят об одном заказе одно и то же.
+        intervalStartMinute: true,
+        intervalEndMinute: true,
+        manualIntervalStartMinute: true,
+        manualIntervalEndMinute: true,
+        address: true,
+        localAddress: true,
         routeOrders: {
           where: { removedAt: null },
           select: { position: true, route: { select: { id: true, number: true, state: true } } },
@@ -599,6 +608,10 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           lon: order.geoLonMicro === null ? null : fromMicro(order.geoLonMicro),
           precision: order.geoPrecision,
           needsAttention: order.needsAttention,
+          startMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
+          endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
+          // Рабочий адрес: по нему поедет курьер.
+          address: order.localAddress ?? order.address,
           // Разные визуальные состояния берутся из факта участия, а не угадываются.
           assigned: participation !== undefined,
           routeId: participation?.route.id ?? null,
