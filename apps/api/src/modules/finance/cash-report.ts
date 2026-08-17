@@ -70,9 +70,17 @@ function abs(value: bigint): bigint {
   return value < 0n ? -value : value;
 }
 
+/**
+ * Сумма движений одного вида.
+ *
+ * Отменённые записи не считаются: если сдачу отменили обратной операцией,
+ * денег в кассе нет, и показывать их как «получено» значит противоречить
+ * остатку. Сам остаток по-прежнему считается по ВСЕМ записям, включая
+ * обратные, — история не переписывается.
+ */
 function sumOf(entries: readonly CashEntryView[], kinds: readonly string[]): bigint {
   return entries
-    .filter((entry) => kinds.includes(entry.kind))
+    .filter((entry) => kinds.includes(entry.kind) && !entry.reversed)
     .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
 }
 
