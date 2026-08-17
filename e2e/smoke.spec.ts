@@ -3870,6 +3870,26 @@ test('маршрутизация: точка дня без номера и пу�
   const own = seedOrders(1, { withPoint: true })[0] ?? '';
   expect(own).not.toBe('');
 
+  /*
+   * Тела запросов создания собираются по ходу сценария.
+   *
+   * Ключ должен принадлежать НАЖАТИЮ: один ключ на дату или на экран означал
+   * бы, что второе осознанное нажатие молча возвращает первый черновик.
+   * Увидеть это можно только в том, что реально ушло на сервер.
+   */
+  const pressed: { creationKey: string; deliveryDate: string; vehicleType: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/api/routes/empty')) {
+      pressed.push(
+        request.postDataJSON() as {
+          creationKey: string;
+          deliveryDate: string;
+          vehicleType: string;
+        },
+      );
+    }
+  });
+
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
@@ -4062,6 +4082,34 @@ test('маршрутизация: точка дня без номера и пу�
     (await page
       .locator('.routes__draft[data-expanded="true"]')
       .getAttribute('data-draft-number')) ?? '';
+
+  /*
+   * Два нажатия — два черновика; повтор первого запроса — по-прежнему два.
+   *
+   * Ключи двух нажатий обязаны различаться: одинаковый означал бы, что второе
+   * нажатие ничего не создаёт. А повтор ровно того тела, что ушло с первым
+   * нажатием, обязан вернуть первый черновик и не завести третий.
+   */
+  expect(pressed).toHaveLength(2);
+  expect(pressed[0]?.creationKey).not.toBe(pressed[1]?.creationKey);
+  expect(pressed[0]?.deliveryDate).toBe(pressed[1]?.deliveryDate);
+  await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 2);
+
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const again = await page.request.post('/api/routes/empty', {
+    headers: { authorization: `Bearer ${token}` },
+    data: pressed[0],
+  });
+  // 200, а не 201: третьего черновика не появилось.
+  expect(again.status()).toBe(200);
+  expect(((await again.json()) as { number: string }).number).toBe(emptyNumber);
+
+  await page.getByRole('button', { name: 'Обновить список' }).click();
+  await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 2);
 
   await page.locator('.routes__card').getByRole('button', { name: 'Отменить маршрут' }).click();
   await page.getByLabel('Причина').fill('Заведён по ошибке');

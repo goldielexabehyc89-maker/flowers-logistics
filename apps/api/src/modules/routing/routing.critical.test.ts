@@ -608,7 +608,48 @@ describe('пустой черновик', () => {
     expect(two.repeated).toBe(true);
   });
 
-  it('несколько пустых черновиков одного дня разрешены', async () => {
+  it('два нажатия дают два черновика, а повтор первого — по-прежнему два', async () => {
+    /*
+     * Ключ принадлежит НАЖАТИЮ, а не дню и не экрану.
+     *
+     * Осознанное второе нажатие — это второй черновик: логист заводит их
+     * столько, сколько нужно машин. Повторно ушедший тот же запрос — это
+     * по-прежнему одно нажатие, и третьего черновика он не создаёт.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-09-14';
+    const countDrafts = async (): Promise<number> =>
+      (
+        (await call('GET', `/api/routes?deliveryDate=${day}&state=DRAFT`, token)).json() as {
+          total: number;
+        }
+      ).total;
+
+    expect(await countDrafts()).toBe(0);
+
+    const firstPress = { deliveryDate: day, vehicleType: 'CAR', creationKey: randomUUID() };
+    const secondPress = { deliveryDate: day, vehicleType: 'CAR', creationKey: randomUUID() };
+
+    const first = await call('POST', '/api/routes/empty', token, firstPress);
+    const second = await call('POST', '/api/routes/empty', token, secondPress);
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+
+    const one = first.json() as { id: string; number: string };
+    const two = second.json() as { id: string; number: string };
+    expect(two.id).not.toBe(one.id);
+    expect(two.number).not.toBe(one.number);
+    expect(await countDrafts()).toBe(2);
+
+    // Повтор запроса ПЕРВОГО нажатия: тот же черновик, третьего нет.
+    const repeat = await call('POST', '/api/routes/empty', token, firstPress);
+    expect(repeat.statusCode).toBe(200);
+    expect((repeat.json() as { id: string }).id).toBe(one.id);
+    expect(await countDrafts()).toBe(2);
+  });
+
+  it('одинаковые дата и тип машины сами по себе повтором не считаются', async () => {
+    // Ключа нет вовсе — значит, нажатий было столько, сколько запросов.
     const token = await tokenFor(['LOGISTICIAN']);
     const one = await createRoute(token);
     const two = await createRoute(token);
