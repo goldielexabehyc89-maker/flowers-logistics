@@ -2058,9 +2058,59 @@ test('курьер: досрочность, «Не доставлен» с пр�
     dialog.locator('[data-testid="delivery-reason"][data-reason-code="OTHER"]'),
   ).toHaveCount(0);
 
-  // Пока причина не выбрана, подтверждение молчит и объясняет, чего не хватает.
+  /*
+   * Пока причина не выбрана, подтверждение погашено — но упрёка на экране нет.
+   *
+   * Красная строка в момент, когда человек ещё ничего не сделал, — это
+   * замечание за несовершённую ошибку.
+   */
   await expect(page.getByTestId('delivery-submit')).toBeDisabled();
-  await expect(page.getByTestId('delivery-problem')).toContainText('причину');
+  await expect(page.getByTestId('delivery-problem')).toHaveCount(0);
+
+  /*
+   * Геометрия кнопок: семь одинаковых прямоугольников, а не лесенка.
+   *
+   * Меряется на настольной ширине и на телефоне. Двухстрочная подпись
+   * «Получатель отсутствует» не имеет права поднимать свою строку сетки:
+   * иначе семь равных по смыслу причин выглядят разными по весу.
+   */
+  const geometry = async (): Promise<{ widths: number[]; heights: number[] }> => {
+    const boxes = await reasons.evaluateAll((nodes: Element[]) =>
+      nodes.map((node) => {
+        const box = node.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      }),
+    );
+    return {
+      widths: boxes.map((box) => box.width),
+      heights: boxes.map((box) => box.height),
+    };
+  };
+
+  for (const size of [
+    { width: 1280, height: 900 },
+    { width: 375, height: 780 },
+  ]) {
+    await page.setViewportSize(size);
+    await page.waitForTimeout(300);
+
+    const { widths, heights } = await geometry();
+    expect(widths, `${size.width}px`).toHaveLength(7);
+    expect(Math.max(...widths) - Math.min(...widths), `ширина ${size.width}px`).toBeLessThanOrEqual(
+      1,
+    );
+    expect(
+      Math.max(...heights) - Math.min(...heights),
+      `высота ${size.width}px`,
+    ).toBeLessThanOrEqual(1);
+
+    // И само окно не расширяет страницу на телефоне.
+    const overflow = await page.evaluate<number>(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    );
+    expect(overflow, `перенос ${size.width}px`).toBeLessThanOrEqual(1);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
 
   const chosen = dialog.locator('[data-testid="delivery-reason"][data-reason-code="NO_ANSWER"]');
   await chosen.click();
@@ -4707,6 +4757,63 @@ test('два сеанса: справочник курьеров у админи
   await expect(logistPage.getByTestId('user-role-tab')).toHaveCount(1);
   await expect(logistPage.getByTestId('user-role-tab')).toHaveText('Курьер');
   await expect(logistPage.getByTestId('user-add')).toHaveText('Добавить курьера');
+
+  /*
+   * Строка таблицы: текст на уровне середины кнопок действий.
+   *
+   * Высоту строки задаёт самый высокий элемент — ряд кнопок. При выравнивании
+   * по верху данные оказывались выше их середины, и строка читалась как две
+   * несвязанные половины: слева сведения, справа действия.
+   */
+  await admin.getByTestId('user-role-tab').filter({ hasText: 'Курьер' }).click();
+  const firstRow = admin.locator('.table tbody tr').first();
+  await expect(firstRow).toBeVisible();
+
+  const centers = await firstRow.evaluate((row: Element) => {
+    /*
+     * Меряется центр САМОГО ТЕКСТА, а не ячейки.
+     *
+     * Ячейка растягивается на всю высоту строки при любом выравнивании,
+     * поэтому её середина совпала бы с кнопками даже тогда, когда текст
+     * прижат к верхнему краю. Диапазон по содержимому даёт настоящий
+     * прямоугольник строки текста.
+     */
+    const middleOf = (rect: DOMRect): number => rect.top + rect.height / 2;
+    const textMiddle = (cell: Element): number | null => {
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      const rect = range.getBoundingClientRect();
+      return rect.height === 0 ? null : middleOf(rect);
+    };
+
+    /*
+     * Опорой служит БЛОК действий, а не первая кнопка.
+     *
+     * На узком экране кнопки переносятся в две строки, и центр первой из них
+     * оказывается выше середины строки по построению. Сравнивать с ним значит
+     * требовать невозможного; выравнивание же означает, что данные стоят
+     * на уровне середины ряда кнопок целиком.
+     */
+    const actions = row.querySelector('td .row');
+    return {
+      button: actions === null ? null : middleOf(actions.getBoundingClientRect()),
+      cells: Array.from(row.querySelectorAll('td'))
+        .filter(
+          (cell) => (cell.textContent ?? '').trim() !== '' && cell.querySelector('button') === null,
+        )
+        .map((cell) => ({
+          text: (cell.textContent ?? '').trim().slice(0, 20),
+          middle: textMiddle(cell),
+        })),
+    };
+  });
+
+  expect(centers.button).not.toBeNull();
+  expect(centers.cells.length).toBeGreaterThanOrEqual(4);
+  for (const cell of centers.cells) {
+    expect(cell.middle, cell.text).not.toBeNull();
+    expect(Math.abs((cell.middle ?? 0) - (centers.button ?? 0)), cell.text).toBeLessThanOrEqual(2);
+  }
 
   // Сервер тоже не отдаёт логисту чужие роли.
   const foreign = await logistPage.request.get('/api/users?role=FLORIST&status=ACTIVE', {

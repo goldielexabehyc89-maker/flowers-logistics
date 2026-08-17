@@ -288,6 +288,17 @@ function ResultDialog(props: ResultDialogProps): React.JSX.Element {
   const { asking } = props;
   const failed = asking?.outcome === 'NOT_DELIVERED';
   const choices = selectableReasons(props.reasons);
+  /** Была ли попытка подтвердить: до неё упрекать человека не за что. */
+  const [attempted, setAttempted] = useState(false);
+
+  // Закрытое окно возвращается к чистому листу: следующий заказ начинается
+  // без чужого упрёка на экране.
+  const open = asking !== null;
+  useEffect(() => {
+    if (!open) {
+      setAttempted(false);
+    }
+  }, [open]);
 
   const problem =
     asking === null
@@ -309,6 +320,7 @@ function ResultDialog(props: ResultDialogProps): React.JSX.Element {
         className="stack"
         onSubmit={(event) => {
           event.preventDefault();
+          setAttempted(true);
           if (problem === null) {
             props.onSubmit();
           }
@@ -343,7 +355,15 @@ function ResultDialog(props: ResultDialogProps): React.JSX.Element {
           </p>
         )}
 
-        {problem === null ? null : (
+        {/*
+          Ошибка появляется ПОСЛЕ попытки, а не при открытии окна.
+
+          Красная строка «Выберите причину» в момент, когда человек ещё ничего
+          не сделал, — это упрёк за несовершённую ошибку. Кнопка подтверждения
+          и без неё погашена, а объяснение нужно тому, кто уже попробовал
+          подтвердить.
+        */}
+        {problem === null || !attempted ? null : (
           <p className="field__error" role="alert" data-testid="delivery-problem">
             {problem}
           </p>

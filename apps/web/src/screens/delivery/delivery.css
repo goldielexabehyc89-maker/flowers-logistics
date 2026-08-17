@@ -89,34 +89,66 @@
  * Причины недоставки кнопками.
  *
  * Курьер стоит у двери с коробкой: попасть пальцем в крупную кнопку он может,
- * а раскрывать список и набирать текст — нет. Сетка сама переносит кнопки
- * по ширине экрана, поэтому на телефоне они идут в один-два столбца, а на
- * планшете — в три.
+ * а раскрывать список и набирать текст — нет.
+ *
+ * Колонки РАВНЫЕ и с явным числом, а не `auto-fit`: при подборе по ширине
+ * содержимого кнопки получались разного размера, а строка с двухстрочной
+ * подписью становилась выше соседних. Семь причин — это сетка, и она обязана
+ * выглядеть сеткой.
  */
 .delivery__reasons {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  /* Телефон: две равные колонки. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
+/* Настольный экран: три равные колонки. */
+@media (min-width: 640px) {
+  .delivery__reasons {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .delivery__reason {
-  min-height: 44px;
-  padding: 10px 12px;
+  /*
+   * Высота фиксированная, а не «по содержимому».
+   *
+   * Иначе «Получатель отсутствует» в две строки поднимал бы всю свою строку
+   * сетки, и семь одинаковых по смыслу кнопок выглядели бы разными по весу.
+   * Двух строк хватает самой длинной подписи; размер от этого не меняется.
+   */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 52px;
+  padding: 6px 10px;
   border: 1px solid var(--color-border, #d5d8e2);
   border-radius: 10px;
   background: var(--color-surface, #fff);
   color: inherit;
   font: inherit;
-  font-size: 16px;
-  text-align: left;
+  font-size: 15px;
+  line-height: 1.15;
+  text-align: center;
+  text-wrap: balance;
   cursor: pointer;
 }
 
-/* Выбранная причина видна без цвета: рамкой и фоном, а не одним оттенком. */
+/*
+ * Выбранная причина видна не одним цветом.
+ *
+ * Часть курьеров работает при ярком свете на телефоне, и различать оттенки
+ * там трудно: поэтому меняются и рамка, и фон, и насыщенность текста.
+ * Рамка рисуется вставкой, а не толщиной, — иначе кнопка «прыгала» бы
+ * на пиксель при выборе.
+ */
 .delivery__reason--picked {
   border-color: var(--color-accent, #4f6ef7);
-  border-width: 2px;
+  box-shadow: inset 0 0 0 1px var(--color-accent, #4f6ef7);
   background: var(--color-accent-soft, #eef2ff);
+  color: var(--color-accent, #4f6ef7);
   font-weight: 600;
 }
 
