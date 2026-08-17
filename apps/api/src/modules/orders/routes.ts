@@ -36,10 +36,11 @@ import { isDadataAllowed } from './geocoding/enabled.js';
 import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { setSuggestionsStatus } from '../integrations/dadata/status.js';
 import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
-import { addressState } from './address.js';
+import { addressState, effectiveAddress } from './address.js';
 import {
   MAX_QUERY_LENGTH,
   MIN_QUERY_LENGTH,
+  MAX_SUGGESTIONS,
   suggestAddresses,
   type AddressSuggestion,
 } from '../integrations/dadata/suggest.js';
@@ -387,8 +388,19 @@ async function dealCards(db: Database, ids: string[]) {
         // Заказ черновика показывается только для чтения и ведёт в свой черновик.
         draftRouteId: participation?.routeId ?? null,
         draftRouteNumber: participation?.route.number ?? null,
+        /*
+         * Выбрать можно заказ без блокирующего внимания, с точкой, с датой
+         * и не занятый черновиком.
+         *
+         * Дата названа отдельно: «Требует внимания» её больше не включает,
+         * а положить заказ без даты в маршрут конкретного дня всё равно
+         * нельзя — сервер откажет, и предлагать выбор было бы обманом.
+         */
         selectable:
-          !row.needsAttention && row.geoState === 'RESOLVED' && participation === undefined,
+          !row.needsAttention &&
+          row.deliveryDate !== null &&
+          row.geoState === 'RESOLVED' &&
+          participation === undefined,
         // Готов к отправке: собран флористом ЛИБО уже размещён на складе.
         // Логисту важен факт готовности, а не путь, которым он наступил.
         assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
@@ -429,13 +441,20 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     const searching = query.search !== undefined && query.search !== '';
 
     if (searching) {
-      // Поиск идёт по тем полям, которые логист реально помнит: номер заказа,
-      // адрес и получатель. Регистр не важен — номер часто набирают латиницей
-      // и в нижнем регистре.
+      /*
+       * Поиск идёт по тем полям, которые логист реально помнит: номер заказа,
+       * адрес и получатель. Регистр не важен — номер часто набирают латиницей
+       * и в нижнем регистре.
+       *
+       * Адрес проверяется в обоих видах. Рабочим может быть локальная правка,
+       * и заказ, найденный глазами в карточке по исправленному адресу, обязан
+       * находиться по нему же поиском.
+       */
       conditions.push({
         OR: [
           { externalName: { contains: query.search, mode: 'insensitive' } },
           { address: { contains: query.search, mode: 'insensitive' } },
+          { localAddress: { contains: query.search, mode: 'insensitive' } },
           { recipient: { contains: query.search, mode: 'insensitive' } },
         ],
       });
@@ -611,7 +630,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           startMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
           endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
           // Рабочий адрес: по нему поедет курьер.
-          address: order.localAddress ?? order.address,
+          address: effectiveAddress(order),
           // Разные визуальные состояния берутся из факта участия, а не угадываются.
           assigned: participation !== undefined,
           routeId: participation?.route.id ?? null,
@@ -816,14 +835,23 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       throw error;
     }
 
+    /*
+     * Второй предел — уже на нашей стороне.
+     *
+     * Провайдеру `count` передан, но верить чужому ответу на слово нельзя:
+     * он вправе вернуть больше запрошенного, и лишние чужие адреса не должны
+     * ни доходить до браузера, ни попадать в наш ответ.
+     */
+    const shown = suggestions.slice(0, MAX_SUGGESTIONS);
+
     // Успешный ответ — единственное настоящее доказательство работоспособности.
     await setSuggestionsStatus(deps.db, 'OK', {
       reason: 'suggestions-served',
       // Число вариантов, а не сами варианты: адресов здесь быть не может.
-      returned: suggestions.length,
+      returned: shown.length,
     });
 
-    return { suggestions, available: true };
+    return { suggestions: shown, available: true };
   });
 
   /** Сохранить локальный адрес. Точка принимается только из точной подсказки. */
@@ -947,7 +975,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         orderId: row.id,
         number: row.externalName,
         // Адрес нужен подсказке при наведении: без него маркер не опознать.
-        address: row.localAddress ?? row.address,
+        address: effectiveAddress(row),
         lat: fromMicro(row.geoLatMicro ?? 0),
         lon: fromMicro(row.geoLonMicro ?? 0),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,

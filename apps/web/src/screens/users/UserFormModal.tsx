@@ -42,6 +42,7 @@ export function UserFormModal({
   mode,
   canAssignRoles,
   initial,
+  defaultRole,
   busy,
   error,
   onSubmit,
@@ -51,6 +52,14 @@ export function UserFormModal({
   mode: 'create' | 'edit';
   canAssignRoles: boolean;
   initial: UserView | null;
+  /**
+   * Роль нового сотрудника: та, вкладка которой открыта.
+   *
+   * Человек уже сказал, кого заводит, выбрав вкладку. Спрашивать это второй
+   * раз галочками — заставлять его повторяться и оставлять возможность
+   * завести флориста, стоя в списке курьеров.
+   */
+  defaultRole: Role;
   busy: boolean;
   error: string | null;
   onSubmit: (values: UserFormValues) => void;
@@ -64,7 +73,7 @@ export function UserFormModal({
     }
     setValues(
       initial === null
-        ? EMPTY
+        ? { ...EMPTY, roles: [defaultRole] }
         : {
             phone: initial.phone,
             fullName: initial.fullName,
@@ -73,7 +82,7 @@ export function UserFormModal({
             comment: initial.comment ?? '',
           },
     );
-  }, [open, initial]);
+  }, [open, initial, defaultRole]);
 
   const toggleRole = (role: Role): void => {
     setValues((current) => ({

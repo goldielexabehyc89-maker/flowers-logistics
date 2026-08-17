@@ -15,10 +15,11 @@
  * Деньги не правятся никогда и ни при каких условиях — только МойСклад.
  */
 
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
+import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
 import { Button, ErrorState, LoadingState, Modal, StatusBadge } from '../../ui/components';
 import { AddressDialog } from '../deals/AddressDialog';
@@ -100,10 +101,63 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
    */
   const refreshEverything = (): void => {
     void order.refetch();
-    for (const key of ['deals', 'deals-map', 'route', 'routes', 'route-sheets', 'map-points']) {
+    for (const key of [
+      'deals',
+      'deals-map',
+      'route',
+      'routes',
+      'route-sheets',
+      'map-points',
+      // «Активные» показывают тот же адрес и тот же интервал: курьер обязан
+      // увидеть правку без перезагрузки, как и логист.
+      'delivery-active',
+    ]) {
       void queryClient.invalidateQueries({ queryKey: [key] });
     }
   };
+
+  /**
+   * Сохранение ручного интервала.
+   *
+   * Поле версии называется `version` — ровно так, как его ждёт сервер.
+   * Прежде отсюда уходило `expectedVersion`, схема молча отбрасывала чужой
+   * ключ и сообщала об отсутствии обязательного поля, а логист видел общее
+   * «Проверьте правильность заполнения полей» на совершенно корректном
+   * интервале 10:00–14:00.
+   */
+  const saveInterval = useMutation({
+    mutationFn: (values: { startMinute: number; endMinute: number }) =>
+      client.put(`/api/orders/${orderId}/interval`, {
+        startMinute: values.startMinute,
+        endMinute: values.endMinute,
+        version: order.data?.order.version ?? 0,
+      }),
+    onSuccess: () => {
+      setEditing(null);
+      setIntervalError(null);
+      showToast('Интервал сохранён', 'success');
+      refreshEverything();
+    },
+    onError: (error: unknown) => {
+      /*
+       * Устаревшая версия — не ошибка ввода, а чужая правка.
+       *
+       * Общий текст заставил бы логиста искать опечатку там, где её нет:
+       * заказ успел измениться, и его надо перечитать.
+       */
+      const stale = error instanceof ApiError && error.conflict?.kind === 'STALE_VERSION';
+      setIntervalError(
+        stale
+          ? 'Заказ изменился в другом окне. Закройте и откройте его заново.'
+          : error instanceof ApiError
+            ? error.message
+            : 'Не удалось сохранить интервал',
+      );
+      if (stale) {
+        void order.refetch();
+      }
+    },
+  });
 
   if (order.isPending) {
     return (
@@ -288,26 +342,9 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
         <IntervalModal
           order={view}
           error={intervalError}
-          pending={false}
+          pending={saveInterval.isPending}
           onCancel={() => setEditing(null)}
-          onSubmit={(values) => {
-            void client
-              .put(`/api/orders/${view.id}/interval`, {
-                startMinute: values.startMinute,
-                endMinute: values.endMinute,
-                expectedVersion: view.version,
-              })
-              .then(() => {
-                setEditing(null);
-                showToast('Интервал сохранён', 'success');
-                refreshEverything();
-              })
-              .catch((error: unknown) => {
-                setIntervalError(
-                  (error as { message?: string }).message ?? 'Не удалось сохранить интервал',
-                );
-              });
-          }}
+          onSubmit={(values) => saveInterval.mutate(values)}
         />
       )}
 

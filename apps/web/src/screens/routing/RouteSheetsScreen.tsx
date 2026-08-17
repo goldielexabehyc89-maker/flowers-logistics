@@ -33,6 +33,7 @@ import { CourierCombobox } from '../logistics/CourierCombobox';
 import { OrderWindow } from '../logistics/OrderWindow';
 import {
   canShip,
+  showsShipButton,
   isDayOpen,
   needsCancelWarning,
   SECTION_TITLES,
@@ -461,17 +462,25 @@ export function RouteSheetsScreen(): React.JSX.Element {
                               <div className="routes__actions">
                                 {section === 'UNSHIPPED' && (
                                   <>
-                                    <Button
-                                      variant="primary"
-                                      disabled={busy || !canShip(sheet, manualIssueEnabled)}
-                                      title={
-                                        shipBlockedReason(sheet, manualIssueEnabled) ?? undefined
-                                      }
-                                      data-testid="sheet-ship"
-                                      onClick={() => ship.mutate(sheet)}
-                                    >
-                                      Отгрузить
-                                    </Button>
+                                    {/*
+                                      Кнопки нет вовсе, пока ручная отгрузка
+                                      выключена: погашенная кнопка обещала бы
+                                      действие, которого в этом контуре не
+                                      существует.
+                                    */}
+                                    {showsShipButton(manualIssueEnabled) && (
+                                      <Button
+                                        variant="primary"
+                                        disabled={busy || !canShip(sheet, manualIssueEnabled)}
+                                        title={
+                                          shipBlockedReason(sheet, manualIssueEnabled) ?? undefined
+                                        }
+                                        data-testid="sheet-ship"
+                                        onClick={() => ship.mutate(sheet)}
+                                      >
+                                        Отгрузить
+                                      </Button>
+                                    )}
                                     <Button
                                       disabled={busy}
                                       data-testid="sheet-return-to-draft"

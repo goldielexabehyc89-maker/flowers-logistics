@@ -590,14 +590,28 @@ describe('API заказов', () => {
       headers: { authorization: `Bearer ${await tokenFor(['ADMIN'])}` },
     });
 
-    const body = response.json() as { items: { id: string; needsAttention: boolean }[] };
+    const body = response.json() as {
+      items: {
+        id: string;
+        needsAttention: boolean;
+        attentionReasons: string[];
+        selectable?: boolean;
+      }[];
+    };
     const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { externalId: withoutDate.externalId },
     });
 
     const found = body.items.find((item) => item.id === order.id);
     expect(found).toBeDefined();
-    expect(found?.needsAttention).toBe(true);
+    /*
+     * Заказ виден при любом выбранном дне, но «Требует внимания» ему больше
+     * не ставится: вопрос к дате — не задача логиста, и красить им карточку
+     * значит прятать за ней настоящие препятствия (адрес, точку, интервал).
+     * Сама причина при этом сохраняется как сведение.
+     */
+    expect(found?.needsAttention).toBe(false);
+    expect(found?.attentionReasons).toContain('MISSING_DELIVERY_DATE');
   });
 
   it('вышедшие из области не видны в активном списке, но доступны через inScope=false', async () => {
@@ -687,6 +701,63 @@ describe('ручной локальный интервал', () => {
       payload: body,
     });
   }
+
+  it('обычный интервал 10:00–14:00 сохраняется и становится рабочим', async () => {
+    /*
+     * Тот самый отказ «Проверьте правильность заполнения полей».
+     *
+     * Значения времени здесь ни при чём: 10:00–14:00 всегда были допустимы.
+     * Отказ приходил из-за формы тела — окно заказа посылало `expectedVersion`
+     * вместо `version`, схема отбрасывала чужой ключ и сообщала об отсутствии
+     * обязательного поля. Проверка закрепляет ИМЯ поля версии: тело именно
+     * этой формы обязано сохраняться.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const order = await orderWithoutInterval();
+
+    const saved = await setInterval(token, order.id, {
+      startMinute: 600,
+      endMinute: 840,
+      version: order.version,
+    });
+    expect(saved.statusCode).toBe(200);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.manualIntervalStartMinute).toBe(600);
+    expect(stored.manualIntervalEndMinute).toBe(840);
+    // Ручной интервал закрывает причину внимания: логист уже всё исправил.
+    expect(stored.attentionReasons).not.toContain('UNRECOGNIZED_INTERVAL');
+
+    // Рабочим он становится и в «Сделках», и на карте, и в «Активных».
+    const deals = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/deals?deliveryDate=${moscowToday(NOW)}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const cards = (
+      deals.json() as {
+        items: { id: string; startMinute: number | null; endMinute: number | null }[];
+      }
+    ).items;
+    const card = cards.find((item) => item.id === order.id);
+    expect(card).toMatchObject({ startMinute: 600, endMinute: 840 });
+  });
+
+  it('тело без поля version отвергается, а не сохраняется молча', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const order = await orderWithoutInterval();
+
+    const response = await setInterval(token, order.id, {
+      startMinute: 600,
+      endMinute: 840,
+      // Именно так посылало окно заказа: чужой ключ вместо `version`.
+      expectedVersion: order.version,
+    });
+    expect(response.statusCode).toBe(400);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(stored.manualIntervalStartMinute).toBeNull();
+  });
 
   it('курьеру ручной интервал недоступен, логисту — доступен', async () => {
     const order = await orderWithoutInterval();

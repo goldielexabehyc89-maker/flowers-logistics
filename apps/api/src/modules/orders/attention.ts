@@ -15,6 +15,7 @@
  */
 
 import type { $Enums } from '../../generated/prisma/client.js';
+import { blocksLogistics } from '@fl/shared';
 
 export type AttentionReason = $Enums.OrderAttentionReason;
 
@@ -52,6 +53,22 @@ export function hasManualInterval(manual: ManualInterval | null | undefined): bo
  * Причины, которые попадают в карточку заказа.
  * Исходный набор из снимка не изменяется: ревизия хранит его как есть.
  */
+/**
+ * Ставить ли заказу признак «Требует внимания».
+ *
+ * Признак рабочий, а не описательный: он красит карточку, поднимает её вверх
+ * и убирает заказ с карты. Поэтому его ставит только то, что мешает логисту
+ * распределить заказ, — адрес, точка и интервал. Отсутствующий получатель,
+ * вопросы к дате и денежные расхождения остаются в наборе причин как сведения,
+ * но работу логиста не блокируют: разбираются они на других экранах.
+ *
+ * Разрешённый список лежит в `@fl/shared`, чтобы сервер и клиент не разошлись,
+ * и новая причина импорта не становилась блокирующей молча.
+ */
+export function needsLogisticsAttention(reasons: readonly AttentionReason[]): boolean {
+  return blocksLogistics(reasons);
+}
+
 export function effectiveAttentionReasons(
   snapshotReasons: readonly AttentionReason[],
   manual: ManualInterval | null | undefined,

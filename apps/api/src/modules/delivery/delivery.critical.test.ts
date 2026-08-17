@@ -207,30 +207,46 @@ describe('окончательный результат', () => {
     );
   });
 
-  it('«Другое» без комментария отвергается, с комментарием проходит', async () => {
+  it('обычная причина принимается без комментария, «Другое» — только с ним', async () => {
+    /*
+     * У курьера в окне остались кнопки причин и ни одного поля ввода.
+     * Причина, требующая пояснения, ему не предлагается — но сервер обязан
+     * проверять это сам: запрос может прийти и мимо интерфейса.
+     */
     const courier = await actorFor(['COURIER']);
-    const route = await seedActiveRoute(courier.userId, 2);
+    const route = await seedActiveRoute(courier.userId, 3);
+    const noAnswer = await reasonByCode('NO_ANSWER');
     const other = await reasonByCode('OTHER');
+
+    const plain = await recordDeliveryResult(
+      deps,
+      courier,
+      route.participations[0]!,
+      { outcome: 'NOT_DELIVERED', reasonId: noAnswer.id },
+      CONTEXT,
+    );
+    expect(plain.attempt.outcome).toBe('NOT_DELIVERED');
+    expect(plain.attempt.reasonName).toBe(noAnswer.name);
+    expect(plain.attempt.comment).toBeNull();
 
     await expectRefusal(
       recordDeliveryResult(
         deps,
         courier,
-        route.participations[0]!,
+        route.participations[1]!,
         { outcome: 'NOT_DELIVERED', reasonId: other.id },
         CONTEXT,
       ),
       /комментарий/i,
     );
 
-    const ok = await recordDeliveryResult(
-      deps,
-      courier,
-      route.participations[0]!,
-      { outcome: 'NOT_DELIVERED', reasonId: other.id, comment: 'дверь закрыта наглухо' },
-      CONTEXT,
-    );
-    expect(ok.attempt.outcome).toBe('NOT_DELIVERED');
+    // Причина и автор доходят до истории: по ним разбирают случай.
+    const stored = await ctx.db.deliveryAttempt.findUniqueOrThrow({
+      where: { id: plain.attempt.id },
+      select: { reasonNameSnapshot: true, courierUserId: true },
+    });
+    expect(stored.reasonNameSnapshot).toBe(noAnswer.name);
+    expect(stored.courierUserId).toBe(courier.userId);
   });
 
   it('снимок названия причины переживает переименование справочника', async () => {
@@ -689,6 +705,116 @@ describe('исправление результата', () => {
 });
 
 // --- 7. Видимость и маскирование --------------------------------------------
+
+describe('рабочий адрес и точка в «Активных»', () => {
+  it('курьер видит адрес логиста, а не исходный адрес источника', async () => {
+    /*
+     * Правка логиста сильнее: по ней курьер и поедет. Прежде «Активные»
+     * отдавали сырой `address`, и человек ехал туда, откуда его уже увели
+     * правкой, — при том что в «Сделках» и на карте адрес был правильный.
+     */
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const route = await seedActiveRoute(courier.userId);
+
+    await ctx.db.deliveryOrder.update({
+      where: { id: route.orderIds[0]! },
+      data: {
+        address: 'исходный адрес МоегоСклада',
+        localAddress: 'Москва, исправленный логистом адрес, 5',
+        localAddressSetAt: new Date(),
+        localAddressSetById: logist.userId,
+        sourceAddressAtLocalEdit: 'исходный адрес МоегоСклада',
+      },
+    });
+
+    const view = await listActiveDeliveries(deps, courier);
+    const order = view.routes.flatMap((entry) => entry.orders)[0];
+    expect(order?.address).toBe('Москва, исправленный логистом адрес, 5');
+  });
+
+  it('без правки логиста показывается исходный адрес', async () => {
+    const courier = await actorFor(['COURIER']);
+    const route = await seedActiveRoute(courier.userId);
+    await ctx.db.deliveryOrder.update({
+      where: { id: route.orderIds[0]! },
+      data: { address: 'Москва, адрес источника, 3' },
+    });
+
+    const view = await listActiveDeliveries(deps, courier);
+    expect(view.routes.flatMap((entry) => entry.orders)[0]?.address).toBe(
+      'Москва, адрес источника, 3',
+    );
+  });
+
+  it('точка отдаётся только подтверждённая: иначе `null`, а не догадка', async () => {
+    const courier = await actorFor(['COURIER']);
+    const confirmed = await seedActiveRoute(courier.userId);
+    await ctx.db.deliveryOrder.update({
+      where: { id: confirmed.orderIds[0]! },
+      data: {
+        geoState: 'RESOLVED',
+        geoSource: 'PHOTON',
+        geoPrecision: 'EXACT_HOUSE',
+        geoLatMicro: 55_751_244,
+        geoLonMicro: 37_618_423,
+        geoResolvedAt: new Date(),
+      },
+    });
+
+    const view = await listActiveDeliveries(deps, courier);
+    const order = view.routes
+      .flatMap((entry) => entry.orders)
+      .find((entry) => entry.orderId === confirmed.orderIds[0]);
+    expect(order?.point).toEqual({ lat: '55.751244', lon: '37.618423' });
+
+    // Заказ без разрешённой геопозиции точки не получает вовсе.
+    const pending = await seedActiveRoute(courier.userId);
+    await ctx.db.deliveryOrder.update({
+      where: { id: pending.orderIds[0]! },
+      data: { geoState: 'PENDING' },
+    });
+    const second = await listActiveDeliveries(deps, courier);
+    const waiting = second.routes
+      .flatMap((entry) => entry.orders)
+      .find((entry) => entry.orderId === pending.orderIds[0]);
+    expect(waiting?.point).toBeNull();
+  });
+
+  it('история курьера показывает тот же рабочий адрес', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const route = await seedActiveRoute(courier.userId);
+    await ctx.db.deliveryOrder.update({
+      where: { id: route.orderIds[0]! },
+      data: {
+        address: 'исходный адрес',
+        localAddress: 'Москва, рабочий адрес истории, 9',
+        localAddressSetAt: new Date(),
+        localAddressSetById: logist.userId,
+        sourceAddressAtLocalEdit: 'исходный адрес',
+      },
+    });
+
+    await recordDeliveryResult(
+      deps,
+      courier,
+      route.participations[0]!,
+      { outcome: 'DELIVERED' },
+      CONTEXT,
+    );
+
+    // День фиксирован вместе с часами: маскирование считается по московской
+    // дате, и «сегодня» проверочного дня наступает только с этими часами.
+    const history = await listDeliveryHistory(
+      { db: ctx.db, clock: () => new Date(`${DAY}T10:00:00.000Z`) },
+      courier,
+      { date: DAY },
+    );
+    const item = history.items.find((entry) => entry.orderNumber !== undefined);
+    expect(item?.address).toBe('Москва, рабочий адрес истории, 9');
+  });
+});
 
 describe('видимость активных доставок', () => {
   it('курьер видит только свои маршруты', async () => {

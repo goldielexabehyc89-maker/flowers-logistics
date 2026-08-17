@@ -173,7 +173,8 @@ export function resolveQueueDate(day: QueueDay, now: Date): string {
   return day === 'today' ? today : shiftCalendarDate(today, 1);
 }
 
-function orderSelect(date: string) {
+/** `date === null` — участие ищется в листе ЛЮБОГО дня: список без границы дня. */
+function orderSelect(date: string | null) {
   return {
     id: true,
     externalName: true,
@@ -207,7 +208,10 @@ function orderSelect(date: string) {
     routeOrders: {
       where: {
         removedAt: null,
-        route: { state: 'CONFIRMED' as const, deliveryDate: toDateColumn(date) },
+        route: {
+          state: 'CONFIRMED' as const,
+          ...(date === null ? {} : { deliveryDate: toDateColumn(date) }),
+        },
       },
       select: { position: true, route: { select: { id: true, number: true } } },
     },
@@ -308,8 +312,18 @@ export async function readQueue(
     nowMinuteMoscow: moscowMinuteOfDay(now),
   };
 
+  /*
+   * «Мои заказы» не ограничены днём.
+   *
+   * За флористом числится работа, а не день: заказ, взятый вчера и не
+   * собранный, обязан оставаться перед глазами, а взятый на завтра — не
+   * прятаться до полуночи. Именно из-за границы дня счётчик вкладки расходился
+   * со списком: считался он всегда по всем дням, а показывался один день.
+   *
+   * «Очередь» день сохраняет: там выбирают, что брать в работу сегодня.
+   */
   const scopeWhere = buildScopeWhere({
-    date,
+    date: mine ? null : date,
     assigneeId: mine ? viewer.userId : null,
     search,
   });
@@ -350,7 +364,9 @@ export async function readQueue(
 
   const rows = await db.deliveryOrder.findMany({
     where: { ...scopeWhere, fulfillmentProcessState: { in: states } },
-    select: orderSelect(date),
+    // Без границы дня участие в листе ищется по дню САМОГО заказа: иначе
+    // вчерашний заказ терял бы свой маршрут и падал вниз списка.
+    select: orderSelect(mine ? null : date),
   });
 
   const routes = await readRoutes(db, rows);
@@ -361,6 +377,7 @@ export async function readQueue(
     return {
       id: row.id,
       externalName: row.externalName,
+      deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
       startMinute: minutes.startMinute,
       endMinute: minutes.endMinute,
       route: participation === undefined ? null : (routes.get(participation.route.id) ?? null),

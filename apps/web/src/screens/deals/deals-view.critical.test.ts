@@ -104,7 +104,13 @@ describe('«Требует внимания» называет причину', 
     expect(primaryAttention(problem)?.action).toBe('FIX_ADDRESS');
   });
 
-  it('причины перечисляются все, а показывается первая', () => {
+  it('перечисляются только препятствия логиста, первое — главное', () => {
+    /*
+     * «Требует внимания» — рабочий признак, а не список претензий источника:
+     * он красит карточку, поднимает её вверх и убирает заказ с карты.
+     * Отсутствующий получатель работе логиста не мешает и сюда не попадает,
+     * хотя в наборе причин заказа остаётся.
+     */
     const problem = card({
       attentionReasons: ['UNRECOGNIZED_INTERVAL', 'MISSING_RECIPIENT'],
       geoState: 'FAILED',
@@ -112,14 +118,19 @@ describe('«Требует внимания» называет причину', 
 
     expect(attentionReasonsOf(problem).map((item) => item.code)).toEqual([
       'UNRECOGNIZED_INTERVAL',
-      'MISSING_RECIPIENT',
       'NO_POINT',
     ]);
     expect(primaryAttention(problem)?.code).toBe('UNRECOGNIZED_INTERVAL');
   });
 
-  it('незнакомый код не прячется, а показывается как есть', () => {
-    expect(primaryAttention(card({ attentionReasons: ['НОВЫЙ_КОД'] }))?.label).toBe('НОВЫЙ_КОД');
+  it('незнакомая причина не становится препятствием молча', () => {
+    // Ровно то, ради чего список сделан разрешающим: причина, появившаяся
+    // в импорте, не имеет права вынести день в «Требует внимания».
+    expect(primaryAttention(card({ attentionReasons: ['НОВЫЙ_КОД'] }))).toBeNull();
+    // А вместе с настоящим препятствием показывается именно оно.
+    expect(
+      primaryAttention(card({ attentionReasons: ['НОВЫЙ_КОД', 'MISSING_ADDRESS'] }))?.code,
+    ).toBe('MISSING_ADDRESS');
   });
 });
 

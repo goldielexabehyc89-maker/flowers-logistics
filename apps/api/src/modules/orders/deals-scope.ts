@@ -92,9 +92,16 @@ function groupCondition(group: DealsGroup): Prisma.Sql {
     return Prisma.sql`"needsAttention" = true`;
   }
   if (group === 'ROUTABLE') {
-    // Пригодным считается заказ без блокирующего внимания и с подтверждённой
-    // точкой: без координаты его нельзя ни показать на карте, ни посчитать.
-    return Prisma.sql`"needsAttention" = false AND "geoState" = 'RESOLVED'`;
+    /*
+     * Пригодным считается заказ без блокирующего внимания, с подтверждённой
+     * точкой и с датой доставки.
+     *
+     * Дата проверяется отдельно, потому что «Требует внимания» её больше
+     * не включает: заказ без даты не блокирует логиста как задача, но и
+     * положить его в маршрут конкретного дня нельзя — сервер откажет
+     * проверкой пригодности, и предлагать его к выбору было бы обманом.
+     */
+    return Prisma.sql`"needsAttention" = false AND "geoState" = 'RESOLVED' AND "deliveryDate" IS NOT NULL`;
   }
   return Prisma.sql`TRUE`;
 }

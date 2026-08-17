@@ -19,10 +19,21 @@ import type { TransactionClient } from '../auth/sessions.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
-import { effectiveAttentionReasons, type AttentionReason } from './attention.js';
+import {
+  effectiveAttentionReasons,
+  needsLogisticsAttention,
+  type AttentionReason,
+} from './attention.js';
 
-/** Кому видны события заказов. Курьеру глобальный список не нужен. */
-const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * Кому видны события заказов.
+ *
+ * Курьер включён намеренно: адрес и интервал он видит в «Активных» и обязан
+ * получить правку в дороге, а не после перезагрузки. Событие не несёт ни
+ * адреса, ни получателя — только повод перечитать собственный список, и
+ * чужие заказы курьеру от этого не открываются.
+ */
+const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN', 'COURIER'] as const;
 
 /** Минуты от полуночи: сутки целиком. */
 export const MIN_MINUTE = 0;
@@ -129,7 +140,7 @@ export async function setManualInterval(
         manualIntervalStartMinute: input.startMinute,
         manualIntervalEndMinute: input.endMinute,
         manualIntervalSetAt: new Date(),
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: { increment: 1 },
       },
@@ -160,7 +171,7 @@ export async function setManualInterval(
         startMinute: input.startMinute,
         endMinute: input.endMinute,
         version,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
       },
       ip: context.ip,
@@ -172,7 +183,7 @@ export async function setManualInterval(
       payload: {
         orderId: order.id,
         inScope: true,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         manualInterval: true,
       },
       audienceRoles: [...ORDER_AUDIENCE],
@@ -183,7 +194,7 @@ export async function setManualInterval(
       version,
       startMinute: input.startMinute,
       endMinute: input.endMinute,
-      needsAttention: reasons.length > 0,
+      needsAttention: needsLogisticsAttention(reasons),
       attentionReasons: reasons,
     };
   });

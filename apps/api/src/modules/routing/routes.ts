@@ -23,6 +23,8 @@ import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.j
 import { fromDateColumn, isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import { toDecimalString } from '../integrations/moysklad/money.js';
 import { assignmentStateOf, calendarDate } from './eligibility.js';
+// Рабочий адрес считается в одном месте на весь продукт.
+import { effectiveAddress } from '../orders/address.js';
 import {
   addOrders,
   createEmptyDraft,
@@ -623,6 +625,7 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
               manualIntervalStartMinute: true,
               manualIntervalEndMinute: true,
               address: true,
+              localAddress: true,
               recipient: true,
               comment: true,
               needsAttention: true,
@@ -695,7 +698,8 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
           manualStartMinute: item.order.manualIntervalStartMinute,
           manualEndMinute: item.order.manualIntervalEndMinute,
         },
-        address: item.order.address,
+        // Рабочий адрес: по нему поедет курьер, он же печатается в листе.
+        address: effectiveAddress(item.order),
         recipient: item.order.recipient,
         comment: item.order.comment,
         needsAttention: item.order.needsAttention,

@@ -40,7 +40,10 @@ export interface ActiveOrderView {
   orderId: string;
   position: number;
   number: string;
+  /** Рабочий адрес: правка логиста сильнее исходного значения источника. */
   address: string | null;
+  /** Подтверждённая точка. `null` — точки нет, и догадка не подставляется. */
+  point: { lat: string; lon: string } | null;
   recipient: string | null;
   comment: string | null;
   intervalStartMinute: number | null;
@@ -139,10 +142,51 @@ export function resultDraftProblem(
   if (draft.reasonId === null) return 'Выберите причину недоставки.';
   const reason = reasons.find((entry) => entry.id === draft.reasonId);
   if (reason === undefined || !reason.isActive) return 'Причина недоступна. Обновите список.';
+  /*
+   * Причина, требующая пояснения, курьеру не предлагается вовсе.
+   *
+   * Поля комментария в окне нет: у двери человек нажимает кнопку, а не пишет
+   * текст. Поэтому такие причины отфильтрованы (`selectableReasons`), а эта
+   * проверка остаётся защитой от несогласованного состояния — например,
+   * если справочник изменили, пока окно было открыто.
+   */
   if (reason.requiresComment && draft.comment.trim() === '') {
-    return 'Для причины «Другое» нужен комментарий.';
+    return 'Эта причина требует пояснения и сейчас недоступна.';
   }
   return null;
+}
+
+/**
+ * Причины, которые показываются курьеру кнопками.
+ *
+ * Действующие и не требующие пояснения: поля комментария в окне нет, и
+ * предлагать причину, которую без текста не принять, значило бы поставить
+ * человека у двери в тупик.
+ */
+export function selectableReasons(reasons: readonly FailureReasonView[]): FailureReasonView[] {
+  return reasons.filter((reason) => reason.isActive && !reason.requiresComment);
+}
+
+/**
+ * Ссылка на Яндекс Карты к подтверждённой точке заказа.
+ *
+ * `rtext=~lat,lon` означает «маршрут от моего места до этой точки»: курьеру
+ * нужен путь, а не булавка на карте. Ключей и подключаемых сценариев здесь
+ * нет — обычная ссылка, которую открывает браузер или приложение карт.
+ *
+ * `null`, если подтверждённой точки нет: вести человека по догаданной
+ * координате хуже, чем не дать ссылку вовсе.
+ */
+export function routeLink(point: { lat: string; lon: string } | null): string | null {
+  if (point === null) {
+    return null;
+  }
+  const lat = Number(point.lat);
+  const lon = Number(point.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+  return `https://yandex.ru/maps/?rtext=~${point.lat},${point.lon}&rtt=auto`;
 }
 
 /** Сколько заказов маршрута ещё без результата. */

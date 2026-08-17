@@ -29,7 +29,6 @@ import {
   FilterPanel,
   LoadingState,
   Modal,
-  PageHeader,
   Pagination,
   Select,
   StatusBadge,
@@ -48,6 +47,32 @@ import {
 import './users.css';
 
 const PAGE_SIZE = 25;
+
+/**
+ * Порядок вкладок ролей.
+ *
+ * Курьеры первыми: их заводят и замораживают чаще всех остальных вместе взятых.
+ * Список закреплён явно, а не собирается из `ROLE_LABELS`: порядок в интерфейсе
+ * определяется частотой работы, а не порядком объявления перечисления.
+ */
+const ROLE_TABS: readonly Role[] = [
+  'COURIER',
+  'FLORIST',
+  'WAREHOUSE',
+  'MANAGER',
+  'LOGISTICIAN',
+  'ADMIN',
+];
+
+/** Кнопка называет, кого именно заводит: роль уже выбрана вкладкой. */
+const ADD_LABELS: Record<Role, string> = {
+  COURIER: 'Добавить курьера',
+  FLORIST: 'Добавить флориста',
+  WAREHOUSE: 'Добавить кладовщика',
+  MANAGER: 'Добавить менеджера',
+  LOGISTICIAN: 'Добавить логиста',
+  ADMIN: 'Добавить администратора',
+};
 
 const STATUS_TONES: Record<UserStatus, StatusTone> = {
   ACTIVE: 'success',
@@ -72,8 +97,19 @@ export function UsersScreen(): React.JSX.Element {
 
   const isAdmin = currentUser?.roles.includes('ADMIN') === true;
 
+  /*
+   * Роль — это вкладка, а не фильтр.
+   *
+   * Список сотрудников читают по одной роли за раз: «покажи курьеров», «покажи
+   * флористов». Выпадающий фильтр со значением «Любая» превращал экран в кашу
+   * из семи ролей, в которой нужную строку приходится искать глазами.
+   *
+   * Логист видит ровно одну вкладку — курьеров: остальные роли ему не
+   * показывает и сам сервер.
+   */
+  const tabs: Role[] = isAdmin ? [...ROLE_TABS] : ['COURIER'];
   const [status, setStatus] = useState<UserStatus>('ACTIVE');
-  const [role, setRole] = useState<Role | ''>('');
+  const [role, setRole] = useState<Role>('COURIER');
   const [offset, setOffset] = useState(0);
 
   const [formOpen, setFormOpen] = useState(false);
@@ -90,12 +126,10 @@ export function UsersScreen(): React.JSX.Element {
     queryFn: () => {
       const params = new URLSearchParams({
         status,
+        role,
         limit: String(PAGE_SIZE),
         offset: String(offset),
       });
-      if (role !== '') {
-        params.set('role', role);
-      }
       return client.get<UserListResponse>(`/api/users?${params.toString()}`);
     },
   });
@@ -113,6 +147,8 @@ export function UsersScreen(): React.JSX.Element {
       client.post<CreatedUserResponse>('/api/users', {
         phone: values.phone,
         fullName: values.fullName,
+        // Логисту сервер разрешает только курьеров, и интерфейс не пытается
+        // спорить: он посылает роль открытой вкладки.
         roles: isAdmin ? values.roles : ['COURIER'],
         ...(values.comment === '' ? {} : { comment: values.comment }),
         ...(values.roles.includes('COURIER')
@@ -243,28 +279,53 @@ export function UsersScreen(): React.JSX.Element {
 
   return (
     <div className="stack">
-      <PageHeader
-        title="Сотрудники и курьеры"
-        description="Сотрудники не удаляются: недоступность выражается заморозкой, её можно снять."
+      {/*
+        Вкладки ролей и рабочая панель — одна поверхность.
+
+        Прежде экран начинался с закреплённой карточки заголовка, которая
+        при прокрутке наезжала на подписи фильтров: сам заголовок раздела
+        и так стоит в шапке приложения, и второй копии ему не нужно.
+      */}
+      <FilterPanel
         actions={
           <Button
             variant="primary"
+            data-testid="user-add"
             onClick={() => {
               setEditing(null);
               setFormError(null);
               setFormOpen(true);
             }}
           >
-            Добавить
+            {ADD_LABELS[role] ?? 'Добавить'}
           </Button>
         }
-      />
+      >
+        <div className="users__tabs" role="tablist" aria-label="Роли">
+          {tabs.map((value) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={role === value}
+              className={`users__tab${role === value ? ' users__tab--active' : ''}`}
+              data-testid="user-role-tab"
+              data-role={value}
+              onClick={() => {
+                setRole(value);
+                setOffset(0);
+              }}
+            >
+              {ROLE_LABELS[value]}
+            </button>
+          ))}
+        </div>
 
-      <FilterPanel>
         <Field label="Статус">
           {(fieldProps) => (
             <Select
               {...fieldProps}
+              data-testid="user-status-filter"
               value={status}
               onChange={(event) => {
                 setStatus(event.target.value as UserStatus);
@@ -277,28 +338,6 @@ export function UsersScreen(): React.JSX.Element {
             </Select>
           )}
         </Field>
-
-        {isAdmin && (
-          <Field label="Роль">
-            {(fieldProps) => (
-              <Select
-                {...fieldProps}
-                value={role}
-                onChange={(event) => {
-                  setRole(event.target.value as Role | '');
-                  setOffset(0);
-                }}
-              >
-                <option value="">Любая</option>
-                {Object.entries(ROLE_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
-        )}
       </FilterPanel>
 
       {query.isLoading && <LoadingState />}
@@ -412,6 +451,7 @@ export function UsersScreen(): React.JSX.Element {
         mode={editing === null ? 'create' : 'edit'}
         canAssignRoles={isAdmin}
         initial={editing}
+        defaultRole={role}
         busy={createMutation.isPending || updateMutation.isPending}
         error={formError}
         onClose={() => {

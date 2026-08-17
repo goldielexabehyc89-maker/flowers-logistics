@@ -32,6 +32,9 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { moscowCalendarDate } from '@fl/shared';
 import { accrueDeliveryResult, reverseDeliveryAccruals } from '../finance/accrual.js';
+// Рабочий адрес считается в одном месте на весь продукт, а не переписывается здесь.
+import { effectiveAddress } from '../orders/address.js';
+import { fromMicro } from '../orders/geo.js';
 import { readLedgerActivation } from '../finance/tariffs.js';
 
 /** Кто работает с доставкой. Курьер сообщает результат, остальные — наблюдают и правят. */
@@ -171,6 +174,24 @@ export async function updateFailureReason(
   });
 }
 
+/**
+ * Подтверждённая точка заказа.
+ *
+ * Только `RESOLVED`: у заказа в ожидании или с отказом геокодера координаты
+ * либо отсутствуют, либо не подтверждены, и выдавать их за место доставки
+ * нельзя. Отсутствие точки — честное `null`, а не центр Москвы.
+ */
+function confirmedPoint(order: {
+  geoState: $Enums.OrderGeoState;
+  geoLatMicro: number | null;
+  geoLonMicro: number | null;
+}): { lat: string; lon: string } | null {
+  if (order.geoState !== 'RESOLVED' || order.geoLatMicro === null || order.geoLonMicro === null) {
+    return null;
+  }
+  return { lat: fromMicro(order.geoLatMicro), lon: fromMicro(order.geoLonMicro) };
+}
+
 // --- Активные доставки -------------------------------------------------------
 
 export interface ActiveDeliveryOrder {
@@ -178,7 +199,20 @@ export interface ActiveDeliveryOrder {
   orderId: string;
   position: number;
   number: string;
+  /**
+   * Рабочий адрес: правка логиста сильнее исходного значения источника.
+   *
+   * Курьер едет именно по нему. Показывать здесь исходный адрес значило бы
+   * отправить человека туда, откуда его уже увели правкой.
+   */
   address: string | null;
+  /**
+   * Подтверждённая точка заказа. `null` — точки нет.
+   *
+   * Отдаётся только для подтверждённой геопозиции: догаданная координата
+   * увела бы курьера не туда с уверенным видом.
+   */
+  point: { lat: string; lon: string } | null;
   recipient: string | null;
   comment: string | null;
   intervalStartMinute: number | null;
@@ -296,6 +330,10 @@ export async function listActiveDeliveries(
               id: true,
               externalName: true,
               address: true,
+              localAddress: true,
+              geoState: true,
+              geoLatMicro: true,
+              geoLonMicro: true,
               recipient: true,
               comment: true,
               intervalStartMinute: true,
@@ -330,7 +368,8 @@ export async function listActiveDeliveries(
           orderId: participation.order.id,
           position: participation.position,
           number: participation.order.externalName,
-          address: participation.order.address,
+          address: effectiveAddress(participation.order),
+          point: confirmedPoint(participation.order),
           recipient: participation.order.recipient,
           comment: participation.order.comment,
           intervalStartMinute:
@@ -588,13 +627,26 @@ function normalizeComment(comment: string | undefined): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+/**
+ * Комментарий при недоставке.
+ *
+ * Обязателен только там, где причина сама этого требует (`requiresComment` —
+ * сейчас это «Другое»). Курьер сообщает результат у двери, и лишнее поле там
+ * стоит времени: причина из справочника отвечает на вопрос «что случилось»
+ * точнее свободного текста и позволяет считать статистику.
+ *
+ * Правило «комментарий обязателен при любой причине» существовало 17.08.2026
+ * несколько часов и отменено владельцем вместе с самим полем комментария.
+ * Проверка остаётся: причина, требующая пояснения, без него не принимается,
+ * даже если такой запрос придёт мимо интерфейса.
+ */
 function assertCommentPresent(
   reason: { requiresComment: boolean } | null,
   comment: string | null,
 ): void {
   if (reason !== null && reason.requiresComment && comment === null) {
     throw new AppError('VALIDATION_FAILED', {
-      publicMessage: 'Для причины «Другое» нужен комментарий.',
+      publicMessage: 'Для этой причины нужен комментарий.',
     });
   }
 }
@@ -887,7 +939,9 @@ export async function listDeliveryHistory(
       occurredAt: true,
       cancellation: { select: { id: true } },
       route: { select: { number: true } },
-      order: { select: { externalName: true, address: true, recipient: true } },
+      order: {
+        select: { externalName: true, address: true, localAddress: true, recipient: true },
+      },
     },
   });
 
@@ -907,7 +961,8 @@ export async function listDeliveryHistory(
       occurredAt: row.occurredAt,
       cancelled: row.cancellation !== null,
       masked,
-      address: masked ? null : row.order.address,
+      // Тот же рабочий адрес, что видел курьер в «Активных».
+      address: masked ? null : effectiveAddress(row.order),
       recipient: masked ? null : row.order.recipient,
       comment: masked ? null : row.comment,
     })),

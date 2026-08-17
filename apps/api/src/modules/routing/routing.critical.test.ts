@@ -488,6 +488,39 @@ describe('выборка нераспределённых заказов для 
     }
   });
 
+  it('карточка маршрута и лист печатают рабочий адрес, а не исходный', async () => {
+    /*
+     * Маршрутный лист — это то, что курьер держит в руках. Исходный адрес
+     * источника в нём означал бы поездку туда, откуда заказ уже увели правкой
+     * логиста: список «Сделок» показывал бы одно, а лист — другое.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-11-24';
+    const orderId = await seedOrder({ deliveryPlannedMoment: `${day} 12:00:00.000` });
+    const logist = await seedUser(ctx.db, { roles: ['LOGISTICIAN'], status: 'ACTIVE' });
+
+    await ctx.db.deliveryOrder.update({
+      where: { id: orderId },
+      data: {
+        address: 'исходный адрес МоегоСклада',
+        localAddress: 'Москва, адрес логиста для листа, 11',
+        localAddressSetAt: new Date(),
+        localAddressSetById: logist.id,
+        sourceAddressAtLocalEdit: 'исходный адрес МоегоСклада',
+      },
+    });
+
+    const route = await createRoute(token, day);
+    const added = await call('POST', `/api/routes/${route.id}/orders`, token, {
+      orderIds: [orderId],
+      expectedVersion: route.version,
+    });
+
+    const body = added.json() as { orders: { order: { address: string | null } }[] };
+    expect(body.orders[0]?.order.address).toBe('Москва, адрес логиста для листа, 11');
+    expect(added.body).not.toContain('исходный адрес МоегоСклада');
+  });
+
   it('карточка маршрута отдаёт сумму к получению строкой и без лишних финансов', async () => {
     const token = await tokenFor(['LOGISTICIAN']);
     const day = '2026-11-23';

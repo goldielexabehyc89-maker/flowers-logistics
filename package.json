@@ -64,5 +64,9 @@
     "prisma@7.9.1": true,
     "@prisma/engines@7.9.1": true,
     "esbuild@0.28.1": true
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.1",
+    "uuid": "14.0.1"
   }
 }

@@ -42,6 +42,7 @@ import { requireDefaultDepot } from '../depots/service.js';
 import { readServiceTime, readShift, requireShift, type Shift } from '../settings/service.js';
 import { computeMatrix, matrixCacheKey, type MatrixDeps } from '../geo/matrix/service.js';
 import { MICRO } from '../orders/geo.js';
+import { effectiveAddress } from '../orders/address.js';
 import type { VroomClient } from '../integrations/vroom/client.js';
 import { VroomError } from '../integrations/vroom/client.js';
 import {
@@ -1053,7 +1054,7 @@ export async function readRun(db: Database, runId: string): Promise<RunView> {
       id: order.id,
       number: order.externalName,
       // Правка логиста сильнее исходного адреса: курьер поедет по ней.
-      address: order.localAddress ?? order.address,
+      address: effectiveAddress(order),
       // Ручной интервал тоже сильнее импортированного.
       intervalStartMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
       intervalEndMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,

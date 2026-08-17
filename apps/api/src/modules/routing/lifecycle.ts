@@ -48,7 +48,14 @@ import {
 import { readManualIssue } from '../settings/service.js';
 import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
 
-const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
+/**
+ * Кому адресованы события жизненного цикла маршрута.
+ *
+ * Подтверждение, возврат в черновик и отмена меняют работу склада и флориста:
+ * подтверждённый лист появляется у них, отменённый обязан исчезнуть. Раньше
+ * эти роли о переходах не узнавали и продолжали собирать снятое.
+ */
+const ROUTE_AUDIENCE: readonly Role[] = ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'];
 
 export interface LifecycleDeps {
   db: Database;
@@ -182,7 +189,7 @@ async function publishRouteEvent(
   await publishRealtimeEvent(tx, {
     topic,
     payload: { routeId },
-    audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+    audienceRoles: [...ROUTE_AUDIENCE],
   });
 }
 

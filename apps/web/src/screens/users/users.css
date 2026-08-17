@@ -39,3 +39,41 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
+
+/*
+ * Вкладки ролей.
+ *
+ * Роль — это не фильтр, а раздел списка: сотрудников читают по одной роли за
+ * раз. Вкладки прокручиваются вбок на телефоне, потому что шести названиям
+ * в 360 пикселей не поместиться, а переносить их в две строки — терять высоту,
+ * которой на телефоне и так нет.
+ */
+.users__tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  /* Полоса прокрутки вкладок не должна тянуть за собой всю страницу. */
+  max-width: 100%;
+  padding-bottom: 2px;
+}
+
+.users__tab {
+  flex: none;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.users__tab--active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 600;
+}

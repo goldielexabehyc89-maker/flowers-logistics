@@ -7,6 +7,7 @@
  * браузера.
  */
 
+import { blockingReasonsOf } from '@fl/shared';
 import type { DealCard } from './selection';
 
 /**
@@ -68,6 +69,20 @@ export const NO_POINT_REASON: AttentionReason = {
 };
 
 /**
+ * Точка уже поставлена в очередь и ждёт геокодера.
+ *
+ * Отдельная формулировка намеренно: «нет точки» и «точка определяется» —
+ * разные положения дел. В первом логисту нужно вмешаться, во втором —
+ * подождать, и одинаковая надпись заставляла бы его чинить то, что и так
+ * в работе.
+ */
+export const PENDING_POINT_REASON: AttentionReason = {
+  code: 'POINT_PENDING',
+  label: 'Точка определяется',
+  action: 'NONE',
+};
+
+/**
  * Все причины внимания заказа, названные по-человечески.
  *
  * Отсутствие точки добавляется к серверным причинам: для логиста это одно
@@ -75,13 +90,24 @@ export const NO_POINT_REASON: AttentionReason = {
  * жило отдельной строкой блокировки и в «Требует внимания» не попадало.
  */
 export function attentionReasonsOf(card: DealCard): AttentionReason[] {
-  const reasons: AttentionReason[] = card.attentionReasons.map((code) => ({
+  /*
+   * В «Требует внимания» попадает только то, что мешает распределить заказ.
+   *
+   * Отсутствующий получатель, вопросы к дате и денежные расхождения приходят
+   * из МоегоСклада и остаются в карточке как сведения, но работу логиста
+   * не блокируют: разбираются они на других экранах и другими людьми.
+   * Разрешённый список общий с сервером — иначе цвет карточки разошёлся бы
+   * с признаком, по которому заказ убирают с карты.
+   */
+  const reasons: AttentionReason[] = blockingReasonsOf(card.attentionReasons).map((code) => ({
     code,
     label: REASON_LABELS[code] ?? code,
     action: REASON_ACTIONS[code] ?? 'NONE',
   }));
 
-  if (card.geoState !== 'RESOLVED') {
+  if (card.geoState === 'PENDING') {
+    reasons.push(PENDING_POINT_REASON);
+  } else if (card.geoState !== 'RESOLVED') {
     reasons.push(NO_POINT_REASON);
   }
 

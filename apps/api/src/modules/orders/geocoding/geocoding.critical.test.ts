@@ -1024,20 +1024,34 @@ describe('устаревший результат и гонки', () => {
     const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
     // Точка от прежнего адреса не досталась новому.
     expect(stored.geoLatMicro).toBeNull();
-    // Поколение прежнее: обновление заказа новую версию на разрешение
-    // не отправляет. Защита держится не на нём, а на сравнении АДРЕСА.
-    expect(stored.geoGeneration).toBe(1);
+    /*
+     * Поколение выросло: появившийся другой адрес — это событие, и заказ
+     * отправлен на разрешение заново. Защита от устаревшего ответа держится
+     * не на поколении, а на сравнении АДРЕСА: ответ по прежнему адресу
+     * отброшен независимо от того, есть ли новое задание.
+     */
+    expect(stored.geoGeneration).toBe(2);
 
     const firstJob = await ctx.db.orderGeocodeJob.findFirstOrThrow({
       where: { orderId: order.id, geoGeneration: 1 },
     });
     expect(firstJob.status).toBe('DONE');
     expect(firstJob.staleResults).toBe(1);
-    expect(firstJob.lastErrorCode).toBe('ADDRESS_CHANGED');
+    /*
+     * Устаревание опознано по поколению.
+     *
+     * Защит две, и обе на месте: адрес сравнивается с тем, что уходил в
+     * запрос, а поколение — с тем, что было на момент постановки. Появившееся
+     * новое задание срабатывает раньше, и код причины называет именно его.
+     */
+    expect(firstJob.lastErrorCode).toBe('GENERATION_CHANGED');
 
-    // Автоматического повторного задания не появилось: событием смена адреса
-    // в МоемСкладе не является.
-    expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: order.id } })).toBe(1);
+    // Новому адресу — новое задание: без него заказ остался бы без координат.
+    expect(await ctx.db.orderGeocodeJob.count({ where: { orderId: order.id } })).toBe(2);
+    const secondJob = await ctx.db.orderGeocodeJob.findFirstOrThrow({
+      where: { orderId: order.id, geoGeneration: 2 },
+    });
+    expect(secondJob.status).toBe('PENDING');
   });
 
   it('медленный геокодер и ручная точка: решение человека не перезаписывается', async () => {
@@ -1684,7 +1698,68 @@ describe('очередь наполняется событиями, а не со
     expect(await jobsOf(order.id)).toBe(1);
   });
 
-  it('обычное обновление существующего заказа в очередь его НЕ ставит', async () => {
+  it('появившийся адрес создаёт задание: заказ импортирован пустым, адрес пришёл потом', async () => {
+    /*
+     * Тот самый случай 137977CRM.
+     *
+     * Заказ создаётся в МоемСкладе без адреса доставки, склад дозаполняет
+     * `shipmentAddressFull` позже, и повторный импорт приносит адрес. Прежде
+     * событие «у заказа появился адрес» не фиксировалось вовсе: задания
+     * не возникало, и заказ навсегда оставался без координат, хотя адрес
+     * у него уже был.
+     */
+    const empty = mapOrder(
+      source({ shipmentAddress: null, shipmentAddressFull: null }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply(empty);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: empty.externalId },
+    });
+    expect(order.geocodeAddress).toBeNull();
+    expect(await jobsOf(order.id)).toBe(0);
+
+    /*
+     * Адрес берётся тем же генератором, что и в остальных проверках файла:
+     * поддельный геокодер отвечает по разобранному запросу, и синтетический
+     * адрес обязан пройти сверку ответа так же, как у обычного заказа.
+     */
+    const filled = mapOrder(
+      source({
+        id: empty.externalId,
+        name: empty.externalName,
+        updated: '2026-08-12 15:00:00.000',
+      }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply({ ...filled, externalUpdated: '2026-08-12 15:00:00.000' });
+
+    const withAddress = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(withAddress.geocodeAddress).not.toBeNull();
+    expect(withAddress.geoState).toBe('PENDING');
+    expect(await jobsOf(order.id)).toBe(1);
+
+    // Повторный импорт того же адреса второго задания не создаёт.
+    await apply({ ...filled, externalUpdated: '2026-08-12 15:00:00.000' });
+    expect(await jobsOf(order.id)).toBe(1);
+
+    // И после обработки у заказа появляются координаты.
+    await isolateJobs([order.id]);
+    await resetProviderState();
+    const client = fakeGeocoder((address) => exactAnswerFor(address));
+    const processed = await processGeocodingOnce(workerDeps(client));
+    expect(processed.resolved).toBe(1);
+
+    const resolved = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(resolved.geoState).toBe('RESOLVED');
+    expect(resolved.geoLatMicro).not.toBeNull();
+    expect(resolved.geoLonMicro).not.toBeNull();
+  });
+
+  it('изменившийся адрес источника ставит заказ в очередь заново', async () => {
     const first = mapOrder(
       source({ shipmentAddressFull: FULL }) as never,
       IDS,
@@ -1696,7 +1771,6 @@ describe('очередь наполняется событиями, а не со
     });
     const before = await jobsOf(order.id);
 
-    // Адрес в МоемСкладе изменился — но это не событие геокодирования.
     const changed = mapOrder(
       source({
         id: first.externalId,
@@ -1709,12 +1783,62 @@ describe('очередь наполняется событиями, а не со
     ).snapshot;
     await apply({ ...changed, externalUpdated: '2026-08-12 15:00:00.000' });
 
-    // Нового задания нет.
-    expect(await jobsOf(order.id)).toBe(before);
-    // Но прежняя точка снята: она относилась к другому адресу и молча
-    // увела бы курьера.
+    // Адрес другой — значит и точка нужна другая: прежняя снята, задание есть.
+    expect(await jobsOf(order.id)).toBe(before + 1);
     const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
     expect(after.geoLatMicro).toBeNull();
+    expect(after.geoState).toBe('PENDING');
+  });
+
+  it('правка логиста сильнее источника: ни адрес, ни точка не перетираются', async () => {
+    const first = mapOrder(
+      source({ shipmentAddressFull: FULL }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply(first);
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: first.externalId },
+    });
+
+    // Логист задал собственный адрес и подтвердил точку руками.
+    const logist = await seedUser(ctx.db, { roles: ['LOGISTICIAN'], status: 'ACTIVE' });
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        localAddress: 'Москва, адрес логиста, дом 7',
+        localAddressSetAt: new Date(),
+        localAddressSetById: logist.id,
+        sourceAddressAtLocalEdit: order.address,
+        geoState: 'RESOLVED',
+        geoSource: 'MANUAL',
+        geoPrecision: 'EXACT_HOUSE',
+        geoLatMicro: 55_700_000,
+        geoLonMicro: 37_600_000,
+        geoResolvedAt: new Date(),
+      },
+    });
+    const before = await jobsOf(order.id);
+
+    const changed = mapOrder(
+      source({
+        id: first.externalId,
+        name: first.externalName,
+        shipmentAddressFull: { ...FULL, house: '41' },
+        updated: '2026-08-12 16:00:00.000',
+      }) as never,
+      IDS,
+      'shipmentAddressFull',
+    ).snapshot;
+    await apply({ ...changed, externalUpdated: '2026-08-12 16:00:00.000' });
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({ where: { id: order.id } });
+    // Автоматический источник равен адресу логиста и не менялся: ни нового
+    // задания, ни потери подтверждённой человеком точки.
+    expect(await jobsOf(order.id)).toBe(before);
+    expect(after.localAddress).toBe('Москва, адрес логиста, дом 7');
+    expect(after.geoSource).toBe('MANUAL');
+    expect(after.geoLatMicro).toBe(55_700_000);
   });
 
   it('без включённого создания заданий импорт очередь не трогает', async () => {

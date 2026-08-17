@@ -29,7 +29,8 @@ export const FLORIST_ROLES = ['ADMIN', 'FLORIST'] as const;
 export const FLORIST_ADMIN_ROLES = ['ADMIN'] as const;
 
 /** Кому адресованы общие события производственного процесса. */
-export const FULFILLMENT_AUDIENCE = ['ADMIN', 'FLORIST'] as const;
+/** Смена и сборка касаются и склада: он принимает собранное. */
+export const FULFILLMENT_AUDIENCE = ['ADMIN', 'FLORIST', 'WAREHOUSE'] as const;
 
 /** Максимальная длина причины администратора: она попадает в аудит и в базу. */
 export const MAX_REASON_LENGTH = 500;

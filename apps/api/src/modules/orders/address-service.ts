@@ -18,14 +18,24 @@ import type { Database } from '../../platform/db.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
-import { effectiveAttentionReasons, type AttentionReason } from './attention.js';
+import {
+  effectiveAttentionReasons,
+  needsLogisticsAttention,
+  type AttentionReason,
+} from './attention.js';
 import { enqueueGeocoding } from './geocoding/queue.js';
 
 /** Адрес правят только логист и администратор. Проверяет сервер, а не экран. */
 export const ADDRESS_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 
-/** События заказов видят те же роли: курьеру глобальный поток не нужен. */
-const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * События заказов видят те же роли.
+ *
+ * Курьер включён намеренно: исправленный адрес обязан дойти до «Активных»
+ * без перезагрузки. В событии нет ни адреса, ни получателя — только повод
+ * перечитать собственный список.
+ */
+const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN', 'COURIER'] as const;
 
 export const MAX_ADDRESS_LENGTH = 500;
 
@@ -293,7 +303,7 @@ export async function setLocalAddress(
         sourceAddressAtLocalEdit: order.address,
         addressConflict: false,
         addressConflictDetectedAt: null,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: order.version + 1,
       },
@@ -395,7 +405,7 @@ export async function clearLocalAddress(
         sourceAddressAtLocalEdit: null,
         addressConflict: false,
         addressConflictDetectedAt: null,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: order.version + 1,
       },
@@ -494,7 +504,7 @@ export async function resolveAddressConflict(
       data: {
         addressConflict: false,
         addressConflictDetectedAt: null,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: order.version + 1,
         ...(keepLocal

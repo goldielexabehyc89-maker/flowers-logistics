@@ -54,6 +54,37 @@ function seedOrders(count: number, options: { withPoint: boolean }): string[] {
   return numbers;
 }
 
+/** Складская фикстура: маршрут с курьером и заказами, подтверждённый лист. */
+function seedWarehouseRoute(): {
+  route: string;
+  courierPhone: string;
+  courierPin: string;
+  orders: string[];
+} {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-warehouse'], {
+    encoding: 'utf8',
+  });
+  const value = (label: string): string =>
+    output.match(new RegExp(`^${label}:\\s*(.+)$`, 'm'))?.[1]?.trim() ?? '';
+  const orders = [...output.matchAll(/^заказ:\s*(.+)$/gm)].map((match) => match[1]?.trim() ?? '');
+
+  const route = value('маршрут');
+  if (route === '' || orders.length === 0) {
+    throw new Error('сеялка склада не вернула маршрут и заказы');
+  }
+  return {
+    route,
+    courierPhone: value('курьер'),
+    courierPin: value('пин курьера'),
+    orders,
+  };
+}
+
+/** Московский день: тот же, что показывает интерфейс. */
+function today(): string {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date());
+}
+
 const ADMIN_PHONE = process.env['E2E_ADMIN_PHONE'] ?? '+79990000001';
 const ADMIN_CODE = process.env['E2E_ADMIN_CODE'] ?? '';
 const ADMIN_PIN = '2481';
@@ -1002,7 +1033,20 @@ test('печатная версия листа не содержит навиг�
   await ownCard.getByTestId('deal-pick').click();
   await page.getByTestId('deals-manual-draft').click();
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
-  await page.getByTestId('create-route-sheet').click();
+  /*
+   * Ответ сервера дожидается явно.
+   *
+   * Без этого отказ создания превращался в загадочное «листа нет» на шаг
+   * позже, и причина оставалась в логе сервера, а не в отчёте проверки.
+   */
+  const [sheetResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes('/from-selection') && response.request().method() === 'POST',
+    ),
+    page.getByTestId('create-route-sheet').click(),
+  ]);
+  expect(sheetResponse.status(), await sheetResponse.text()).toBe(201);
 
   // «Создать МЛ» приводит прямо в «Маршрутные листы».
   await expect(page).toHaveURL(/\/logistics\/route-sheets/);
@@ -1961,8 +2005,29 @@ test('курьер: досрочность, «Не доставлен» с пр�
   // 1. Первый заказ: обычная доставка. Заказ дня ещё не в интервале, поэтому
   // экран предупреждает о досрочности — но подтвердить разрешает.
   const first = page.locator(`[data-testid="delivery-order"][data-order-number="${firstOrder}"]`);
+  const dialog = page.getByTestId('delivery-result-dialog');
+
+  /*
+   * Результат подтверждается ОКНОМ, а не полями внутри карточки.
+   *
+   * Карточка при этом не отращивает форму и не сдвигает соседние заказы
+   * под пальцем курьера: проверяется и это.
+   */
   await first.getByTestId('delivery-open-delivered').click();
-  await first.getByTestId('delivery-submit').click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(firstOrder);
+  // У «Доставлен» полей нет вовсе: ни причины, ни комментария.
+  await expect(dialog.getByTestId('delivery-reason')).toHaveCount(0);
+  await expect(dialog.getByTestId('delivery-comment')).toHaveCount(0);
+  await expect(first.locator('.delivery__form')).toHaveCount(0);
+
+  // Отмена ничего не записывает: карточка остаётся без результата.
+  await page.getByTestId('delivery-dismiss').click();
+  await expect(dialog).toBeHidden();
+  await expect(first).toHaveAttribute('data-result', 'none');
+
+  await first.getByTestId('delivery-open-delivered').click();
+  await page.getByTestId('delivery-submit').click();
   await expect(first).toHaveAttribute('data-result', 'DELIVERED');
 
   // 2. Ошибку курьер исправляет сам: заказ снова открыт.
@@ -1971,16 +2036,90 @@ test('курьер: досрочность, «Не доставлен» с пр�
 
   // 3. Повторяем результат и закрываем второй заказ недоставкой с причиной.
   await first.getByTestId('delivery-open-delivered').click();
-  await first.getByTestId('delivery-submit').click();
+  await page.getByTestId('delivery-submit').click();
   await expect(first).toHaveAttribute('data-result', 'DELIVERED');
 
   const second = page.locator(`[data-testid="delivery-order"][data-order-number="${secondOrder}"]`);
   await second.getByTestId('delivery-open-failed').click();
-  await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
-  // Кнопка активна только при заполненном черновике: если причина не выбрана,
-  // отказ произойдёт здесь и будет назван, а не спрячется за общим таймаутом.
-  await expect(second.getByTestId('delivery-submit')).toBeEnabled();
-  await second.getByTestId('delivery-submit').click();
+  await expect(dialog).toBeVisible();
+
+  /*
+   * Причины — кнопками, поля комментария нет вовсе.
+   *
+   * Курьер стоит у двери с коробкой: попасть пальцем в крупную кнопку он
+   * может, а раскрывать список и набирать текст — нет. Нажатие только
+   * выбирает; записывает «Подтвердить».
+   */
+  await expect(dialog.getByTestId('delivery-comment')).toHaveCount(0);
+  const reasons = dialog.getByTestId('delivery-reason');
+  await expect(reasons.first()).toBeVisible();
+  // «Другое» не предлагается: она требует пояснения, которого мы не собираем.
+  await expect(
+    dialog.locator('[data-testid="delivery-reason"][data-reason-code="OTHER"]'),
+  ).toHaveCount(0);
+
+  /*
+   * Пока причина не выбрана, подтверждение погашено — но упрёка на экране нет.
+   *
+   * Красная строка в момент, когда человек ещё ничего не сделал, — это
+   * замечание за несовершённую ошибку.
+   */
+  await expect(page.getByTestId('delivery-submit')).toBeDisabled();
+  await expect(page.getByTestId('delivery-problem')).toHaveCount(0);
+
+  /*
+   * Геометрия кнопок: семь одинаковых прямоугольников, а не лесенка.
+   *
+   * Меряется на настольной ширине и на телефоне. Двухстрочная подпись
+   * «Получатель отсутствует» не имеет права поднимать свою строку сетки:
+   * иначе семь равных по смыслу причин выглядят разными по весу.
+   */
+  const geometry = async (): Promise<{ widths: number[]; heights: number[] }> => {
+    // Размеры берутся у каждой кнопки по отдельности: так измерение не зависит
+    // от того, что именно вернёт браузер из общего выражения.
+    const count = await reasons.count();
+    const widths: number[] = [];
+    const heights: number[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const box = await reasons.nth(index).boundingBox();
+      expect(box, `кнопка ${index}`).not.toBeNull();
+      widths.push(box?.width ?? 0);
+      heights.push(box?.height ?? 0);
+    }
+    return { widths, heights };
+  };
+
+  for (const size of [
+    { width: 1280, height: 900 },
+    { width: 375, height: 780 },
+  ]) {
+    await page.setViewportSize(size);
+    await page.waitForTimeout(300);
+
+    const { widths, heights } = await geometry();
+    expect(widths, `${size.width}px`).toHaveLength(7);
+    expect(Math.max(...widths) - Math.min(...widths), `ширина ${size.width}px`).toBeLessThanOrEqual(
+      1,
+    );
+    expect(
+      Math.max(...heights) - Math.min(...heights),
+      `высота ${size.width}px`,
+    ).toBeLessThanOrEqual(1);
+
+    // И само окно не расширяет страницу на телефоне.
+    const overflow = await page.evaluate<number>(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    );
+    expect(overflow, `перенос ${size.width}px`).toBeLessThanOrEqual(1);
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  const chosen = dialog.locator('[data-testid="delivery-reason"][data-reason-code="NO_ANSWER"]');
+  await chosen.click();
+  await expect(chosen).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('delivery-submit')).toBeEnabled();
+
+  await page.getByTestId('delivery-submit').click();
   // Состояние карточки здесь не проверяется намеренно: это ПОСЛЕДНИЙ заказ,
   // его результат завершает маршрут, и список активных доставок пустеет —
   // карточки больше не существует. Доказательством служат ответ сервера
@@ -3650,7 +3789,8 @@ test('история и отчёты: тариф, доставка, расчёт
   );
   await expect(courierCard).toBeVisible({ timeout: 20_000 });
   await courierCard.getByTestId('delivery-open-delivered').click();
-  await courierCard.getByTestId('delivery-submit').click();
+  // Подтверждение живёт в окне, а не в карточке: карточка только открывает его.
+  await courierPage.getByTestId('delivery-submit').click();
   /*
    * Состояние карточки не проверяется: это единственный заказ маршрута, его
    * результат завершает маршрут, и список активных доставок пустеет. Факт
@@ -4149,4 +4289,666 @@ test('маршрутизация: точка дня без номера и пу�
     });
     expect(overflow).toBeLessThanOrEqual(1);
   }
+});
+
+/**
+ * Рабочий адрес, ручной интервал и подтверждение результата.
+ *
+ * Один сеанс логиста правит адрес и интервал, второй сеанс — курьерский —
+ * обязан увидеть правку без перезагрузки. Проверяется то, ради чего всё это
+ * и делается: курьер едет по адресу логиста, ко времени логиста и строит
+ * маршрут к подтверждённой точке.
+ */
+test('«Активные»: рабочий адрес, интервал 10:00–14:00 и ссылка на карты', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  /*
+   * Собственная фикстура сценария.
+   *
+   * Чужие маршруты к этому месту уже завершены соседними сценариями, а нам
+   * нужен ЖИВОЙ активный маршрут с курьером: иначе «Активные» пусты, и
+   * проверять нечего.
+   */
+  const seeded = seedWarehouseRoute();
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  /*
+   * Лист отгружается ТОЙ ЖЕ доменной операцией, что и кнопкой в интерфейсе.
+   *
+   * Складской путь со сканированием проверяет отдельный сценарий; здесь нужен
+   * лишь активный маршрут, и подделывать состояние базы ради него нельзя.
+   */
+  const sheets = await page.request.get('/api/route-sheets?section=UNSHIPPED&limit=100', {
+    headers: authorized,
+  });
+  const sheetList = (await sheets.json()) as {
+    days: { sheets: { id: string; number: string; version: number }[] }[];
+  };
+  const target = sheetList.days
+    .flatMap((day) => day.sheets)
+    .find((item) => item.number === seeded.route);
+  expect(target, 'маршрут фикстуры не найден в листах').toBeTruthy();
+
+  const shipped = await page.request.post(`/api/routes/${target?.id ?? ''}/ship`, {
+    headers: authorized,
+    data: { expectedVersion: target?.version ?? 0 },
+  });
+  expect(shipped.status(), await shipped.text()).toBe(200);
+
+  /*
+   * 1. Ручной интервал 10:00–14:00 сохраняется из окна заказа.
+   *
+   * Прежде окно посылало версию под чужим именем поля, и совершенно
+   * корректный интервал получал общее «Проверьте правильность заполнения
+   * полей». Проверяется именно этот путь — тот, которым пользуется логист.
+   */
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+
+  const sheet = page.locator(`[data-sheet-number="${seeded.route}"]`).first();
+  await expect(sheet).toBeVisible({ timeout: 20_000 });
+  if ((await sheet.getAttribute('data-expanded')) !== 'true') {
+    await sheet.getByTestId('sheet-expand').click();
+  }
+  await sheet
+    .locator(`[data-order-number="${seeded.orders[0] ?? ''}"]`)
+    .getByTestId('order-number')
+    .click();
+
+  const orderWindow = page.getByTestId('order-window');
+  await expect(orderWindow).toBeVisible();
+  await orderWindow.getByTestId('order-window-interval').click();
+
+  await page.getByLabel('Начало').fill('10:00');
+  await page.getByLabel('Окончание').fill('14:00');
+  await clickAndAwait(
+    page,
+    page.getByRole('button', { name: 'Сохранить интервал' }),
+    'PUT',
+    '/interval',
+  );
+  await expect(page.locator('.toast-region')).toContainText('Интервал сохранён');
+
+  // 2. Рабочий адрес: правка логиста сильнее исходного значения источника.
+  const localAddress = `Москва, проверочный адрес логиста ${Date.now() % 100000}`;
+  const order = await page.request.get(
+    `/api/orders?deliveryDate=${today()}&search=${encodeURIComponent(seeded.orders[0] ?? '')}`,
+    { headers: authorized },
+  );
+  const found = (await order.json()) as { items: { id: string; version: number }[] };
+  const orderId = found.items[0]?.id ?? '';
+  expect(orderId).not.toBe('');
+
+  /*
+   * Вместе с адресом логист подтверждает точку.
+   *
+   * Именно она потом уходит в ссылку на карты: строка адреса для маршрута
+   * не годится — по ней карты находят «примерно тот» дом.
+   */
+  const saved = await page.request.put(`/api/orders/${orderId}/address`, {
+    headers: authorized,
+    data: { address: localAddress, point: { latMicro: 55_751_244, lonMicro: 37_618_423 } },
+  });
+  expect(saved.status(), await saved.text()).toBe(200);
+
+  /*
+   * 3. Второй сеанс — курьер — видит и адрес, и интервал БЕЗ перезагрузки.
+   *
+   * Страница курьера открывается заранее и больше не перезагружается:
+   * доказательство держится на канале событий, а не на F5.
+   */
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+  await login(courierPage, seeded.courierPhone, seeded.courierPin);
+  await expect(courierPage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  const card = courierPage.locator(
+    `[data-testid="delivery-order"][data-order-number="${seeded.orders[0] ?? ''}"]`,
+  );
+  await expect(card).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByTestId('delivery-address')).toHaveText(localAddress, { timeout: 20_000 });
+  await expect(card).toContainText('10:00–14:00', { timeout: 20_000 });
+
+  /*
+   * 4. Адрес ведёт в Яндекс Карты — к подтверждённой точке заказа.
+   *
+   * Проверяется именно координата, а не строка адреса: карты по строке
+   * находят «примерно тот» дом, а курьеру нужен подтверждённый логистом.
+   */
+  const href = (await card.getByTestId('delivery-address').getAttribute('href')) ?? '';
+  expect(href).toBe('https://yandex.ru/maps/?rtext=~55.751244,37.618423&rtt=auto');
+  await expect(card.getByTestId('delivery-address')).toHaveAttribute('target', '_blank');
+  await expect(card.getByTestId('delivery-address')).toHaveAttribute('rel', /noopener/);
+
+  // Ключей и подключаемых сценариев карт в странице нет: обычная ссылка.
+  const scripts = await courierPage.evaluate<number>(
+    'document.querySelectorAll(\'script[src*="yandex"], script[src*="api-maps"]\').length',
+  );
+  expect(scripts).toBe(0);
+
+  // 5. Телефон и настольный экран: карточка не уезжает вбок.
+  for (const size of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await courierPage.setViewportSize(size);
+    await expect(card).toBeVisible();
+    const overflow = await courierPage.evaluate<number>(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+
+  await courierContext.close();
+  await context.close();
+});
+
+/**
+ * Ручная отгрузка настраивается администратором и видна логисту сразу.
+ *
+ * Кнопка «Отгрузить» существует ровно тогда, когда владелец это разрешил:
+ * погашенная кнопка обещала бы действие, которого в контуре нет.
+ */
+test('настройки: переключатель ручной отгрузки прячет и возвращает кнопку', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  const toggle = page.getByTestId('manual-issue-toggle');
+  await expect(toggle).toBeVisible();
+  // Значение по умолчанию сохранено и показано, а не придумано экраном.
+  await expect(toggle).toBeChecked();
+  await expect(page.getByTestId('manual-issue-form')).toContainText('фактически переданы курьеру');
+
+  // Выключение доходит до вкладки листов без перезагрузки.
+  await clickAndAwait(page, toggle, 'PUT', '/settings/planning/manual-issue');
+  await expect(toggle).not.toBeChecked();
+
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByTestId('sheet-ship')).toHaveCount(0);
+
+  // Возвращаем разрешение: кнопка снова на месте.
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await clickAndAwait(page, page.getByTestId('manual-issue-toggle'), 'PUT', '/manual-issue');
+  await expect(page.getByTestId('manual-issue-toggle')).toBeChecked();
+
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  const unshipped = page.getByTestId('sheets-UNSHIPPED');
+  await expect(unshipped).toBeVisible();
+  const anySheet = unshipped.locator('[data-testid="sheet-row"]').first();
+  if ((await anySheet.count()) > 0) {
+    // Кнопка есть; без курьера она недоступна и объясняет причину.
+    const ship = anySheet.getByTestId('sheet-ship');
+    await expect(ship).toHaveCount(1);
+    const courier = await anySheet.getByTestId('sheet-courier-combobox-field').inputValue();
+    if (courier === '') {
+      await expect(ship).toBeDisabled();
+      await expect(ship).toHaveAttribute('title', /курьера/i);
+    } else {
+      await expect(ship).toBeEnabled();
+    }
+  }
+});
+
+/** Сотрудник любой роли, заведённый через API и сразу активированный. */
+async function seedRole(
+  page: Page,
+  token: string,
+  role: 'LOGISTICIAN' | 'FLORIST' | 'WAREHOUSE',
+  pin: string,
+): Promise<{ phone: string; pin: string; fullName: string }> {
+  const phone = uniquePhone();
+  const fullName = `Сотрудник ${role}`;
+
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName, phone, roles: [role] },
+  });
+  expect(created.status(), await created.text()).toBe(201);
+  const body = (await created.json()) as { activationCode: string };
+
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone, code: body.activationCode, pin },
+  });
+  expect(activated.status()).toBe(200);
+
+  return { phone, pin, fullName };
+}
+
+/**
+ * Два сеанса: логист подтверждает лист — флорист и кладовщик видят это сами.
+ *
+ * Проверяется канал событий, а не перезагрузка: страницы производства
+ * открываются ДО действия логиста и больше не обновляются руками.
+ */
+test('два сеанса: подтверждение листа доходит до флориста и кладовщика без F5', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const numbers = seedOrders(1, { withPoint: true });
+  const orderNumber = numbers[0] ?? '';
+  expect(orderNumber).not.toBe('');
+
+  const adminContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+
+  const auth = await admin.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  const florist = await seedRole(admin, token, 'FLORIST', '5511');
+  const keeper = await seedRole(admin, token, 'WAREHOUSE', '5522');
+
+  // Производство открыто заранее: доказательство держится на событиях.
+  const floristContext = await browser.newContext();
+  const floristPage = await floristContext.newPage();
+  await login(floristPage, florist.phone, florist.pin);
+  await expect(floristPage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
+
+  const keeperContext = await browser.newContext();
+  const keeperPage = await keeperContext.newPage();
+  await login(keeperPage, keeper.phone, keeper.pin);
+  await expect(keeperPage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+  await keeperPage.getByTestId('wh-tab-picking').click();
+  await expect(keeperPage.getByTestId('wh-route-date')).toBeVisible();
+
+  /*
+   * Логист собирает лист из «Сделок» и подтверждает его.
+   *
+   * Черновик производство не трогает: собирать под него нечего, и до
+   * подтверждения ни очередь флориста, ни склад о нём знать не обязаны.
+   */
+  await admin.getByRole('link', { name: 'Логистика' }).first().click();
+  await admin.getByRole('link', { name: 'Сделки' }).first().click();
+  const deal = admin.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
+  await expect(deal).toHaveAttribute('data-selectable', 'yes');
+  await deal.getByTestId('deal-pick').click();
+  await admin.getByTestId('deals-manual-draft').click();
+  await expect(admin.getByTestId('create-route-dialog')).toBeVisible();
+  /*
+   * Номер листа берётся из ответа сервера, а не из списка черновиков:
+   * подтверждённый лист черновиком уже не является и там не появляется.
+   */
+  const [created] = await Promise.all([
+    admin.waitForResponse(
+      (response) =>
+        response.url().includes('/from-selection') && response.request().method() === 'POST',
+    ),
+    admin.getByTestId('create-route-sheet').click(),
+  ]);
+  expect(created.status(), await created.text()).toBe(201);
+  const sheetNumber = ((await created.json()) as { number: string }).number;
+  expect(sheetNumber).toMatch(/^R-/);
+
+  // Склад увидел подтверждённый лист сам, без перезагрузки.
+  await expect(
+    keeperPage.getByTestId('wh-route-button').filter({ hasText: sheetNumber }),
+  ).toHaveCount(1, { timeout: 25_000 });
+
+  // Флорист увидел заказ листа в очереди — приоритет задаёт именно лист.
+  await expect(floristPage.getByTestId('florist-queue')).toContainText(orderNumber, {
+    timeout: 25_000,
+  });
+
+  /*
+   * Возврат листа в черновик убирает его из складской работы так же сразу.
+   */
+  await admin.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  const sheetRow = admin.locator(`[data-sheet-number="${sheetNumber}"]`).first();
+  await expect(sheetRow).toBeVisible();
+  await clickAndAwait(
+    admin,
+    sheetRow.getByTestId('sheet-return-to-draft'),
+    'POST',
+    '/return-to-draft',
+  );
+
+  await expect(
+    keeperPage.getByTestId('wh-route-button').filter({ hasText: sheetNumber }),
+  ).toHaveCount(0, { timeout: 25_000 });
+
+  await keeperContext.close();
+  await floristContext.close();
+  await adminContext.close();
+});
+
+/**
+ * Два сеанса: логист меняет курьера — склад видит это сам.
+ *
+ * Смена курьера в листе меняет то, кому склад выдаёт заказы. Пока событие
+ * не доходило до складских вкладок, кладовщик выдавал маршрут человеку,
+ * которого уже сняли.
+ */
+test('два сеанса: смена курьера доходит до склада без F5', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const seeded = seedWarehouseRoute();
+
+  const adminContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await admin.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  const keeper = await seedRole(admin, token, 'WAREHOUSE', '5533');
+  const keeperContext = await browser.newContext();
+  const keeperPage = await keeperContext.newPage();
+  await login(keeperPage, keeper.phone, keeper.pin);
+  await keeperPage.getByTestId('wh-tab-picking').click();
+
+  const sheetButton = keeperPage.getByTestId('wh-route-button').filter({ hasText: seeded.route });
+  await expect(sheetButton).toHaveCount(1, { timeout: 25_000 });
+  await sheetButton.click();
+  const courierLine = keeperPage.getByTestId('wh-route-courier');
+  await expect(courierLine).toBeVisible();
+  const before = (await courierLine.innerText()).trim();
+
+  /*
+   * Логист назначает другого курьера — тем же путём, что и в интерфейсе листов.
+   */
+  const replacement = await seedRole(admin, token, 'LOGISTICIAN', '5544');
+  expect(replacement.phone).not.toBe('');
+
+  const sheets = await admin.request.get('/api/route-sheets?section=UNSHIPPED&limit=100', {
+    headers: authorized,
+  });
+  const list = (await sheets.json()) as {
+    days: { sheets: { id: string; number: string; version: number }[] }[];
+  };
+  const target = list.days
+    .flatMap((day) => day.sheets)
+    .find((item) => item.number === seeded.route);
+  expect(target, 'лист фикстуры не найден').toBeTruthy();
+
+  const couriers = await admin.request.get('/api/users?role=COURIER&status=ACTIVE&limit=100', {
+    headers: authorized,
+  });
+  const options = ((await couriers.json()) as { items: { id: string; fullName: string }[] }).items;
+  const other = options.find((item) => item.fullName !== before);
+  expect(other, 'нужен второй курьер').toBeTruthy();
+
+  const assigned = await admin.request.put(`/api/routes/${target?.id ?? ''}/courier`, {
+    headers: authorized,
+    data: { courierUserId: other?.id ?? null, expectedVersion: target?.version ?? 0 },
+  });
+  expect(assigned.status(), await assigned.text()).toBe(200);
+
+  // Кладовщик ничего не нажимал: строка курьера обновилась событием.
+  await expect
+    .poll(async () => (await courierLine.innerText()).trim(), { timeout: 25_000 })
+    .not.toBe(before);
+
+  await keeperContext.close();
+  await adminContext.close();
+});
+
+/**
+ * Справочник в двух сеансах: администратор и логист.
+ *
+ * Логист видит одну вкладку — курьеров, и заводит именно курьера. Чужие роли
+ * ему не показывает не экран, а сервер: проверяется и это.
+ */
+test('два сеанса: справочник курьеров у администратора и логиста', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const adminContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await admin.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const logist = await seedRole(admin, token, 'LOGISTICIAN', '5566');
+
+  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  // Вкладки ролей вместо выпадающего фильтра, «Добавить» — в рабочей панели.
+  await expect(admin.getByTestId('user-role-tab')).toHaveCount(6);
+  await expect(admin.getByTestId('user-add')).toBeVisible();
+  await expect(admin.getByLabel('Роль')).toHaveCount(0);
+  // Отдельного блока с пояснением про заморозку больше нет.
+  await expect(admin.getByText('Сотрудники не удаляются')).toHaveCount(0);
+
+  // Вкладка показывает только свою роль.
+  await admin.getByTestId('user-role-tab').filter({ hasText: 'Логист' }).click();
+  await expect(admin.locator('.table tbody tr').first()).toContainText('Логист');
+
+  const logistContext = await browser.newContext();
+  const logistPage = await logistContext.newPage();
+  await login(logistPage, logist.phone, logist.pin);
+  await logistPage.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+
+  // У логиста одна вкладка — «Курьеры», и кнопка называет, кого он заводит.
+  await expect(logistPage.getByTestId('user-role-tab')).toHaveCount(1);
+  await expect(logistPage.getByTestId('user-role-tab')).toHaveText('Курьер');
+  await expect(logistPage.getByTestId('user-add')).toHaveText('Добавить курьера');
+
+  /*
+   * Строка таблицы: текст на уровне середины кнопок действий.
+   *
+   * Высоту строки задаёт самый высокий элемент — ряд кнопок. При выравнивании
+   * по верху данные оказывались выше их середины, и строка читалась как две
+   * несвязанные половины: слева сведения, справа действия.
+   */
+  await admin.getByTestId('user-role-tab').filter({ hasText: 'Курьер' }).click();
+  const firstRow = admin.locator('.table tbody tr').first();
+  await expect(firstRow).toBeVisible();
+
+  /*
+   * Меряется центр САМОГО ТЕКСТА, а не ячейки.
+   *
+   * Ячейка растягивается на всю высоту строки при любом выравнивании, поэтому
+   * её середина совпала бы с кнопками даже тогда, когда текст прижат к
+   * верхнему краю. Диапазон по содержимому даёт настоящий прямоугольник
+   * строки текста.
+   *
+   * Опорой служит БЛОК действий, а не первая кнопка: на узком экране кнопки
+   * переносятся в две строки, и центр первой из них выше середины строки
+   * по построению.
+   */
+  const centers = (await admin.evaluate(`(() => {
+    const row = document.querySelector('.table tbody tr');
+    if (row === null) {
+      return null;
+    }
+    const middleOf = (rect) => rect.top + rect.height / 2;
+    const textMiddle = (cell) => {
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      const rect = range.getBoundingClientRect();
+      return rect.height === 0 ? null : middleOf(rect);
+    };
+
+    const actions = row.querySelector('td .row');
+    return {
+      button: actions === null ? null : middleOf(actions.getBoundingClientRect()),
+      cells: Array.from(row.querySelectorAll('td'))
+        .filter((cell) => cell.textContent.trim() !== '' && cell.querySelector('button') === null)
+        .map((cell) => ({
+          text: cell.textContent.trim().slice(0, 20),
+          middle: textMiddle(cell),
+        })),
+    };
+  })()`)) as { button: number | null; cells: { text: string; middle: number | null }[] } | null;
+
+  expect(centers, 'строка таблицы не найдена').not.toBeNull();
+  expect(centers?.button).not.toBeNull();
+  expect(centers?.cells.length ?? 0).toBeGreaterThanOrEqual(4);
+  for (const cell of centers?.cells ?? []) {
+    expect(cell.middle, cell.text).not.toBeNull();
+    expect(Math.abs((cell.middle ?? 0) - (centers?.button ?? 0)), cell.text).toBeLessThanOrEqual(2);
+  }
+
+  // Сервер тоже не отдаёт логисту чужие роли.
+  const foreign = await logistPage.request.get('/api/users?role=FLORIST&status=ACTIVE', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  expect(foreign.status()).toBe(200);
+
+  const asLogist = await logistPage.request.post('/api/auth/login', {
+    data: { phone: logist.phone, pin: logist.pin },
+  });
+  const logistToken = ((await asLogist.json()) as { accessToken: string }).accessToken;
+  const denied = await logistPage.request.post('/api/users', {
+    headers: { authorization: `Bearer ${logistToken}` },
+    data: { fullName: 'Чужая роль', phone: uniquePhone(), roles: ['FLORIST'] },
+  });
+  expect(denied.status()).toBe(403);
+
+  await logistContext.close();
+  await adminContext.close();
+});
+
+/**
+ * Телефон: ширина совпадает с экраном и ввод не приближает страницу.
+ *
+ * Проверяются три распространённые ширины и все рабочие роли. Приближение
+ * лечится размером текста в полях, а не запретом масштабирования: отнимать
+ * у людей возможность приблизить экран нельзя.
+ */
+test('телефон: 390/375/360 без горизонтального выезда и без приближения при вводе', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const setupContext = await browser.newContext();
+  const setup = await setupContext.newPage();
+  await login(setup, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await setup.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  const florist = await seedRole(setup, token, 'FLORIST', '6611');
+  const keeper = await seedRole(setup, token, 'WAREHOUSE', '6622');
+  const logist = await seedRole(setup, token, 'LOGISTICIAN', '6633');
+  await setupContext.close();
+
+  const roles: { name: string; phone: string; pin: string; paths: string[] }[] = [
+    {
+      name: 'администратор',
+      phone: ADMIN_PHONE,
+      pin: ADMIN_PIN,
+      paths: ['/logistics/deals', '/logistics/route-sheets', '/logistics/reports', '/couriers'],
+    },
+    {
+      name: 'логист',
+      phone: logist.phone,
+      pin: logist.pin,
+      paths: ['/logistics/deals', '/couriers'],
+    },
+    { name: 'флорист', phone: florist.phone, pin: florist.pin, paths: ['/florist'] },
+    { name: 'кладовщик', phone: keeper.phone, pin: keeper.pin, paths: ['/warehouse'] },
+  ];
+
+  for (const width of [390, 375, 360]) {
+    for (const role of roles) {
+      const context = await browser.newContext({ viewport: { width, height: 780 } });
+      const page = await context.newPage();
+      await login(page, role.phone, role.pin);
+
+      for (const path of role.paths) {
+        await page.goto(path);
+        /*
+         * Экран обязан отрисоваться ДО измерения.
+         *
+         * Пустая страница шире экрана не бывает, и без этого ожидания
+         * проверка доказывала бы лишь то, что успела ничего не загрузить.
+         */
+        await expect(page.locator('h1').first()).toBeVisible({ timeout: 20_000 });
+        await page.waitForTimeout(500);
+
+        const overflow = await page.evaluate<number>(
+          'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+        );
+        expect(overflow, `${role.name} ${width}px ${path}`).toBeLessThanOrEqual(1);
+
+        /*
+         * Заодно размер текста в полях: именно им iOS решает, приближать ли
+         * страницу при фокусе. Меряется вычисленный размер, а не наличие
+         * правила — правило могло быть перекрыто.
+         */
+        const fields = await page.evaluate<number[]>(
+          "Array.from(document.querySelectorAll('input, select, textarea')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+        );
+        for (const size of fields) {
+          expect(size, `${role.name} ${width}px ${path}`).toBeGreaterThanOrEqual(16);
+        }
+      }
+
+      await context.close();
+    }
+  }
+
+  /*
+   * Размер текста в полях — не меньше 16 пикселей.
+   *
+   * Именно этим iOS решает, приближать ли страницу при фокусе. Проверяется
+   * вычисленный размер, а не наличие правила: правило могло быть перекрыто.
+   */
+  /*
+   * Поля страницы входа — тоже не меньше шестнадцати.
+   *
+   * Это первый экран, который человек видит с телефона, и приближение здесь
+   * оставляет его в увеличенном интерфейсе на всё дальнейшее время работы.
+   */
+  const phone = await browser.newContext({ viewport: { width: 375, height: 780 } });
+  const phonePage = await phone.newPage();
+  await phonePage.goto('/login');
+  await expect(phonePage.getByLabel('Телефон')).toBeVisible();
+  const loginFields = await phonePage.evaluate<number[]>(
+    "Array.from(document.querySelectorAll('input')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+  );
+  expect(loginFields.length).toBeGreaterThan(0);
+  for (const size of loginFields) {
+    expect(size).toBeGreaterThanOrEqual(16);
+  }
+
+  // Масштабирование пальцами при этом не запрещено.
+  const viewport = await phonePage.evaluate<string>(
+    "document.querySelector('meta[name=viewport]').getAttribute('content')",
+  );
+  expect(viewport).not.toContain('user-scalable=no');
+  expect(viewport).not.toContain('maximum-scale');
+
+  await phone.close();
 });

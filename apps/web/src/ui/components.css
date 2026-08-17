@@ -372,12 +372,19 @@
   font-size: var(--font-size-sm);
 }
 
+/*
+ * Ячейки выровнены по вертикальному центру строки.
+ *
+ * Высоту строки задаёт самый высокий элемент — обычно ряд кнопок действий.
+ * При выравнивании по верху текст оказывался выше их середины, и строка
+ * читалась как две несвязанные половины: слева данные, справа кнопки.
+ */
 .table th,
 .table td {
   padding: var(--space-2) var(--space-3);
   text-align: left;
   border-bottom: 1px solid var(--color-border);
-  vertical-align: top;
+  vertical-align: middle;
 }
 
 .table th {
