@@ -1,0 +1,106 @@
+/*
+ * Настройки денег: плотные ряды полей и таблицы версий.
+ *
+ * Предупреждения выделены не только цветом, но и словами: раздел про деньги,
+ * и «жёлтая рамка» сама по себе ничего не объясняет.
+ */
+.finance__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+
+.finance__row .field {
+  display: grid;
+  gap: 4px;
+  grid-template-rows: 18px 32px 16px;
+  margin: 0;
+}
+
+.finance__row input,
+.finance__row select {
+  height: 32px;
+  min-height: 32px;
+  box-sizing: border-box;
+}
+
+.finance__select {
+  padding: 0 8px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-field);
+  background: var(--log-surface);
+  font-size: var(--log-font-md);
+}
+
+.finance__state {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.finance__warning {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--log-radius-group);
+  background: var(--log-section-unshipped-bg);
+  color: var(--log-section-unshipped-text);
+  font-size: var(--log-font-md);
+}
+
+.finance__ok {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--log-radius-group);
+  background: var(--log-section-shipped-bg);
+  color: var(--log-section-shipped-text);
+  font-size: var(--log-font-md);
+}
+
+.finance__error {
+  margin: 0;
+  color: var(--color-error);
+  font-size: var(--log-font-sm);
+}
+
+.finance__geometry {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-field);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--log-font-sm);
+  resize: vertical;
+}
+
+.finance__table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-card);
+}
+
+.finance__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--log-font-sm);
+}
+
+.finance__table th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--log-border);
+  background: var(--log-surface-muted);
+  color: var(--log-text-muted);
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.finance__table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--log-border-soft);
+  white-space: nowrap;
+}
+
+.finance__table tr:last-child td {
+  border-bottom: 0;
+}

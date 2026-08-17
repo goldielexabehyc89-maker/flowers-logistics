@@ -12,6 +12,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { OutboxFailures } from './OutboxFailures';
 import { PlanningSettings } from './settings/PlanningSettings';
+import { FinanceSettings } from './settings/FinanceSettings';
 import { StorageCells } from './settings/StorageCells';
 import { useAuth } from '../auth/AuthContext';
 import { ErrorState, LoadingState, StatusBadge, type StatusTone } from '../ui/components';
@@ -56,7 +57,6 @@ function toneFor(state: string): StatusTone {
 
 const REQUIRED_SETTINGS = [
   'Адрес склада',
-  'Обычный тариф: ставка за заказ и за километр за МКАД',
   'Вместимость и максимальная длительность автомобильного и пешего маршрута',
   'Сервисное время на заказ и резерв времени',
   'Подключение МоегоСклада',
@@ -115,6 +115,8 @@ export function SettingsScreen(): React.JSX.Element {
       </section>
 
       <PlanningSettings />
+
+      <FinanceSettings />
 
       <StorageCells />
 

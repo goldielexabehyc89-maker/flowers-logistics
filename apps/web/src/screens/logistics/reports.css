@@ -1,0 +1,246 @@
+/*
+ * «Отчёты»: сводка, плотные таблицы и одно окно операции.
+ *
+ * Таблицы прокручиваются внутри своей области, а не растягивают страницу вбок:
+ * на телефоне горизонтальный выезд означает потерянные столбцы.
+ */
+.reports__tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.reports__tab {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-control);
+  background: var(--log-surface);
+  color: var(--log-text-muted);
+  font-size: var(--log-font-md);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reports__tab--active {
+  border-color: var(--log-selected-text);
+  background: var(--log-selected-bg);
+  color: var(--log-selected-text);
+}
+
+.reports__notice {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--log-radius-group);
+  background: var(--log-section-unshipped-bg);
+  color: var(--log-section-unshipped-text);
+  font-size: var(--log-font-sm);
+}
+
+.reports__summary {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+
+.reports__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-card);
+  background: var(--log-surface-soft);
+}
+
+.reports__cell--total {
+  border-color: var(--log-selected-text);
+  background: var(--log-selected-bg);
+}
+
+.reports__cell-label {
+  color: var(--log-text-muted);
+  font-size: var(--log-font-xs);
+}
+
+.reports__cell-value {
+  color: var(--log-text-strong);
+  font-size: var(--log-font-card-title);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.reports__cell-words {
+  color: var(--log-text-muted);
+  font-size: var(--log-font-xs);
+}
+
+.reports__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.reports__link {
+  color: var(--log-selected-text);
+  font-size: var(--log-font-md);
+  font-weight: 600;
+}
+
+.reports__table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--log-border);
+  border-radius: var(--log-radius-card);
+}
+
+.reports__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--log-font-sm);
+}
+
+.reports__table th {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--log-border);
+  background: var(--log-surface-muted);
+  color: var(--log-text-muted);
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.reports__table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--log-border-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.reports__table tr:last-child td {
+  border-bottom: 0;
+}
+
+.reports__missing {
+  color: var(--log-text-faint);
+}
+
+.reports__reverse {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-error);
+  font: inherit;
+  font-size: var(--log-font-xs);
+  cursor: pointer;
+}
+
+.reports__error {
+  margin: 0;
+  color: var(--color-error);
+  font-size: var(--log-font-sm);
+}
+
+/* Группа «день + курьер»: свёрнута по умолчанию, итоги считает сервер. */
+.reports__group td {
+  background: var(--log-surface-soft);
+  font-weight: 600;
+}
+
+.reports__group[data-expanded='true'] td {
+  background: var(--log-selected-bg);
+}
+
+.reports__group-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reports__group-chevron {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-2xs);
+}
+
+.reports__group-name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+/* Телефон — вторая строка вторичным текстом. */
+.reports__group-phone {
+  color: var(--log-text-faint);
+  font-size: var(--log-font-xs);
+  font-weight: 400;
+}
+
+.reports__detail td {
+  color: var(--log-text-muted);
+  font-weight: 400;
+}
+
+.reports__detail-order {
+  padding-left: 26px !important;
+  color: var(--log-text);
+}
+
+/* Ячейка-кнопка: выглядит числом, нажимается как кнопка. */
+.reports__cell-button {
+  width: 100%;
+  padding: 2px 4px;
+  border: 1px dashed transparent;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reports__cell-button:hover,
+.reports__cell-button:focus-visible {
+  border-color: var(--log-selected-text);
+  color: var(--log-selected-text);
+}
+
+/* Журнал платежей внутри раскрытой группы. */
+.reports__payment td {
+  background: var(--log-surface-soft);
+  font-size: var(--log-font-xs);
+}
+
+/*
+ * Ширины плотной таблицы.
+ *
+ * Раскладка ФИКСИРОВАННАЯ: ширина столбцов задаётся шапкой, а не содержимым.
+ * Иначе раскрытие группы растягивало таблицу длинной строкой заказа или
+ * причины, и она уезжала за край страницы — свёрнутая помещалась, раскрытая
+ * нет. Длинный текст теперь обрезается многоточием, а полностью виден
+ * подсказкой по наведению.
+ */
+.reports__table {
+  table-layout: fixed;
+}
+
+.reports__table td,
+.reports__table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Дата и курьер шире прочих: в них две строки и полная дата. */
+.reports__table th:first-child {
+  width: 108px;
+}
+
+.reports__table th:nth-child(2) {
+  width: 190px;
+}

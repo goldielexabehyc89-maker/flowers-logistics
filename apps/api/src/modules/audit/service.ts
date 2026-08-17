@@ -149,6 +149,20 @@ export const AUDIT_ACTIONS = [
   // Выдача самовывоза покупателю (этап 6.7). В записи — идентификаторы заказа,
   // размещения и ячейки: ни номера заказа, ни кода полки, ни получателя.
   'PICKUP_ORDER_ISSUED',
+  // Этап 7. Деньги: в записях только вид операции, сумма, день и участники
+  // идентификаторами. Ни причин, ни комментариев, ни адресов и получателей.
+  'FINANCE_TARIFF_CREATED',
+  'FINANCE_LEDGER_ACTIVATED',
+  'FINANCE_OPERATION_RECORDED',
+  'FINANCE_OPERATION_REVERSED',
+  'FINANCE_REPORT_EXPORTED',
+  'FINANCE_MKAD_RING_INSTALLED',
+  'FINANCE_DISTANCE_COMPUTED',
+  'FINANCE_DISTANCE_CORRECTED',
+  // Касса логиста. В записи — вид, сумма, день и владелец кассы; автор берётся
+  // из самой записи аудита и с владельцем кассы не смешивается.
+  'FINANCE_CASH_MOVED',
+  'FINANCE_CASH_REVERSED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

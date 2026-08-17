@@ -7,6 +7,7 @@
  */
 
 import { loadConfig } from './platform/config.js';
+import { ensureBundledRing } from './modules/finance/mkad-bundle.js';
 import { createLogger } from './platform/logging/logger.js';
 import { redactString } from './platform/logging/redact.js';
 import { createDatabase } from './platform/db.js';
@@ -224,6 +225,23 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  /*
+   * Геометрия МКАД из поставки.
+   *
+   * Ставится при запуске и идемпотентно: тот же файл не создаёт вторую версию.
+   *
+   * Негодная поставка — отказ запуска, а не запись в журнал. Файл не попал
+   * в образ, GeoJSON не разбирается, отпечаток не сходится, кольцо не замкнуто
+   * или пересекает само себя — по такой геометрии считаются деньги, и
+   * приложение, поднявшееся «почти правильно», хуже неподнявшегося: ошибка
+   * ушла бы в начисления, а не в глаза дежурному.
+   */
+  const ring = await ensureBundledRing(db);
+  logger.info(
+    { version: ring.version, installed: ring.installed, ringVersionId: ring.ringVersionId },
+    'геометрия МКАД проверена',
+  );
 
   await app.listen({ host: config.HOST, port: config.PORT });
   logger.info(

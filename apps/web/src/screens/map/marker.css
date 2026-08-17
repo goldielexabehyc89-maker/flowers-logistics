@@ -1,0 +1,172 @@
+/*
+ * Внешний вид отметки заказа на карте. Общий для всех карт продукта.
+ *
+ * Правила лежат здесь, а не в стилях раздела, потому что раздел не владеет
+ * тем, как выглядит заказ на карте: «Сделки» и «Маршрутизация» показывают
+ * одни и те же заказы, и две копии этих правил однажды разошлись бы.
+ *
+ * КРИТИЧЕСКИЙ КОНТРАКТ. MapLibre ставит на координату ЦЕНТР элемента отметки.
+ * Пока подпись времени участвовала в потоке, центром связки «подпись + кружок»
+ * была точка между ними: сам кружок оказывался ниже настоящего места заказа
+ * на половину высоты подписи. Смещение постоянно в пикселях, а значит
+ * на карте оно означает разное расстояние при разном масштабе — заказ
+ * «переезжал» при zoom. Компенсировать это сдвигом нельзя: лечить надо
+ * коробку, а не проекцию.
+ *
+ * Поэтому коробка отметки равна кружку, а подпись вынесена из потока
+ * absolute-позиционированием: она видна, но на центр не влияет.
+ */
+.map-point {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.map-point__time {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 3px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 90%);
+  color: #333;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+  /* Подпись не перехватывает клик: нажимают по кружку. */
+  pointer-events: none;
+}
+
+.map-point__dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+}
+
+/*
+ * Собственная подсказка отметки.
+ *
+ * Нативный `title` появляется через секунду с лишним — за это время логист
+ * успевает решить, что подсказки нет вовсе. Эта появляется сразу и достаётся
+ * клавиатурному фокусу наравне с мышью.
+ */
+.map-point__hint {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 20px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgb(17 17 17 / 92%);
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  /* Ориентир — не более 150 мс: подсказка обязана успеть за взглядом. */
+  transition: opacity 120ms ease-out;
+  z-index: 2;
+}
+
+.map-point:hover .map-point__hint,
+.map-point:focus-visible .map-point__hint {
+  opacity: 1;
+}
+
+/* Выбранная отметка крупнее: номер порядка обязан читаться. */
+.map-point--picked {
+  width: 24px;
+  height: 24px;
+}
+
+.map-point--cluster {
+  width: 26px;
+  height: 26px;
+  cursor: default;
+}
+
+/* Склад — не заказ: отдельная форма и отдельный цвет. */
+.map-point--depot {
+  width: 22px;
+  height: 22px;
+  cursor: default;
+}
+
+.map-point--depot .map-point__dot {
+  border-radius: 4px;
+  background: #333;
+  transform: rotate(45deg);
+}
+
+.map-point--free .map-point__dot {
+  background: #6b7280;
+}
+
+/* Выбранный несёт номер порядка: это будущий порядок остановок. */
+.map-point--picked .map-point__dot {
+  background: hsl(210 70% 45%);
+  font-size: 12px;
+}
+
+/* Уже в черновике: только чтение, кликом его не забрать. */
+.map-point--draft .map-point__dot {
+  background: #9ca3af;
+  border-style: dashed;
+}
+
+/* Собран: галочка видна и без выбора, и вместе с номером порядка. */
+.map-point--assembled .map-point__dot {
+  background: hsl(150 55% 32%);
+}
+
+.map-point--picked.map-point--assembled .map-point__dot::after {
+  content: '✓';
+  position: absolute;
+  transform: translate(15px, -13px);
+  font-size: 11px;
+  color: hsl(150 55% 26%);
+}
+
+.map-point--cluster .map-point__dot {
+  background: #444;
+}
+
+/*
+ * Требует внимания.
+ *
+ * Отличается не только цветом: часть логистов работает при ярком свете
+ * на планшете, и различать оттенки в таких условиях трудно.
+ */
+.map-point--attention .map-point__dot {
+  background: hsl(35 90% 45%);
+  border-color: hsl(35 90% 30%);
+  border-style: dashed;
+}
+
+/* Выбранная строкой списка отметка: та же форма, добавленное кольцо. */
+.map-point--selected {
+  z-index: 1;
+}
+
+.map-point--selected .map-point__dot {
+  box-shadow: 0 0 0 3px hsl(210 70% 45% / 60%);
+}

@@ -3465,3 +3465,688 @@ test('выбор курьера: открытие полем, фильтраци
   await page.getByTestId('create-route-count').click();
   await expect(list).toHaveCount(0);
 });
+
+/**
+ * Логист для кассы.
+ *
+ * Наличные лежат у конкретного человека: без сотрудника с ролью логиста
+ * кассы не существует вовсе, и передавать деньги некуда.
+ */
+async function seedOwnLogist(page: Page, token: string): Promise<{ id: string; fullName: string }> {
+  const phone = uniquePhone();
+  const fullName = 'Логист кассы';
+
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName, phone, roles: ['LOGISTICIAN'] },
+  });
+  expect(created.status()).toBe(201);
+  const body = (await created.json()) as { user: { id: string }; activationCode: string };
+
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone, code: body.activationCode, pin: '9753' },
+  });
+  expect(activated.status()).toBe(200);
+
+  return { id: body.user.id, fullName };
+}
+
+/**
+ * Отдельный курьер для этого сценария.
+ *
+ * Общий курьер набора не годится: соседняя проверка его замораживает, и он
+ * пропадает из списка действующих — маршрут достался бы другому человеку,
+ * а экран курьера оказался бы пуст. Заводится через тот же API, которым
+ * пользуется администратор.
+ */
+async function seedOwnCourier(
+  page: Page,
+  token: string,
+): Promise<{ phone: string; pin: string; fullName: string }> {
+  const phone = uniquePhone();
+  const fullName = 'Курьер отчётов';
+
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName, phone, roles: ['COURIER'], defaultVehicleType: 'CAR' },
+  });
+  expect(created.status()).toBe(201);
+  const body = (await created.json()) as { activationCode: string };
+
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone, code: body.activationCode, pin: COURIER_PIN },
+  });
+  expect(activated.status()).toBe(200);
+
+  return { phone, pin: COURIER_PIN, fullName };
+}
+
+/**
+ * «История» и «Отчёты»: журнал прошлого и расчёты с курьером.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Подменяются только те же локальные флаги, что и раньше
+ * (решатель, подсказки, маршрутизатор). Деньги, тарифы и учёт настоящие:
+ * тариф заводится через API администратора, учёт включается им же, а
+ * начисления делает сам продукт при доставке.
+ */
+test('история и отчёты: тариф, доставка, расчёт с курьером и выгрузки', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  /*
+   * Тариф и включение учёта заводятся через API администратора.
+   *
+   * Экран настройки тарифов — отдельная работа; здесь важно, что ставки
+   * задаёт человек с правом ADMIN, а не сеялка и не значение по умолчанию.
+   */
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+
+  /*
+   * Запросы идут через контекст страницы с настоящим токеном.
+   *
+   * Токен приложения живёт в памяти вкладки и в браузерный `fetch` сам собой
+   * не попадает: без явного заголовка сервер честно отвечает 401, и проверка
+   * доказывала бы только это.
+   */
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  const courier = await seedOwnCourier(page, token);
+  const logist = await seedOwnLogist(page, token);
+
+  /*
+   * Тариф, включение учёта и геометрия МКАД заводятся ЭКРАНОМ настроек:
+   * проверяется тот путь, которым пользуется администратор, а не только API.
+   */
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await expect(page.getByTestId('finance-settings')).toBeVisible();
+
+  await page.getByTestId('tariff-from').fill(today);
+  await page.getByTestId('tariff-per-order').fill('200');
+  await page.getByTestId('tariff-per-km').fill('30');
+  await page.getByTestId('tariff-note').fill('проверочный тариф');
+  await page.getByTestId('tariff-submit').click();
+  await expect(page.getByTestId('tariff-list')).toContainText('200,00 ₽');
+
+  await page.getByTestId('finance-activation-date').fill(today);
+  await page.getByTestId('finance-activate').click();
+  await expect(page.getByTestId('finance-ledger-off')).toHaveCount(0);
+
+  /*
+   * Геометрия МКАД приходит с поставкой: загрузки через интерфейс нет.
+   * Настройки показывают только состояние — версию, источник и лицензию.
+   */
+  const mkad = page.getByTestId('mkad-active');
+  await expect(mkad).toContainText('OpenStreetMap');
+  await expect(mkad).toContainText('ODbL');
+  // Отношение, датированный снимок и версия названы прямо на экране.
+  await expect(mkad).toContainText('2094222');
+  await expect(mkad).toContainText('geofabrik');
+  await expect(page.getByTestId('mkad-sha')).toContainText('Отпечаток');
+
+  /*
+   * Управлять геометрией отсюда нельзя.
+   *
+   * Ни поля файла, ни кнопки загрузки: кольцо входит в поставку, и правятся
+   * здесь только тариф и стоимость километра за МКАД.
+   */
+  const settings = page.getByTestId('finance-settings');
+  await expect(settings.locator('input[type="file"]')).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: /геометри/i })).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: /Загрузить/i })).toHaveCount(0);
+
+  // 1. Обычный путь: сделка → лист → курьер → отгрузка.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await page.getByTestId('create-route-sheet').click();
+  await expect(page).toHaveURL(/\/logistics\/route-sheets/);
+
+  await page.getByTestId('sheets-search').fill(own ?? '');
+  const sheet = page.getByTestId('sheets-UNSHIPPED').locator('[data-testid="sheet-row"]').first();
+  await expect(sheet).toBeVisible();
+  /*
+   * Курьер выбирается ИМЕННО тот, под которым дальше входит проверка.
+   *
+   * «Первый в списке» здесь не годится: соседние сценарии заводят своих
+   * курьеров, и маршрут достался бы чужому — экран курьера оказался бы пуст.
+   */
+  await sheet.getByTestId('sheet-courier-combobox-field').fill(courier.phone);
+  await expect(sheet.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
+  await sheet.getByTestId('sheet-courier-combobox-option').first().click();
+  await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
+  const sheetNumber = (await sheet.getAttribute('data-sheet-number')) ?? '';
+  await sheet.getByTestId('sheet-ship').click();
+  await expect(
+    page.getByTestId('sheets-SHIPPED').locator(`[data-sheet-number="${sheetNumber}"]`),
+  ).toBeVisible({ timeout: 20_000 });
+
+  // 2. Курьер сообщает результат: деньги в учёт попадают отсюда, а не из формы.
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+  await login(courierPage, courier.phone, courier.pin);
+  const courierCard = courierPage.locator(
+    `[data-testid="delivery-order"][data-order-number="${own}"]`,
+  );
+  await expect(courierCard).toBeVisible({ timeout: 20_000 });
+  await courierCard.getByTestId('delivery-open-delivered').click();
+  await courierCard.getByTestId('delivery-submit').click();
+  /*
+   * Состояние карточки не проверяется: это единственный заказ маршрута, его
+   * результат завершает маршрут, и список активных доставок пустеет. Факт
+   * доставки доказывается дальше — в истории и в расчёте с курьером.
+   */
+  await expect(courierPage.locator('.toast-region')).toContainText('Маршрут завершён', {
+    timeout: 20_000,
+  });
+  await courierContext.close();
+
+  // 3. «История» показывает маршрут, его состав и хронологию.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByTestId('history-screen')).toBeVisible();
+  await page.getByTestId('history-search').fill(own ?? '');
+
+  const historyRow = page.locator(
+    `[data-testid="history-route"][data-route-number="${sheetNumber}"]`,
+  );
+  await expect(historyRow).toBeVisible({ timeout: 20_000 });
+  await historyRow.getByTestId('history-expand').click();
+  await expect(historyRow.locator(`[data-order-number="${own}"]`)).toBeVisible();
+  await expect(historyRow.getByTestId('history-events')).toContainText('Отгружен курьеру');
+  await expect(historyRow.getByTestId('history-events')).toContainText('Доставлен');
+
+  // 4. «Отчёты»: расчёт с курьером и денежная операция.
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+  await expect(page.getByTestId('reports-summary')).toBeVisible();
+
+  /*
+   * Иерархия: свёрнутая группа курьера с итогами дня, подробности —
+   * по раскрытию.
+   */
+  const rows = page.getByTestId('reports-rows');
+  const group = rows.locator(`[data-testid="reports-group"][data-group-date="${today}"]`).first();
+  await expect(group).toBeVisible({ timeout: 20_000 });
+  await expect(group).toHaveAttribute('data-expanded', 'false');
+  await expect(rows.locator(`[data-order-number="${own}"]`)).toHaveCount(0);
+  await expect(group).toContainText(courier.fullName);
+  await expect(group).toContainText(courier.phone.replace(/\s/g, ''));
+
+  await group.getByTestId('reports-group-toggle').click();
+  await expect(rows.locator(`[data-order-number="${own}"]`)).toBeVisible();
+
+  /*
+   * Баланс до и после операции.
+   *
+   * Проверяется именно изменение: конкретная сумма зависит от наличных
+   * фикстуры, а вот направление и факт учёта операции — нет.
+   */
+  const before = (await page.getByTestId('reports-closing').innerText()).trim();
+
+  /*
+   * Операции заводятся ИЗ ЯЧЕЙКИ: день и курьер берутся из строки, поэтому
+   * ни того, ни другого выбирать не нужно. Универсальной кнопки больше нет.
+   */
+  await expect(page.getByTestId('reports-add-operation')).toHaveCount(0);
+
+  await group.getByTestId('reports-cell-handed').click();
+  await expect(page.getByTestId('cell-editor')).toBeVisible();
+  // Администратор обязан назвать кассу: своей у него нет.
+  await page.getByTestId('cell-desk').selectOption(logist.id);
+  // Поле суммы работает как калькулятор: «1000+500=» даёт 1500.
+  await page.getByTestId('cell-amount').fill('1000+500=');
+  await expect(page.getByTestId('cell-preview')).toContainText('1500,00 ₽');
+  await page.getByTestId('cell-submit').click();
+  await expect(page.getByTestId('cell-editor')).toHaveCount(0);
+
+  // Ячейка и итог пересчитались без перезагрузки страницы.
+  await expect(group.getByTestId('reports-cell-handed')).toContainText('1500,00 ₽', {
+    timeout: 20_000,
+  });
+
+  // Дополнительный расход требует пояснения.
+  await group.getByTestId('reports-cell-expense').click();
+  await page.getByTestId('cell-amount').fill('200');
+  await page.getByTestId('cell-submit').click();
+  await expect(page.getByTestId('cell-error')).toBeVisible();
+  await page.getByTestId('cell-reason').fill('парковка у адреса');
+  await page.getByTestId('cell-submit').click();
+  // Отказ обязан быть назван словами, а не превратиться в тихое «ничего не произошло».
+  await expect(page.getByTestId('cell-error')).toHaveCount(0);
+  await expect(page.locator('.toast-region')).toContainText('Операция записана', {
+    timeout: 20_000,
+  });
+  await expect(group.getByTestId('reports-cell-expense')).toContainText('200,00 ₽', {
+    timeout: 20_000,
+  });
+
+  // Журнал платежей виден в раскрытой группе: вид, сумма и автор.
+  const payments = page.getByTestId('reports-payment');
+  await expect(payments.first()).toBeVisible();
+  await expect(payments.filter({ hasText: 'Курьер сдал' })).toHaveCount(1);
+  await expect(payments.filter({ hasText: 'Дополнительный расход' })).toHaveCount(1);
+
+  const after = (await page.getByTestId('reports-closing').innerText()).trim();
+  expect(after).not.toBe(before);
+
+  // Те же операции видны в «Истории» с датой, временем, суммой и автором.
+  await page.getByRole('link', { name: 'История' }).first().click();
+  await expect(page.getByTestId('history-payments').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('history-payments').first()).toContainText('Курьер сдал');
+  await expect(page.getByTestId('history-payments').first()).toContainText('1500,00 ₽');
+
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+
+  const period = `from=${today}&to=${today}`;
+  const xlsx = await page.request.get(`/api/logistics/reports/settlements.xlsx?${period}`, {
+    headers: authorized,
+  });
+  const pdf = await page.request.get(`/api/logistics/reports/settlements.pdf?${period}`, {
+    headers: authorized,
+  });
+
+  expect(xlsx.status()).toBe(200);
+  expect(pdf.status()).toBe(200);
+  // Сигнатуры файлов: XLSX — это zip, PDF — это PDF, а не страница с ошибкой.
+  expect((await xlsx.body()).subarray(0, 2).toString('latin1')).toBe('PK');
+  expect((await pdf.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
+  expect(pdf.headers()['content-type']).toContain('application/pdf');
+
+  // 6. Операционные показатели считаются тем же периодом.
+  await page.getByTestId('reports-mode-operations').click();
+  await expect(page.getByTestId('operations-summary')).toBeVisible();
+  await expect(page.getByTestId('operations-summary')).toContainText('Доставлено');
+
+  /*
+   * 6а. Касса логистов: полный цикл наличных.
+   *
+   * Проверяется, что одна фактическая передача существует на двух сторонах:
+   * сдача курьера уже попала в кассу, из кассы можно взять и сдать деньги,
+   * а отрицательный остаток невозможен.
+   */
+  await page.getByTestId('reports-mode-cash').click();
+  await expect(page.getByTestId('cash-panel')).toBeVisible();
+  await expect(page.getByTestId('cash-summary')).toContainText('Ожидается к сдаче');
+
+  const cashGroup = page.getByTestId('cash-group').first();
+  await expect(cashGroup).toBeVisible({ timeout: 20_000 });
+  // Сдача курьера, записанная в расчётах, уже лежит в кассе логиста.
+  await expect(cashGroup).toContainText('1500,00 ₽');
+
+  await expect(cashGroup).toHaveAttribute('data-expanded', 'false');
+  await cashGroup.getByTestId('cash-group-toggle').click();
+  await expect(page.getByTestId('cash-entry').first()).toBeVisible();
+  await expect(page.getByTestId('cash-entry').first()).toContainText('Получено от курьера');
+
+  // Взять наличные из компании: тот же безопасный калькулятор.
+  const cashBefore = (await page.getByTestId('cash-closing').innerText()).trim();
+  await page.getByTestId('cash-take').click();
+  await expect(page.getByTestId('cash-editor')).toBeVisible();
+  await page.getByTestId('cash-amount').fill('900+100');
+  await expect(page.getByTestId('cash-preview')).toContainText('1000,00 ₽');
+  await page.getByTestId('cash-submit').click();
+  await expect(page.getByTestId('cash-editor')).toHaveCount(0);
+  await expect
+    .poll(async () => (await page.getByTestId('cash-closing').innerText()).trim(), {
+      timeout: 20_000,
+    })
+    .not.toBe(cashBefore);
+
+  // Сдать больше, чем есть в кассе, нельзя.
+  await page.getByTestId('cash-hand').click();
+  await page.getByTestId('cash-amount').fill('1000000');
+  await page.getByTestId('cash-submit').click();
+  await expect(page.getByTestId('cash-error')).toContainText('недостаточно наличных');
+  await page.getByTestId('cash-cancel').click();
+
+  // Обычная сдача проходит и уменьшает остаток.
+  const beforeHand = (await page.getByTestId('cash-closing').innerText()).trim();
+  await page.getByTestId('cash-hand').click();
+  await page.getByTestId('cash-amount').fill('500');
+  await page.getByTestId('cash-submit').click();
+  await expect
+    .poll(async () => (await page.getByTestId('cash-closing').innerText()).trim(), {
+      timeout: 20_000,
+    })
+    .not.toBe(beforeHand);
+
+  // Выгрузки кассы — настоящие файлы.
+  const cashXlsx = await page.request.get(
+    `/api/logistics/reports/cash.xlsx?from=${today}&to=${today}`,
+    { headers: authorized },
+  );
+  const cashPdf = await page.request.get(
+    `/api/logistics/reports/cash.pdf?from=${today}&to=${today}`,
+    { headers: authorized },
+  );
+  expect((await cashXlsx.body()).subarray(0, 2).toString('latin1')).toBe('PK');
+  expect((await cashPdf.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
+
+  // 7. Телефон: обе вкладки без горизонтального выезда.
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const [name, testId] of [
+    ['История', 'history-screen'],
+    ['Отчёты', 'reports-screen'],
+  ]) {
+    await page
+      .getByRole('link', { name: name ?? '' })
+      .first()
+      .click();
+    await expect(page.getByTestId(testId ?? '')).toBeVisible();
+    const overflow = await page.evaluate(() => {
+      const root = (
+        globalThis as unknown as {
+          document: { documentElement: { scrollWidth: number; clientWidth: number } };
+        }
+      ).document.documentElement;
+      return root.scrollWidth - root.clientWidth;
+    });
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+});
+
+/**
+ * «Маршрутизация»: нераспределённая сделка выглядит как в «Сделках»,
+ * а пустой черновик заводится кнопкой.
+ *
+ * Обе правки проверяются одним сеансом намеренно: заведённый пустой черновик
+ * тут же наполняется той самой нераспределённой точкой, вид которой проверен
+ * шагом раньше. Разнести это по двум сценариям значило бы дважды поднимать
+ * карту ради одного и того же дня.
+ */
+test('маршрутизация: точка дня без номера и пустой черновик кнопкой', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const own = seedOrders(1, { withPoint: true })[0] ?? '';
+  expect(own).not.toBe('');
+
+  /*
+   * Тела запросов создания собираются по ходу сценария.
+   *
+   * Ключ должен принадлежать НАЖАТИЮ: один ключ на дату или на экран означал
+   * бы, что второе осознанное нажатие молча возвращает первый черновик.
+   * Увидеть это можно только в том, что реально ушло на сервер.
+   */
+  const pressed: { creationKey: string; deliveryDate: string; vehicleType: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/api/routes/empty')) {
+      pressed.push(
+        request.postDataJSON() as {
+          creationKey: string;
+          deliveryDate: string;
+          vehicleType: string;
+        },
+      );
+    }
+  });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+
+  /*
+   * 1. Пустой черновик одним нажатием.
+   *
+   * Ждём именно ответа операции: список обновляется запросом, и без ожидания
+   * сценарий проверял бы состояние до её завершения.
+   */
+  /*
+   * Список сначала обязан загрузиться.
+   *
+   * Пока идёт запрос, черновиков на экране ноль, и посчитанное «до» означало
+   * бы не состояние дня, а незавершённую загрузку.
+   */
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  await expect
+    .poll(async () =>
+      (await page.locator('.routes__draft').count()) > 0
+        ? 'есть'
+        : (await page.getByText('Черновиков на этот день нет').count()) > 0
+          ? 'пусто'
+          : 'ждём',
+    )
+    .not.toBe('ждём');
+  const draftsBefore = await page.locator('.routes__draft').count();
+
+  const add = page.getByRole('button', { name: 'Добавить пустой черновик' });
+  await expect(add).toBeVisible();
+  await clickAndAwait(page, add, 'POST', '/api/routes/empty');
+
+  // Появился ровно один новый черновик — и без перезагрузки страницы.
+  await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 1);
+  // Он раскрыт и активен: логисту он нужен открытым, чтобы начать наполнять.
+  const opened = page.locator('.routes__draft[data-expanded="true"]');
+  await expect(opened).toHaveCount(1);
+  const emptyNumber = (await opened.getAttribute('data-draft-number')) ?? '';
+  expect(emptyNumber).toMatch(/^R-\d{4}-\d{2}-\d{2}-\d{3}/);
+  // Заказов в нём нет, курьера тоже.
+  await expect(page.locator('.routes__card .routes__stop')).toHaveCount(0);
+
+  /*
+   * 2. Вид нераспределённой точки.
+   *
+   * Круг пуст: номер внутри означал бы позицию остановки, которой у этой
+   * сделки нет. Время стоит подписью над кругом, номер и адрес — в подсказке.
+   */
+  await page.getByTestId('map-unassigned-toggle').check();
+  const marker = page.getByRole('button', { name: `Заказ ${own} на карте` });
+  await expect(marker).toBeVisible();
+  await expect(marker.locator('.map-point__dot')).toHaveText('');
+  await expect(marker.locator('.map-point__time')).toBeVisible();
+  await expect(marker.locator('.map-point__time')).not.toHaveText('');
+  const hint = marker.locator('.map-point__hint');
+  await expect(hint).toHaveAttribute('role', 'tooltip');
+  await expect(hint).toContainText(own);
+  await expect(hint).toContainText('Москва');
+
+  /*
+   * Подсказка появляется по наведению и достаётся клавиатуре.
+   *
+   * Наведение проверяется на ВЕРХНЕЙ отметке: у проверочных заказов сеялки
+   * один адрес, отметки лежат друг на друге, и мышь физически достаётся
+   * верхней. Правило показа общее для всех отметок, поэтому доказывает его
+   * любая из них. Видимость меряется прозрачностью, а не `toBeVisible`:
+   * скрытая подсказка занимает место и по размерам считалась бы видимой.
+   */
+  const opacityOf = (selector: string): Promise<string> =>
+    page.evaluate<string>(`getComputedStyle(document.querySelector('${selector}')).opacity`);
+
+  const ownHint = `[aria-label="Заказ ${own} на карте"] .map-point__hint`;
+  expect(await opacityOf(ownHint)).toBe('0');
+
+  const topMarker = page.locator('[data-testid="map-marker"][data-order-id]').last();
+  const topLabel = (await topMarker.getAttribute('aria-label')) ?? '';
+  await topMarker.hover();
+  await expect.poll(() => opacityOf(`[aria-label="${topLabel}"] .map-point__hint`)).toBe('1');
+
+  // Отметка — обычная кнопка: клавиатура до неё доходит и имя у неё есть.
+  await marker.focus();
+  expect(await page.evaluate<string>("document.activeElement.getAttribute('aria-label')")).toBe(
+    `Заказ ${own} на карте`,
+  );
+
+  /*
+   * 3. Координата точки не зависит от масштаба, сдвига и обновления данных.
+   *
+   * Сверяется положение кружка на экране с проекцией той самой координаты,
+   * которую отметка о себе объявляет.
+   */
+  const drift = async (): Promise<{ dx: number; dy: number; lng: number; lat: number }> => {
+    await page.waitForTimeout(150);
+    const box = await marker.boundingBox();
+    const lng = Number(await marker.getAttribute('data-lng'));
+    const lat = Number(await marker.getAttribute('data-lat'));
+    const projected = await page.evaluate(
+      ([lngValue, latValue]: [number, number]) => {
+        const map = (
+          globalThis as unknown as {
+            __routingMap: { project: (lngLat: [number, number]) => { x: number; y: number } };
+          }
+        ).__routingMap;
+        const point = map.project([lngValue, latValue]);
+        return { x: point.x, y: point.y };
+      },
+      [lng, lat] as [number, number],
+    );
+    const canvas = await page.getByTestId('orders-map').boundingBox();
+    const centerX = (box?.x ?? 0) + (box?.width ?? 0) / 2 - (canvas?.x ?? 0);
+    const centerY = (box?.y ?? 0) + (box?.height ?? 0) / 2 - (canvas?.y ?? 0);
+    return { dx: centerX - projected.x, dy: centerY - projected.y, lng, lat };
+  };
+
+  const start = await drift();
+  expect(Math.abs(start.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(start.dy)).toBeLessThanOrEqual(1);
+
+  for (const step of [3, -2]) {
+    await page.evaluate((value: number) => {
+      const map = (
+        globalThis as unknown as {
+          __routingMap: { setZoom: (z: number) => void; getZoom: () => number };
+        }
+      ).__routingMap;
+      map.setZoom(map.getZoom() + value);
+    }, step);
+    const after = await drift();
+    // Координата доменного объекта неизменна: масштаб её не касается.
+    expect(after.lng).toBe(start.lng);
+    expect(after.lat).toBe(start.lat);
+    expect(Math.abs(after.dx)).toBeLessThanOrEqual(1);
+    expect(Math.abs(after.dy)).toBeLessThanOrEqual(1);
+  }
+
+  await page.evaluate(() => {
+    const map = (
+      globalThis as unknown as {
+        __routingMap: { panBy: (offset: [number, number], options: { duration: number }) => void };
+      }
+    ).__routingMap;
+    map.panBy([160, -110], { duration: 0 });
+  });
+  const afterPan = await drift();
+  expect(afterPan.lng).toBe(start.lng);
+  expect(Math.abs(afterPan.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterPan.dy)).toBeLessThanOrEqual(1);
+
+  // Обновление данных списка отметку не двигает.
+  await page.getByRole('button', { name: 'Обновить список' }).click();
+  const afterRefresh = await drift();
+  expect(afterRefresh.lat).toBe(start.lat);
+  expect(Math.abs(afterRefresh.dx)).toBeLessThanOrEqual(1);
+  expect(Math.abs(afterRefresh.dy)).toBeLessThanOrEqual(1);
+
+  /*
+   * 4. В пустой черновик кладётся нераспределённый заказ, и его точка
+   * становится нумерованной остановкой.
+   */
+  /*
+   * Нажатие отправляется САМОЙ отметке.
+   *
+   * У проверочных заказов сеялки один адрес, и отметки лежат друг на друге:
+   * обычное нажатие досталось бы верхней, и в черновик уехал бы чужой заказ.
+   */
+  await marker.dispatchEvent('click');
+  const window = page.getByTestId('map-selection');
+  await expect(window).toBeVisible();
+  await clickAndAwait(page, window.getByRole('button', { name: emptyNumber }), 'POST', '/orders');
+  await openDraft(page, emptyNumber);
+  await expect(page.locator('.routes__card .routes__stop')).toHaveCount(1);
+  // Остановка активного черновика — единственный случай цифры в кружке.
+  await expect(
+    page.getByRole('button', { name: `Заказ ${own} на карте` }).locator('.map-point__dot'),
+  ).toHaveText('1');
+
+  /*
+   * 5. Пустой черновик отменяется с причиной обычным способом.
+   */
+  const second = page.getByRole('button', { name: 'Добавить пустой черновик' });
+  await clickAndAwait(page, second, 'POST', '/api/routes/empty');
+  // Раскрытым становится именно новый черновик: ждём смены номера, а не
+  // мгновенного перерисовывания списка.
+  await expect
+    .poll(async () =>
+      page.locator('.routes__draft[data-expanded="true"]').getAttribute('data-draft-number'),
+    )
+    .not.toBe(emptyNumber);
+  const secondNumber =
+    (await page
+      .locator('.routes__draft[data-expanded="true"]')
+      .getAttribute('data-draft-number')) ?? '';
+
+  /*
+   * Два нажатия — два черновика; повтор первого запроса — по-прежнему два.
+   *
+   * Ключи двух нажатий обязаны различаться: одинаковый означал бы, что второе
+   * нажатие ничего не создаёт. А повтор ровно того тела, что ушло с первым
+   * нажатием, обязан вернуть первый черновик и не завести третий.
+   */
+  expect(pressed).toHaveLength(2);
+  expect(pressed[0]?.creationKey).not.toBe(pressed[1]?.creationKey);
+  expect(pressed[0]?.deliveryDate).toBe(pressed[1]?.deliveryDate);
+  await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 2);
+
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const again = await page.request.post('/api/routes/empty', {
+    headers: { authorization: `Bearer ${token}` },
+    data: pressed[0],
+  });
+  // 200, а не 201: третьего черновика не появилось.
+  expect(again.status()).toBe(200);
+  expect(((await again.json()) as { number: string }).number).toBe(emptyNumber);
+
+  await page.getByRole('button', { name: 'Обновить список' }).click();
+  await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 2);
+
+  await page.locator('.routes__card').getByRole('button', { name: 'Отменить маршрут' }).click();
+  await page.getByLabel('Причина').fill('Заведён по ошибке');
+  await clickAndAwait(page, page.getByRole('button', { name: 'Продолжить' }), 'POST', '/cancel');
+  await expect(page.locator(`.routes__draft[data-draft-number="${secondNumber}"]`)).toHaveCount(0);
+
+  // 6. Телефон и настольный экран: полоса действий не уезжает вбок.
+  for (const size of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(size);
+    await expect(page.getByRole('button', { name: 'Добавить пустой черновик' })).toBeVisible();
+    const overflow = await page.evaluate(() => {
+      const root = (
+        globalThis as unknown as {
+          document: { documentElement: { scrollWidth: number; clientWidth: number } };
+        }
+      ).document.documentElement;
+      return root.scrollWidth - root.clientWidth;
+    });
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+});

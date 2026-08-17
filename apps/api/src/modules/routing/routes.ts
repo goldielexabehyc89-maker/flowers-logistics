@@ -25,7 +25,7 @@ import { toDecimalString } from '../integrations/moysklad/money.js';
 import { assignmentStateOf, calendarDate } from './eligibility.js';
 import {
   addOrders,
-  createDraft,
+  createEmptyDraft,
   createDraftFromSelection,
   MAX_SELECTION_SIZE,
   moveOrders,
@@ -78,9 +78,17 @@ const listQuerySchema = z.object({
   state: z.enum(['DRAFT', 'CONFIRMED', 'CANCELLED', 'ACTIVE']).optional(),
 });
 
+/**
+ * Пустой черновик: дата и тип машины, заказов нет.
+ *
+ * Состав сюда не принимается вовсе — маршрут из выбора создаёт
+ * `/api/routes/from-selection`, и требование непустого выбора там остаётся.
+ */
 const createSchema = z.object({
   deliveryDate: dateSchema,
   vehicleType: z.enum(['CAR', 'FOOT']),
+  /** Ключ запроса: повтор возвращает уже созданный черновик, а не второй. */
+  creationKey: uuid.optional(),
 });
 
 /**
@@ -283,12 +291,19 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     };
   });
 
-  app.post('/api/routes', async (request, reply) => {
+  /**
+   * Пустой черновик дня.
+   *
+   * Логист заводит его заранее и наполняет нераспределёнными заказами.
+   * Повтор запроса с тем же ключом возвращает прежний маршрут и код 200:
+   * 201 означал бы, что создан ещё один.
+   */
+  app.post('/api/routes/empty', async (request, reply) => {
     const actor = await authenticateWithRoles(request, deps, ROUTE_ROLES);
     const body = createSchema.parse(request.body);
 
-    const created = await createDraft(deps, actor, body, contextOf(request));
-    return reply.code(201).send(created);
+    const created = await createEmptyDraft(deps, actor, body, contextOf(request));
+    return reply.code(created.repeated ? 200 : 201).send(created);
   });
 
   /**

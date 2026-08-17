@@ -12,7 +12,8 @@ health/readiness, структурированные логи, авториза�
 Документы: [PROJECT_RULES.md](PROJECT_RULES.md) · [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) ·
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/DEPLOY.md](docs/DEPLOY.md) ·
 [docs/OPERATIONS.md](docs/OPERATIONS.md) · [docs/DOMAIN_STATES.md](docs/DOMAIN_STATES.md) ·
-[docs/INTEGRATION_MOYSKLAD.md](docs/INTEGRATION_MOYSKLAD.md)
+[docs/INTEGRATION_MOYSKLAD.md](docs/INTEGRATION_MOYSKLAD.md) ·
+[docs/THIRD_PARTY_DATA.md](docs/THIRD_PARTY_DATA.md)
 
 ## Требования
 

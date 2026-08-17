@@ -38,6 +38,9 @@ import type { ConflictKind, Role } from '@fl/shared';
 import { calendarDate, ineligibleReason } from './eligibility.js';
 import { nextRouteNumber } from './numbering.js';
 import { assertReason, grantLease, releaseLeaseRow, requireLease } from './lease.js';
+import { captureRouteTariff } from '../finance/accrual.js';
+import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { ledgerCoversDate, readLedgerActivation, resolveTariff } from '../finance/tariffs.js';
 import {
   activateRouteWithinTransaction,
   markRoutePlacementsForRelocation,
@@ -338,6 +341,29 @@ export async function confirmWithinTransaction(
         ...(first !== undefined && first.orderIds.length > 0 ? { orderIds: first.orderIds } : {}),
       },
     });
+  }
+
+  /*
+   * Тариф фиксируется снимком именно здесь.
+   *
+   * Позже ставки могут измениться, а начисления обязаны совпадать с тем, что
+   * человек видел при подтверждении. Пока учёт не включён владельцем, снимок
+   * не делается и подтверждение работает как прежде: прошлым маршрутам ставку
+   * задним числом не назначают.
+   */
+  const deliveryDate = fromDateColumn(route.deliveryDate);
+  const activation = await readLedgerActivation(tx as unknown as Database);
+  if (ledgerCoversDate(activation, deliveryDate)) {
+    const rates = await resolveTariff(tx as unknown as Database, deliveryDate);
+    if (rates === null) {
+      throw new AppError('CONFLICT', {
+        message: 'tariff is not configured',
+        publicMessage:
+          'На дату доставки не настроен тариф курьера. Подтверждение недоступно, пока администратор не задаст ставки.',
+        conflict: { kind: 'ROUTE_TARIFF_REQUIRED' },
+      });
+    }
+    await captureRouteTariff(tx, { routeId, deliveryDate, rates });
   }
 
   await applyTransition(tx, route, 'CONFIRMED', actor, now, null);

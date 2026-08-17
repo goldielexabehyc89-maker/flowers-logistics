@@ -140,7 +140,10 @@ async function createRoute(
   token: string,
   deliveryDate = DAY,
 ): Promise<{ id: string; version: number }> {
-  const response = await call('POST', '/api/routes', token, { deliveryDate, vehicleType: 'CAR' });
+  const response = await call('POST', '/api/routes/empty', token, {
+    deliveryDate,
+    vehicleType: 'CAR',
+  });
   expect(response.statusCode).toBe(201);
   return response.json() as { id: string; version: number };
 }
@@ -280,7 +283,7 @@ describe('календарная дата маршрута', () => {
     const eventsBefore = await ctx.db.realtimeEvent.count();
 
     for (const deliveryDate of ['2026-02-30', '2026-13-01', '2025-02-29']) {
-      const response = await call('POST', '/api/routes', token, {
+      const response = await call('POST', '/api/routes/empty', token, {
         deliveryDate,
         vehicleType: 'CAR',
       });
@@ -298,7 +301,7 @@ describe('календарная дата маршрута', () => {
 
   it('високосный день принимается', async () => {
     const token = await tokenFor(['ADMIN']);
-    const response = await call('POST', '/api/routes', token, {
+    const response = await call('POST', '/api/routes/empty', token, {
       deliveryDate: '2024-02-29',
       vehicleType: 'CAR',
     });
@@ -308,7 +311,7 @@ describe('календарная дата маршрута', () => {
   });
 
   it('сервисный слой отвергает несуществующую дату и без HTTP', async () => {
-    const { createDraft } = await import('./service.js');
+    const { createEmptyDraft } = await import('./service.js');
     const actor = {
       userId: (await seedUser(ctx.db, { roles: ['ADMIN'] })).id,
       familyId: randomUUID(),
@@ -318,7 +321,7 @@ describe('календарная дата маршрута', () => {
     };
 
     await expect(
-      createDraft(
+      createEmptyDraft(
         { db: ctx.db },
         actor,
         { deliveryDate: '2026-02-30', vehicleType: 'CAR' },
@@ -541,7 +544,7 @@ describe('права', () => {
       const token = await tokenFor(roles);
       expect((await call('GET', '/api/routes', token)).statusCode, roles.join()).toBe(403);
       expect(
-        (await call('POST', '/api/routes', token, { deliveryDate: DAY, vehicleType: 'CAR' }))
+        (await call('POST', '/api/routes/empty', token, { deliveryDate: DAY, vehicleType: 'CAR' }))
           .statusCode,
         roles.join(),
       ).toBe(403);
@@ -553,6 +556,161 @@ describe('права', () => {
 });
 
 // --- Состав маршрута --------------------------------------------------------
+
+describe('пустой черновик', () => {
+  it('создаётся ровно один черновик выбранного дня: без заказов и без курьера', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const before = (
+      await call('GET', `/api/routes?deliveryDate=${DAY}&state=DRAFT`, token)
+    ).json() as {
+      total: number;
+    };
+
+    const response = await call('POST', '/api/routes/empty', token, {
+      deliveryDate: DAY,
+      vehicleType: 'CAR',
+      creationKey: randomUUID(),
+    });
+    expect(response.statusCode).toBe(201);
+    const created = response.json() as { id: string; repeated: boolean };
+    expect(created.repeated).toBe(false);
+
+    const view = await card(token, created.id);
+    expect(view.state).toBe('DRAFT');
+    expect(view.orders).toHaveLength(0);
+    expect(view.courier).toBeNull();
+
+    const after = (
+      await call('GET', `/api/routes?deliveryDate=${DAY}&state=DRAFT`, token)
+    ).json() as {
+      total: number;
+      items: { id: string; deliveryDate: string }[];
+    };
+    expect(after.total).toBe(before.total + 1);
+    expect(after.items.find((item) => item.id === created.id)?.deliveryDate).toBe(DAY);
+  });
+
+  it('повтор одного запроса возвращает прежний черновик, а не создаёт второй', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const creationKey = randomUUID();
+    const body = { deliveryDate: DAY, vehicleType: 'CAR', creationKey };
+
+    const first = await call('POST', '/api/routes/empty', token, body);
+    expect(first.statusCode).toBe(201);
+    const second = await call('POST', '/api/routes/empty', token, body);
+    // 200, а не 201: второго черновика не появилось.
+    expect(second.statusCode).toBe(200);
+
+    const one = first.json() as { id: string; number: string };
+    const two = second.json() as { id: string; number: string; repeated: boolean };
+    expect(two.id).toBe(one.id);
+    expect(two.number).toBe(one.number);
+    expect(two.repeated).toBe(true);
+  });
+
+  it('два нажатия дают два черновика, а повтор первого — по-прежнему два', async () => {
+    /*
+     * Ключ принадлежит НАЖАТИЮ, а не дню и не экрану.
+     *
+     * Осознанное второе нажатие — это второй черновик: логист заводит их
+     * столько, сколько нужно машин. Повторно ушедший тот же запрос — это
+     * по-прежнему одно нажатие, и третьего черновика он не создаёт.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const day = '2026-09-14';
+    const countDrafts = async (): Promise<number> =>
+      (
+        (await call('GET', `/api/routes?deliveryDate=${day}&state=DRAFT`, token)).json() as {
+          total: number;
+        }
+      ).total;
+
+    expect(await countDrafts()).toBe(0);
+
+    const firstPress = { deliveryDate: day, vehicleType: 'CAR', creationKey: randomUUID() };
+    const secondPress = { deliveryDate: day, vehicleType: 'CAR', creationKey: randomUUID() };
+
+    const first = await call('POST', '/api/routes/empty', token, firstPress);
+    const second = await call('POST', '/api/routes/empty', token, secondPress);
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+
+    const one = first.json() as { id: string; number: string };
+    const two = second.json() as { id: string; number: string };
+    expect(two.id).not.toBe(one.id);
+    expect(two.number).not.toBe(one.number);
+    expect(await countDrafts()).toBe(2);
+
+    // Повтор запроса ПЕРВОГО нажатия: тот же черновик, третьего нет.
+    const repeat = await call('POST', '/api/routes/empty', token, firstPress);
+    expect(repeat.statusCode).toBe(200);
+    expect((repeat.json() as { id: string }).id).toBe(one.id);
+    expect(await countDrafts()).toBe(2);
+  });
+
+  it('одинаковые дата и тип машины сами по себе повтором не считаются', async () => {
+    // Ключа нет вовсе — значит, нажатий было столько, сколько запросов.
+    const token = await tokenFor(['LOGISTICIAN']);
+    const one = await createRoute(token);
+    const two = await createRoute(token);
+
+    expect(two.id).not.toBe(one.id);
+  });
+
+  it('в пустой черновик перекладывается нераспределённый заказ', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const route = await createRoute(token);
+    const orderId = await seedOrder();
+
+    const added = await call('POST', `/api/routes/${route.id}/orders`, token, {
+      orderIds: [orderId],
+      expectedVersion: route.version,
+    });
+    expect(added.statusCode).toBe(200);
+    expect((added.json() as RouteCard).orders.map((item) => item.order.id)).toEqual([orderId]);
+  });
+
+  it('пустой черновик отменяется с причиной', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const route = await createRoute(token);
+
+    const cancelled = await call('POST', `/api/routes/${route.id}/cancel`, token, {
+      expectedVersion: route.version,
+      reason: 'Заведён по ошибке',
+    });
+    expect(cancelled.statusCode).toBe(200);
+    expect((cancelled.json() as RouteCard).state).toBe('CANCELLED');
+  });
+
+  it('общий контракт создания из выбора не ослаблен пустым составом', async () => {
+    /*
+     * Пустой черновик появляется только явным действием. Пустой `orderIds`
+     * в создании из выбора по-прежнему ошибка: иначе случайно снятая галочка
+     * молча заводила бы маршрут без заказов.
+     */
+    const token = await tokenFor(['LOGISTICIAN']);
+    const response = await call('POST', '/api/routes/from-selection', token, {
+      deliveryDate: DAY,
+      vehicleType: 'CAR',
+      orderIds: [],
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('создание пустого черновика записывается в аудит', async () => {
+    const token = await tokenFor(['LOGISTICIAN']);
+    const route = await createRoute(token);
+
+    const entries = await ctx.db.auditLog.findMany({
+      where: { entityId: route.id, action: 'ROUTE_CREATED' },
+      select: { newValue: true },
+    });
+    expect(entries).toHaveLength(1);
+    expect((entries[0]?.newValue as { totalOrders?: number; state?: string }).totalOrders).toBe(0);
+    expect((entries[0]?.newValue as { state?: string }).state).toBe('DRAFT');
+  });
+});
 
 describe('состав маршрута', () => {
   it('заказ добавляется, позиции идут подряд и порядок устойчив', async () => {

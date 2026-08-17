@@ -50,7 +50,7 @@ export default tseslint.config(
      * образа: они не входят в сборку приложения, пишут в stderr осознанно
      * и пользуются глобальными объектами среды выполнения напрямую.
      */
-    files: ['tools/**/*.mjs', 'deploy/scripts/**/*.mjs'],
+    files: ['tools/**/*.mjs', 'deploy/scripts/**/*.mjs', 'scripts/**/*.mjs'],
     languageOptions: {
       globals: {
         Buffer: 'readonly',

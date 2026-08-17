@@ -15,16 +15,17 @@ import {
   LOGISTICS_DEFAULT_TAB,
 } from './navigation/navigation';
 import { FirstLoginScreen, LoginScreen } from './screens/LoginScreen';
-import {
-  LOGISTICS_HISTORY,
-  LOGISTICS_REPORTS,
-  NoSectionsScreen,
-  PLACEHOLDERS,
-  PlaceholderScreen,
-} from './screens/PlaceholderScreen';
+import { NoSectionsScreen, PLACEHOLDERS, PlaceholderScreen } from './screens/PlaceholderScreen';
 import { WarehouseScreen } from './screens/warehouse/WarehouseScreen';
 import { ActiveScreen } from './screens/delivery/ActiveScreen';
 import { HistoryScreen } from './screens/delivery/HistoryScreen';
+/*
+ * Курьерская «История доставок» и логистическая «История» — разные экраны
+ * с разной аудиторией. Псевдоним оставлен намеренно: одинаковое имя в двух
+ * местах однажды привело бы к подмене одного другим.
+ */
+import { HistoryScreen as LogisticsHistoryScreen } from './screens/logistics/HistoryScreen';
+import { ReportsScreen } from './screens/logistics/ReportsScreen';
 import { DealsWorkspace } from './screens/deals/DealsWorkspace';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
@@ -141,8 +142,8 @@ export function App(): React.JSX.Element {
           <Route path="deals" element={<DealsWorkspace />} />
           <Route path="routing" element={<RoutingScreen />} />
           <Route path="route-sheets" element={<RouteSheetsScreen />} />
-          <Route path="history" element={<PlaceholderScreen {...LOGISTICS_HISTORY} />} />
-          <Route path="reports" element={<PlaceholderScreen {...LOGISTICS_REPORTS} />} />
+          <Route path="history" element={<LogisticsHistoryScreen />} />
+          <Route path="reports" element={<ReportsScreen />} />
         </Route>
         {/* Прежние адреса верхнего уровня ведут в точный новый эквивалент. */}
         {Object.entries(LEGACY_PATHS).map(([from, to]) => (

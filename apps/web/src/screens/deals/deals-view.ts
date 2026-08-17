@@ -177,7 +177,10 @@ export function markerLabel(selectionNumber: number | null): string {
 }
 
 /** Интервал над маркером. Показан всегда: по нему логист и группирует день. */
-export function markerInterval(point: MapPoint, format: (minute: number) => string): string {
+export function markerInterval(
+  point: Pick<MapPoint, 'startMinute' | 'endMinute'>,
+  format: (minute: number) => string,
+): string {
   if (point.startMinute === null || point.endMinute === null) {
     return 'время не задано';
   }
@@ -185,7 +188,7 @@ export function markerInterval(point: MapPoint, format: (minute: number) => stri
 }
 
 /** Подсказка при наведении: номер и адрес — то, чего нет на самом маркере. */
-export function markerHint(point: MapPoint): string {
+export function markerHint(point: Pick<MapPoint, 'number' | 'address'>): string {
   return point.address === null ? point.number : `${point.number} · ${point.address}`;
 }
 

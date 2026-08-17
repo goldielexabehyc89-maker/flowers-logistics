@@ -1,0 +1,952 @@
+/**
+ * Вкладка «Отчёты»: расчёты с курьерами и операционные показатели.
+ *
+ * По умолчанию открываются расчёты — это то, ради чего логист сюда заходит.
+ *
+ * Деньги показываются одинаково во всех местах экрана и всегда сопровождаются
+ * СЛОВАМИ о направлении долга: цвет и знак читаются по-разному, а ошибка здесь
+ * стоит настоящих денег.
+ *
+ * Строки маршрутов, подтверждённых до включения учёта, помечаются «Расчёт
+ * отсутствует». Ноль вместо этого означал бы нулевую ставку, а это неправда.
+ */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useAuth } from '../../auth/AuthContext';
+import { useToast } from '../../ui/ToastProvider';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Field,
+  LoadingState,
+  Modal,
+  TextInput,
+} from '../../ui/components';
+import { formatMoscowDateTime } from '@fl/shared';
+import { formatDate, moscowToday } from '../routing/routing';
+import { evaluateMoney, previewOf } from './money-calculator';
+import { CashDeskPanel } from './CashDeskPanel';
+import './reports.css';
+
+interface SettlementTotals {
+  openingBalanceMinor: string;
+  cashReceivedMinor: string;
+  handedToLogistMinor: string;
+  issuedToCourierMinor: string;
+  deliveryFeesMinor: string;
+  attemptFeesMinor: string;
+  distanceFeesMinor: string;
+  expensesMinor: string;
+  bonusesMinor: string;
+  adjustmentsMinor: string;
+  closingBalanceMinor: string;
+}
+
+interface SettlementRow {
+  attemptId: string;
+  orderNumber: string;
+  routeNumber: string;
+  deliveryDate: string;
+  outcome: string;
+  cancelled: boolean;
+  cashMinor: string;
+  paymentTypeName: string | null;
+  perOrderMinor: string | null;
+  perKmMinor: string | null;
+  beyondMkadKmTenths: number | null;
+  deliveryFeeMinor: string;
+  distanceFeeMinor: string;
+  attemptFeeMinor: string;
+  expensesMinor: string;
+  bonusesMinor: string;
+  totalMinor: string;
+  settlementMissing: boolean;
+}
+
+interface LedgerEntry {
+  id: string;
+  kind: string;
+  amountMinor: string;
+  operationDate: string;
+  occurredAt: string;
+  actorName: string | null;
+  reason: string | null;
+  reversed: boolean;
+}
+
+interface CourierGroup {
+  courierUserId: string;
+  fullName: string;
+  phone: string | null;
+  sheets: number;
+  orders: number;
+  cashMinor: string;
+  deliveryFeesMinor: string;
+  distanceKmTenths: number;
+  distanceFeesMinor: string;
+  attemptFeesMinor: string;
+  extraExpensesMinor: string;
+  handedMinor: string;
+  issuedMinor: string;
+  accruedMinor: string;
+  totalMinor: string;
+  settlementMissing: boolean;
+  rows: SettlementRow[];
+  operations: {
+    count: number;
+    totalMinor: string;
+    entries: LedgerEntry[];
+  };
+}
+
+interface DayGroup {
+  date: string;
+  couriers: CourierGroup[];
+}
+
+interface SettlementReport {
+  totals: SettlementTotals;
+  rows: SettlementRow[];
+  days: DayGroup[];
+  totalGroups: number;
+  hasMore: boolean;
+  entries: LedgerEntry[];
+  ledgerActiveFrom: string | null;
+}
+
+interface OperationalReport {
+  orders: {
+    received: number;
+    assigned: number;
+    unassigned: number;
+    shipped: number;
+    delivered: number;
+    failed: number;
+    cancelled: number;
+  };
+  routes: {
+    total: number;
+    confirmed: number;
+    active: number;
+    completed: number;
+    cancelled: number;
+    averageOrders: number;
+  };
+  actualMinutes: { measured: number; averageMinutes: number | null };
+  failureReasons: { name: string; count: number }[];
+}
+
+const OPERATION_LABELS: Record<string, string> = {
+  CASH_RECEIVED: 'Наличные получены курьером',
+  DELIVERY_FEE: 'Оплата за доставку',
+  DISTANCE_FEE: 'Оплата километров за МКАД',
+  ATTEMPT_FEE: 'Оплачиваемая попытка',
+  CASH_HANDED_TO_LOGIST: 'Курьер сдал логисту',
+  CASH_ISSUED_TO_COURIER: 'Логист выдал курьеру',
+  EXPENSE_PARKING: 'Расход: парковка',
+  EXPENSE_TOLL: 'Расход: платная дорога',
+  EXPENSE_TRANSIT: 'Расход: общественный транспорт',
+  EXPENSE_REPAIR: 'Расход: ремонт',
+  EXPENSE_LOADING: 'Расход: погрузка',
+  EXPENSE_OTHER: 'Дополнительный расход',
+  BONUS: 'Доплата курьеру',
+  ADJUSTMENT: 'Обратная корректировка',
+};
+
+/** Сколько групп «день + курьер» показывать за раз. */
+const GROUPS_PER_PAGE = 25;
+
+/**
+ * Что заводится прямо из ячейки таблицы.
+ *
+ * Универсальной кнопки «Добавить операцию» больше нет: человек нажимает на ту
+ * ячейку дня и курьера, к которой относится операция, — так невозможно завести
+ * расход не тому курьеру или не в тот день.
+ *
+ * Доплата и оплачиваемая попытка по решению владельца из интерфейса убраны:
+ * это обычные расходы и вносятся через «Доп.». В учёте их виды сохранены —
+ * прошлые записи никуда не делись и продолжают считаться.
+ */
+const CELL_OPERATIONS = {
+  EXPENSE_OTHER: { title: 'Дополнительный расход', needsReason: true },
+  CASH_HANDED_TO_LOGIST: { title: 'Курьер сдал', needsReason: false },
+  CASH_ISSUED_TO_COURIER: { title: 'Выдано курьеру', needsReason: false },
+} as const;
+
+type CellOperation = keyof typeof CELL_OPERATIONS;
+
+/** Деньги одинаково во всём приложении: рубли, запятая, два знака. */
+export function formatMoney(minor: string): string {
+  const value = Number(BigInt(minor)) / 100;
+  return `${value.toFixed(2).replace('.', ',')} ₽`;
+}
+
+/**
+ * В каком столбце показывать сумму операции журнала.
+ *
+ * Число встаёт ровно под тот столбец, в который оно вошло итогом дня: расход
+ * под «Доп.», сдача под «Курьер сдал», выдача под «Выдано курьеру». Так строку
+ * журнала можно сверить со свёрнутой строкой глазами, не считая в уме.
+ */
+export function journalColumn(kind: string): number {
+  if (kind === 'CASH_HANDED_TO_LOGIST') {
+    return 11;
+  }
+  if (kind === 'CASH_ISSUED_TO_COURIER') {
+    return 12;
+  }
+  if (kind === 'ADJUSTMENT') {
+    return 10;
+  }
+  return 9;
+}
+
+/** Величина суммы без знака: направление задаёт вид операции или столбец. */
+export function absMoney(minor: string): string {
+  const value = BigInt(minor);
+  return (value < 0n ? -value : value).toString();
+}
+
+/** Направление долга словами: знак сам по себе читается неоднозначно. */
+export function debtWords(minor: string): string {
+  const value = BigInt(minor);
+  if (value === 0n) {
+    return 'взаиморасчёты закрыты';
+  }
+  return value > 0n ? 'курьер должен компании' : 'компания должна курьеру';
+}
+
+function weekAgo(today: string): string {
+  const instant = new Date(`${today}T00:00:00.000Z`);
+  instant.setUTCDate(instant.getUTCDate() - 7);
+  return instant.toISOString().slice(0, 10);
+}
+
+export function ReportsScreen(): React.JSX.Element {
+  const { client } = useAuth();
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  const today = moscowToday();
+
+  const [mode, setMode] = useState<'SETTLEMENTS' | 'CASH' | 'OPERATIONS'>('SETTLEMENTS');
+  const [from, setFrom] = useState(weekAgo(today));
+  const [to, setTo] = useState(today);
+  const [courierUserId, setCourierUserId] = useState('');
+  /**
+   * Открытый редактор ячейки.
+   *
+   * Ячейка задаёт всё сразу: день, курьера и вид операции. Ошибиться адресатом
+   * невозможно — человек нажимает ровно на ту клетку, к которой относится
+   * операция.
+   */
+  const [editor, setEditor] = useState<{
+    kind: CellOperation;
+    date: string;
+    courierUserId: string;
+    courierName: string;
+    /**
+     * Ключ идемпотентности открытого редактора.
+     *
+     * Один на всё окно: повторное нажатие «Добавить» не создаёт вторую
+     * запись, а следующая операция открывает новое окно и получает новый
+     * ключ — два одинаковых расхода за день остаются двумя расходами.
+     */
+    nonce: string;
+  } | null>(null);
+  /** Касса логиста для передач наличных. */
+  const [deskId, setDeskId] = useState('');
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
+  /**
+   * Раскрытые группы.
+   *
+   * По умолчанию свёрнуты все: экран отвечает на вопрос «сколько за день»,
+   * а подробности человек открывает сам по конкретному курьеру.
+   */
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const [pages, setPages] = useState(1);
+
+  const toggle = (key: string): void =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+
+  /*
+   * Кассы, доступные пользователю.
+   *
+   * Логисту доступна одна — своя, и выбирать нечего. Администратор обязан
+   * назвать кассу явно: его действие не должно попадать в несуществующую
+   * кассу владельца системы.
+   */
+  const desks = useQuery({
+    queryKey: ['cash-desks'],
+    queryFn: () =>
+      client.get<{ items: { id: string; fullName: string; balanceMinor: string }[] }>(
+        '/api/logistics/cash/desks',
+      ),
+  });
+
+  const couriers = useQuery({
+    queryKey: ['couriers-for-routes'],
+    queryFn: () =>
+      client.get<{ items: { id: string; fullName: string }[] }>(
+        '/api/users?role=COURIER&status=ACTIVE&limit=100',
+      ),
+  });
+
+  const params = (withPaging = true): string => {
+    const search = new URLSearchParams({ from, to });
+    if (courierUserId !== '') {
+      search.set('courierUserId', courierUserId);
+    }
+    if (withPaging) {
+      // Страница считается ГРУППАМИ: группа курьера не делится между страницами.
+      search.set('limit', String(GROUPS_PER_PAGE * pages));
+      search.set('offset', '0');
+    }
+    return search.toString();
+  };
+
+  const settlements = useQuery({
+    queryKey: ['settlements', from, to, courierUserId, pages],
+    enabled: mode === 'SETTLEMENTS',
+    queryFn: () => client.get<SettlementReport>(`/api/logistics/reports/settlements?${params()}`),
+  });
+
+  const operations = useQuery({
+    queryKey: ['operations-report', from, to],
+    enabled: mode === 'OPERATIONS',
+    queryFn: () =>
+      client.get<OperationalReport>(`/api/logistics/reports/operations?from=${from}&to=${to}`),
+  });
+
+  const refresh = (): void => {
+    void queryClient.invalidateQueries({ queryKey: ['settlements'] });
+  };
+
+  const addOperation = useMutation({
+    mutationFn: (input: { minor: bigint; idempotencyKey: string }) =>
+      client.post('/api/logistics/ledger/operations', {
+        courierUserId: editor?.courierUserId ?? '',
+        kind: editor?.kind ?? 'EXPENSE_OTHER',
+        // Сумма уже посчитана калькулятором и приходит целыми копейками.
+        amountMinor: input.minor.toString(),
+        // День берётся из строки таблицы, а не из фильтра: операция относится
+        // к тому дню, на который человек нажал.
+        operationDate: editor?.date ?? to,
+        reason: reason.trim() === '' ? undefined : reason.trim(),
+        // Передача наличных всегда идёт через чью-то кассу.
+        logistUserId: editor?.kind === 'EXPENSE_OTHER' ? undefined : deskId,
+        idempotencyKey: input.idempotencyKey,
+      }),
+    onSuccess: () => {
+      setEditor(null);
+      setAmount('');
+      setReason('');
+      showToast('Операция записана', 'success');
+      refresh();
+    },
+    onError: (error: unknown) =>
+      setFormError((error as { message?: string }).message ?? 'Не удалось записать операцию'),
+  });
+
+  /** Открытие редактора ячейки: поля всегда начинаются пустыми. */
+  const openEditor = (
+    kind: CellOperation,
+    date: string,
+    group: { courierUserId: string; fullName: string },
+  ): void => {
+    setFormError(null);
+    setAmount('');
+    setReason('');
+    setDeskId(desks.data?.items[0]?.id ?? '');
+    setEditor({
+      kind,
+      date,
+      courierUserId: group.courierUserId,
+      courierName: group.fullName,
+      nonce: globalThis.crypto.randomUUID(),
+    });
+  };
+
+  const reverse = useMutation({
+    mutationFn: (input: { id: string; reason: string }) =>
+      client.post(`/api/logistics/ledger/operations/${input.id}/reverse`, { reason: input.reason }),
+    onSuccess: () => {
+      showToast('Обратная корректировка записана', 'success');
+      refresh();
+    },
+    onError: (error: unknown) =>
+      showToast((error as { message?: string }).message ?? 'Не удалось отменить операцию', 'error'),
+  });
+
+  // Выгрузка отдаёт ВЕСЬ отбор, а не показанную страницу.
+  const exportUrl = (format: 'xlsx' | 'pdf'): string =>
+    `/api/logistics/reports/settlements.${format}?${params(false)}`;
+
+  return (
+    <section className="reports" data-testid="reports-screen">
+      <div className="reports__tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'SETTLEMENTS'}
+          className={mode === 'SETTLEMENTS' ? 'reports__tab reports__tab--active' : 'reports__tab'}
+          data-testid="reports-mode-settlements"
+          onClick={() => setMode('SETTLEMENTS')}
+        >
+          Расчёты с курьерами
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'CASH'}
+          className={mode === 'CASH' ? 'reports__tab reports__tab--active' : 'reports__tab'}
+          data-testid="reports-mode-cash"
+          onClick={() => setMode('CASH')}
+        >
+          Касса логистов
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'OPERATIONS'}
+          className={mode === 'OPERATIONS' ? 'reports__tab reports__tab--active' : 'reports__tab'}
+          data-testid="reports-mode-operations"
+          onClick={() => setMode('OPERATIONS')}
+        >
+          Операционные показатели
+        </button>
+      </div>
+
+      <div className="reports__filters">
+        <Field label="С">
+          {(props) => (
+            <TextInput
+              {...props}
+              type="date"
+              value={from}
+              data-testid="reports-from"
+              onChange={(event) => setFrom(event.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="По">
+          {(props) => (
+            <TextInput
+              {...props}
+              type="date"
+              value={to}
+              data-testid="reports-to"
+              onChange={(event) => setTo(event.target.value)}
+            />
+          )}
+        </Field>
+        {mode === 'SETTLEMENTS' && (
+          <Field label="Курьер" hint="Баланс считается по одному курьеру">
+            {(props) => (
+              <select
+                {...props}
+                className="reports__select"
+                value={courierUserId}
+                data-testid="reports-courier"
+                onChange={(event) => setCourierUserId(event.target.value)}
+              >
+                <option value="">Все курьеры</option>
+                {(couriers.data?.items ?? []).map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.fullName}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+        )}
+      </div>
+
+      {mode === 'SETTLEMENTS' ? (
+        settlements.isPending ? (
+          <LoadingState title="Считаем расчёты…" />
+        ) : settlements.isError ? (
+          <ErrorState
+            title="Не удалось построить отчёт"
+            onRetry={() => void settlements.refetch()}
+          />
+        ) : (
+          <>
+            {settlements.data.ledgerActiveFrom === null && (
+              <p className="reports__notice" role="status" data-testid="reports-ledger-off">
+                Финансовый учёт ещё не включён: начислений за период нет. Прошлые доставки
+                показываются с пометкой «Расчёт отсутствует».
+              </p>
+            )}
+
+            <div className="reports__summary" data-testid="reports-summary">
+              {[
+                ['Начальный баланс', settlements.data.totals.openingBalanceMinor],
+                ['Наличные у курьера', settlements.data.totals.cashReceivedMinor],
+                ['Сдано логисту', settlements.data.totals.handedToLogistMinor],
+                ['Выдано курьеру', settlements.data.totals.issuedToCourierMinor],
+                ['Оплата доставок', settlements.data.totals.deliveryFeesMinor],
+                ['Оплачиваемые попытки', settlements.data.totals.attemptFeesMinor],
+                ['Километры за МКАД', settlements.data.totals.distanceFeesMinor],
+                ['Расходы', settlements.data.totals.expensesMinor],
+                ['Доплаты', settlements.data.totals.bonusesMinor],
+              ].map(([label, value]) => (
+                <div key={label} className="reports__cell">
+                  <span className="reports__cell-label">{label}</span>
+                  <span className="reports__cell-value">{formatMoney(value ?? '0')}</span>
+                </div>
+              ))}
+              <div className="reports__cell reports__cell--total">
+                <span className="reports__cell-label">Конечный баланс</span>
+                <span className="reports__cell-value" data-testid="reports-closing">
+                  {formatMoney(settlements.data.totals.closingBalanceMinor)}
+                </span>
+                <span className="reports__cell-words">
+                  {debtWords(settlements.data.totals.closingBalanceMinor)}
+                </span>
+              </div>
+            </div>
+
+            <div className="reports__actions">
+              <a className="reports__link" href={exportUrl('xlsx')} data-testid="reports-xlsx">
+                Выгрузить XLSX
+              </a>
+              <a className="reports__link" href={exportUrl('pdf')} data-testid="reports-pdf">
+                Итог в PDF
+              </a>
+            </div>
+
+            {settlements.data.days.length === 0 ? (
+              <EmptyState title="За период доставок и операций не было" />
+            ) : (
+              <>
+                {/*
+                  Иерархия «день → курьер → строки».
+                  Итоги группы считает сервер по всему отбору, а не по видимым
+                  строкам: сумма, зависящая от прокрутки, итогом не является.
+                */}
+                <div className="reports__table-wrap">
+                  <table className="reports__table" data-testid="reports-rows">
+                    <thead>
+                      <tr>
+                        <th>Дата</th>
+                        <th>Курьер</th>
+                        <th>Листы</th>
+                        <th>Заказы</th>
+                        <th>Статус</th>
+                        <th>Наличные</th>
+                        <th>За заказ</th>
+                        <th>За МКАД</th>
+                        <th>Доп.</th>
+                        <th>Начислено</th>
+                        <th>Курьер сдал</th>
+                        <th>Выдано курьеру</th>
+                        <th>Итог</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {settlements.data.days.flatMap((day) =>
+                        day.couriers.flatMap((group) => {
+                          const key = `${day.date}:${group.courierUserId}`;
+                          const open = expanded.has(key);
+
+                          const rows = [
+                            <tr
+                              key={key}
+                              className="reports__group"
+                              data-testid="reports-group"
+                              data-group-date={day.date}
+                              data-group-courier={group.courierUserId}
+                              data-expanded={open ? 'true' : 'false'}
+                            >
+                              <td>{formatDate(day.date)}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="reports__group-toggle"
+                                  aria-expanded={open}
+                                  data-testid="reports-group-toggle"
+                                  onClick={() => toggle(key)}
+                                >
+                                  <span className="reports__group-chevron" aria-hidden="true">
+                                    {open ? '▲' : '▼'}
+                                  </span>
+                                  <span className="reports__group-name">
+                                    <span>{group.fullName}</span>
+                                    <span className="reports__group-phone">
+                                      {group.phone ?? 'телефон не указан'}
+                                    </span>
+                                  </span>
+                                </button>
+                              </td>
+                              <td>{group.sheets}</td>
+                              <td>{group.orders}</td>
+                              {/* Внутри дня статусы разные, поэтому в свёрнутой строке пусто. */}
+                              <td />
+                              <td>{formatMoney(group.cashMinor)}</td>
+                              <td>{formatMoney(group.deliveryFeesMinor)}</td>
+                              <td>
+                                {(group.distanceKmTenths / 10).toFixed(1)} км ·{' '}
+                                {formatMoney(group.distanceFeesMinor)}
+                              </td>
+                              {/*
+                                Три ячейки-кнопки: день и курьер берутся из самой
+                                строки, поэтому операция не может уйти не тому
+                                человеку и не в тот день.
+                              */}
+                              <td>
+                                <button
+                                  type="button"
+                                  className="reports__cell-button"
+                                  data-testid="reports-cell-expense"
+                                  title="Добавить дополнительный расход"
+                                  onClick={() => openEditor('EXPENSE_OTHER', day.date, group)}
+                                >
+                                  {formatMoney(group.extraExpensesMinor)}
+                                </button>
+                              </td>
+                              <td>{formatMoney(group.accruedMinor)}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="reports__cell-button"
+                                  data-testid="reports-cell-handed"
+                                  title="Курьер сдал наличные логисту"
+                                  onClick={() =>
+                                    openEditor('CASH_HANDED_TO_LOGIST', day.date, group)
+                                  }
+                                >
+                                  {formatMoney(group.handedMinor)}
+                                </button>
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="reports__cell-button"
+                                  data-testid="reports-cell-issued"
+                                  title="Логист выдал деньги курьеру"
+                                  onClick={() =>
+                                    openEditor('CASH_ISSUED_TO_COURIER', day.date, group)
+                                  }
+                                >
+                                  {formatMoney(group.issuedMinor)}
+                                </button>
+                              </td>
+                              <td>
+                                {group.settlementMissing ? (
+                                  <span className="reports__missing">Расчёт отсутствует</span>
+                                ) : (
+                                  formatMoney(group.totalMinor)
+                                )}
+                              </td>
+                            </tr>,
+                          ];
+
+                          if (!open) {
+                            return rows;
+                          }
+
+                          for (const row of group.rows) {
+                            rows.push(
+                              <tr
+                                key={row.attemptId}
+                                className="reports__detail"
+                                data-order-number={row.orderNumber}
+                              >
+                                <td>{formatDate(row.deliveryDate)}</td>
+                                <td className="reports__detail-order">
+                                  {row.routeNumber} · {row.orderNumber}
+                                </td>
+                                <td colSpan={2} />
+                                <td>
+                                  {row.outcome === 'DELIVERED' ? 'Доставлен' : 'Не доставлен'}
+                                  {row.cancelled ? ' (отменён)' : ''}
+                                </td>
+                                <td>{formatMoney(row.cashMinor)}</td>
+                                <td>
+                                  {row.perOrderMinor === null
+                                    ? '—'
+                                    : formatMoney(row.deliveryFeeMinor)}
+                                </td>
+                                <td>
+                                  {row.beyondMkadKmTenths === null
+                                    ? 'не рассчитано'
+                                    : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
+                                </td>
+                                {/* Доп., сдача и выдача — операции дня, а не заказа. */}
+                                <td />
+                                <td>
+                                  {formatMoney(
+                                    (
+                                      BigInt(row.deliveryFeeMinor) +
+                                      BigInt(row.distanceFeeMinor) +
+                                      BigInt(row.attemptFeeMinor)
+                                    ).toString(),
+                                  )}
+                                </td>
+                                <td />
+                                <td />
+                                <td>
+                                  {row.settlementMissing ? (
+                                    <span className="reports__missing">Расчёт отсутствует</span>
+                                  ) : (
+                                    formatMoney(row.totalMinor)
+                                  )}
+                                </td>
+                              </tr>,
+                            );
+                          }
+
+                          /*
+                           * Журнал платежей курьера за день: время, вид, сумма,
+                           * автор и состояние отмены. Операции неизменяемы —
+                           * исправление только обратной корректировкой.
+                           */
+                          for (const entry of group.operations.entries) {
+                            rows.push(
+                              <tr
+                                key={entry.id}
+                                className="reports__detail reports__payment"
+                                data-entry-kind={entry.kind}
+                                data-testid="reports-payment"
+                              >
+                                {/*
+                                  Ячеек ровно столько же, сколько столбцов
+                                  в шапке. Раньше их было на одну меньше, и
+                                  строка журнала съезжала вбок, растягивая
+                                  таблицу за край страницы.
+                                */}
+                                <td>{formatMoscowDateTime(entry.occurredAt)}</td>
+                                <td className="reports__detail-order">
+                                  {OPERATION_LABELS[entry.kind] ?? entry.kind}
+                                </td>
+                                <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
+                                <td
+                                  className="reports__detail-reason"
+                                  colSpan={journalColumn(entry.kind) - 5}
+                                  title={entry.reason ?? undefined}
+                                >
+                                  {entry.reason ?? ''}
+                                </td>
+                                {/*
+                                  В журнале сумма показывается величиной:
+                                  направление уже названо видом операции, а
+                                  прыгающий знак рядом с названием читается как
+                                  ошибка ввода.
+                                */}
+                                <td>{formatMoney(absMoney(entry.amountMinor))}</td>
+                                <td colSpan={13 - journalColumn(entry.kind)}>
+                                  {entry.reversed ? (
+                                    <span className="muted text-sm">отменена</span>
+                                  ) : (
+                                    entry.kind !== 'ADJUSTMENT' && (
+                                      <button
+                                        type="button"
+                                        className="reports__reverse"
+                                        data-testid="reports-reverse"
+                                        onClick={() => {
+                                          const value = globalThis.prompt(
+                                            'Причина обратной корректировки',
+                                          );
+                                          if (value !== null && value.trim().length >= 3) {
+                                            reverse.mutate({ id: entry.id, reason: value.trim() });
+                                          }
+                                        }}
+                                      >
+                                        Отменить
+                                      </button>
+                                    )
+                                  )}
+                                </td>
+                              </tr>,
+                            );
+                          }
+
+                          return rows;
+                        }),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {settlements.data.hasMore && (
+                  <Button
+                    data-testid="reports-more"
+                    onClick={() => setPages((current) => current + 1)}
+                  >
+                    Показать ещё
+                  </Button>
+                )}
+              </>
+            )}
+          </>
+        )
+      ) : mode === 'CASH' ? (
+        <CashDeskPanel from={from} to={to} />
+      ) : operations.isPending ? (
+        <LoadingState title="Считаем показатели…" />
+      ) : operations.isError ? (
+        <ErrorState title="Не удалось построить отчёт" onRetry={() => void operations.refetch()} />
+      ) : (
+        <div className="reports__summary" data-testid="operations-summary">
+          {[
+            ['Получено заказов', operations.data.orders.received],
+            ['Распределено', operations.data.orders.assigned],
+            ['Не распределено', operations.data.orders.unassigned],
+            ['Отгружено', operations.data.orders.shipped],
+            ['Доставлено', operations.data.orders.delivered],
+            ['Не доставлено', operations.data.orders.failed],
+            ['Маршрутов', operations.data.routes.total],
+            ['Средняя загрузка', operations.data.routes.averageOrders],
+            [
+              'Среднее время маршрута',
+              operations.data.actualMinutes.averageMinutes === null
+                ? 'нет данных'
+                : `${operations.data.actualMinutes.averageMinutes} мин`,
+            ],
+          ].map(([label, value]) => (
+            <div key={String(label)} className="reports__cell">
+              <span className="reports__cell-label">{label}</span>
+              <span className="reports__cell-value">{value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/*
+        Компактный редактор ячейки.
+        Ни курьера, ни вида операции выбирать не нужно: их задала сама ячейка.
+      */}
+      {editor !== null && (
+        <Modal open title={CELL_OPERATIONS[editor.kind].title} onClose={() => setEditor(null)}>
+          <div className="stack" data-testid="cell-editor">
+            <p className="muted text-sm">
+              {editor.courierName} · {formatDate(editor.date)}
+            </p>
+
+            {/*
+              Передача наличных всегда идёт через чью-то кассу: деньги лежат
+              у конкретного человека. Логисту доступна одна касса — своя,
+              администратор обязан назвать её явно.
+            */}
+            {editor.kind !== 'EXPENSE_OTHER' && (desks.data?.items ?? []).length === 0 && (
+              <p className="reports__error" role="alert" data-testid="cell-no-desk">
+                Нет ни одной кассы логиста: назначьте роль логиста сотруднику, который принимает и
+                выдаёт наличные.
+              </p>
+            )}
+
+            {editor.kind !== 'EXPENSE_OTHER' && (desks.data?.items ?? []).length > 0 && (
+              <Field label="Касса логиста" hint="Наличные лежат у конкретного человека">
+                {(props) => (
+                  <select
+                    {...props}
+                    className="reports__select"
+                    value={deskId}
+                    data-testid="cell-desk"
+                    onChange={(event) => setDeskId(event.target.value)}
+                  >
+                    {(desks.data?.items ?? []).map((desk) => (
+                      <option key={desk.id} value={desk.id}>
+                        {desk.fullName} · {formatMoney(desk.balanceMinor)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+            )}
+
+            <Field label="Сумма, ₽" hint="Можно считать прямо здесь: 1000+500 даст 1500">
+              {(props) => (
+                <TextInput
+                  {...props}
+                  value={amount}
+                  inputMode="text"
+                  autoFocus
+                  data-testid="cell-amount"
+                  onChange={(event) => {
+                    setAmount(event.target.value);
+                    setFormError(null);
+                  }}
+                />
+              )}
+            </Field>
+
+            {previewOf(amount) !== null && (
+              <p className="muted text-sm" data-testid="cell-preview">
+                Получится {previewOf(amount)}
+              </p>
+            )}
+
+            {CELL_OPERATIONS[editor.kind].needsReason && (
+              <Field label="Пояснение" hint="Обязательно: за что именно потрачено">
+                {(props) => (
+                  <TextInput
+                    {...props}
+                    value={reason}
+                    data-testid="cell-reason"
+                    onChange={(event) => setReason(event.target.value)}
+                  />
+                )}
+              </Field>
+            )}
+
+            {formError !== null && (
+              <p className="reports__error" role="alert" data-testid="cell-error">
+                {formError}
+              </p>
+            )}
+
+            <div className="reports__actions">
+              <Button data-testid="cell-cancel" onClick={() => setEditor(null)}>
+                Отмена
+              </Button>
+              <Button
+                variant="primary"
+                disabled={
+                  addOperation.isPending ||
+                  (editor.kind !== 'EXPENSE_OTHER' && (desks.data?.items ?? []).length === 0)
+                }
+                data-testid="cell-submit"
+                onClick={() => {
+                  const value = evaluateMoney(amount);
+                  if (value.minor === null) {
+                    setFormError(value.error ?? 'Введите сумму.');
+                    return;
+                  }
+                  if (CELL_OPERATIONS[editor.kind].needsReason && reason.trim().length < 3) {
+                    setFormError('Опишите расход: не меньше трёх символов.');
+                    return;
+                  }
+
+                  /*
+                   * Ключ идемпотентности собирается из содержания операции.
+                   * Двойное нажатие не создаёт вторую запись, а разные операции
+                   * одного вида за день различаются суммой и пояснением.
+                   */
+                  addOperation.mutate({
+                    minor: value.minor,
+                    idempotencyKey: `cell:${editor.nonce}`,
+                  });
+                }}
+              >
+                Добавить
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </section>
+  );
+}
