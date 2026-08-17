@@ -27,6 +27,7 @@ import {
 import { formatMoscowDateTime } from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
+import { CashDeskPanel } from './CashDeskPanel';
 import './reports.css';
 
 interface SettlementTotals {
@@ -209,7 +210,7 @@ export function ReportsScreen(): React.JSX.Element {
   const { showToast } = useToast();
   const today = moscowToday();
 
-  const [mode, setMode] = useState<'SETTLEMENTS' | 'OPERATIONS'>('SETTLEMENTS');
+  const [mode, setMode] = useState<'SETTLEMENTS' | 'CASH' | 'OPERATIONS'>('SETTLEMENTS');
   const [from, setFrom] = useState(weekAgo(today));
   const [to, setTo] = useState(today);
   const [courierUserId, setCourierUserId] = useState('');
@@ -225,7 +226,17 @@ export function ReportsScreen(): React.JSX.Element {
     date: string;
     courierUserId: string;
     courierName: string;
+    /**
+     * Ключ идемпотентности открытого редактора.
+     *
+     * Один на всё окно: повторное нажатие «Добавить» не создаёт вторую
+     * запись, а следующая операция открывает новое окно и получает новый
+     * ключ — два одинаковых расхода за день остаются двумя расходами.
+     */
+    nonce: string;
   } | null>(null);
+  /** Касса логиста для передач наличных. */
+  const [deskId, setDeskId] = useState('');
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
@@ -248,6 +259,21 @@ export function ReportsScreen(): React.JSX.Element {
       }
       return next;
     });
+
+  /*
+   * Кассы, доступные пользователю.
+   *
+   * Логисту доступна одна — своя, и выбирать нечего. Администратор обязан
+   * назвать кассу явно: его действие не должно попадать в несуществующую
+   * кассу владельца системы.
+   */
+  const desks = useQuery({
+    queryKey: ['cash-desks'],
+    queryFn: () =>
+      client.get<{ items: { id: string; fullName: string; balanceMinor: string }[] }>(
+        '/api/logistics/cash/desks',
+      ),
+  });
 
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
@@ -298,6 +324,8 @@ export function ReportsScreen(): React.JSX.Element {
         // к тому дню, на который человек нажал.
         operationDate: editor?.date ?? to,
         reason: reason.trim() === '' ? undefined : reason.trim(),
+        // Передача наличных всегда идёт через чью-то кассу.
+        logistUserId: editor?.kind === 'EXPENSE_OTHER' ? undefined : deskId,
         idempotencyKey: input.idempotencyKey,
       }),
     onSuccess: () => {
@@ -320,7 +348,14 @@ export function ReportsScreen(): React.JSX.Element {
     setFormError(null);
     setAmount('');
     setReason('');
-    setEditor({ kind, date, courierUserId: group.courierUserId, courierName: group.fullName });
+    setDeskId(desks.data?.items[0]?.id ?? '');
+    setEditor({
+      kind,
+      date,
+      courierUserId: group.courierUserId,
+      courierName: group.fullName,
+      nonce: globalThis.crypto.randomUUID(),
+    });
   };
 
   const reverse = useMutation({
@@ -350,6 +385,16 @@ export function ReportsScreen(): React.JSX.Element {
           onClick={() => setMode('SETTLEMENTS')}
         >
           Расчёты с курьерами
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'CASH'}
+          className={mode === 'CASH' ? 'reports__tab reports__tab--active' : 'reports__tab'}
+          data-testid="reports-mode-cash"
+          onClick={() => setMode('CASH')}
+        >
+          Касса логистов
         </button>
         <button
           type="button"
@@ -715,6 +760,8 @@ export function ReportsScreen(): React.JSX.Element {
             )}
           </>
         )
+      ) : mode === 'CASH' ? (
+        <CashDeskPanel from={from} to={to} />
       ) : operations.isPending ? (
         <LoadingState title="Считаем показатели…" />
       ) : operations.isError ? (
@@ -755,6 +802,38 @@ export function ReportsScreen(): React.JSX.Element {
             <p className="muted text-sm">
               {editor.courierName} · {formatDate(editor.date)}
             </p>
+
+            {/*
+              Передача наличных всегда идёт через чью-то кассу: деньги лежат
+              у конкретного человека. Логисту доступна одна касса — своя,
+              администратор обязан назвать её явно.
+            */}
+            {editor.kind !== 'EXPENSE_OTHER' && (desks.data?.items ?? []).length === 0 && (
+              <p className="reports__error" role="alert" data-testid="cell-no-desk">
+                Нет ни одной кассы логиста: назначьте роль логиста сотруднику, который принимает и
+                выдаёт наличные.
+              </p>
+            )}
+
+            {editor.kind !== 'EXPENSE_OTHER' && (desks.data?.items ?? []).length > 0 && (
+              <Field label="Касса логиста" hint="Наличные лежат у конкретного человека">
+                {(props) => (
+                  <select
+                    {...props}
+                    className="reports__select"
+                    value={deskId}
+                    data-testid="cell-desk"
+                    onChange={(event) => setDeskId(event.target.value)}
+                  >
+                    {(desks.data?.items ?? []).map((desk) => (
+                      <option key={desk.id} value={desk.id}>
+                        {desk.fullName} · {formatMoney(desk.balanceMinor)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+            )}
 
             <Field label="Сумма, ₽" hint="Можно считать прямо здесь: 1000+500 даст 1500">
               {(props) => (
@@ -803,7 +882,10 @@ export function ReportsScreen(): React.JSX.Element {
               </Button>
               <Button
                 variant="primary"
-                disabled={addOperation.isPending}
+                disabled={
+                  addOperation.isPending ||
+                  (editor.kind !== 'EXPENSE_OTHER' && (desks.data?.items ?? []).length === 0)
+                }
                 data-testid="cell-submit"
                 onClick={() => {
                   const value = evaluateMoney(amount);
@@ -823,7 +905,7 @@ export function ReportsScreen(): React.JSX.Element {
                    */
                   addOperation.mutate({
                     minor: value.minor,
-                    idempotencyKey: `cell:${editor.courierUserId}:${editor.kind}:${editor.date}:${value.minor}:${reason.trim()}`,
+                    idempotencyKey: `cell:${editor.nonce}`,
                   });
                 }}
               >

@@ -3467,6 +3467,31 @@ test('выбор курьера: открытие полем, фильтраци
 });
 
 /**
+ * Логист для кассы.
+ *
+ * Наличные лежат у конкретного человека: без сотрудника с ролью логиста
+ * кассы не существует вовсе, и передавать деньги некуда.
+ */
+async function seedOwnLogist(page: Page, token: string): Promise<{ id: string; fullName: string }> {
+  const phone = uniquePhone();
+  const fullName = 'Логист кассы';
+
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName, phone, roles: ['LOGISTICIAN'] },
+  });
+  expect(created.status()).toBe(201);
+  const body = (await created.json()) as { user: { id: string }; activationCode: string };
+
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone, code: body.activationCode, pin: '9753' },
+  });
+  expect(activated.status()).toBe(200);
+
+  return { id: body.user.id, fullName };
+}
+
+/**
  * Отдельный курьер для этого сценария.
  *
  * Общий курьер набора не годится: соседняя проверка его замораживает, и он
@@ -3543,6 +3568,7 @@ test('история и отчёты: тариф, доставка, расчёт
   const authorized = { authorization: `Bearer ${token}` };
 
   const courier = await seedOwnCourier(page, token);
+  const logist = await seedOwnLogist(page, token);
 
   /*
    * Тариф, включение учёта и геометрия МКАД заводятся ЭКРАНОМ настроек:
@@ -3675,6 +3701,8 @@ test('история и отчёты: тариф, доставка, расчёт
 
   await group.getByTestId('reports-cell-handed').click();
   await expect(page.getByTestId('cell-editor')).toBeVisible();
+  // Администратор обязан назвать кассу: своей у него нет.
+  await page.getByTestId('cell-desk').selectOption(logist.id);
   // Поле суммы работает как калькулятор: «1000+500=» даёт 1500.
   await page.getByTestId('cell-amount').fill('1000+500=');
   await expect(page.getByTestId('cell-preview')).toContainText('1500,00 ₽');
@@ -3693,6 +3721,11 @@ test('история и отчёты: тариф, доставка, расчёт
   await expect(page.getByTestId('cell-error')).toBeVisible();
   await page.getByTestId('cell-reason').fill('парковка у адреса');
   await page.getByTestId('cell-submit').click();
+  // Отказ обязан быть назван словами, а не превратиться в тихое «ничего не произошло».
+  await expect(page.getByTestId('cell-error')).toHaveCount(0);
+  await expect(page.locator('.toast-region')).toContainText('Операция записана', {
+    timeout: 20_000,
+  });
   await expect(group.getByTestId('reports-cell-expense')).toContainText('200,00 ₽', {
     timeout: 20_000,
   });
@@ -3734,6 +3767,71 @@ test('история и отчёты: тариф, доставка, расчёт
   await page.getByTestId('reports-mode-operations').click();
   await expect(page.getByTestId('operations-summary')).toBeVisible();
   await expect(page.getByTestId('operations-summary')).toContainText('Доставлено');
+
+  /*
+   * 6а. Касса логистов: полный цикл наличных.
+   *
+   * Проверяется, что одна фактическая передача существует на двух сторонах:
+   * сдача курьера уже попала в кассу, из кассы можно взять и сдать деньги,
+   * а отрицательный остаток невозможен.
+   */
+  await page.getByTestId('reports-mode-cash').click();
+  await expect(page.getByTestId('cash-panel')).toBeVisible();
+  await expect(page.getByTestId('cash-summary')).toContainText('Ожидается к сдаче');
+
+  const cashGroup = page.getByTestId('cash-group').first();
+  await expect(cashGroup).toBeVisible({ timeout: 20_000 });
+  // Сдача курьера, записанная в расчётах, уже лежит в кассе логиста.
+  await expect(cashGroup).toContainText('1500,00 ₽');
+
+  await expect(cashGroup).toHaveAttribute('data-expanded', 'false');
+  await cashGroup.getByTestId('cash-group-toggle').click();
+  await expect(page.getByTestId('cash-entry').first()).toBeVisible();
+  await expect(page.getByTestId('cash-entry').first()).toContainText('Получено от курьера');
+
+  // Взять наличные из компании: тот же безопасный калькулятор.
+  const cashBefore = (await page.getByTestId('cash-closing').innerText()).trim();
+  await page.getByTestId('cash-take').click();
+  await expect(page.getByTestId('cash-editor')).toBeVisible();
+  await page.getByTestId('cash-amount').fill('900+100');
+  await expect(page.getByTestId('cash-preview')).toContainText('1000,00 ₽');
+  await page.getByTestId('cash-submit').click();
+  await expect(page.getByTestId('cash-editor')).toHaveCount(0);
+  await expect
+    .poll(async () => (await page.getByTestId('cash-closing').innerText()).trim(), {
+      timeout: 20_000,
+    })
+    .not.toBe(cashBefore);
+
+  // Сдать больше, чем есть в кассе, нельзя.
+  await page.getByTestId('cash-hand').click();
+  await page.getByTestId('cash-amount').fill('1000000');
+  await page.getByTestId('cash-submit').click();
+  await expect(page.getByTestId('cash-error')).toContainText('недостаточно наличных');
+  await page.getByTestId('cash-cancel').click();
+
+  // Обычная сдача проходит и уменьшает остаток.
+  const beforeHand = (await page.getByTestId('cash-closing').innerText()).trim();
+  await page.getByTestId('cash-hand').click();
+  await page.getByTestId('cash-amount').fill('500');
+  await page.getByTestId('cash-submit').click();
+  await expect
+    .poll(async () => (await page.getByTestId('cash-closing').innerText()).trim(), {
+      timeout: 20_000,
+    })
+    .not.toBe(beforeHand);
+
+  // Выгрузки кассы — настоящие файлы.
+  const cashXlsx = await page.request.get(
+    `/api/logistics/reports/cash.xlsx?from=${today}&to=${today}`,
+    { headers: authorized },
+  );
+  const cashPdf = await page.request.get(
+    `/api/logistics/reports/cash.pdf?from=${today}&to=${today}`,
+    { headers: authorized },
+  );
+  expect((await cashXlsx.body()).subarray(0, 2).toString('latin1')).toBe('PK');
+  expect((await cashPdf.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
 
   // 7. Телефон: обе вкладки без горизонтального выезда.
   await page.setViewportSize({ width: 390, height: 844 });

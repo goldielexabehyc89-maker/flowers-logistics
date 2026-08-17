@@ -147,6 +147,9 @@ model User {
   deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
 
   createdTariffs     CourierTariffVersion[] @relation("TariffAuthor")
+  cashEntries        LogistCashEntry[]      @relation("CashOwner")
+  cashOperations     LogistCashEntry[]      @relation("CashActor")
+  cashTransfers      LogistCashEntry[]      @relation("CashCourier")
   ledgerEntries      CourierLedgerEntry[]   @relation("LedgerCourier")
   ledgerOperations   CourierLedgerEntry[]   @relation("LedgerActor")
   correctedDistances RouteOrderDistance[]   @relation("DistanceActor")
@@ -2533,6 +2536,14 @@ model CourierLedgerEntry {
   orderId   String? @db.Uuid
   attemptId String? @db.Uuid
 
+  /**
+   * Общая передача денег.
+   * Одна фактическая передача наличных существует на двух сторонах: долг
+   * курьера и касса логиста. Идентификатор один на обе записи, поэтому по
+   * любой из них видно вторую и невозможно посчитать деньги дважды.
+   */
+  transferId String? @db.Uuid
+
   reversesEntryId String?             @unique @db.Uuid
   reversesEntry   CourierLedgerEntry? @relation("LedgerReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   reversedBy      CourierLedgerEntry? @relation("LedgerReversal")
@@ -2545,5 +2556,66 @@ model CourierLedgerEntry {
   @@index([courierUserId, operationDate])
   @@index([routeId])
   @@index([orderId])
+  @@index([occurredAt])
+  @@index([transferId])
+}
+
+/// Движение наличных в кассе логиста.
+enum LogistCashKind {
+  RECEIVED_FROM_COURIER
+  ISSUED_TO_COURIER
+  TAKEN_FROM_COMPANY
+  HANDED_TO_COMPANY
+  ADJUSTMENT
+}
+
+/**
+ * Касса логиста: фактические наличные у конкретного человека.
+ * Отдельная сущность, а не поле пользователя: касса — это история движений,
+ * а остаток — их сумма. Хранить остаток числом означало бы иметь две правды
+ * и однажды их разойтись.
+ * Знак задан видом: ПЛЮС увеличивает наличные у логиста, МИНУС уменьшает.
+ * Отрицательный остаток запрещён — проверка выполняется под блокировкой
+ * владельца кассы, потому что это правило о ПОСЛЕДОВАТЕЛЬНОСТИ записей,
+ * а не об одной строке.
+ * Записи неизменяемы: ошибка исправляется связанной обратной операцией.
+ */
+model LogistCashEntry {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Чья касса. У администратора своей кассы нет: он действует от имени логиста.
+  logistUserId String @db.Uuid
+  logist       User   @relation("CashOwner", fields: [logistUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  kind        LogistCashKind
+  amountMinor BigInt
+
+  operationDate DateTime @db.Date
+  occurredAt    DateTime @default(now())
+
+  /// Кто выполнил. У действия администратора автор и владелец кассы разные.
+  actorUserId String @db.Uuid
+  actor       User   @relation("CashActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Курьер участвует только в передачах наличных.
+  courierUserId String? @db.Uuid
+  courier       User?   @relation("CashCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Та же передача на стороне курьера.
+  transferId String? @db.Uuid
+
+  reason String?
+
+  reversesEntryId String?          @unique @db.Uuid
+  reversesEntry   LogistCashEntry? @relation("CashReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reversedBy      LogistCashEntry? @relation("CashReversal")
+
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([logistUserId, operationDate])
+  @@index([courierUserId, operationDate])
+  @@index([transferId])
   @@index([occurredAt])
 }

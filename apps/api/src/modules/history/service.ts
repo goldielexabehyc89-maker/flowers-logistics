@@ -214,7 +214,49 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
     },
   });
 
+  const cashMoves = await db.logistCashEntry.findMany({
+    where: { operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) } },
+    orderBy: [{ occurredAt: 'desc' }],
+    take: 500,
+    select: {
+      id: true,
+      occurredAt: true,
+      operationDate: true,
+      kind: true,
+      amountMinor: true,
+      reason: true,
+      logist: { select: { fullName: true } },
+      courier: { select: { fullName: true } },
+      actor: { select: { fullName: true } },
+      reversedBy: { select: { id: true } },
+    },
+  });
+
   const paymentsByDay = new Map<string, HistoryPayment[]>();
+
+  /*
+   * Движения кассы логиста — тоже история денег.
+   *
+   * Владелец кассы называется прямо: без него «сдано в компанию» не отвечает
+   * на вопрос, из чьей кассы ушли деньги.
+   */
+  for (const move of cashMoves) {
+    const date = fromDateColumn(move.operationDate);
+    paymentsByDay.set(date, [
+      ...(paymentsByDay.get(date) ?? []),
+      {
+        id: move.id,
+        occurredAt: move.occurredAt.toISOString(),
+        // Префикс отличает движение кассы от одноимённой записи у курьера.
+        kind: `DESK_${move.kind}`,
+        amountMinor: move.amountMinor.toString(),
+        courierName: move.courier?.fullName ?? move.logist.fullName,
+        actorName: move.actor.fullName,
+        reason: move.reason,
+        reversed: move.reversedBy !== null,
+      },
+    ]);
+  }
   for (const payment of payments) {
     const date = fromDateColumn(payment.operationDate);
     paymentsByDay.set(date, [

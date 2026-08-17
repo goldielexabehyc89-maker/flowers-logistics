@@ -94,6 +94,11 @@ const PAYMENT_LABELS: Record<string, string> = {
   CASH_HANDED_TO_LOGIST: 'Курьер сдал',
   CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
   ADJUSTMENT: 'Обратная корректировка',
+  DESK_RECEIVED_FROM_COURIER: 'Касса: получено от курьера',
+  DESK_ISSUED_TO_COURIER: 'Касса: выдано курьеру',
+  DESK_TAKEN_FROM_COMPANY: 'Касса: взято из компании',
+  DESK_HANDED_TO_COMPANY: 'Касса: сдано в компанию',
+  DESK_ADJUSTMENT: 'Касса: обратная корректировка',
 };
 
 /** Деньги в истории показываются так же, как в отчётах. */

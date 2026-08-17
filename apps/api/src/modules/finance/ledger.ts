@@ -55,6 +55,8 @@ export interface LedgerEntryInput {
   routeId?: string | null;
   orderId?: string | null;
   attemptId?: string | null;
+  /** Общая передача: та же операция на стороне кассы логиста. */
+  transferId?: string | null;
   idempotencyKey: string;
 }
 
@@ -74,6 +76,8 @@ export interface LedgerEntryView {
   orderId: string | null;
   attemptId: string | null;
   reversesEntryId: string | null;
+  /** Та же передача на стороне кассы логиста. */
+  transferId: string | null;
   reversed: boolean;
 }
 
@@ -113,6 +117,7 @@ function toView(row: {
   orderId: string | null;
   attemptId: string | null;
   reversesEntryId: string | null;
+  transferId?: string | null;
   reversedBy?: { id: string } | null;
   actor?: { fullName: string } | null;
 }): LedgerEntryView {
@@ -131,6 +136,7 @@ function toView(row: {
     orderId: row.orderId,
     attemptId: row.attemptId,
     reversesEntryId: row.reversesEntryId,
+    transferId: row.transferId ?? null,
     reversed: (row.reversedBy ?? null) !== null,
   };
 }
@@ -173,9 +179,10 @@ export async function appendEntry(
         routeId: input.routeId ?? null,
         orderId: input.orderId ?? null,
         attemptId: input.attemptId ?? null,
+        transferId: input.transferId ?? null,
         idempotencyKey: input.idempotencyKey,
       },
-      include: { reversedBy: { select: { id: true } } },
+      include: { reversedBy: { select: { id: true } }, actor: { select: { fullName: true } } },
     });
     return toView(created);
   } catch (error) {
@@ -240,6 +247,7 @@ export async function reverseEntry(
       routeId: source.routeId,
       orderId: source.orderId,
       attemptId: source.attemptId,
+      transferId: source.transferId,
       reversesEntryId: source.id,
       idempotencyKey: reversalKey(source.id),
     },

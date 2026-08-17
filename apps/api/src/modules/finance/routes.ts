@@ -32,6 +32,9 @@ import {
   validateTariffPeriod,
 } from './tariffs.js';
 import { appendEntry, balanceOf, EXPENSE_KINDS, reverseEntry } from './ledger.js';
+import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
+import { buildCashReport, visibleDeskIds } from './cash-report.js';
+import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
 import {
   activeRing,
@@ -43,6 +46,7 @@ import {
 import { ValhallaClient } from '../integrations/valhalla/client.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf } from './export-pdf.js';
+import { buildCashPdf, buildCashWorkbook } from './export-cash.js';
 
 const FINANCE_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const ADMIN_ONLY = ['ADMIN'] as const;
@@ -97,6 +101,8 @@ const operationSchema = z.object({
   routeId: z.string().uuid().optional(),
   orderId: z.string().uuid().optional(),
   attemptId: z.string().uuid().optional(),
+  /** Чья касса участвует в передаче. Логисту разрешена только своя. */
+  logistUserId: z.string().uuid().optional(),
   idempotencyKey: z.string().trim().min(8).max(120),
 });
 
@@ -112,6 +118,32 @@ const tariffSchema = z.object({
 });
 
 const activationSchema = z.object({ activeFrom: dateSchema });
+
+const cashQuerySchema = z.object({
+  from: dateSchema,
+  to: dateSchema,
+  logistUserId: z.string().uuid().optional(),
+  kind: z
+    .enum([
+      'RECEIVED_FROM_COURIER',
+      'ISSUED_TO_COURIER',
+      'TAKEN_FROM_COMPANY',
+      'HANDED_TO_COMPANY',
+      'ADJUSTMENT',
+    ])
+    .optional(),
+  search: z.string().trim().min(1).max(120).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const companySchema = z.object({
+  direction: z.enum(['TAKE', 'HAND']),
+  amountMinor: moneySchema,
+  operationDate: dateSchema,
+  logistUserId: z.string().uuid().optional(),
+  idempotencyKey: z.string().trim().min(8).max(120),
+});
 
 const ringSchema = z.object({
   points: z.array(z.tuple([z.number(), z.number()])).min(4),
@@ -303,6 +335,68 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       .send(file);
   });
 
+  app.get('/api/logistics/reports/cash.xlsx', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const query = cashQuerySchema.parse(request.query);
+    assertPeriod(query.from, query.to);
+
+    const report = await buildCashReport(deps.db, {
+      from: query.from,
+      to: query.to,
+      logistUserId: query.logistUserId,
+      kind: query.kind,
+      search: query.search,
+      limit: Number.MAX_SAFE_INTEGER,
+      offset: 0,
+      visibleLogistIds: actor.roles.includes('ADMIN') ? null : [actor.userId],
+    });
+
+    await writeAudit(deps.db, {
+      action: 'FINANCE_REPORT_EXPORTED',
+      entityType: 'LogistCashEntry',
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      newValue: { format: 'xlsx', section: 'cash', from: query.from, to: query.to },
+      ...contextOf(request),
+    });
+
+    return reply
+      .header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .header('content-disposition', `attachment; filename="cash-${query.from}_${query.to}.xlsx"`)
+      .send(await buildCashWorkbook(report));
+  });
+
+  app.get('/api/logistics/reports/cash.pdf', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const query = cashQuerySchema.parse(request.query);
+    assertPeriod(query.from, query.to);
+
+    const report = await buildCashReport(deps.db, {
+      from: query.from,
+      to: query.to,
+      logistUserId: query.logistUserId,
+      kind: query.kind,
+      search: query.search,
+      limit: Number.MAX_SAFE_INTEGER,
+      offset: 0,
+      visibleLogistIds: actor.roles.includes('ADMIN') ? null : [actor.userId],
+    });
+
+    await writeAudit(deps.db, {
+      action: 'FINANCE_REPORT_EXPORTED',
+      entityType: 'LogistCashEntry',
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      newValue: { format: 'pdf', section: 'cash', from: query.from, to: query.to },
+      ...contextOf(request),
+    });
+
+    return reply
+      .header('content-type', 'application/pdf')
+      .header('content-disposition', `attachment; filename="cash-${query.from}_${query.to}.pdf"`)
+      .send(Buffer.from(await buildCashPdf(report)));
+  });
+
   // --- Денежные операции ---------------------------------------------------
 
   app.post('/api/logistics/ledger/operations', async (request, reply) => {
@@ -313,7 +407,59 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       throw new AppError('VALIDATION_FAILED', { publicMessage: 'У расхода обязательна причина.' });
     }
 
+    /*
+     * Передача наличных меняет ДВЕ стороны сразу.
+     *
+     * Сдача и выдача — это фактическое движение денег: долг курьера и касса
+     * логиста записываются одной транзакцией с общим идентификатором.
+     * Дополнительный расход кассы не касается: наличные при нём не двигаются.
+     */
+    const transfer =
+      body.kind === 'CASH_HANDED_TO_LOGIST'
+        ? ('HANDED_BY_COURIER' as const)
+        : body.kind === 'CASH_ISSUED_TO_COURIER'
+          ? ('ISSUED_TO_COURIER' as const)
+          : null;
+
     const entry = await deps.db.$transaction(async (tx) => {
+      if (transfer !== null) {
+        const logistUserId = resolveDeskOwner(actor, body.logistUserId);
+        const result = await recordTransfer(tx, actor, {
+          kind: transfer,
+          courierUserId: body.courierUserId,
+          logistUserId,
+          amountMinor: body.amountMinor,
+          operationDate: body.operationDate,
+          idempotencyKey: body.idempotencyKey,
+        });
+
+        await writeAudit(tx, {
+          action: 'FINANCE_OPERATION_RECORDED',
+          entityType: 'CourierLedgerEntry',
+          entityId: result.courierEntry.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: {
+            kind: result.courierEntry.kind,
+            amountMinor: result.courierEntry.amountMinor,
+            operationDate: result.courierEntry.operationDate,
+            courierUserId: result.courierEntry.courierUserId,
+            // Владелец кассы и автор различаются, когда действует администратор.
+            logistUserId,
+            transferId: result.transferId,
+          },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: result.courierEntry.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+        });
+
+        return result.courierEntry;
+      }
+
       const created = await appendEntry(tx, {
         courierUserId: body.courierUserId,
         kind: body.kind,
@@ -369,12 +515,32 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const body = reversalSchema.parse(request.body);
 
     const entry = await deps.db.$transaction(async (tx) => {
+      const source = await tx.courierLedgerEntry.findUnique({
+        where: { id },
+        select: { transferId: true },
+      });
+
       const created = await reverseEntry(tx, {
         entryId: id,
         actorUserId: actor.userId,
         reason: body.reason,
         operationDate: moscowCalendarDate(new Date()),
       });
+
+      /*
+       * У передачи две стороны, и отменяются они вместе.
+       *
+       * Отменённая наполовину передача оставила бы деньги в кассе, которых
+       * у логиста нет, или долг у курьера, которого он не делал.
+       */
+      if (source !== null && source.transferId !== null) {
+        await reverseTransfer(tx, {
+          transferId: source.transferId,
+          actorUserId: actor.userId,
+          reason: body.reason,
+          operationDate: moscowCalendarDate(new Date()),
+        });
+      }
 
       await writeAudit(tx, {
         action: 'FINANCE_OPERATION_REVERSED',
@@ -389,6 +555,173 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       await publishRealtimeEvent(tx, {
         topic: 'finance.ledger_changed',
         payload: { operationDate: created.operationDate },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+      });
+
+      return created;
+    });
+
+    return { entry };
+  });
+
+  // --- Касса логистов -----------------------------------------------------
+
+  /**
+   * Кассы, доступные текущему пользователю.
+   *
+   * Логист видит только свою: наличные лежат у конкретного человека, и чужая
+   * касса — это чужие деньги. Администратор видит все.
+   */
+  const visibleDesks = async (actor: {
+    userId: string;
+    roles: readonly string[];
+  }): Promise<string[] | null> => {
+    if (actor.roles.includes('ADMIN')) {
+      return null;
+    }
+    return [actor.userId];
+  };
+
+  app.get('/api/logistics/cash', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const query = cashQuerySchema.parse(request.query);
+    assertPeriod(query.from, query.to);
+
+    const visible = await visibleDesks(actor);
+    return buildCashReport(deps.db, {
+      from: query.from,
+      to: query.to,
+      logistUserId: query.logistUserId,
+      kind: query.kind,
+      search: query.search,
+      limit: query.limit,
+      offset: query.offset,
+      visibleLogistIds: visible === null ? null : visible,
+    });
+  });
+
+  /** Список логистов для выбора кассы: нужен администратору. */
+  app.get('/api/logistics/cash/desks', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const ids = actor.roles.includes('ADMIN') ? await visibleDeskIds(deps.db) : [actor.userId];
+
+    const users = await deps.db.user.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, fullName: true, phone: true },
+      orderBy: [{ fullName: 'asc' }],
+    });
+
+    return {
+      items: await Promise.all(
+        users.map(async (user) => ({
+          id: user.id,
+          fullName: user.fullName,
+          phone: user.phone,
+          balanceMinor: (await cashBalanceOf(deps.db, user.id, null)).toString(),
+        })),
+      ),
+    };
+  });
+
+  /**
+   * Движение денег между кассой и компанией.
+   *
+   * Проводится сразу: промежуточного «ожидает подтверждения» не существует,
+   * потому что деньги уже переданы физически, и учёт обязан это отражать.
+   */
+  app.post('/api/logistics/cash/company', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const body = companySchema.parse(request.body);
+    const logistUserId = resolveDeskOwner(actor, body.logistUserId);
+
+    const entry = await deps.db.$transaction(async (tx) => {
+      const created = await appendCash(tx, {
+        logistUserId,
+        kind: body.direction === 'TAKE' ? 'TAKEN_FROM_COMPANY' : 'HANDED_TO_COMPANY',
+        amountMinor: body.amountMinor,
+        operationDate: body.operationDate,
+        actorUserId: actor.userId,
+        idempotencyKey: body.idempotencyKey,
+      });
+
+      await writeAudit(tx, {
+        action: 'FINANCE_CASH_MOVED',
+        entityType: 'LogistCashEntry',
+        entityId: created.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        // Автор и владелец кассы хранятся раздельно: действие администратора
+        // не превращается в кассу владельца системы.
+        newValue: {
+          kind: created.kind,
+          amountMinor: created.amountMinor,
+          operationDate: created.operationDate,
+          logistUserId,
+        },
+        ...contextOf(request),
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'finance.ledger_changed',
+        payload: { operationDate: created.operationDate },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+      });
+
+      return created;
+    });
+
+    return reply.code(201).send({ entry });
+  });
+
+  /** Обратная корректировка движения кассы: только с причиной и только один раз. */
+  app.post('/api/logistics/cash/:id/reverse', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = reversalSchema.parse(request.body);
+
+    const entry = await deps.db.$transaction(async (tx) => {
+      const source = await tx.logistCashEntry.findUnique({
+        where: { id },
+        select: { logistUserId: true, transferId: true },
+      });
+      if (source === null) {
+        throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
+      }
+      // Логист отменяет только в своей кассе.
+      resolveDeskOwner(actor, source.logistUserId);
+
+      const created =
+        source.transferId === null
+          ? await reverseCash(tx, {
+              entryId: id,
+              actorUserId: actor.userId,
+              reason: body.reason,
+              operationDate: moscowCalendarDate(new Date()),
+            })
+          : null;
+
+      if (source.transferId !== null) {
+        await reverseTransfer(tx, {
+          transferId: source.transferId,
+          actorUserId: actor.userId,
+          reason: body.reason,
+          operationDate: moscowCalendarDate(new Date()),
+        });
+      }
+
+      await writeAudit(tx, {
+        action: 'FINANCE_CASH_REVERSED',
+        entityType: 'LogistCashEntry',
+        entityId: id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        newValue: { logistUserId: source.logistUserId, transfer: source.transferId !== null },
+        ...contextOf(request),
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'finance.ledger_changed',
+        payload: { operationDate: moscowCalendarDate(new Date()) },
         audienceRoles: ['ADMIN', 'LOGISTICIAN'],
       });
 

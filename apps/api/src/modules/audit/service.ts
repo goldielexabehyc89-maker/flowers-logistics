@@ -159,6 +159,10 @@ export const AUDIT_ACTIONS = [
   'FINANCE_MKAD_RING_STORED',
   'FINANCE_DISTANCE_COMPUTED',
   'FINANCE_DISTANCE_CORRECTED',
+  // Касса логиста. В записи — вид, сумма, день и владелец кассы; автор берётся
+  // из самой записи аудита и с владельцем кассы не смешивается.
+  'FINANCE_CASH_MOVED',
+  'FINANCE_CASH_REVERSED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
