@@ -56,6 +56,9 @@ COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/apps/api/package.json apps/api/package.json
 COPY --from=build /app/apps/api/dist apps/api/dist
+# Системные файлы приложения: геометрия МКАД поставляется вместе с образом,
+# иначе расстояние за МКАД не с чего считать.
+COPY --from=build /app/apps/api/assets apps/api/assets
 COPY --from=build /app/apps/web/dist apps/web/dist
 
 # Процесс работает от непривилегированного пользователя.

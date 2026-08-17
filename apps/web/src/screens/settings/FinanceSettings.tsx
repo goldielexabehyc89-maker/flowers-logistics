@@ -96,12 +96,6 @@ export function FinanceSettings(): React.JSX.Element {
 
   const [activeFrom, setActiveFrom] = useState(today);
 
-  const [ringText, setRingText] = useState('');
-  const [ringSource, setRingSource] = useState('');
-  const [ringLicense, setRingLicense] = useState('');
-  const [ringDate, setRingDate] = useState(today);
-  const [ringError, setRingError] = useState<string | null>(null);
-
   const tariffs = useQuery({
     queryKey: ['finance-tariffs'],
     queryFn: () => client.get<TariffsResponse>('/api/logistics/tariffs'),
@@ -144,24 +138,6 @@ export function FinanceSettings(): React.JSX.Element {
       showToast((error as { message?: string }).message ?? 'Не удалось включить учёт', 'error'),
   });
 
-  const uploadRing = useMutation({
-    mutationFn: (points: [number, number][]) =>
-      client.post('/api/logistics/mkad', {
-        points,
-        source: ringSource.trim(),
-        license: ringLicense.trim(),
-        sourceDate: ringDate,
-      }),
-    onSuccess: () => {
-      setRingText('');
-      setRingError(null);
-      showToast('Геометрия МКАД загружена', 'success');
-      void queryClient.invalidateQueries({ queryKey: ['finance-mkad'] });
-    },
-    onError: (error: unknown) =>
-      setRingError((error as { message?: string }).message ?? 'Не удалось загрузить геометрию'),
-  });
-
   const submitTariff = (): void => {
     const order = toMinor(perOrder);
     const km = toMinor(perKm);
@@ -170,53 +146,6 @@ export function FinanceSettings(): React.JSX.Element {
       return;
     }
     createTariff.mutate({ perOrderMinor: order, perKmMinor: km });
-  };
-
-  /**
-   * Разбор загруженной геометрии.
-   *
-   * Принимается GeoJSON или простой список пар координат. Приблизительное
-   * кольцо не строится ни при каких условиях: если разобрать не удалось,
-   * геометрия не загружается вовсе.
-   */
-  const submitRing = (): void => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(ringText);
-    } catch {
-      setRingError('Не удалось разобрать JSON. Ожидается GeoJSON или список пар координат.');
-      return;
-    }
-
-    const asGeoJson = parsed as {
-      type?: string;
-      coordinates?: unknown;
-      geometry?: { coordinates?: unknown };
-      features?: { geometry?: { coordinates?: unknown } }[];
-    };
-
-    const candidate =
-      asGeoJson.features?.[0]?.geometry?.coordinates ??
-      asGeoJson.geometry?.coordinates ??
-      asGeoJson.coordinates ??
-      parsed;
-
-    // Полигон приходит массивом колец: рабочим считается внешнее.
-    const ringPoints =
-      Array.isArray(candidate) && Array.isArray(candidate[0]?.[0])
-        ? (candidate[0] as [number, number][])
-        : (candidate as [number, number][]);
-
-    if (!Array.isArray(ringPoints) || ringPoints.length < 4) {
-      setRingError('В геометрии меньше четырёх точек: это не кольцо.');
-      return;
-    }
-    if (ringSource.trim() === '' || ringLicense.trim() === '') {
-      setRingError('Источник и лицензия обязательны: от геометрии зависят деньги.');
-      return;
-    }
-
-    uploadRing.mutate(ringPoints);
   };
 
   const activation = tariffs.data?.activation.activeFrom ?? null;
@@ -462,73 +391,15 @@ export function FinanceSettings(): React.JSX.Element {
               </div>
             )}
 
-            <div className="finance__row">
-              <Field label="Источник" hint="Например, «OpenStreetMap, relation 1434342»">
-                {(props) => (
-                  <TextInput
-                    {...props}
-                    value={ringSource}
-                    data-testid="mkad-source"
-                    onChange={(event) => setRingSource(event.target.value)}
-                  />
-                )}
-              </Field>
-              <Field label="Лицензия" hint="Условия использования данных">
-                {(props) => (
-                  <TextInput
-                    {...props}
-                    value={ringLicense}
-                    data-testid="mkad-license"
-                    onChange={(event) => setRingLicense(event.target.value)}
-                  />
-                )}
-              </Field>
-              <Field label="Актуальна на">
-                {(props) => (
-                  <TextInput
-                    {...props}
-                    type="date"
-                    value={ringDate}
-                    data-testid="mkad-date"
-                    onChange={(event) => setRingDate(event.target.value)}
-                  />
-                )}
-              </Field>
-            </div>
-
-            <Field
-              label="Геометрия"
-              hint="GeoJSON LineString или Polygon либо список пар [долгота, широта]"
-            >
-              {(props) => (
-                <textarea
-                  {...props}
-                  className="finance__geometry"
-                  rows={6}
-                  value={ringText}
-                  placeholder='{"type":"LineString","coordinates":[[37.35,55.57], …]}'
-                  data-testid="mkad-geometry"
-                  onChange={(event) => setRingText(event.target.value)}
-                />
-              )}
-            </Field>
-
-            {ringError !== null && (
-              <p className="finance__error" role="alert" data-testid="mkad-error">
-                {ringError}
-              </p>
-            )}
-
-            <div className="finance__row">
-              <Button
-                variant="primary"
-                disabled={uploadRing.isPending || ringText.trim() === ''}
-                data-testid="mkad-submit"
-                onClick={submitRing}
-              >
-                Загрузить версию
-              </Button>
-            </div>
+            {/*
+              Загрузки и правки геометрии здесь нет намеренно: кольцо входит
+              в поставку системным файлом, и меняется только новой версией
+              приложения. Раздел показывает состояние, а не управляет им.
+            */}
+            <p className="muted text-sm">
+              Геометрия поставляется вместе с приложением и обновляется новой версией файла при
+              обновлении. Прежние версии и снимки прошлых расчётов сохраняются.
+            </p>
 
             {ring.data.versions.length > 1 && (
               <div className="finance__table-wrap">

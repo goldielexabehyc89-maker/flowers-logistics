@@ -36,13 +36,7 @@ import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
 import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
-import {
-  activeRing,
-  computeBeyondMkad,
-  parseRing,
-  saveDistanceSnapshot,
-  storeRing,
-} from './mkad.js';
+import { activeRing, computeBeyondMkad, saveDistanceSnapshot } from './mkad.js';
 import { ValhallaClient } from '../integrations/valhalla/client.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf } from './export-pdf.js';
@@ -143,17 +137,6 @@ const companySchema = z.object({
   operationDate: dateSchema,
   logistUserId: z.string().uuid().optional(),
   idempotencyKey: z.string().trim().min(8).max(120),
-});
-
-const ringSchema = z.object({
-  points: z.array(z.tuple([z.number(), z.number()])).min(4),
-  source: z.string().trim().min(3).max(200),
-  /*
-   * Лицензия и дата актуальности обязательны: геометрия влияет на деньги,
-   * и через год «откуда это взялось» должно отвечаться записью, а не памятью.
-   */
-  license: z.string().trim().min(2).max(200),
-  sourceDate: dateSchema,
 });
 
 const distanceSchema = z.object({
@@ -891,30 +874,13 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     };
   });
 
-  app.post('/api/logistics/mkad', async (request, reply) => {
-    const actor = await authenticateWithRoles(request, deps, ADMIN_ONLY);
-    const body = ringSchema.parse(request.body);
+  /*
+    Загрузки геометрии через интерфейс нет намеренно.
 
-    const points = parseRing(body.points);
-    const version = await storeRing(deps.db, {
-      points,
-      source: body.source,
-      license: body.license,
-      sourceDate: body.sourceDate,
-    });
-
-    await writeAudit(deps.db, {
-      action: 'FINANCE_MKAD_RING_STORED',
-      entityType: 'MkadRingVersion',
-      entityId: version.id,
-      actorUserId: actor.userId,
-      actorRoles: actor.roles,
-      newValue: { sha256: version.sha256, pointCount: version.pointCount },
-      ...contextOf(request),
-    });
-
-    return reply.code(201).send({ version });
-  });
+    Кольцо входит в поставку версионированным системным файлом: от него
+    зависят деньги, и менять его нажатием кнопки нельзя. Замена — только
+    новой версией файла через обновление приложения.
+  */
 
   /**
    * Пересчёт расстояний маршрута.

@@ -3588,17 +3588,12 @@ test('история и отчёты: тариф, доставка, расчёт
   await page.getByTestId('finance-activate').click();
   await expect(page.getByTestId('finance-ledger-off')).toHaveCount(0);
 
-  // Геометрия загружается с источником, лицензией и датой актуальности.
-  await page.getByTestId('mkad-source').fill('Синтетическое кольцо проверки');
-  await page.getByTestId('mkad-license').fill('Только для проверки');
-  await page.getByTestId('mkad-date').fill(today);
-  await page
-    .getByTestId('mkad-geometry')
-    .fill(
-      '{"type":"LineString","coordinates":[[37.35,55.57],[37.85,55.57],[37.85,55.92],[37.35,55.92],[37.35,55.57]]}',
-    );
-  await page.getByTestId('mkad-submit').click();
-  await expect(page.getByTestId('mkad-active')).toContainText('Только для проверки');
+  /*
+   * Геометрия МКАД приходит с поставкой: загрузки через интерфейс нет.
+   * Настройки показывают только состояние — версию, источник и лицензию.
+   */
+  await expect(page.getByTestId('mkad-active')).toContainText('OpenStreetMap');
+  await expect(page.getByTestId('mkad-active')).toContainText('ODbL');
 
   // 1. Обычный путь: сделка → лист → курьер → отгрузка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
