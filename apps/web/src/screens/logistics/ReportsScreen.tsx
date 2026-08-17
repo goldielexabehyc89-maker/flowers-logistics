@@ -183,6 +183,26 @@ export function formatMoney(minor: string): string {
   return `${value.toFixed(2).replace('.', ',')} ₽`;
 }
 
+/**
+ * В каком столбце показывать сумму операции журнала.
+ *
+ * Число встаёт ровно под тот столбец, в который оно вошло итогом дня: расход
+ * под «Доп.», сдача под «Курьер сдал», выдача под «Выдано курьеру». Так строку
+ * журнала можно сверить со свёрнутой строкой глазами, не считая в уме.
+ */
+export function journalColumn(kind: string): number {
+  if (kind === 'CASH_HANDED_TO_LOGIST') {
+    return 11;
+  }
+  if (kind === 'CASH_ISSUED_TO_COURIER') {
+    return 12;
+  }
+  if (kind === 'ADJUSTMENT') {
+    return 10;
+  }
+  return 9;
+}
+
 /** Величина суммы без знака: направление задаёт вид операции или столбец. */
 export function absMoney(minor: string): string {
   const value = BigInt(minor);
@@ -701,12 +721,24 @@ export function ReportsScreen(): React.JSX.Element {
                                 data-entry-kind={entry.kind}
                                 data-testid="reports-payment"
                               >
+                                {/*
+                                  Ячеек ровно столько же, сколько столбцов
+                                  в шапке. Раньше их было на одну меньше, и
+                                  строка журнала съезжала вбок, растягивая
+                                  таблицу за край страницы.
+                                */}
                                 <td>{formatMoscowDateTime(entry.occurredAt)}</td>
                                 <td className="reports__detail-order">
                                   {OPERATION_LABELS[entry.kind] ?? entry.kind}
                                 </td>
                                 <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
-                                <td colSpan={4}>{entry.reason ?? ''}</td>
+                                <td
+                                  className="reports__detail-reason"
+                                  colSpan={journalColumn(entry.kind) - 5}
+                                  title={entry.reason ?? undefined}
+                                >
+                                  {entry.reason ?? ''}
+                                </td>
                                 {/*
                                   В журнале сумма показывается величиной:
                                   направление уже названо видом операции, а
@@ -714,7 +746,7 @@ export function ReportsScreen(): React.JSX.Element {
                                   ошибка ввода.
                                 */}
                                 <td>{formatMoney(absMoney(entry.amountMinor))}</td>
-                                <td colSpan={3}>
+                                <td colSpan={13 - journalColumn(entry.kind)}>
                                   {entry.reversed ? (
                                     <span className="muted text-sm">отменена</span>
                                   ) : (
