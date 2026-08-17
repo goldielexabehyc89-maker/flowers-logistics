@@ -98,7 +98,10 @@ const PAYMENT_LABELS: Record<string, string> = {
 
 /** Деньги в истории показываются так же, как в отчётах. */
 function money(minor: string): string {
-  return `${(Number(BigInt(minor)) / 100).toFixed(2).replace('.', ',')} ₽`;
+  // Величина без знака: направление операции названо её видом.
+  const value = BigInt(minor);
+  const positive = value < 0n ? -value : value;
+  return `${(Number(positive) / 100).toFixed(2).replace('.', ',')} ₽`;
 }
 
 /** Начало периода по умолчанию: неделя назад — обычный горизонт разбора. */

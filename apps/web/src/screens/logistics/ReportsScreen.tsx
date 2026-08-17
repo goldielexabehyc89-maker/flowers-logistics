@@ -182,6 +182,12 @@ export function formatMoney(minor: string): string {
   return `${value.toFixed(2).replace('.', ',')} ₽`;
 }
 
+/** Величина суммы без знака: направление задаёт вид операции или столбец. */
+export function absMoney(minor: string): string {
+  const value = BigInt(minor);
+  return (value < 0n ? -value : value).toString();
+}
+
 /** Направление долга словами: знак сам по себе читается неоднозначно. */
 export function debtWords(minor: string): string {
   const value = BigInt(minor);
@@ -656,7 +662,13 @@ export function ReportsScreen(): React.JSX.Element {
                                 </td>
                                 <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                 <td colSpan={4}>{entry.reason ?? ''}</td>
-                                <td>{formatMoney(entry.amountMinor)}</td>
+                                {/*
+                                  В журнале сумма показывается величиной:
+                                  направление уже названо видом операции, а
+                                  прыгающий знак рядом с названием читается как
+                                  ошибка ввода.
+                                */}
+                                <td>{formatMoney(absMoney(entry.amountMinor))}</td>
                                 <td colSpan={3}>
                                   {entry.reversed ? (
                                     <span className="muted text-sm">отменена</span>
