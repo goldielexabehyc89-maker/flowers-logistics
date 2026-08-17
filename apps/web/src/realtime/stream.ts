@@ -167,7 +167,7 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * `deals-map` здесь обязателен: адрес и точка живут именно там, и без этого
    * ключа исправленный заказ появлялся на карте только после F5.
    */
-  'order.created': [...DEALS_SCREEN, ['status']],
+  'order.created': [...DEALS_SCREEN, ...FLORIST_SCREEN, ['status']],
   /*
    * Правка заказа доходит до ВСЕХ, кто его показывает.
    *
@@ -180,10 +180,12 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ...DEALS_SCREEN,
     ...ROUTING_SCREEN,
     ...DELIVERY_SCREEN,
+    // Интервал задаёт порядок очереди флориста, поэтому и она перечитывается.
+    ...FLORIST_SCREEN,
     ['order-window'],
     ['status'],
   ],
-  'order.scope_changed': [...DEALS_SCREEN, ...ROUTING_SCREEN, ['status']],
+  'order.scope_changed': [...DEALS_SCREEN, ...ROUTING_SCREEN, ...FLORIST_SCREEN, ['status']],
   'order.geo_changed': [...DEALS_SCREEN, ...DELIVERY_SCREEN, ['map-points'], ['order-window']],
   'order.address_changed': [
     ...DEALS_SCREEN,
@@ -198,23 +200,45 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * Производственные события трогают очередь флориста И «Сделки»: признак
    * «Собран» логист видит в своём списке и на карте.
    */
-  'order.fulfillment_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN],
-  'order.fulfillment_process_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN],
+  'order.fulfillment_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN, ...WAREHOUSE_SCREEN],
+  'order.fulfillment_process_changed': [
+    ...FLORIST_SCREEN,
+    ...DEALS_SCREEN,
+    // Склад принимает собранное: готовность обязана появляться у него сама.
+    ...WAREHOUSE_SCREEN,
+  ],
   'florist.shift_changed': [['florist-shift'], ['florist-shifts'], ['florist-queue']],
   'print_job.changed': [['florist-print-jobs'], ['florist-card']],
 
   // Маршруты: состав, жизненный цикл и блокировка редактора.
   'route.created': [...ROUTING_SCREEN, ...DEALS_SCREEN],
-  'route.updated': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  /*
+   * Состав и порядок листа — это работа склада и флориста.
+   *
+   * Подтверждённый лист задаёт приоритет очереди сборки и содержимое
+   * комплектования: пока эти ключи сюда не входили, обе роли узнавали
+   * об изменении состава только перезагрузкой и собирали снятые заказы.
+   *
+   * Черновик очередь не трогает намеренно — он ещё меняется, собирать под него
+   * нечего. Событие `route.updated` приходит и на черновик, но перечитанный
+   * ответ сервера остаётся прежним: неподтверждённого листа в производстве нет.
+   */
+  'route.updated': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
   'route.conflict_detected': ROUTING_SCREEN,
-  'route.confirmed': [...ROUTING_SCREEN, ...DEALS_SCREEN],
-  'route.returned_to_draft': [...ROUTING_SCREEN, ...DEALS_SCREEN],
-  'route.cancelled': [...ROUTING_SCREEN, ...DEALS_SCREEN],
+  'route.confirmed': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
+  'route.returned_to_draft': [
+    ...ROUTING_SCREEN,
+    ...DEALS_SCREEN,
+    ...FLORIST_SCREEN,
+    ...WAREHOUSE_SCREEN,
+  ],
+  'route.cancelled': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
   'route.edit_lock_changed': [['route']],
   'route.edit_lock_taken_over': [['route']],
   'route.completed': [
     ...ROUTING_SCREEN,
     ...DELIVERY_SCREEN,
+    ...WAREHOUSE_SCREEN,
     ['settlements'],
     ['operations-report'],
   ],
@@ -225,8 +249,8 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
 
   // Складские экраны. Размещение меняет и «Собран» в «Сделках».
   'storage_cell.changed': [['storage-cells'], ...WAREHOUSE_SCREEN],
-  'warehouse.placement_changed': [...WAREHOUSE_SCREEN, ...DEALS_SCREEN],
-  'warehouse.route_flow_changed': [...WAREHOUSE_SCREEN, ['routes'], ['route']],
+  'warehouse.placement_changed': [...WAREHOUSE_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN],
+  'warehouse.route_flow_changed': [...WAREHOUSE_SCREEN, ['routes'], ['route'], ['route-sheets']],
 
   /*
    * Результат доставки — это ещё и деньги: наличные и начисления попадают

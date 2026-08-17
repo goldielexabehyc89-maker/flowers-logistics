@@ -40,6 +40,7 @@ import { addressState, effectiveAddress } from './address.js';
 import {
   MAX_QUERY_LENGTH,
   MIN_QUERY_LENGTH,
+  MAX_SUGGESTIONS,
   suggestAddresses,
   type AddressSuggestion,
 } from '../integrations/dadata/suggest.js';
@@ -387,8 +388,19 @@ async function dealCards(db: Database, ids: string[]) {
         // Заказ черновика показывается только для чтения и ведёт в свой черновик.
         draftRouteId: participation?.routeId ?? null,
         draftRouteNumber: participation?.route.number ?? null,
+        /*
+         * Выбрать можно заказ без блокирующего внимания, с точкой, с датой
+         * и не занятый черновиком.
+         *
+         * Дата названа отдельно: «Требует внимания» её больше не включает,
+         * а положить заказ без даты в маршрут конкретного дня всё равно
+         * нельзя — сервер откажет, и предлагать выбор было бы обманом.
+         */
         selectable:
-          !row.needsAttention && row.geoState === 'RESOLVED' && participation === undefined,
+          !row.needsAttention &&
+          row.deliveryDate !== null &&
+          row.geoState === 'RESOLVED' &&
+          participation === undefined,
         // Готов к отправке: собран флористом ЛИБО уже размещён на складе.
         // Логисту важен факт готовности, а не путь, которым он наступил.
         assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
@@ -823,14 +835,23 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       throw error;
     }
 
+    /*
+     * Второй предел — уже на нашей стороне.
+     *
+     * Провайдеру `count` передан, но верить чужому ответу на слово нельзя:
+     * он вправе вернуть больше запрошенного, и лишние чужие адреса не должны
+     * ни доходить до браузера, ни попадать в наш ответ.
+     */
+    const shown = suggestions.slice(0, MAX_SUGGESTIONS);
+
     // Успешный ответ — единственное настоящее доказательство работоспособности.
     await setSuggestionsStatus(deps.db, 'OK', {
       reason: 'suggestions-served',
       // Число вариантов, а не сами варианты: адресов здесь быть не может.
-      returned: suggestions.length,
+      returned: shown.length,
     });
 
-    return { suggestions, available: true };
+    return { suggestions: shown, available: true };
   });
 
   /** Сохранить локальный адрес. Точка принимается только из точной подсказки. */

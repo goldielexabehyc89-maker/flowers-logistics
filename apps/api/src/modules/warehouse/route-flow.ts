@@ -20,7 +20,13 @@ import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import { FLOW_AUDIENCE, type FlowDeps, type RequestContext } from './placement.js';
 import { assertCourierAssignable } from '../routing/service.js';
 
-const ROUTE_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * Смена курьера и состояние листа нужны и складу, а не одной логистике.
+ *
+ * Сборщик цветов сюда не входит намеренно: кто повезёт маршрут, его работы
+ * не меняет, а складской модуль не должен знать о производстве ничего.
+ */
+const ROUTE_AUDIENCE = ['ADMIN', 'LOGISTICIAN', 'WAREHOUSE'] as const;
 
 interface LockedRoute {
   id: string;

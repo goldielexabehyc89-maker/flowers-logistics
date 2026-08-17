@@ -555,20 +555,30 @@ export function FloristScreen(): React.JSX.Element {
 
       {tab !== 'print' && (
         <div className="florist__filters card">
-          <div className="row">
-            <SegmentedControl
-              label="День"
-              value={day}
-              onChange={setDay}
-              options={[
-                { value: 'today', label: 'Сегодня', testId: 'florist-day-today' },
-                { value: 'tomorrow', label: 'Завтра', testId: 'florist-day-tomorrow' },
-              ]}
-            />
-            <span className="muted text-sm">
-              {queueDate === undefined ? '' : formatDay(queueDate)}
-            </span>
-          </div>
+          {/*
+            День выбирается только в «Очереди».
+
+            За флористом числится РАБОТА, а не день: заказ, взятый вчера и не
+            собранный, обязан оставаться перед глазами, а взятый на завтра —
+            не прятаться до полуночи. Границу дня в «Моих заказах» снимает
+            сервер; переключатель здесь означал бы выбор, которого нет.
+          */}
+          {tab === 'queue' && (
+            <div className="row">
+              <SegmentedControl
+                label="День"
+                value={day}
+                onChange={setDay}
+                options={[
+                  { value: 'today', label: 'Сегодня', testId: 'florist-day-today' },
+                  { value: 'tomorrow', label: 'Завтра', testId: 'florist-day-tomorrow' },
+                ]}
+              />
+              <span className="muted text-sm">
+                {queueDate === undefined ? '' : formatDay(queueDate)}
+              </span>
+            </div>
+          )}
 
           {/*
            * Поиск СЕРВЕРНЫЙ и внутри выбранных дня и области.

@@ -111,6 +111,56 @@ describe('таблица событий и потребителей полна',
     }
   });
 
+  it('маршрутные события доходят до производства, а не только до логистики', () => {
+    /*
+     * Подтверждённый лист — это работа склада и флориста: он задаёт, что
+     * комплектовать и в каком порядке собирать. Пока эти ключи сюда не
+     * входили, обе роли узнавали об изменении состава только перезагрузкой
+     * и продолжали собирать снятые заказы.
+     */
+    for (const topic of [
+      'route.confirmed',
+      'route.updated',
+      'route.returned_to_draft',
+      'route.cancelled',
+    ] as const) {
+      const keys = invalidationKeysFor(topic).map((key) => key[0]);
+      expect(keys, topic).toContain('florist-queue');
+      expect(keys, topic).toContain('warehouse-routes');
+      expect(keys, topic).toContain('warehouse-route');
+    }
+  });
+
+  it('смена курьера и складские переходы видны всем складским вкладкам', () => {
+    const keys = invalidationKeysFor('warehouse.route_flow_changed').map((key) => key[0]);
+    for (const expected of ['warehouse-routes', 'warehouse-route', 'warehouse-placements']) {
+      expect(keys, expected).toContain(expected);
+    }
+    // И маршрутные листы логиста: отгрузка меняет их раздел.
+    expect(keys).toContain('route-sheets');
+  });
+
+  it('правка заказа доходит до очереди флориста', () => {
+    // Интервал задаёт порядок очереди: без этого ключа флорист собирал бы
+    // по вчерашнему приоритету.
+    for (const topic of ['order.created', 'order.updated'] as const) {
+      expect(
+        invalidationKeysFor(topic).map((key) => key[0]),
+        topic,
+      ).toContain('florist-queue');
+    }
+  });
+
+  it('готовность заказа доходит до склада', () => {
+    for (const topic of [
+      'order.fulfillment_process_changed',
+      'order.fulfillment_changed',
+    ] as const) {
+      const keys = invalidationKeysFor(topic).map((key) => key[0]);
+      expect(keys, topic).toContain('warehouse-placements');
+    }
+  });
+
   it('расчёт, склады и ячейки перестали быть невидимыми', () => {
     expect(invalidationKeysFor('route_plan.updated').map((key) => key[0])).toContain('route-plan');
     expect(invalidationKeysFor('depot.changed').map((key) => key[0])).toContain('depots');

@@ -167,6 +167,43 @@ describe('подсказки адреса', () => {
     expect(JSON.stringify(suggestions)).not.toContain('unsafe_data');
   });
 
+  it('запрашивается и отдаётся не больше четырёх подсказок', async () => {
+    /*
+     * Список читают глазами в момент набора адреса: длинная простыня
+     * заставляет выбирать вместо того, чтобы узнавать, а нужный дом почти
+     * всегда в первых строках. Заодно через наш сервер проходит меньше
+     * чужих адресов.
+     *
+     * Предела два. Провайдеру уходит `count`, а разобранный ответ режется
+     * ещё раз: верить чужому сервису на слово нельзя — он вправе вернуть
+     * больше, чем просили.
+     */
+    let sentCount: unknown = null;
+    const overflowing = {
+      suggestions: Array.from({ length: 9 }, (_, index) => ({
+        value: `Москва, синтетическая улица, дом ${index + 1}`,
+        data: { geo_lat: '55.751244', geo_lon: '37.618423', qc_geo: '0' },
+      })),
+    };
+
+    const capturing = (async (_url: string, init: { body: string }) => {
+      sentCount = (JSON.parse(init.body) as { count: number }).count;
+      return new Response(JSON.stringify(overflowing), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const suggestions = await suggestAddresses(
+      { credentials: CREDENTIALS, fetch: capturing },
+      'Москва, синтетическая',
+    );
+
+    expect(sentCount).toBe(MAX_SUGGESTIONS);
+    expect(MAX_SUGGESTIONS).toBe(4);
+    expect(suggestions).toHaveLength(4);
+  });
+
   it('неточная привязка точной не объявляется', async () => {
     const [first] = await suggestAddresses(
       {

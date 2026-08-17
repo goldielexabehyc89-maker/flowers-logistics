@@ -1033,7 +1033,20 @@ test('печатная версия листа не содержит навиг�
   await ownCard.getByTestId('deal-pick').click();
   await page.getByTestId('deals-manual-draft').click();
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
-  await page.getByTestId('create-route-sheet').click();
+  /*
+   * Ответ сервера дожидается явно.
+   *
+   * Без этого отказ создания превращался в загадочное «листа нет» на шаг
+   * позже, и причина оставалась в логе сервера, а не в отчёте проверки.
+   */
+  const [sheetResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes('/from-selection') && response.request().method() === 'POST',
+    ),
+    page.getByTestId('create-route-sheet').click(),
+  ]);
+  expect(sheetResponse.status(), await sheetResponse.text()).toBe(201);
 
   // «Создать МЛ» приводит прямо в «Маршрутные листы».
   await expect(page).toHaveURL(/\/logistics\/route-sheets/);
@@ -2031,17 +2044,29 @@ test('курьер: досрочность, «Не доставлен» с пр�
   await expect(dialog).toBeVisible();
 
   /*
-   * Комментарий обязателен при ЛЮБОЙ причине.
+   * Причины — кнопками, поля комментария нет вовсе.
    *
-   * Проверяется именно это правило: причина выбрана, а кнопка подтверждения
-   * молчит, пока курьер не описал случай словами.
+   * Курьер стоит у двери с коробкой: попасть пальцем в крупную кнопку он
+   * может, а раскрывать список и набирать текст — нет. Нажатие только
+   * выбирает; записывает «Подтвердить».
    */
-  await page.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
-  await expect(page.getByTestId('delivery-submit')).toBeDisabled();
-  await expect(page.getByTestId('delivery-problem')).toContainText('комментарий');
+  await expect(dialog.getByTestId('delivery-comment')).toHaveCount(0);
+  const reasons = dialog.getByTestId('delivery-reason');
+  await expect(reasons.first()).toBeVisible();
+  // «Другое» не предлагается: она требует пояснения, которого мы не собираем.
+  await expect(
+    dialog.locator('[data-testid="delivery-reason"][data-reason-code="OTHER"]'),
+  ).toHaveCount(0);
 
-  await page.getByTestId('delivery-comment').fill('звонил трижды, никто не открыл');
+  // Пока причина не выбрана, подтверждение молчит и объясняет, чего не хватает.
+  await expect(page.getByTestId('delivery-submit')).toBeDisabled();
+  await expect(page.getByTestId('delivery-problem')).toContainText('причину');
+
+  const chosen = dialog.locator('[data-testid="delivery-reason"][data-reason-code="NO_ANSWER"]');
+  await chosen.click();
+  await expect(chosen).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByTestId('delivery-submit')).toBeEnabled();
+
   await page.getByTestId('delivery-submit').click();
   // Состояние карточки здесь не проверяется намеренно: это ПОСЛЕДНИЙ заказ,
   // его результат завершает маршрут, и список активных доставок пустеет —
@@ -4433,4 +4458,389 @@ test('настройки: переключатель ручной отгрузк
       await expect(ship).toBeEnabled();
     }
   }
+});
+
+/** Сотрудник любой роли, заведённый через API и сразу активированный. */
+async function seedRole(
+  page: Page,
+  token: string,
+  role: 'LOGISTICIAN' | 'FLORIST' | 'WAREHOUSE',
+  pin: string,
+): Promise<{ phone: string; pin: string; fullName: string }> {
+  const phone = uniquePhone();
+  const fullName = `Сотрудник ${role}`;
+
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName, phone, roles: [role] },
+  });
+  expect(created.status(), await created.text()).toBe(201);
+  const body = (await created.json()) as { activationCode: string };
+
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone, code: body.activationCode, pin },
+  });
+  expect(activated.status()).toBe(200);
+
+  return { phone, pin, fullName };
+}
+
+/**
+ * Два сеанса: логист подтверждает лист — флорист и кладовщик видят это сами.
+ *
+ * Проверяется канал событий, а не перезагрузка: страницы производства
+ * открываются ДО действия логиста и больше не обновляются руками.
+ */
+test('два сеанса: подтверждение листа доходит до флориста и кладовщика без F5', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const numbers = seedOrders(1, { withPoint: true });
+  const orderNumber = numbers[0] ?? '';
+  expect(orderNumber).not.toBe('');
+
+  const adminContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+
+  const auth = await admin.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  const florist = await seedRole(admin, token, 'FLORIST', '5511');
+  const keeper = await seedRole(admin, token, 'WAREHOUSE', '5522');
+
+  // Производство открыто заранее: доказательство держится на событиях.
+  const floristContext = await browser.newContext();
+  const floristPage = await floristContext.newPage();
+  await login(floristPage, florist.phone, florist.pin);
+  await expect(floristPage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
+
+  const keeperContext = await browser.newContext();
+  const keeperPage = await keeperContext.newPage();
+  await login(keeperPage, keeper.phone, keeper.pin);
+  await expect(keeperPage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+  await keeperPage.getByTestId('wh-tab-picking').click();
+  await expect(keeperPage.getByTestId('wh-route-date')).toBeVisible();
+
+  /*
+   * Логист собирает лист из «Сделок» и подтверждает его.
+   *
+   * Черновик производство не трогает: собирать под него нечего, и до
+   * подтверждения ни очередь флориста, ни склад о нём знать не обязаны.
+   */
+  await admin.getByRole('link', { name: 'Логистика' }).first().click();
+  await admin.getByRole('link', { name: 'Сделки' }).first().click();
+  const deal = admin.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
+  await expect(deal).toHaveAttribute('data-selectable', 'yes');
+  await deal.getByTestId('deal-pick').click();
+  await admin.getByTestId('deals-manual-draft').click();
+  await expect(admin.getByTestId('create-route-dialog')).toBeVisible();
+  /*
+   * Номер листа берётся из ответа сервера, а не из списка черновиков:
+   * подтверждённый лист черновиком уже не является и там не появляется.
+   */
+  const [created] = await Promise.all([
+    admin.waitForResponse(
+      (response) =>
+        response.url().includes('/from-selection') && response.request().method() === 'POST',
+    ),
+    admin.getByTestId('create-route-sheet').click(),
+  ]);
+  expect(created.status(), await created.text()).toBe(201);
+  const sheetNumber = ((await created.json()) as { number: string }).number;
+  expect(sheetNumber).toMatch(/^R-/);
+
+  // Склад увидел подтверждённый лист сам, без перезагрузки.
+  await expect(
+    keeperPage.getByTestId('wh-route-button').filter({ hasText: sheetNumber }),
+  ).toHaveCount(1, { timeout: 25_000 });
+
+  // Флорист увидел заказ листа в очереди — приоритет задаёт именно лист.
+  await expect(floristPage.getByTestId('florist-queue')).toContainText(orderNumber, {
+    timeout: 25_000,
+  });
+
+  /*
+   * Возврат листа в черновик убирает его из складской работы так же сразу.
+   */
+  await admin.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  const sheetRow = admin.locator(`[data-sheet-number="${sheetNumber}"]`).first();
+  await expect(sheetRow).toBeVisible();
+  await clickAndAwait(
+    admin,
+    sheetRow.getByTestId('sheet-return-to-draft'),
+    'POST',
+    '/return-to-draft',
+  );
+
+  await expect(
+    keeperPage.getByTestId('wh-route-button').filter({ hasText: sheetNumber }),
+  ).toHaveCount(0, { timeout: 25_000 });
+
+  await keeperContext.close();
+  await floristContext.close();
+  await adminContext.close();
+});
+
+/**
+ * Два сеанса: логист меняет курьера — склад видит это сам.
+ *
+ * Смена курьера в листе меняет то, кому склад выдаёт заказы. Пока событие
+ * не доходило до складских вкладок, кладовщик выдавал маршрут человеку,
+ * которого уже сняли.
+ */
+test('два сеанса: смена курьера доходит до склада без F5', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const seeded = seedWarehouseRoute();
+
+  const adminContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await admin.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  const keeper = await seedRole(admin, token, 'WAREHOUSE', '5533');
+  const keeperContext = await browser.newContext();
+  const keeperPage = await keeperContext.newPage();
+  await login(keeperPage, keeper.phone, keeper.pin);
+  await keeperPage.getByTestId('wh-tab-picking').click();
+
+  const sheetButton = keeperPage.getByTestId('wh-route-button').filter({ hasText: seeded.route });
+  await expect(sheetButton).toHaveCount(1, { timeout: 25_000 });
+  await sheetButton.click();
+  const courierLine = keeperPage.getByTestId('wh-route-courier');
+  await expect(courierLine).toBeVisible();
+  const before = (await courierLine.innerText()).trim();
+
+  /*
+   * Логист назначает другого курьера — тем же путём, что и в интерфейсе листов.
+   */
+  const replacement = await seedRole(admin, token, 'LOGISTICIAN', '5544');
+  expect(replacement.phone).not.toBe('');
+
+  const sheets = await admin.request.get('/api/route-sheets?section=UNSHIPPED&limit=100', {
+    headers: authorized,
+  });
+  const list = (await sheets.json()) as {
+    days: { sheets: { id: string; number: string; version: number }[] }[];
+  };
+  const target = list.days
+    .flatMap((day) => day.sheets)
+    .find((item) => item.number === seeded.route);
+  expect(target, 'лист фикстуры не найден').toBeTruthy();
+
+  const couriers = await admin.request.get('/api/users?role=COURIER&status=ACTIVE&limit=100', {
+    headers: authorized,
+  });
+  const options = ((await couriers.json()) as { items: { id: string; fullName: string }[] }).items;
+  const other = options.find((item) => item.fullName !== before);
+  expect(other, 'нужен второй курьер').toBeTruthy();
+
+  const assigned = await admin.request.put(`/api/routes/${target?.id ?? ''}/courier`, {
+    headers: authorized,
+    data: { courierUserId: other?.id ?? null, expectedVersion: target?.version ?? 0 },
+  });
+  expect(assigned.status(), await assigned.text()).toBe(200);
+
+  // Кладовщик ничего не нажимал: строка курьера обновилась событием.
+  await expect
+    .poll(async () => (await courierLine.innerText()).trim(), { timeout: 25_000 })
+    .not.toBe(before);
+
+  await keeperContext.close();
+  await adminContext.close();
+});
+
+/**
+ * Справочник в двух сеансах: администратор и логист.
+ *
+ * Логист видит одну вкладку — курьеров, и заводит именно курьера. Чужие роли
+ * ему не показывает не экран, а сервер: проверяется и это.
+ */
+test('два сеанса: справочник курьеров у администратора и логиста', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const adminContext = await browser.newContext();
+  const admin = await adminContext.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await admin.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const logist = await seedRole(admin, token, 'LOGISTICIAN', '5566');
+
+  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  // Вкладки ролей вместо выпадающего фильтра, «Добавить» — в рабочей панели.
+  await expect(admin.getByTestId('user-role-tab')).toHaveCount(6);
+  await expect(admin.getByTestId('user-add')).toBeVisible();
+  await expect(admin.getByLabel('Роль')).toHaveCount(0);
+  // Отдельного блока с пояснением про заморозку больше нет.
+  await expect(admin.getByText('Сотрудники не удаляются')).toHaveCount(0);
+
+  // Вкладка показывает только свою роль.
+  await admin.getByTestId('user-role-tab').filter({ hasText: 'Логист' }).click();
+  await expect(admin.locator('.table tbody tr').first()).toContainText('Логист');
+
+  const logistContext = await browser.newContext();
+  const logistPage = await logistContext.newPage();
+  await login(logistPage, logist.phone, logist.pin);
+  await logistPage.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+
+  // У логиста одна вкладка — «Курьеры», и кнопка называет, кого он заводит.
+  await expect(logistPage.getByTestId('user-role-tab')).toHaveCount(1);
+  await expect(logistPage.getByTestId('user-role-tab')).toHaveText('Курьер');
+  await expect(logistPage.getByTestId('user-add')).toHaveText('Добавить курьера');
+
+  // Сервер тоже не отдаёт логисту чужие роли.
+  const foreign = await logistPage.request.get('/api/users?role=FLORIST&status=ACTIVE', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  expect(foreign.status()).toBe(200);
+
+  const asLogist = await logistPage.request.post('/api/auth/login', {
+    data: { phone: logist.phone, pin: logist.pin },
+  });
+  const logistToken = ((await asLogist.json()) as { accessToken: string }).accessToken;
+  const denied = await logistPage.request.post('/api/users', {
+    headers: { authorization: `Bearer ${logistToken}` },
+    data: { fullName: 'Чужая роль', phone: uniquePhone(), roles: ['FLORIST'] },
+  });
+  expect(denied.status()).toBe(403);
+
+  await logistContext.close();
+  await adminContext.close();
+});
+
+/**
+ * Телефон: ширина совпадает с экраном и ввод не приближает страницу.
+ *
+ * Проверяются три распространённые ширины и все рабочие роли. Приближение
+ * лечится размером текста в полях, а не запретом масштабирования: отнимать
+ * у людей возможность приблизить экран нельзя.
+ */
+test('телефон: 390/375/360 без горизонтального выезда и без приближения при вводе', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const setupContext = await browser.newContext();
+  const setup = await setupContext.newPage();
+  await login(setup, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await setup.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  const florist = await seedRole(setup, token, 'FLORIST', '6611');
+  const keeper = await seedRole(setup, token, 'WAREHOUSE', '6622');
+  const logist = await seedRole(setup, token, 'LOGISTICIAN', '6633');
+  await setupContext.close();
+
+  const roles: { name: string; phone: string; pin: string; paths: string[] }[] = [
+    {
+      name: 'администратор',
+      phone: ADMIN_PHONE,
+      pin: ADMIN_PIN,
+      paths: ['/logistics/deals', '/logistics/route-sheets', '/logistics/reports', '/couriers'],
+    },
+    {
+      name: 'логист',
+      phone: logist.phone,
+      pin: logist.pin,
+      paths: ['/logistics/deals', '/couriers'],
+    },
+    { name: 'флорист', phone: florist.phone, pin: florist.pin, paths: ['/florist'] },
+    { name: 'кладовщик', phone: keeper.phone, pin: keeper.pin, paths: ['/warehouse'] },
+  ];
+
+  for (const width of [390, 375, 360]) {
+    for (const role of roles) {
+      const context = await browser.newContext({ viewport: { width, height: 780 } });
+      const page = await context.newPage();
+      await login(page, role.phone, role.pin);
+
+      for (const path of role.paths) {
+        await page.goto(path);
+        /*
+         * Экран обязан отрисоваться ДО измерения.
+         *
+         * Пустая страница шире экрана не бывает, и без этого ожидания
+         * проверка доказывала бы лишь то, что успела ничего не загрузить.
+         */
+        await expect(page.locator('h1').first()).toBeVisible({ timeout: 20_000 });
+        await page.waitForTimeout(500);
+
+        const overflow = await page.evaluate<number>(
+          'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+        );
+        expect(overflow, `${role.name} ${width}px ${path}`).toBeLessThanOrEqual(1);
+
+        /*
+         * Заодно размер текста в полях: именно им iOS решает, приближать ли
+         * страницу при фокусе. Меряется вычисленный размер, а не наличие
+         * правила — правило могло быть перекрыто.
+         */
+        const fields = await page.evaluate<number[]>(
+          "Array.from(document.querySelectorAll('input, select, textarea')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+        );
+        for (const size of fields) {
+          expect(size, `${role.name} ${width}px ${path}`).toBeGreaterThanOrEqual(16);
+        }
+      }
+
+      await context.close();
+    }
+  }
+
+  /*
+   * Размер текста в полях — не меньше 16 пикселей.
+   *
+   * Именно этим iOS решает, приближать ли страницу при фокусе. Проверяется
+   * вычисленный размер, а не наличие правила: правило могло быть перекрыто.
+   */
+  /*
+   * Поля страницы входа — тоже не меньше шестнадцати.
+   *
+   * Это первый экран, который человек видит с телефона, и приближение здесь
+   * оставляет его в увеличенном интерфейсе на всё дальнейшее время работы.
+   */
+  const phone = await browser.newContext({ viewport: { width: 375, height: 780 } });
+  const phonePage = await phone.newPage();
+  await phonePage.goto('/login');
+  await expect(phonePage.getByLabel('Телефон')).toBeVisible();
+  const loginFields = await phonePage.evaluate<number[]>(
+    "Array.from(document.querySelectorAll('input')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+  );
+  expect(loginFields.length).toBeGreaterThan(0);
+  for (const size of loginFields) {
+    expect(size).toBeGreaterThanOrEqual(16);
+  }
+
+  // Масштабирование пальцами при этом не запрещено.
+  const viewport = await phonePage.evaluate<string>(
+    "document.querySelector('meta[name=viewport]').getAttribute('content')",
+  );
+  expect(viewport).not.toContain('user-scalable=no');
+  expect(viewport).not.toContain('maximum-scale');
+
+  await phone.close();
 });

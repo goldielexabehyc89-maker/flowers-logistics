@@ -207,48 +207,45 @@ describe('окончательный результат', () => {
     );
   });
 
-  it('недоставка без комментария отвергается при ЛЮБОЙ причине', async () => {
+  it('обычная причина принимается без комментария, «Другое» — только с ним', async () => {
     /*
-     * Правило владельца от 17.08.2026: комментарий обязателен всегда, а не
-     * только для «Другое». Причина отвечает «что за случай», комментарий —
-     * «что именно произошло у этой двери».
+     * У курьера в окне остались кнопки причин и ни одного поля ввода.
+     * Причина, требующая пояснения, ему не предлагается — но сервер обязан
+     * проверять это сам: запрос может прийти и мимо интерфейса.
      */
     const courier = await actorFor(['COURIER']);
     const route = await seedActiveRoute(courier.userId, 3);
-    const other = await reasonByCode('OTHER');
     const noAnswer = await reasonByCode('NO_ANSWER');
+    const other = await reasonByCode('OTHER');
 
-    for (const [index, reason] of [other, noAnswer].entries()) {
-      await expectRefusal(
-        recordDeliveryResult(
-          deps,
-          courier,
-          route.participations[index]!,
-          // Комментария нет намеренно: именно его отсутствие обязано отказать.
-          { outcome: 'NOT_DELIVERED', reasonId: reason.id },
-          CONTEXT,
-        ),
-        /комментарий/i,
-      );
-    }
-
-    const ok = await recordDeliveryResult(
+    const plain = await recordDeliveryResult(
       deps,
       courier,
       route.participations[0]!,
-      { outcome: 'NOT_DELIVERED', reasonId: other.id, comment: 'дверь закрыта наглухо' },
+      { outcome: 'NOT_DELIVERED', reasonId: noAnswer.id },
       CONTEXT,
     );
-    expect(ok.attempt.outcome).toBe('NOT_DELIVERED');
-    expect(ok.attempt.comment).toBe('дверь закрыта наглухо');
+    expect(plain.attempt.outcome).toBe('NOT_DELIVERED');
+    expect(plain.attempt.reasonName).toBe(noAnswer.name);
+    expect(plain.attempt.comment).toBeNull();
 
-    // Причина и комментарий доходят до истории вместе: по ним разбирают случай.
+    await expectRefusal(
+      recordDeliveryResult(
+        deps,
+        courier,
+        route.participations[1]!,
+        { outcome: 'NOT_DELIVERED', reasonId: other.id },
+        CONTEXT,
+      ),
+      /комментарий/i,
+    );
+
+    // Причина и автор доходят до истории: по ним разбирают случай.
     const stored = await ctx.db.deliveryAttempt.findUniqueOrThrow({
-      where: { id: ok.attempt.id },
-      select: { reasonNameSnapshot: true, comment: true, courierUserId: true, orderId: true },
+      where: { id: plain.attempt.id },
+      select: { reasonNameSnapshot: true, courierUserId: true },
     });
-    expect(stored.reasonNameSnapshot).toBe(other.name);
-    expect(stored.comment).toBe('дверь закрыта наглухо');
+    expect(stored.reasonNameSnapshot).toBe(noAnswer.name);
     expect(stored.courierUserId).toBe(courier.userId);
   });
 
@@ -262,7 +259,7 @@ describe('окончательный результат', () => {
       deps,
       courier,
       route.participations[0]!,
-      { outcome: 'NOT_DELIVERED', reasonId: reason.id, comment: 'никто не открыл' },
+      { outcome: 'NOT_DELIVERED', reasonId: reason.id },
       CONTEXT,
     );
     expect(attempt.attempt.reasonName).toBe(reason.name);
@@ -431,7 +428,7 @@ describe('двух действующих правд не бывает', () => {
         deps,
         courier,
         route.participations[0]!,
-        { outcome: 'NOT_DELIVERED', reasonId: reason.id, comment: 'никто не открыл' },
+        { outcome: 'NOT_DELIVERED', reasonId: reason.id },
         CONTEXT,
       ),
       /уже есть результат/i,
@@ -457,7 +454,7 @@ describe('двух действующих правд не бывает', () => {
         deps,
         courier,
         route.participations[0]!,
-        { outcome: 'NOT_DELIVERED', reasonId: reason.id, comment: 'никто не открыл' },
+        { outcome: 'NOT_DELIVERED', reasonId: reason.id },
         CONTEXT,
       ),
     ]);
@@ -519,7 +516,7 @@ describe('автоматическое завершение маршрута', (
       deps,
       courier,
       route.participations[0]!,
-      { outcome: 'NOT_DELIVERED', reasonId: reason.id, comment: 'никто не открыл' },
+      { outcome: 'NOT_DELIVERED', reasonId: reason.id },
       CONTEXT,
     );
 

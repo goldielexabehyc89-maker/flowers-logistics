@@ -23,6 +23,7 @@ import { parseMoscow } from './moscow-time.js';
 import { diffSnapshots, snapshotHash, type OrderSnapshot } from './mapper.js';
 import {
   effectiveAttentionReasons,
+  needsLogisticsAttention,
   type AddressAttention,
   type AttentionReason,
   type ManualInterval,
@@ -192,7 +193,7 @@ function orderData(
     sourceArchived: snapshot.sourceArchived,
     inScope: snapshot.inScope,
     fulfillmentInScope: snapshot.fulfillmentInScope,
-    needsAttention: reasons.length > 0,
+    needsAttention: needsLogisticsAttention(reasons),
     attentionReasons: reasons,
     scopeExitReason: snapshot.inScope ? null : snapshot.scopeExitReason,
     scopeExitedAt: snapshot.inScope ? null : now,
@@ -559,7 +560,7 @@ async function writeOrderAudit(
       version,
       inScope: snapshot.inScope,
       scopeExitReason: snapshot.scopeExitReason,
-      needsAttention: reasons.length > 0,
+      needsAttention: needsLogisticsAttention(reasons),
       attentionReasons: reasons,
       externalStateType: snapshot.externalStateType,
     },
@@ -584,7 +585,7 @@ async function publishOrderEvent(
     payload: {
       orderId,
       inScope: snapshot.inScope,
-      needsAttention: reasons.length > 0,
+      needsAttention: needsLogisticsAttention(reasons),
       deliveryDate: snapshot.deliveryDate,
     },
     audienceRoles: [...ORDER_AUDIENCE],

@@ -86,6 +86,46 @@
 }
 
 /*
+ * Причины недоставки кнопками.
+ *
+ * Курьер стоит у двери с коробкой: попасть пальцем в крупную кнопку он может,
+ * а раскрывать список и набирать текст — нет. Сетка сама переносит кнопки
+ * по ширине экрана, поэтому на телефоне они идут в один-два столбца, а на
+ * планшете — в три.
+ */
+.delivery__reasons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.delivery__reason {
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #d5d8e2);
+  border-radius: 10px;
+  background: var(--color-surface, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Выбранная причина видна без цвета: рамкой и фоном, а не одним оттенком. */
+.delivery__reason--picked {
+  border-color: var(--color-accent, #4f6ef7);
+  border-width: 2px;
+  background: var(--color-accent-soft, #eef2ff);
+  font-weight: 600;
+}
+
+.delivery__reason:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/*
  * Адрес-ссылка на карты.
  *
  * Подчёркивание оставлено намеренно: это единственная ссылка в карточке,

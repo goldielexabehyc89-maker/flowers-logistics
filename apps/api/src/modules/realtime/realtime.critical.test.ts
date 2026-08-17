@@ -15,6 +15,8 @@ import {
 } from '../auth/testing/harness.js';
 import { managementAudienceFor, publishRealtimeEvent, RealtimePayloadLeakError } from './events.js';
 import { parseLastEventId, readEventsForViewer, VISIBILITY_LAG_MS } from './reader.js';
+import { randomUUID } from 'node:crypto';
+import type { Role } from '@fl/shared';
 
 let ctx: TestContext;
 
@@ -134,6 +136,71 @@ describe('адресация при чтении', () => {
 
     expect(typeof result.events[0]?.id).toBe('string');
     expect(result.lastId).toMatch(/^\d+$/);
+  });
+});
+
+describe('аудитория событий по ролям', () => {
+  /**
+   * Кто обязан получить событие темы.
+   *
+   * Таблица явная, потому что молчащий экран выглядит не как дефект, а как
+   * «ничего не произошло»: производство узнавало об изменении подтверждённого
+   * листа только перезагрузкой и продолжало собирать снятые заказы.
+   */
+  const EXPECTED: { topic: string; roles: Role[] }[] = [
+    { topic: 'route.confirmed', roles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'] },
+    { topic: 'route.updated', roles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'] },
+    { topic: 'route.cancelled', roles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'] },
+    { topic: 'order.updated', roles: ['ADMIN', 'LOGISTICIAN', 'COURIER'] },
+    { topic: 'order.fulfillment_process_changed', roles: ['ADMIN', 'FLORIST', 'WAREHOUSE'] },
+    { topic: 'warehouse.placement_changed', roles: ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN'] },
+  ];
+
+  it('событие доходит до каждой роли, которой оно нужно', async () => {
+    for (const { topic, roles } of EXPECTED) {
+      const from = await currentMaxId();
+      await ctx.db.$transaction((tx) =>
+        publishRealtimeEvent(tx, {
+          topic: topic as Parameters<typeof publishRealtimeEvent>[1]['topic'],
+          payload: { routeId: randomUUID() },
+          audienceRoles: roles,
+        }),
+      );
+
+      for (const role of roles) {
+        const viewer = await seedUser(ctx.db, { roles: [role], status: 'ACTIVE' });
+        const seen = await readEventsForViewer(
+          ctx.db,
+          { userId: viewer.id, roles: [role] },
+          from,
+          afterLag(),
+        );
+        expect(
+          seen.events.some((event) => event.topic === topic),
+          `${topic} → ${role}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('курьер не получает производственных и складских событий', async () => {
+    const from = await currentMaxId();
+    await ctx.db.$transaction((tx) =>
+      publishRealtimeEvent(tx, {
+        topic: 'route.confirmed',
+        payload: { routeId: randomUUID() },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'],
+      }),
+    );
+
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
+    const seen = await readEventsForViewer(
+      ctx.db,
+      { userId: courier.id, roles: ['COURIER'] },
+      from,
+      afterLag(),
+    );
+    expect(seen.events.some((event) => event.topic === 'route.confirmed')).toBe(false);
   });
 });
 

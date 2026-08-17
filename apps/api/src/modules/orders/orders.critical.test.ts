@@ -590,14 +590,28 @@ describe('API заказов', () => {
       headers: { authorization: `Bearer ${await tokenFor(['ADMIN'])}` },
     });
 
-    const body = response.json() as { items: { id: string; needsAttention: boolean }[] };
+    const body = response.json() as {
+      items: {
+        id: string;
+        needsAttention: boolean;
+        attentionReasons: string[];
+        selectable?: boolean;
+      }[];
+    };
     const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { externalId: withoutDate.externalId },
     });
 
     const found = body.items.find((item) => item.id === order.id);
     expect(found).toBeDefined();
-    expect(found?.needsAttention).toBe(true);
+    /*
+     * Заказ виден при любом выбранном дне, но «Требует внимания» ему больше
+     * не ставится: вопрос к дате — не задача логиста, и красить им карточку
+     * значит прятать за ней настоящие препятствия (адрес, точку, интервал).
+     * Сама причина при этом сохраняется как сведение.
+     */
+    expect(found?.needsAttention).toBe(false);
+    expect(found?.attentionReasons).toContain('MISSING_DELIVERY_DATE');
   });
 
   it('вышедшие из области не видны в активном списке, но доступны через inScope=false', async () => {

@@ -36,7 +36,8 @@ export const FLOW_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
 /** Отмена сессии выдачи — только администратор. */
 export const FLOW_ADMIN_ROLES = ['ADMIN'] as const;
 
-export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE'] as const;
+/** Складские события. Логист видит их в маршрутных листах и «Сделках». */
+export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN'] as const;
 
 export interface RequestContext {
   ip: string | null;

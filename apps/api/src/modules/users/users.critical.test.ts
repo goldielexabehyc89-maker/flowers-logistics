@@ -72,6 +72,49 @@ describe('права логиста', () => {
     }
   });
 
+  it('логист замораживает и размораживает курьера, но не флориста и не кладовщика', async () => {
+    /*
+     * Экран логиста показывает одну вкладку — «Курьеры». Проверяется не она,
+     * а сервер: интерфейс лишь не рисует лишнего, а запрет обязан жить там,
+     * где его нельзя обойти запросом.
+     */
+    const logist = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const actor = logisticianActor(logist.id);
+
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
+    const frozen = await freezeUser(ctx, actor, courier.id, META);
+    expect(frozen.status).toBe('FROZEN');
+    const restored = await unfreezeUser(ctx, actor, courier.id, META);
+    expect(restored.status).toBe('PENDING_ACTIVATION');
+
+    // Непривилегированные, но и не курьерские роли логисту тоже недоступны.
+    for (const role of ['FLORIST', 'WAREHOUSE', 'MANAGER'] as const) {
+      const target = await seedUser(ctx.db, { roles: [role], status: 'ACTIVE' });
+      await expect(freezeUser(ctx, actor, target.id, META)).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+      });
+      await expect(getUser(ctx, actor, target.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    }
+  });
+
+  it('в выборке логиста нет никого, кроме обычных курьеров', async () => {
+    const logist = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const actor = logisticianActor(logist.id);
+
+    await seedUser(ctx.db, { roles: ['FLORIST'], status: 'ACTIVE' });
+    await seedUser(ctx.db, { roles: ['WAREHOUSE'], status: 'ACTIVE' });
+    await seedUser(ctx.db, { roles: ['MANAGER'], status: 'ACTIVE' });
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
+
+    const list = await listUsers(ctx, actor, { limit: 100, offset: 0, status: 'ACTIVE' });
+    // В выборке нет ни одной чужой роли — сколько бы страниц в ней ни было.
+    for (const item of list.items) {
+      expect(item.roles, item.id).toEqual(['COURIER']);
+    }
+    // А свой курьер логисту доступен поимённо.
+    expect((await getUser(ctx, actor, courier.id)).roles).toEqual(['COURIER']);
+  });
+
   it('логист не может изменить или заморозить привилегированного пользователя', async () => {
     const logist = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
     const admin = await seedUser(ctx.db, { roles: ['ADMIN'] });

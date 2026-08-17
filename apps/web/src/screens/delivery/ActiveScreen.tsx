@@ -25,7 +25,6 @@ import {
   Modal,
   Select,
   StatusBadge,
-  TextInput,
 } from '../../ui/components';
 import {
   cancelWindowLeftMs,
@@ -37,6 +36,7 @@ import {
   resultDraftProblem,
   routeAccent,
   routeLink,
+  selectableReasons,
   type ActiveOrderView,
   type ActiveRouteView,
   type AttemptView,
@@ -75,7 +75,6 @@ export function ActiveScreen(): React.JSX.Element {
     null,
   );
   const [reasonId, setReasonId] = useState<string | null>(null);
-  const [comment, setComment] = useState('');
   const [now, setNow] = useState(() => new Date());
 
   // Часы тикают только ради подсказок времени: досрочности и остатка окна
@@ -98,7 +97,6 @@ export function ActiveScreen(): React.JSX.Element {
   function resetDraft(): void {
     setAsking(null);
     setReasonId(null);
-    setComment('');
   }
 
   /**
@@ -223,7 +221,6 @@ export function ActiveScreen(): React.JSX.Element {
                 onAsk={(nextOutcome) => {
                   setAsking({ order, outcome: nextOutcome });
                   setReasonId(null);
-                  setComment('');
                 }}
                 onCancelResult={(attemptId) => cancel.mutate(attemptId)}
               />
@@ -242,20 +239,22 @@ export function ActiveScreen(): React.JSX.Element {
         asking={asking}
         reasons={reasonList}
         reasonId={reasonId}
-        comment={comment}
         busy={record.isPending}
         onReason={setReasonId}
-        onComment={setComment}
         onCancel={resetDraft}
         onSubmit={() => {
           if (asking === null) return;
+          /*
+           * Комментарий не отправляется вовсе — даже пустой строкой.
+           *
+           * Пустая строка не «отсутствие пояснения», а пояснение из нуля
+           * символов: база отвергает её отдельным ограничением, и посылать
+           * такое значит выдумывать данные там, где их нет.
+           */
           record.mutate({
             routeOrderId: asking.order.routeOrderId,
             outcome: asking.outcome,
             ...(asking.outcome === 'NOT_DELIVERED' && reasonId !== null ? { reasonId } : {}),
-            ...(asking.outcome === 'NOT_DELIVERED' && comment.trim() !== ''
-              ? { comment: comment.trim() }
-              : {}),
           });
         }}
       />
@@ -267,10 +266,8 @@ interface ResultDialogProps {
   asking: { order: ActiveOrderView; outcome: DeliveryOutcome } | null;
   reasons: FailureReasonView[];
   reasonId: string | null;
-  comment: string;
   busy: boolean;
   onReason: (reasonId: string) => void;
-  onComment: (comment: string) => void;
   onCancel: () => void;
   onSubmit: () => void;
 }
@@ -278,22 +275,25 @@ interface ResultDialogProps {
 /**
  * Подтверждение результата доставки.
  *
- * Компактное окно на один вопрос. У «Доставлен» полей нет вовсе — причина
- * и комментарий там не существуют и не отправляются. У «Не доставлен» два
- * обязательных поля: причина из справочника и описание случая.
+ * Компактное окно на один вопрос. У «Доставлен» полей нет вовсе. У «Не
+ * доставлен» — причины кнопками: курьер стоит у двери с коробкой в руках,
+ * и попасть пальцем в крупную кнопку он может, а раскрывать список и
+ * набирать текст — нет.
  *
- * Отмена ничего не отправляет: закрытое окно не оставляет следа ни в базе,
- * ни в списке.
+ * Нажатие на причину только ВЫБИРАЕТ её. Запись происходит по «Подтвердить»:
+ * результат отменяется всего пять минут, и случайное касание не должно
+ * закрывать заказ. «Отмена» и крестик не отправляют ничего.
  */
 function ResultDialog(props: ResultDialogProps): React.JSX.Element {
   const { asking } = props;
   const failed = asking?.outcome === 'NOT_DELIVERED';
+  const choices = selectableReasons(props.reasons);
 
   const problem =
     asking === null
       ? null
       : resultDraftProblem(
-          { outcome: asking.outcome, reasonId: props.reasonId, comment: props.comment },
+          { outcome: asking.outcome, reasonId: props.reasonId, comment: '' },
           props.reasons,
         );
 
@@ -316,38 +316,25 @@ function ResultDialog(props: ResultDialogProps): React.JSX.Element {
       >
         {failed ? (
           <>
-            <Field label="Причина">
-              {(fieldProps) => (
-                <Select
-                  {...fieldProps}
+            <p className="text-sm muted">Что произошло?</p>
+            <div className="delivery__reasons" data-testid="delivery-reasons">
+              {choices.map((reason) => (
+                <button
+                  key={reason.id}
+                  type="button"
+                  className={`delivery__reason${
+                    props.reasonId === reason.id ? ' delivery__reason--picked' : ''
+                  }`}
                   data-testid="delivery-reason"
-                  value={props.reasonId ?? ''}
-                  onChange={(event) => props.onReason(event.target.value)}
-                  required
+                  data-reason-code={reason.code}
+                  aria-pressed={props.reasonId === reason.id}
+                  disabled={props.busy}
+                  onClick={() => props.onReason(reason.id)}
                 >
-                  <option value="">Выберите причину</option>
-                  {props.reasons
-                    .filter((reason) => reason.isActive)
-                    .map((reason) => (
-                      <option key={reason.id} value={reason.id}>
-                        {reason.name}
-                      </option>
-                    ))}
-                </Select>
-              )}
-            </Field>
-            <Field label="Комментарий" hint="Обязателен: опишите, что произошло">
-              {(fieldProps) => (
-                <TextInput
-                  {...fieldProps}
-                  data-testid="delivery-comment"
-                  value={props.comment}
-                  onChange={(event) => props.onComment(event.target.value)}
-                  maxLength={500}
-                  required
-                />
-              )}
-            </Field>
+                  {reason.name}
+                </button>
+              ))}
+            </div>
           </>
         ) : (
           <p className="text-sm muted">

@@ -19,6 +19,7 @@ import {
   moscowMinutesOfDay,
   remainingOf,
   resultDraftProblem,
+  selectableReasons,
   routeAccent,
   type ActiveRouteView,
   type FailureReasonView,
@@ -93,16 +94,19 @@ describe('черновик результата', () => {
     ).toMatch(/причину/i);
   });
 
-  it('«Другое» требует комментария, пробелы комментарием не считаются', () => {
+  it('причина, требующая пояснения, курьеру не предлагается', () => {
+    /*
+     * Поля комментария в окне нет: у двери человек нажимает кнопку, а не
+     * пишет текст. Поэтому «Другое» отфильтровано из выбора, а проверка
+     * черновика остаётся защитой от несогласованного состояния — например,
+     * если справочник изменили, пока окно было открыто.
+     */
+    expect(selectableReasons(REASONS).map((reason) => reason.id)).not.toContain('r-2');
+    expect(selectableReasons(REASONS).every((reason) => reason.isActive)).toBe(true);
+
     expect(
-      resultDraftProblem({ outcome: 'NOT_DELIVERED', reasonId: 'r-2', comment: '   ' }, REASONS),
-    ).toMatch(/комментарий/i);
-    expect(
-      resultDraftProblem(
-        { outcome: 'NOT_DELIVERED', reasonId: 'r-2', comment: 'нет доступа' },
-        REASONS,
-      ),
-    ).toBeNull();
+      resultDraftProblem({ outcome: 'NOT_DELIVERED', reasonId: 'r-2', comment: '' }, REASONS),
+    ).toMatch(/недоступна/i);
   });
 
   it('выключенная причина не принимается', () => {
@@ -111,21 +115,11 @@ describe('черновик результата', () => {
     ).toMatch(/недоступна/i);
   });
 
-  it('комментарий обязателен при ЛЮБОЙ причине, а не только при «Другое»', () => {
-    /*
-     * Решение владельца от 17.08.2026. Причина отвечает «что за случай»,
-     * комментарий — «что именно произошло у этой двери»: без него разбор
-     * с клиентом упирается в восемь одинаковых строк «Нет ответа».
-     */
+  it('обычная причина принимается одной кнопкой, без пояснения', () => {
+    // В окне остались только кнопки причин: комментарий не собирается вовсе
+    // и не отправляется даже пустой строкой.
     expect(
       resultDraftProblem({ outcome: 'NOT_DELIVERED', reasonId: 'r-1', comment: '' }, REASONS),
-    ).toMatch(/комментарий/i);
-
-    expect(
-      resultDraftProblem(
-        { outcome: 'NOT_DELIVERED', reasonId: 'r-1', comment: 'никто не открыл' },
-        REASONS,
-      ),
     ).toBeNull();
   });
 

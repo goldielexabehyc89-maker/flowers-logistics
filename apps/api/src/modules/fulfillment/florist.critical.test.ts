@@ -67,6 +67,8 @@ import { closeOwnShift, forceCloseShift, listAssignableFlorists, startShift } fr
 /** Забронированный этим файлом день и следующий за ним. */
 const DAY = '2027-03-10';
 const NEXT_DAY = '2027-03-11';
+/** Вчерашний день: работа, не закрытая до полуночи, никуда не девается. */
+const PREVIOUS_DAY = '2027-03-09';
 /** Момент «сейчас» внутри забронированного дня: 12:00 Москвы. */
 const NOW = new Date('2027-03-10T09:00:00.000Z');
 
@@ -1372,6 +1374,55 @@ describe('«Мои заказы»: работа и собранные', () => {
     );
   }
 
+  it('«Мои заказы» не ограничены днём: вчерашняя работа и завтрашняя видны сразу', async () => {
+    /*
+     * За флористом числится РАБОТА, а не день.
+     *
+     * Заказ, взятый вчера и не собранный, обязан оставаться перед глазами:
+     * иначе он исчезает в полночь вместе с обязанностью его закрыть. Заказ на
+     * завтра, взятый заранее, — по той же причине. Раньше список показывал
+     * один день, а счётчик вкладки считался по всем дням, и они расходились.
+     */
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('DAYS');
+
+    const yesterday = await seedOrder({ number: `${tag}-Y`, day: PREVIOUS_DAY });
+    const today = await seedOrder({ number: `${tag}-T`, day: DAY });
+    const tomorrow = await seedOrder({ number: `${tag}-N`, day: NEXT_DAY });
+    for (const order of [yesterday, today, tomorrow]) {
+      await claimOrder(ctx.db, florist, order.id, CONTEXT);
+    }
+
+    const work = await ask(florist, 'work', tag);
+    const ids = work.items.map((item) => item.id);
+    expect(ids).toContain(yesterday.id);
+    expect(ids).toContain(today.id);
+    expect(ids).toContain(tomorrow.id);
+    // Более ранняя дата — выше: просроченная работа не уезжает вниз.
+    expect(ids.indexOf(yesterday.id)).toBeLessThan(ids.indexOf(today.id));
+    expect(ids.indexOf(today.id)).toBeLessThan(ids.indexOf(tomorrow.id));
+
+    // Счётчик вкладки совпадает с полным набором, а не с одним днём.
+    expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(work.total);
+    expect(work.total).toBe(3);
+  });
+
+  it('«Очередь» день по-прежнему ограничивает', async () => {
+    const florist = await floristOnShift();
+    const tag = uniqueNumber('QDAY');
+    await seedOrder({ number: `${tag}-T`, day: DAY });
+    await seedOrder({ number: `${tag}-N`, day: NEXT_DAY });
+
+    const general = await readQueue(
+      ctx.db,
+      { userId: florist.userId },
+      { day: 'today', scope: 'general', group: 'work', includeAssigned: false, search: tag },
+      NOW,
+    );
+    expect(general.items).toHaveLength(1);
+    expect(general.deliveryDate).toBe(DAY);
+  });
+
   it('работа и собранные разделены сервером, NEEDS_REVIEW остаётся в работе', async () => {
     const florist = await floristOnShift();
     const tag = uniqueNumber('GRP');
@@ -1531,11 +1582,16 @@ describe('«Мои заказы»: работа и собранные', () => {
     await claimOrder(ctx.db, florist, tomorrow.id, CONTEXT);
     expect(await countActiveAssignments(ctx.db, florist.userId)).toBe(2);
 
-    // Список выбранного дня при этом показывает один заказ, а счётчик — два.
-    // Это не расхождение, а разные вопросы: «что видно» и «сколько за мной».
+    /*
+     * Список «Моих заказов» и счётчик отвечают на ОДИН вопрос: сколько работы
+     * за флористом. Раньше список ограничивался выбранным днём, счётчик — нет,
+     * и они честно расходились; теперь границы дня нет ни у того, ни у другого.
+     * Ограничение страницы при этом на общее число не влияет.
+     */
     const day = await ask(florist, 'work', tag, { limit: 1 });
     expect(day.items).toHaveLength(1);
-    expect(day.total).toBe(1);
+    expect(day.total).toBe(2);
+    expect(day.total).toBe(await countActiveAssignments(ctx.db, florist.userId));
 
     // Собранный заказ работой не является и в счётчик не входит: он ушёл
     // в свёрнутую группу «Собранные» со своим собственным числом.
@@ -1575,7 +1631,7 @@ describe('«Мои заказы»: работа и собранные', () => {
     expect(await countActiveAssignments(ctx.db, stranger.userId)).toBe(0);
   });
 
-  it('поиск ищет в обеих группах и не выходит за выбранный день', async () => {
+  it('поиск ищет в обеих группах и не смешивает их', async () => {
     const florist = await floristOnShift();
     const tag = uniqueNumber('FIND');
     const working = await mine(florist, tag, 'WORK', 'IN_ASSEMBLY');
@@ -1595,15 +1651,21 @@ describe('«Мои заказы»: работа и собранные', () => {
     expect(byWork.items.map((item) => item.id)).toEqual([working.id]);
     expect(byWork.assembledTotal).toBe(0);
 
-    // Завтрашний день собранных этого дня не показывает вовсе.
+    /*
+     * Выбранный день на «Мои заказы» больше не влияет.
+     *
+     * Работа флориста не заканчивается в полночь: тот же собранный заказ
+     * находится и при «Завтра», потому что вопрос здесь — «что за мной»,
+     * а не «что сегодня».
+     */
     const tomorrow = await readQueue(
       ctx.db,
       { userId: florist.userId },
       { day: 'tomorrow', scope: 'mine', group: 'assembled', includeAssigned: false, search: tag },
       NOW,
     );
-    expect(tomorrow.items).toEqual([]);
-    expect(tomorrow.assembledTotal).toBe(0);
+    expect(tomorrow.items.map((item) => item.id)).toEqual([done.id]);
+    expect(tomorrow.assembledTotal).toBe(1);
   });
 
   it('общая очередь групп не знает: собранных в ней нет ни при какой галочке', async () => {

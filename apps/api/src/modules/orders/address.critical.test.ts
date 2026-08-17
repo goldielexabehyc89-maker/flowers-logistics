@@ -26,7 +26,7 @@ import {
   geocodingAddress,
   isSourceConflict,
 } from './address.js';
-import { effectiveAttentionReasons } from './attention.js';
+import { effectiveAttentionReasons, needsLogisticsAttention } from './attention.js';
 import { setLocalAddress } from './address-service.js';
 
 let ctx: TestContext;
@@ -109,6 +109,56 @@ async function seedCorrectedOrder(): Promise<{ id: string; externalId: string }>
 }
 
 // ---------------------------------------------------------------------------
+
+describe('«Требует внимания» — разрешённый список', () => {
+  /*
+   * Признак рабочий, а не описательный: он красит карточку, поднимает её
+   * вверх списка и убирает заказ с карты. Поэтому в него попадает ровно то,
+   * что мешает логисту распределить заказ.
+   */
+  it('адрес, конфликт и интервал блокируют работу', () => {
+    for (const reason of [
+      'MISSING_ADDRESS',
+      'GEOCODING_ADDRESS_INCOMPLETE',
+      'ADDRESS_CONFLICT',
+      'MISSING_INTERVAL',
+      'UNRECOGNIZED_INTERVAL',
+    ] as const) {
+      expect(needsLogisticsAttention([reason]), reason).toBe(true);
+    }
+  });
+
+  it('получатель, дата и деньги логиста не блокируют', () => {
+    for (const reason of [
+      'MISSING_RECIPIENT',
+      'MISSING_DELIVERY_DATE',
+      'UNRECOGNIZED_DELIVERY_DATE',
+      'CASH_OVERPAYMENT',
+    ] as const) {
+      expect(needsLogisticsAttention([reason]), reason).toBe(false);
+    }
+    // Вместе они тоже ничего не блокируют: список разрешающий, а не счётный.
+    expect(
+      needsLogisticsAttention(['MISSING_RECIPIENT', 'MISSING_DELIVERY_DATE', 'CASH_OVERPAYMENT']),
+    ).toBe(false);
+  });
+
+  it('новая посторонняя причина не становится блокирующей молча', () => {
+    // Ровно то, ради чего список сделан разрешающим: причина, о которой эта
+    // версия приложения не знает, не имеет права выносить день в «Требует
+    // внимания».
+    expect(needsLogisticsAttention(['SOMETHING_NEW' as never])).toBe(false);
+    expect(needsLogisticsAttention(['SOMETHING_NEW' as never, 'MISSING_ADDRESS'])).toBe(true);
+  });
+
+  it('диагностические сведения остаются в наборе причин', () => {
+    // Причины из МоегоСклада не выбрасываются: они видны в карточке и хранятся
+    // в снимке — просто не управляют цветом и порядком.
+    const reasons = effectiveAttentionReasons(['MISSING_RECIPIENT', 'CASH_OVERPAYMENT'], null);
+    expect(reasons).toEqual(['MISSING_RECIPIENT', 'CASH_OVERPAYMENT']);
+    expect(needsLogisticsAttention(reasons)).toBe(false);
+  });
+});
 
 describe('рабочий адрес один', () => {
   it('локальная правка сильнее исходного адреса', () => {

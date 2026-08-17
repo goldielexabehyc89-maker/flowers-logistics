@@ -35,6 +35,13 @@ export interface QueueOrder {
   id: string;
   /** Номер заказа МоегоСклада: стабильный tie-break и человеческий ключ. */
   externalName: string;
+  /**
+   * Календарный день доставки. Нужен там, где список охватывает несколько дней.
+   *
+   * Необязателен: очередь одного дня о нём не спрашивает — там он у всех
+   * одинаковый, и сравнивать нечего.
+   */
+  deliveryDate?: string | null;
   /** Минуты от полуночи Москвы. `null` — время не задано. */
   startMinute: number | null;
   endMinute: number | null;
@@ -156,6 +163,26 @@ export function sortQueue(
   context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number },
 ): QueueOrder[] {
   return [...orders].sort((a, b) => {
+    /*
+     * Раньше по дате — раньше в списке.
+     *
+     * Сравнение включается только там, где список охватывает несколько дней
+     * («Мои заказы» без границы дня). Внутри одного дня даты равны, и правило
+     * ничего не меняет: приоритет листов и срочность работают как прежде.
+     * Вчерашний невыполненный заказ обязан стоять выше завтрашнего — иначе
+     * просроченная работа уезжает вниз именно тогда, когда она горит.
+     */
+    if (a.deliveryDate !== undefined && b.deliveryDate !== undefined) {
+      const left = a.deliveryDate;
+      const right = b.deliveryDate;
+      if (left !== right) {
+        // Заказ без даты — в конец: «нет даты» не значит «сегодня».
+        if (left === null) return 1;
+        if (right === null) return -1;
+        return left.localeCompare(right);
+      }
+    }
+
     const aRoute = a.route;
     const bRoute = b.route;
 

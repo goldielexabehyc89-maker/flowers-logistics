@@ -19,7 +19,11 @@ import type { TransactionClient } from '../auth/sessions.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
-import { effectiveAttentionReasons, type AttentionReason } from './attention.js';
+import {
+  effectiveAttentionReasons,
+  needsLogisticsAttention,
+  type AttentionReason,
+} from './attention.js';
 
 /**
  * Кому видны события заказов.
@@ -136,7 +140,7 @@ export async function setManualInterval(
         manualIntervalStartMinute: input.startMinute,
         manualIntervalEndMinute: input.endMinute,
         manualIntervalSetAt: new Date(),
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: { increment: 1 },
       },
@@ -167,7 +171,7 @@ export async function setManualInterval(
         startMinute: input.startMinute,
         endMinute: input.endMinute,
         version,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
       },
       ip: context.ip,
@@ -179,7 +183,7 @@ export async function setManualInterval(
       payload: {
         orderId: order.id,
         inScope: true,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         manualInterval: true,
       },
       audienceRoles: [...ORDER_AUDIENCE],
@@ -190,7 +194,7 @@ export async function setManualInterval(
       version,
       startMinute: input.startMinute,
       endMinute: input.endMinute,
-      needsAttention: reasons.length > 0,
+      needsAttention: needsLogisticsAttention(reasons),
       attentionReasons: reasons,
     };
   });

@@ -7,6 +7,7 @@
  * браузера.
  */
 
+import { blockingReasonsOf } from '@fl/shared';
 import type { DealCard } from './selection';
 
 /**
@@ -89,7 +90,16 @@ export const PENDING_POINT_REASON: AttentionReason = {
  * жило отдельной строкой блокировки и в «Требует внимания» не попадало.
  */
 export function attentionReasonsOf(card: DealCard): AttentionReason[] {
-  const reasons: AttentionReason[] = card.attentionReasons.map((code) => ({
+  /*
+   * В «Требует внимания» попадает только то, что мешает распределить заказ.
+   *
+   * Отсутствующий получатель, вопросы к дате и денежные расхождения приходят
+   * из МоегоСклада и остаются в карточке как сведения, но работу логиста
+   * не блокируют: разбираются они на других экранах и другими людьми.
+   * Разрешённый список общий с сервером — иначе цвет карточки разошёлся бы
+   * с признаком, по которому заказ убирают с карты.
+   */
+  const reasons: AttentionReason[] = blockingReasonsOf(card.attentionReasons).map((code) => ({
     code,
     label: REASON_LABELS[code] ?? code,
     action: REASON_ACTIONS[code] ?? 'NONE',

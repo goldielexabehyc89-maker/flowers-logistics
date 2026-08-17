@@ -18,7 +18,11 @@ import type { Database } from '../../platform/db.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
-import { effectiveAttentionReasons, type AttentionReason } from './attention.js';
+import {
+  effectiveAttentionReasons,
+  needsLogisticsAttention,
+  type AttentionReason,
+} from './attention.js';
 import { enqueueGeocoding } from './geocoding/queue.js';
 
 /** Адрес правят только логист и администратор. Проверяет сервер, а не экран. */
@@ -299,7 +303,7 @@ export async function setLocalAddress(
         sourceAddressAtLocalEdit: order.address,
         addressConflict: false,
         addressConflictDetectedAt: null,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: order.version + 1,
       },
@@ -401,7 +405,7 @@ export async function clearLocalAddress(
         sourceAddressAtLocalEdit: null,
         addressConflict: false,
         addressConflictDetectedAt: null,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: order.version + 1,
       },
@@ -500,7 +504,7 @@ export async function resolveAddressConflict(
       data: {
         addressConflict: false,
         addressConflictDetectedAt: null,
-        needsAttention: reasons.length > 0,
+        needsAttention: needsLogisticsAttention(reasons),
         attentionReasons: reasons,
         version: order.version + 1,
         ...(keepLocal
