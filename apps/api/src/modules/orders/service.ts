@@ -21,8 +21,15 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { effectiveAttentionReasons, type AttentionReason } from './attention.js';
 
-/** Кому видны события заказов. Курьеру глобальный список не нужен. */
-const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * Кому видны события заказов.
+ *
+ * Курьер включён намеренно: адрес и интервал он видит в «Активных» и обязан
+ * получить правку в дороге, а не после перезагрузки. Событие не несёт ни
+ * адреса, ни получателя — только повод перечитать собственный список, и
+ * чужие заказы курьеру от этого не открываются.
+ */
+const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN', 'COURIER'] as const;
 
 /** Минуты от полуночи: сутки целиком. */
 export const MIN_MINUTE = 0;

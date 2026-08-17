@@ -68,6 +68,20 @@ export const NO_POINT_REASON: AttentionReason = {
 };
 
 /**
+ * Точка уже поставлена в очередь и ждёт геокодера.
+ *
+ * Отдельная формулировка намеренно: «нет точки» и «точка определяется» —
+ * разные положения дел. В первом логисту нужно вмешаться, во втором —
+ * подождать, и одинаковая надпись заставляла бы его чинить то, что и так
+ * в работе.
+ */
+export const PENDING_POINT_REASON: AttentionReason = {
+  code: 'POINT_PENDING',
+  label: 'Точка определяется',
+  action: 'NONE',
+};
+
+/**
  * Все причины внимания заказа, названные по-человечески.
  *
  * Отсутствие точки добавляется к серверным причинам: для логиста это одно
@@ -81,7 +95,9 @@ export function attentionReasonsOf(card: DealCard): AttentionReason[] {
     action: REASON_ACTIONS[code] ?? 'NONE',
   }));
 
-  if (card.geoState !== 'RESOLVED') {
+  if (card.geoState === 'PENDING') {
+    reasons.push(PENDING_POINT_REASON);
+  } else if (card.geoState !== 'RESOLVED') {
     reasons.push(NO_POINT_REASON);
   }
 

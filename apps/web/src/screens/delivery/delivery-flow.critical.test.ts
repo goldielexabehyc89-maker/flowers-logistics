@@ -111,9 +111,27 @@ describe('черновик результата', () => {
     ).toMatch(/недоступна/i);
   });
 
-  it('обычная причина комментария не требует', () => {
+  it('комментарий обязателен при ЛЮБОЙ причине, а не только при «Другое»', () => {
+    /*
+     * Решение владельца от 17.08.2026. Причина отвечает «что за случай»,
+     * комментарий — «что именно произошло у этой двери»: без него разбор
+     * с клиентом упирается в восемь одинаковых строк «Нет ответа».
+     */
     expect(
       resultDraftProblem({ outcome: 'NOT_DELIVERED', reasonId: 'r-1', comment: '' }, REASONS),
+    ).toMatch(/комментарий/i);
+
+    expect(
+      resultDraftProblem(
+        { outcome: 'NOT_DELIVERED', reasonId: 'r-1', comment: 'никто не открыл' },
+        REASONS,
+      ),
+    ).toBeNull();
+  });
+
+  it('у «Доставлен» ни причины, ни комментария не требуется', () => {
+    expect(
+      resultDraftProblem({ outcome: 'DELIVERED', reasonId: null, comment: '' }, REASONS),
     ).toBeNull();
   });
 });
@@ -150,6 +168,7 @@ describe('объединённый список', () => {
       position: results.length - index,
       number: `N-${index}`,
       address: null,
+      point: null,
       recipient: null,
       comment: null,
       intervalStartMinute: null,

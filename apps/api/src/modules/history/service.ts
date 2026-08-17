@@ -18,6 +18,7 @@
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { effectiveAddress } from '../orders/address.js';
 
 /** Действия аудита, которые показывает логистическая история. */
 export const HISTORY_ACTIONS = [
@@ -529,7 +530,7 @@ export async function routeHistory(db: Database, routeId: string): Promise<Histo
         position: item.position,
         number: item.order.externalName,
         // Рабочий адрес: исправленный, если он есть. Курьер ехал именно по нему.
-        address: item.order.localAddress ?? item.order.address,
+        address: effectiveAddress(item.order),
         recipient: item.order.recipient,
         interval: item.order.intervalRaw,
         outcome: attempt?.outcome ?? null,

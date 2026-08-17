@@ -68,6 +68,18 @@ a {
   white-space: nowrap;
 }
 
+/*
+ * Переключатель с подписью.
+ *
+ * Общий, а не «настроек»: галочка с текстом справа выглядит одинаково на любом
+ * экране, и третья её копия разошлась бы с первыми двумя.
+ */
+.toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
 .stack {
   display: flex;
   flex-direction: column;

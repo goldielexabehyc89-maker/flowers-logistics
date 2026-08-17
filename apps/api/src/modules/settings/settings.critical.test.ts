@@ -172,6 +172,79 @@ describe('время обслуживания', () => {
   });
 });
 
+describe('ручная отгрузка', () => {
+  async function readManualIssueOverHttp(token: string): Promise<{
+    value: { enabled: boolean };
+    version: number;
+  }> {
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/settings/planning',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.statusCode).toBe(200);
+    return (response.json() as { manualIssue: { value: { enabled: boolean }; version: number } })
+      .manualIssue;
+  }
+
+  it('сохранённое значение возвращается вместе с версией', async () => {
+    const token = await tokenFor(['ADMIN']);
+    const before = await readManualIssueOverHttp(token);
+
+    const off = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/planning/manual-issue',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { value: { enabled: false }, expectedVersion: before.version },
+    });
+    expect(off.statusCode).toBe(200);
+
+    const disabled = await readManualIssueOverHttp(token);
+    expect(disabled.value.enabled).toBe(false);
+    expect(disabled.version).toBe(before.version + 1);
+
+    const on = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/planning/manual-issue',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { value: { enabled: true }, expectedVersion: disabled.version },
+    });
+    expect(on.statusCode).toBe(200);
+    expect((await readManualIssueOverHttp(token)).value.enabled).toBe(true);
+  });
+
+  it('устаревшая версия отклоняется, значение остаётся прежним', async () => {
+    const token = await tokenFor(['ADMIN']);
+    const before = await readManualIssueOverHttp(token);
+
+    const response = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/planning/manual-issue',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { value: { enabled: !before.value.enabled }, expectedVersion: before.version + 10 },
+    });
+    expect(response.statusCode).toBe(409);
+    expect((await readManualIssueOverHttp(token)).value).toEqual(before.value);
+  });
+
+  it('логист значение видит, но переключить не может', async () => {
+    const logist = await tokenFor(['LOGISTICIAN']);
+    // Видеть обязан: от настройки зависит, есть ли у него кнопка отгрузки.
+    const seen = await readManualIssueOverHttp(logist);
+
+    const response = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/planning/manual-issue',
+      headers: { authorization: `Bearer ${logist}` },
+      payload: { value: { enabled: !seen.value.enabled }, expectedVersion: seen.version },
+    });
+    expect(response.statusCode).toBe(403);
+
+    const admin = await tokenFor(['ADMIN']);
+    expect((await readManualIssueOverHttp(admin)).value).toEqual(seen.value);
+  });
+});
+
 describe('права', () => {
   it('логист читает настройки, но не меняет их', async () => {
     const token = await tokenFor(['LOGISTICIAN']);

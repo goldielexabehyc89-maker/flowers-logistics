@@ -36,7 +36,7 @@ import { isDadataAllowed } from './geocoding/enabled.js';
 import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { setSuggestionsStatus } from '../integrations/dadata/status.js';
 import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
-import { addressState } from './address.js';
+import { addressState, effectiveAddress } from './address.js';
 import {
   MAX_QUERY_LENGTH,
   MIN_QUERY_LENGTH,
@@ -429,13 +429,20 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     const searching = query.search !== undefined && query.search !== '';
 
     if (searching) {
-      // Поиск идёт по тем полям, которые логист реально помнит: номер заказа,
-      // адрес и получатель. Регистр не важен — номер часто набирают латиницей
-      // и в нижнем регистре.
+      /*
+       * Поиск идёт по тем полям, которые логист реально помнит: номер заказа,
+       * адрес и получатель. Регистр не важен — номер часто набирают латиницей
+       * и в нижнем регистре.
+       *
+       * Адрес проверяется в обоих видах. Рабочим может быть локальная правка,
+       * и заказ, найденный глазами в карточке по исправленному адресу, обязан
+       * находиться по нему же поиском.
+       */
       conditions.push({
         OR: [
           { externalName: { contains: query.search, mode: 'insensitive' } },
           { address: { contains: query.search, mode: 'insensitive' } },
+          { localAddress: { contains: query.search, mode: 'insensitive' } },
           { recipient: { contains: query.search, mode: 'insensitive' } },
         ],
       });
@@ -611,7 +618,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           startMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
           endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
           // Рабочий адрес: по нему поедет курьер.
-          address: order.localAddress ?? order.address,
+          address: effectiveAddress(order),
           // Разные визуальные состояния берутся из факта участия, а не угадываются.
           assigned: participation !== undefined,
           routeId: participation?.route.id ?? null,
@@ -947,7 +954,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         orderId: row.id,
         number: row.externalName,
         // Адрес нужен подсказке при наведении: без него маркер не опознать.
-        address: row.localAddress ?? row.address,
+        address: effectiveAddress(row),
         lat: fromMicro(row.geoLatMicro ?? 0),
         lon: fromMicro(row.geoLonMicro ?? 0),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,

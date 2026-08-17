@@ -22,6 +22,7 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  Modal,
   Select,
   StatusBadge,
   TextInput,
@@ -35,6 +36,7 @@ import {
   remainingOf,
   resultDraftProblem,
   routeAccent,
+  routeLink,
   type ActiveOrderView,
   type ActiveRouteView,
   type AttemptView,
@@ -62,8 +64,16 @@ export function ActiveScreen(): React.JSX.Element {
   const { showToast } = useToast();
 
   const [routeFilter, setRouteFilter] = useState<string>('');
-  const [openOrderId, setOpenOrderId] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<DeliveryOutcome | null>(null);
+  /*
+   * Заказ и исход, ради которых открыто окно.
+   *
+   * Раскрытия карточки больше нет: результат — отдельное действие с явным
+   * подтверждением, а не форма, выросшая посреди списка и сдвинувшая
+   * соседние заказы под пальцем курьера.
+   */
+  const [asking, setAsking] = useState<{ order: ActiveOrderView; outcome: DeliveryOutcome } | null>(
+    null,
+  );
   const [reasonId, setReasonId] = useState<string | null>(null);
   const [comment, setComment] = useState('');
   const [now, setNow] = useState(() => new Date());
@@ -86,8 +96,7 @@ export function ActiveScreen(): React.JSX.Element {
   });
 
   function resetDraft(): void {
-    setOpenOrderId(null);
-    setOutcome(null);
+    setAsking(null);
     setReasonId(null);
     setComment('');
   }
@@ -210,30 +219,11 @@ export function ActiveScreen(): React.JSX.Element {
                 order={order}
                 minutes={minutes}
                 now={now}
-                reasons={reasonList}
-                open={openOrderId === order.routeOrderId}
                 busy={record.isPending || cancel.isPending}
-                outcome={outcome}
-                reasonId={reasonId}
-                comment={comment}
-                onOpen={(nextOutcome) => {
-                  setOpenOrderId(order.routeOrderId);
-                  setOutcome(nextOutcome);
+                onAsk={(nextOutcome) => {
+                  setAsking({ order, outcome: nextOutcome });
                   setReasonId(null);
                   setComment('');
-                }}
-                onOutcome={setOutcome}
-                onReason={setReasonId}
-                onComment={setComment}
-                onCancelDraft={resetDraft}
-                onSubmit={() => {
-                  if (outcome === null) return;
-                  record.mutate({
-                    routeOrderId: order.routeOrderId,
-                    outcome,
-                    ...(reasonId === null ? {} : { reasonId }),
-                    ...(comment.trim() === '' ? {} : { comment: comment.trim() }),
-                  });
                 }}
                 onCancelResult={(attemptId) => cancel.mutate(attemptId)}
               />
@@ -241,7 +231,157 @@ export function ActiveScreen(): React.JSX.Element {
           </div>
         </section>
       ))}
+
+      {/*
+        Окно подтверждения результата.
+
+        Одно на весь экран, а не по одному в каждой карточке: открыт всегда
+        ровно один вопрос, и список под ним не перестраивается.
+      */}
+      <ResultDialog
+        asking={asking}
+        reasons={reasonList}
+        reasonId={reasonId}
+        comment={comment}
+        busy={record.isPending}
+        onReason={setReasonId}
+        onComment={setComment}
+        onCancel={resetDraft}
+        onSubmit={() => {
+          if (asking === null) return;
+          record.mutate({
+            routeOrderId: asking.order.routeOrderId,
+            outcome: asking.outcome,
+            ...(asking.outcome === 'NOT_DELIVERED' && reasonId !== null ? { reasonId } : {}),
+            ...(asking.outcome === 'NOT_DELIVERED' && comment.trim() !== ''
+              ? { comment: comment.trim() }
+              : {}),
+          });
+        }}
+      />
     </div>
+  );
+}
+
+interface ResultDialogProps {
+  asking: { order: ActiveOrderView; outcome: DeliveryOutcome } | null;
+  reasons: FailureReasonView[];
+  reasonId: string | null;
+  comment: string;
+  busy: boolean;
+  onReason: (reasonId: string) => void;
+  onComment: (comment: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+}
+
+/**
+ * Подтверждение результата доставки.
+ *
+ * Компактное окно на один вопрос. У «Доставлен» полей нет вовсе — причина
+ * и комментарий там не существуют и не отправляются. У «Не доставлен» два
+ * обязательных поля: причина из справочника и описание случая.
+ *
+ * Отмена ничего не отправляет: закрытое окно не оставляет следа ни в базе,
+ * ни в списке.
+ */
+function ResultDialog(props: ResultDialogProps): React.JSX.Element {
+  const { asking } = props;
+  const failed = asking?.outcome === 'NOT_DELIVERED';
+
+  const problem =
+    asking === null
+      ? null
+      : resultDraftProblem(
+          { outcome: asking.outcome, reasonId: props.reasonId, comment: props.comment },
+          props.reasons,
+        );
+
+  return (
+    <Modal
+      open={asking !== null}
+      title={asking === null ? '' : `${outcomeLabel(asking.outcome)}: заказ ${asking.order.number}`}
+      onClose={props.onCancel}
+      dismissible={!props.busy}
+      testId="delivery-result-dialog"
+    >
+      <form
+        className="stack"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (problem === null) {
+            props.onSubmit();
+          }
+        }}
+      >
+        {failed ? (
+          <>
+            <Field label="Причина">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  data-testid="delivery-reason"
+                  value={props.reasonId ?? ''}
+                  onChange={(event) => props.onReason(event.target.value)}
+                  required
+                >
+                  <option value="">Выберите причину</option>
+                  {props.reasons
+                    .filter((reason) => reason.isActive)
+                    .map((reason) => (
+                      <option key={reason.id} value={reason.id}>
+                        {reason.name}
+                      </option>
+                    ))}
+                </Select>
+              )}
+            </Field>
+            <Field label="Комментарий" hint="Обязателен: опишите, что произошло">
+              {(fieldProps) => (
+                <TextInput
+                  {...fieldProps}
+                  data-testid="delivery-comment"
+                  value={props.comment}
+                  onChange={(event) => props.onComment(event.target.value)}
+                  maxLength={500}
+                  required
+                />
+              )}
+            </Field>
+          </>
+        ) : (
+          <p className="text-sm muted">
+            Заказ {asking?.order.number} будет отмечен доставленным. Отменить результат можно в
+            течение пяти минут.
+          </p>
+        )}
+
+        {problem === null ? null : (
+          <p className="field__error" role="alert" data-testid="delivery-problem">
+            {problem}
+          </p>
+        )}
+
+        <div className="modal__footer">
+          <Button
+            variant="ghost"
+            data-testid="delivery-dismiss"
+            onClick={props.onCancel}
+            disabled={props.busy}
+          >
+            Отмена
+          </Button>
+          <Button
+            type="submit"
+            variant="primary"
+            data-testid="delivery-submit"
+            disabled={props.busy || problem !== null}
+          >
+            Подтвердить
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -249,33 +389,16 @@ interface OrderCardProps {
   order: ActiveOrderView;
   minutes: number;
   now: Date;
-  reasons: FailureReasonView[];
-  open: boolean;
   busy: boolean;
-  outcome: DeliveryOutcome | null;
-  reasonId: string | null;
-  comment: string;
-  onOpen: (outcome: DeliveryOutcome) => void;
-  onOutcome: (outcome: DeliveryOutcome) => void;
-  onReason: (reasonId: string) => void;
-  onComment: (comment: string) => void;
-  onCancelDraft: () => void;
-  onSubmit: () => void;
+  onAsk: (outcome: DeliveryOutcome) => void;
   onCancelResult: (attemptId: string) => void;
 }
 
 function OrderCard(props: OrderCardProps): React.JSX.Element {
-  const { order, minutes, now, reasons } = props;
+  const { order, minutes, now } = props;
   const position = intervalPosition(order, minutes);
   const done = order.result !== null;
-
-  const problem =
-    props.outcome === null
-      ? null
-      : resultDraftProblem(
-          { outcome: props.outcome, reasonId: props.reasonId, comment: props.comment },
-          reasons,
-        );
+  const link = routeLink(order.point);
 
   return (
     <article
@@ -300,7 +423,32 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         </span>
       </div>
 
-      {order.address === null ? null : <div className="delivery__order-line">{order.address}</div>}
+      {order.address === null ? null : (
+        <div className="delivery__order-line">
+          {/*
+            Адрес ведёт в Яндекс Карты — к подтверждённой точке заказа, а не
+            к строке адреса: по строке карты найдут «примерно тот» дом, а
+            курьеру нужен именно тот, который подтвердил логист.
+
+            Без подтверждённой точки ссылки нет: догаданная координата увела
+            бы человека не туда с уверенным видом.
+          */}
+          {link === null ? (
+            <span data-testid="delivery-address">{order.address}</span>
+          ) : (
+            <a
+              className="delivery__address-link"
+              data-testid="delivery-address"
+              href={link}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Построить маршрут в Яндекс Картах"
+            >
+              {order.address}
+            </a>
+          )}
+        </div>
+      )}
       {order.recipient === null ? null : (
         <div className="delivery__order-muted">{order.recipient}</div>
       )}
@@ -322,73 +470,11 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
 
       {done ? <ResultRow result={order.result!} now={now} onCancel={props.onCancelResult} /> : null}
 
-      {done ? null : props.open ? (
-        <div className="delivery__form">
-          <Field label="Результат">
-            {(fieldProps) => (
-              <Select
-                {...fieldProps}
-                value={props.outcome ?? ''}
-                onChange={(event) => props.onOutcome(event.target.value as DeliveryOutcome)}
-              >
-                <option value="DELIVERED">Доставлен</option>
-                <option value="NOT_DELIVERED">Не доставлен</option>
-              </Select>
-            )}
-          </Field>
-
-          {props.outcome === 'NOT_DELIVERED' ? (
-            <>
-              <Field label="Причина">
-                {(fieldProps) => (
-                  <Select
-                    {...fieldProps}
-                    value={props.reasonId ?? ''}
-                    onChange={(event) => props.onReason(event.target.value)}
-                  >
-                    <option value="">Выберите причину</option>
-                    {reasons
-                      .filter((reason) => reason.isActive)
-                      .map((reason) => (
-                        <option key={reason.id} value={reason.id}>
-                          {reason.name}
-                        </option>
-                      ))}
-                  </Select>
-                )}
-              </Field>
-              <Field label="Комментарий" hint="Обязателен для причины «Другое»">
-                {(fieldProps) => (
-                  <TextInput
-                    {...fieldProps}
-                    value={props.comment}
-                    onChange={(event) => props.onComment(event.target.value)}
-                  />
-                )}
-              </Field>
-            </>
-          ) : null}
-
-          {problem === null ? null : <p className="delivery__warning">{problem}</p>}
-
-          <div className="delivery__actions">
-            <Button
-              data-testid="delivery-submit"
-              onClick={props.onSubmit}
-              disabled={props.busy || problem !== null}
-            >
-              Подтвердить
-            </Button>
-            <Button variant="secondary" onClick={props.onCancelDraft} disabled={props.busy}>
-              Отмена
-            </Button>
-          </div>
-        </div>
-      ) : (
+      {done ? null : (
         <div className="delivery__actions">
           <Button
             data-testid="delivery-open-delivered"
-            onClick={() => props.onOpen('DELIVERED')}
+            onClick={() => props.onAsk('DELIVERED')}
             disabled={props.busy}
           >
             Доставлен
@@ -396,7 +482,7 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
           <Button
             data-testid="delivery-open-failed"
             variant="secondary"
-            onClick={() => props.onOpen('NOT_DELIVERED')}
+            onClick={() => props.onAsk('NOT_DELIVERED')}
             disabled={props.busy}
           >
             Не доставлен

@@ -51,6 +51,8 @@ import {
 const MICRO = 1_000_000;
 
 interface PlanningSettingsResponse {
+  /** Ручная отгрузка без складского сканирования. Меняет только администратор. */
+  manualIssue: { value: { enabled: boolean }; version: number };
   shift: { value: { startMinute: number; endMinute: number } | null; version: number };
   serviceTime: {
     value: { carMinutes: number; footMinutes: number };
@@ -71,7 +73,10 @@ interface DepotView {
 }
 
 export function PlanningSettings(): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
+  // Настройку меняет только администратор — ровно как решает сервер.
+  // Логист её видит: иначе кнопка отгрузки появлялась бы и исчезала без причины.
+  const isAdmin = (user?.roles ?? []).includes('ADMIN');
   const queryClient = useQueryClient();
   const { showToast } = useToast();
 
@@ -109,7 +114,31 @@ export function PlanningSettings(): React.JSX.Element {
   const invalidate = async (): Promise<void> => {
     await queryClient.invalidateQueries({ queryKey: ['planning-settings'] });
     await queryClient.invalidateQueries({ queryKey: ['depots'] });
+    // Вкладка маршрутных листов питается той же настройкой: без этого кнопка
+    // «Отгрузить» меняла бы состояние только после перезагрузки страницы.
+    await queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
   };
+
+  /**
+   * Переключение ручной отгрузки.
+   *
+   * Значение уходит вместе с ожидаемой версией: настройка версионируется,
+   * и слепая перезапись чужого переключения здесь так же недопустима, как
+   * в маршруте. После сохранения список настроек и вкладка маршрутных листов
+   * перечитываются — кнопка «Отгрузить» обязана появиться или исчезнуть сразу.
+   */
+  const saveManualIssue = useMutation({
+    mutationFn: (enabled: boolean) =>
+      client.put('/api/settings/planning/manual-issue', {
+        value: { enabled },
+        expectedVersion: settings.data?.manualIssue.version ?? 0,
+      }),
+    onSuccess: async (_result, enabled) => {
+      await invalidate();
+      showToast(enabled ? 'Ручная отгрузка разрешена' : 'Ручная отгрузка запрещена', 'success');
+    },
+    onError: (error: unknown) => showToast(errorText(error), 'error'),
+  });
 
   const saveShift = useMutation({
     mutationFn: () =>
@@ -235,6 +264,29 @@ export function PlanningSettings(): React.JSX.Element {
 
       {settings.data === undefined ? null : (
         <>
+          <div className="stack" data-testid="manual-issue-form">
+            <h3>Ручная отгрузка</h3>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                data-testid="manual-issue-toggle"
+                checked={settings.data.manualIssue.value.enabled}
+                disabled={!isAdmin || saveManualIssue.isPending}
+                onChange={(event) => saveManualIssue.mutate(event.target.checked)}
+              />
+              Разрешить логисту отгружать маршрутные листы без сканирования
+            </label>
+            <p className="muted text-sm">
+              Отгрузка без складского сканирования. Используйте, только если заказы фактически
+              переданы курьеру.
+            </p>
+            {isAdmin ? null : (
+              <p className="muted text-sm" data-testid="manual-issue-readonly">
+                Изменяет только администратор.
+              </p>
+            )}
+          </div>
+
           <form
             className="stack"
             data-testid="shift-form"

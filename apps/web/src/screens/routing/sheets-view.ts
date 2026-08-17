@@ -67,13 +67,29 @@ export function canShip(sheet: SheetView, manualIssueEnabled: boolean): boolean 
   return manualIssueEnabled && sheet.courier !== null;
 }
 
-/** Почему отгрузка недоступна. `null` — доступна. */
+/**
+ * Показывать ли кнопку отгрузки вообще.
+ *
+ * При выключенной настройке кнопки нет: погашенная кнопка обещает действие,
+ * которого в этом контуре не существует, и логист раз за разом возвращается
+ * к ней в поисках, что же ещё нажать.
+ */
+export function showsShipButton(manualIssueEnabled: boolean): boolean {
+  return manualIssueEnabled;
+}
+
+/**
+ * Почему отгрузка недоступна. `null` — доступна.
+ *
+ * Возвращает причину и для выключенной настройки: она нужна там, где кнопку
+ * всё же показывают (например, в объяснении на самой вкладке).
+ */
 export function shipBlockedReason(sheet: SheetView, manualIssueEnabled: boolean): string | null {
   if (!manualIssueEnabled) {
     return 'Ручная отгрузка выключена администратором';
   }
   if (sheet.courier === null) {
-    return 'Сначала назначьте курьера';
+    return 'Сначала назначьте курьера: без него отгружать некому';
   }
   return null;
 }

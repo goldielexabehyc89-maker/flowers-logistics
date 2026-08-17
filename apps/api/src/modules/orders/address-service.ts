@@ -24,8 +24,14 @@ import { enqueueGeocoding } from './geocoding/queue.js';
 /** Адрес правят только логист и администратор. Проверяет сервер, а не экран. */
 export const ADDRESS_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 
-/** События заказов видят те же роли: курьеру глобальный поток не нужен. */
-const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * События заказов видят те же роли.
+ *
+ * Курьер включён намеренно: исправленный адрес обязан дойти до «Активных»
+ * без перезагрузки. В событии нет ни адреса, ни получателя — только повод
+ * перечитать собственный список.
+ */
+const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN', 'COURIER'] as const;
 
 export const MAX_ADDRESS_LENGTH = 500;
 

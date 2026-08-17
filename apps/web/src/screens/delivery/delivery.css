@@ -85,6 +85,22 @@
   overflow-wrap: anywhere;
 }
 
+/*
+ * Адрес-ссылка на карты.
+ *
+ * Подчёркивание оставлено намеренно: это единственная ссылка в карточке,
+ * и курьер должен видеть, что по адресу можно нажать, ещё до нажатия.
+ * Палец у него занят коробкой, а не изучением интерфейса.
+ */
+.delivery__address-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  /* Цель нажатия крупнее самой строки: экран используют на ходу. */
+  display: inline-block;
+  padding: 2px 0;
+}
+
 .delivery__order-muted {
   color: var(--text-muted, #666);
   font-size: 13px;

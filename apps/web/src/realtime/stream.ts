@@ -168,10 +168,31 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * ключа исправленный заказ появлялся на карте только после F5.
    */
   'order.created': [...DEALS_SCREEN, ['status']],
-  'order.updated': [...DEALS_SCREEN, ['status']],
-  'order.scope_changed': [...DEALS_SCREEN, ['status']],
-  'order.geo_changed': [...DEALS_SCREEN, ['map-points']],
-  'order.address_changed': [...DEALS_SCREEN, ['map-points'], ['address-history']],
+  /*
+   * Правка заказа доходит до ВСЕХ, кто его показывает.
+   *
+   * Интервал и адрес живут не только в «Сделках»: их печатает маршрутный лист,
+   * состав маршрута и список активных доставок курьера. Пока здесь стояли одни
+   * «Сделки», второй сеанс — и особенно курьер в дороге — видел старый адрес
+   * и старое время до перезагрузки страницы.
+   */
+  'order.updated': [
+    ...DEALS_SCREEN,
+    ...ROUTING_SCREEN,
+    ...DELIVERY_SCREEN,
+    ['order-window'],
+    ['status'],
+  ],
+  'order.scope_changed': [...DEALS_SCREEN, ...ROUTING_SCREEN, ['status']],
+  'order.geo_changed': [...DEALS_SCREEN, ...DELIVERY_SCREEN, ['map-points'], ['order-window']],
+  'order.address_changed': [
+    ...DEALS_SCREEN,
+    ...ROUTING_SCREEN,
+    ...DELIVERY_SCREEN,
+    ['map-points'],
+    ['address-history'],
+    ['order-window'],
+  ],
 
   /*
    * Производственные события трогают очередь флориста И «Сделки»: признак

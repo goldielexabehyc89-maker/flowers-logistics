@@ -54,6 +54,37 @@ function seedOrders(count: number, options: { withPoint: boolean }): string[] {
   return numbers;
 }
 
+/** Складская фикстура: маршрут с курьером и заказами, подтверждённый лист. */
+function seedWarehouseRoute(): {
+  route: string;
+  courierPhone: string;
+  courierPin: string;
+  orders: string[];
+} {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-warehouse'], {
+    encoding: 'utf8',
+  });
+  const value = (label: string): string =>
+    output.match(new RegExp(`^${label}:\\s*(.+)$`, 'm'))?.[1]?.trim() ?? '';
+  const orders = [...output.matchAll(/^заказ:\s*(.+)$/gm)].map((match) => match[1]?.trim() ?? '');
+
+  const route = value('маршрут');
+  if (route === '' || orders.length === 0) {
+    throw new Error('сеялка склада не вернула маршрут и заказы');
+  }
+  return {
+    route,
+    courierPhone: value('курьер'),
+    courierPin: value('пин курьера'),
+    orders,
+  };
+}
+
+/** Московский день: тот же, что показывает интерфейс. */
+function today(): string {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date());
+}
+
 const ADMIN_PHONE = process.env['E2E_ADMIN_PHONE'] ?? '+79990000001';
 const ADMIN_CODE = process.env['E2E_ADMIN_CODE'] ?? '';
 const ADMIN_PIN = '2481';
@@ -1961,8 +1992,29 @@ test('курьер: досрочность, «Не доставлен» с пр�
   // 1. Первый заказ: обычная доставка. Заказ дня ещё не в интервале, поэтому
   // экран предупреждает о досрочности — но подтвердить разрешает.
   const first = page.locator(`[data-testid="delivery-order"][data-order-number="${firstOrder}"]`);
+  const dialog = page.getByTestId('delivery-result-dialog');
+
+  /*
+   * Результат подтверждается ОКНОМ, а не полями внутри карточки.
+   *
+   * Карточка при этом не отращивает форму и не сдвигает соседние заказы
+   * под пальцем курьера: проверяется и это.
+   */
   await first.getByTestId('delivery-open-delivered').click();
-  await first.getByTestId('delivery-submit').click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(firstOrder);
+  // У «Доставлен» полей нет вовсе: ни причины, ни комментария.
+  await expect(dialog.getByTestId('delivery-reason')).toHaveCount(0);
+  await expect(dialog.getByTestId('delivery-comment')).toHaveCount(0);
+  await expect(first.locator('.delivery__form')).toHaveCount(0);
+
+  // Отмена ничего не записывает: карточка остаётся без результата.
+  await page.getByTestId('delivery-dismiss').click();
+  await expect(dialog).toBeHidden();
+  await expect(first).toHaveAttribute('data-result', 'none');
+
+  await first.getByTestId('delivery-open-delivered').click();
+  await page.getByTestId('delivery-submit').click();
   await expect(first).toHaveAttribute('data-result', 'DELIVERED');
 
   // 2. Ошибку курьер исправляет сам: заказ снова открыт.
@@ -1971,16 +2023,26 @@ test('курьер: досрочность, «Не доставлен» с пр�
 
   // 3. Повторяем результат и закрываем второй заказ недоставкой с причиной.
   await first.getByTestId('delivery-open-delivered').click();
-  await first.getByTestId('delivery-submit').click();
+  await page.getByTestId('delivery-submit').click();
   await expect(first).toHaveAttribute('data-result', 'DELIVERED');
 
   const second = page.locator(`[data-testid="delivery-order"][data-order-number="${secondOrder}"]`);
   await second.getByTestId('delivery-open-failed').click();
-  await second.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
-  // Кнопка активна только при заполненном черновике: если причина не выбрана,
-  // отказ произойдёт здесь и будет назван, а не спрячется за общим таймаутом.
-  await expect(second.getByTestId('delivery-submit')).toBeEnabled();
-  await second.getByTestId('delivery-submit').click();
+  await expect(dialog).toBeVisible();
+
+  /*
+   * Комментарий обязателен при ЛЮБОЙ причине.
+   *
+   * Проверяется именно это правило: причина выбрана, а кнопка подтверждения
+   * молчит, пока курьер не описал случай словами.
+   */
+  await page.getByRole('combobox', { name: 'Причина' }).selectOption({ label: 'Нет ответа' });
+  await expect(page.getByTestId('delivery-submit')).toBeDisabled();
+  await expect(page.getByTestId('delivery-problem')).toContainText('комментарий');
+
+  await page.getByTestId('delivery-comment').fill('звонил трижды, никто не открыл');
+  await expect(page.getByTestId('delivery-submit')).toBeEnabled();
+  await page.getByTestId('delivery-submit').click();
   // Состояние карточки здесь не проверяется намеренно: это ПОСЛЕДНИЙ заказ,
   // его результат завершает маршрут, и список активных доставок пустеет —
   // карточки больше не существует. Доказательством служат ответ сервера
@@ -3650,7 +3712,8 @@ test('история и отчёты: тариф, доставка, расчёт
   );
   await expect(courierCard).toBeVisible({ timeout: 20_000 });
   await courierCard.getByTestId('delivery-open-delivered').click();
-  await courierCard.getByTestId('delivery-submit').click();
+  // Подтверждение живёт в окне, а не в карточке: карточка только открывает его.
+  await courierPage.getByTestId('delivery-submit').click();
   /*
    * Состояние карточки не проверяется: это единственный заказ маршрута, его
    * результат завершает маршрут, и список активных доставок пустеет. Факт
@@ -4148,5 +4211,226 @@ test('маршрутизация: точка дня без номера и пу�
       return root.scrollWidth - root.clientWidth;
     });
     expect(overflow).toBeLessThanOrEqual(1);
+  }
+});
+
+/**
+ * Рабочий адрес, ручной интервал и подтверждение результата.
+ *
+ * Один сеанс логиста правит адрес и интервал, второй сеанс — курьерский —
+ * обязан увидеть правку без перезагрузки. Проверяется то, ради чего всё это
+ * и делается: курьер едет по адресу логиста, ко времени логиста и строит
+ * маршрут к подтверждённой точке.
+ */
+test('«Активные»: рабочий адрес, интервал 10:00–14:00 и ссылка на карты', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  /*
+   * Собственная фикстура сценария.
+   *
+   * Чужие маршруты к этому месту уже завершены соседними сценариями, а нам
+   * нужен ЖИВОЙ активный маршрут с курьером: иначе «Активные» пусты, и
+   * проверять нечего.
+   */
+  const seeded = seedWarehouseRoute();
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  /*
+   * Лист отгружается ТОЙ ЖЕ доменной операцией, что и кнопкой в интерфейсе.
+   *
+   * Складской путь со сканированием проверяет отдельный сценарий; здесь нужен
+   * лишь активный маршрут, и подделывать состояние базы ради него нельзя.
+   */
+  const sheets = await page.request.get('/api/route-sheets?section=UNSHIPPED&limit=100', {
+    headers: authorized,
+  });
+  const sheetList = (await sheets.json()) as {
+    days: { sheets: { id: string; number: string; version: number }[] }[];
+  };
+  const target = sheetList.days
+    .flatMap((day) => day.sheets)
+    .find((item) => item.number === seeded.route);
+  expect(target, 'маршрут фикстуры не найден в листах').toBeTruthy();
+
+  const shipped = await page.request.post(`/api/routes/${target?.id ?? ''}/ship`, {
+    headers: authorized,
+    data: { expectedVersion: target?.version ?? 0 },
+  });
+  expect(shipped.status(), await shipped.text()).toBe(200);
+
+  /*
+   * 1. Ручной интервал 10:00–14:00 сохраняется из окна заказа.
+   *
+   * Прежде окно посылало версию под чужим именем поля, и совершенно
+   * корректный интервал получал общее «Проверьте правильность заполнения
+   * полей». Проверяется именно этот путь — тот, которым пользуется логист.
+   */
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+
+  const sheet = page.locator(`[data-sheet-number="${seeded.route}"]`).first();
+  await expect(sheet).toBeVisible({ timeout: 20_000 });
+  if ((await sheet.getAttribute('data-expanded')) !== 'true') {
+    await sheet.getByTestId('sheet-expand').click();
+  }
+  await sheet
+    .locator(`[data-order-number="${seeded.orders[0] ?? ''}"]`)
+    .getByTestId('order-number')
+    .click();
+
+  const orderWindow = page.getByTestId('order-window');
+  await expect(orderWindow).toBeVisible();
+  await orderWindow.getByTestId('order-window-interval').click();
+
+  await page.getByLabel('Начало').fill('10:00');
+  await page.getByLabel('Окончание').fill('14:00');
+  await clickAndAwait(
+    page,
+    page.getByRole('button', { name: 'Сохранить интервал' }),
+    'PUT',
+    '/interval',
+  );
+  await expect(page.locator('.toast-region')).toContainText('Интервал сохранён');
+
+  // 2. Рабочий адрес: правка логиста сильнее исходного значения источника.
+  const localAddress = `Москва, проверочный адрес логиста ${Date.now() % 100000}`;
+  const order = await page.request.get(
+    `/api/orders?deliveryDate=${today()}&search=${encodeURIComponent(seeded.orders[0] ?? '')}`,
+    { headers: authorized },
+  );
+  const found = (await order.json()) as { items: { id: string; version: number }[] };
+  const orderId = found.items[0]?.id ?? '';
+  expect(orderId).not.toBe('');
+
+  /*
+   * Вместе с адресом логист подтверждает точку.
+   *
+   * Именно она потом уходит в ссылку на карты: строка адреса для маршрута
+   * не годится — по ней карты находят «примерно тот» дом.
+   */
+  const saved = await page.request.put(`/api/orders/${orderId}/address`, {
+    headers: authorized,
+    data: { address: localAddress, point: { latMicro: 55_751_244, lonMicro: 37_618_423 } },
+  });
+  expect(saved.status(), await saved.text()).toBe(200);
+
+  /*
+   * 3. Второй сеанс — курьер — видит и адрес, и интервал БЕЗ перезагрузки.
+   *
+   * Страница курьера открывается заранее и больше не перезагружается:
+   * доказательство держится на канале событий, а не на F5.
+   */
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+  await login(courierPage, seeded.courierPhone, seeded.courierPin);
+  await expect(courierPage.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  const card = courierPage.locator(
+    `[data-testid="delivery-order"][data-order-number="${seeded.orders[0] ?? ''}"]`,
+  );
+  await expect(card).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByTestId('delivery-address')).toHaveText(localAddress, { timeout: 20_000 });
+  await expect(card).toContainText('10:00–14:00', { timeout: 20_000 });
+
+  /*
+   * 4. Адрес ведёт в Яндекс Карты — к подтверждённой точке заказа.
+   *
+   * Проверяется именно координата, а не строка адреса: карты по строке
+   * находят «примерно тот» дом, а курьеру нужен подтверждённый логистом.
+   */
+  const href = (await card.getByTestId('delivery-address').getAttribute('href')) ?? '';
+  expect(href).toBe('https://yandex.ru/maps/?rtext=~55.751244,37.618423&rtt=auto');
+  await expect(card.getByTestId('delivery-address')).toHaveAttribute('target', '_blank');
+  await expect(card.getByTestId('delivery-address')).toHaveAttribute('rel', /noopener/);
+
+  // Ключей и подключаемых сценариев карт в странице нет: обычная ссылка.
+  const scripts = await courierPage.evaluate<number>(
+    'document.querySelectorAll(\'script[src*="yandex"], script[src*="api-maps"]\').length',
+  );
+  expect(scripts).toBe(0);
+
+  // 5. Телефон и настольный экран: карточка не уезжает вбок.
+  for (const size of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await courierPage.setViewportSize(size);
+    await expect(card).toBeVisible();
+    const overflow = await courierPage.evaluate<number>(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+  }
+
+  await courierContext.close();
+  await context.close();
+});
+
+/**
+ * Ручная отгрузка настраивается администратором и видна логисту сразу.
+ *
+ * Кнопка «Отгрузить» существует ровно тогда, когда владелец это разрешил:
+ * погашенная кнопка обещала бы действие, которого в контуре нет.
+ */
+test('настройки: переключатель ручной отгрузки прячет и возвращает кнопку', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  const toggle = page.getByTestId('manual-issue-toggle');
+  await expect(toggle).toBeVisible();
+  // Значение по умолчанию сохранено и показано, а не придумано экраном.
+  await expect(toggle).toBeChecked();
+  await expect(page.getByTestId('manual-issue-form')).toContainText('фактически переданы курьеру');
+
+  // Выключение доходит до вкладки листов без перезагрузки.
+  await clickAndAwait(page, toggle, 'PUT', '/settings/planning/manual-issue');
+  await expect(toggle).not.toBeChecked();
+
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByTestId('sheet-ship')).toHaveCount(0);
+
+  // Возвращаем разрешение: кнопка снова на месте.
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await clickAndAwait(page, page.getByTestId('manual-issue-toggle'), 'PUT', '/manual-issue');
+  await expect(page.getByTestId('manual-issue-toggle')).toBeChecked();
+
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  const unshipped = page.getByTestId('sheets-UNSHIPPED');
+  await expect(unshipped).toBeVisible();
+  const anySheet = unshipped.locator('[data-testid="sheet-row"]').first();
+  if ((await anySheet.count()) > 0) {
+    // Кнопка есть; без курьера она недоступна и объясняет причину.
+    const ship = anySheet.getByTestId('sheet-ship');
+    await expect(ship).toHaveCount(1);
+    const courier = await anySheet.getByTestId('sheet-courier-combobox-field').inputValue();
+    if (courier === '') {
+      await expect(ship).toBeDisabled();
+      await expect(ship).toHaveAttribute('title', /курьера/i);
+    } else {
+      await expect(ship).toBeEnabled();
+    }
   }
 });

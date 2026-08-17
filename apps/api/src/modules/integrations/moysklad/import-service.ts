@@ -272,7 +272,7 @@ async function updateOrder(
   existing: StoredOrder,
   snapshot: OrderSnapshot,
   now: Date,
-  _options: ApplyOptions,
+  options: ApplyOptions,
 ): Promise<ApplyResult> {
   const previous = await previousSnapshot(tx, existing.id);
   const changedFields = diffSnapshots(previous, snapshot);
@@ -399,6 +399,23 @@ async function updateOrder(
     address: snapshot.address,
   });
 
+  /*
+   * Автоматический источник запроса: правка логиста, затем разобранный адрес.
+   *
+   * Строка `address` произвольного формата сюда не входит — по ней геокодер
+   * подбирает похожий дом, а не находит нужный. Это то же правило, по которому
+   * работает первый импорт.
+   */
+  const automaticBefore = automaticGeocodingAddress(existing);
+  const automaticAfter = automaticGeocodingAddress({
+    localAddress: existing.localAddress,
+    geocodeAddress: snapshot.geocodeAddress,
+    address: snapshot.address,
+  });
+
+  let geoState = existing.geoState;
+  let geoSource = existing.geoSource;
+
   if (geocodeQueryBefore !== geocodeQueryAfter) {
     const invalidated = await invalidateGeoOnAddressChange(tx, existing.id, {
       geoState: existing.geoState,
@@ -406,17 +423,47 @@ async function updateOrder(
       lonMicro: existing.geoLonMicro,
     });
 
-    // Задание здесь НЕ создаётся, и это правило, а не упущение.
-    //
-    // Обычное обновление заказа в МоемСкладе событием геокодирования не
-    // является. Прежняя точка снята выше — она относилась к другому адресу
-    // и молча увела бы курьера, — но обращаться к геокодеру за исторический
-    // заказ никто не просил. Заказ виден в «Требует внимания», и решение
-    // принимает человек: правкой адреса либо явной операторской командой.
-    //
-    // Автоматически в очередь попадают ровно два события: первый импорт
-    // нового заказа и ручная правка адреса логистом.
-    void invalidated;
+    if (invalidated) {
+      geoState = 'NEEDS_REVIEW';
+      geoSource = null;
+    }
+  }
+
+  /*
+   * Адрес, пригодный для геокодера, ВПЕРВЫЕ появился или действительно
+   * изменился — заказ отправляется на разрешение.
+   *
+   * Прежде задание здесь не создавалось вовсе, и это оставляло дыру ровно там,
+   * где адрес приходит вторым сообщением: заказ создавался пустым, склад
+   * дозаполнял `shipmentAddressFull`, повторный импорт молча приносил адрес —
+   * и заказ навсегда оставался без координат, потому что события «появился
+   * адрес» никто не фиксировал.
+   *
+   * Сравнивается именно автоматический источник, а не показываемый адрес:
+   * повторный импорт того же значения ничего не меняет и задания не создаёт,
+   * а смена одной квартиры или домофона не отправляет дом на повторный поиск.
+   *
+   * Пока действует правка логиста, источник равен ей и от изменений
+   * МоегоСклада не зависит: ни адрес человека, ни его точка не перетираются.
+   * Подтверждённую вручную точку `isGeocodable` не переспрашивает.
+   */
+  if (options.geocoding === true && automaticAfter !== null && automaticAfter !== automaticBefore) {
+    await enqueueGeocoding(
+      tx,
+      {
+        id: existing.id,
+        address: snapshot.address,
+        geocodeAddress: snapshot.geocodeAddress,
+        localAddress: existing.localAddress,
+        inScope: snapshot.inScope,
+        sourceArchived: snapshot.sourceArchived,
+        sourceMissing: false,
+        geoState,
+        geoSource,
+        geoGeneration: existing.geoGeneration,
+      },
+      now,
+    );
   }
 
   // Заказ мог уже лежать в маршруте. Из маршрута он НЕ удаляется: участие и история

@@ -40,7 +40,10 @@ export interface ActiveOrderView {
   orderId: string;
   position: number;
   number: string;
+  /** Рабочий адрес: правка логиста сильнее исходного значения источника. */
   address: string | null;
+  /** Подтверждённая точка. `null` — точки нет, и догадка не подставляется. */
+  point: { lat: string; lon: string } | null;
   recipient: string | null;
   comment: string | null;
   intervalStartMinute: number | null;
@@ -139,10 +142,40 @@ export function resultDraftProblem(
   if (draft.reasonId === null) return 'Выберите причину недоставки.';
   const reason = reasons.find((entry) => entry.id === draft.reasonId);
   if (reason === undefined || !reason.isActive) return 'Причина недоступна. Обновите список.';
-  if (reason.requiresComment && draft.comment.trim() === '') {
-    return 'Для причины «Другое» нужен комментарий.';
+  /*
+   * Комментарий обязателен при ЛЮБОЙ причине (решение владельца от 17.08.2026).
+   *
+   * Причина отвечает «что за случай», комментарий — «что именно произошло
+   * у этой двери». Без него разбирательство с клиентом упирается в восемь
+   * одинаковых строк «Нет ответа» без единой подробности. То же правило
+   * проверяет сервер: интерфейс объясняет, а не разрешает.
+   */
+  if (draft.comment.trim() === '') {
+    return 'Опишите, что произошло: комментарий обязателен.';
   }
   return null;
+}
+
+/**
+ * Ссылка на Яндекс Карты к подтверждённой точке заказа.
+ *
+ * `rtext=~lat,lon` означает «маршрут от моего места до этой точки»: курьеру
+ * нужен путь, а не булавка на карте. Ключей и подключаемых сценариев здесь
+ * нет — обычная ссылка, которую открывает браузер или приложение карт.
+ *
+ * `null`, если подтверждённой точки нет: вести человека по догаданной
+ * координате хуже, чем не дать ссылку вовсе.
+ */
+export function routeLink(point: { lat: string; lon: string } | null): string | null {
+  if (point === null) {
+    return null;
+  }
+  const lat = Number(point.lat);
+  const lon = Number(point.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+  return `https://yandex.ru/maps/?rtext=~${point.lat},${point.lon}&rtt=auto`;
 }
 
 /** Сколько заказов маршрута ещё без результата. */
