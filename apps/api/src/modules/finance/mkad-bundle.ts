@@ -3,79 +3,89 @@
  *
  * Загрузка через интерфейс убрана намеренно: от кольца зависят деньги, и оно
  * не должно меняться по нажатию кнопки. Точная геометрия входит в поставку
- * версионированным системным файлом с зафиксированными источником, датой
- * и лицензией; замена — только новой версией файла через обновление
- * приложения. Прежние версии и снимки расчётов при этом сохраняются: старые
- * начисления обязаны остаться такими, какими были.
+ * настоящим GeoJSON с зафиксированными источником, снимком, датой и лицензией;
+ * замена — только новой версией файла через обновление приложения. Прежние
+ * версии и снимки расчётов при этом сохраняются: старые начисления обязаны
+ * остаться такими, какими были.
  *
- * Загрузка идемпотентна: один и тот же файл не создаёт вторую версию, потому
+ * Действующая версия определяется ПОСТАВКОЙ, а не последней строкой в базе:
+ * отпечаток геометрии из manifest указывает на конкретную версию кольца.
+ * Иначе откат приложения на прежнюю версию оставил бы действующей геометрию,
+ * которой в этой поставке уже нет.
+ *
+ * Установка идемпотентна: один и тот же файл не создаёт вторую версию, потому
  * что версии различаются отпечатком геометрии.
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Database } from '../../platform/db.js';
-import { parseRing, ringSha256, storeRing, type RingPoint } from './mkad.js';
+import { writeAudit } from '../audit/service.js';
+import { MkadBundleError, parseBundle, type MkadBundle } from './mkad-geojson.js';
+import { storeRing, type RingPoint } from './mkad.js';
+
+export type { MkadBundle } from './mkad-geojson.js';
+export { MkadBundleError } from './mkad-geojson.js';
 
 /** Где лежат системные файлы геометрии. Каталог входит в образ приложения. */
 const ASSETS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../assets/mkad');
 
-export interface MkadBundle {
-  version: string;
-  source: string;
-  license: string;
-  sourceDate: string;
-  derivation: string;
-  sha256: string;
-  points: RingPoint[];
+/**
+ * Чтение поставки.
+ *
+ * Отсутствие файла — не «геометрия пока не настроена», а негодная поставка:
+ * образ собран без обязательной части. Поэтому здесь исключение, а не `null`.
+ */
+export function readBundle(directory: string = ASSETS): MkadBundle {
+  let manifestRaw: unknown;
+  try {
+    manifestRaw = JSON.parse(readFileSync(path.join(directory, 'manifest.json'), 'utf8'));
+  } catch (error) {
+    throw new MkadBundleError(
+      `Системная геометрия МКАД негодна: manifest не прочитан (${directory}): ${String(error)}`,
+    );
+  }
+
+  const name = (manifestRaw as { geometry?: unknown }).geometry;
+  if (typeof name !== 'string' || name === '') {
+    throw new MkadBundleError('Системная геометрия МКАД негодна: manifest не называет файл.');
+  }
+
+  let geojsonRaw: unknown;
+  try {
+    geojsonRaw = JSON.parse(readFileSync(path.join(directory, name), 'utf8'));
+  } catch (error) {
+    throw new MkadBundleError(
+      `Системная геометрия МКАД негодна: файл ${name} не прочитан: ${String(error)}`,
+    );
+  }
+
+  return parseBundle(manifestRaw, geojsonRaw);
 }
 
 /**
- * Самый свежий файл поставки. `null` — файлов нет вовсе.
+ * Поставка читается один раз за жизнь процесса.
  *
- * Имя файла содержит версию, поэтому «самый свежий» определяется по имени,
- * а не по времени файла: у образа время создания одинаковое у всего.
+ * Файл в образе не меняется, а разбор включает проверку самопересечений:
+ * повторять её на каждом расчёте расстояния незачем.
  */
-export function readBundle(directory: string = ASSETS): MkadBundle | null {
-  let files: string[];
-  try {
-    files = readdirSync(directory).filter((name) => name.endsWith('.json'));
-  } catch {
-    return null;
-  }
-  if (files.length === 0) {
-    return null;
-  }
+let cached: MkadBundle | null = null;
 
-  const latest = files.sort().at(-1) ?? '';
-  const raw = JSON.parse(readFileSync(path.join(directory, latest), 'utf8')) as {
-    version: string;
-    source: string;
-    license: string;
-    sourceDate: string;
-    derivation: string;
-    sha256: string;
-    points: [number, number][];
-  };
-
-  const points = parseRing(raw.points);
-  const sha256 = ringSha256(points);
-  if (sha256 !== raw.sha256) {
-    // Отпечаток не сходится: файл повреждён или подменён. Молча брать такую
-    // геометрию нельзя — по ней считаются деньги.
-    throw new Error(`Отпечаток геометрии МКАД не совпадает с файлом ${latest}`);
+export function bundle(directory: string = ASSETS): MkadBundle {
+  if (cached === null || directory !== ASSETS) {
+    const value = readBundle(directory);
+    if (directory === ASSETS) {
+      cached = value;
+    }
+    return value;
   }
+  return cached;
+}
 
-  return {
-    version: raw.version,
-    source: raw.source,
-    license: raw.license,
-    sourceDate: raw.sourceDate,
-    derivation: raw.derivation,
-    sha256,
-    points,
-  };
+/** Только для проверок: сбрасывает разобранную поставку. */
+export function resetBundleCache(): void {
+  cached = null;
 }
 
 /**
@@ -83,27 +93,76 @@ export function readBundle(directory: string = ASSETS): MkadBundle | null {
  *
  * Вызывается при запуске приложения после миграций. Повторный запуск ничего
  * не меняет: та же геометрия имеет тот же отпечаток и остаётся той же версией.
+ * Новая версия файла добавляет новую неизменяемую строку, а прежние остаются
+ * вместе со ссылками прошлых расчётов.
  */
 export async function ensureBundledRing(
   db: Database,
   directory: string = ASSETS,
-): Promise<{ installed: boolean; version: string | null }> {
-  const bundle = readBundle(directory);
-  if (bundle === null) {
-    return { installed: false, version: null };
-  }
+): Promise<{ installed: boolean; version: string; ringVersionId: string }> {
+  const value = bundle(directory);
 
-  const existing = await db.mkadRingVersion.findUnique({ where: { sha256: bundle.sha256 } });
+  const existing = await db.mkadRingVersion.findUnique({ where: { sha256: value.sha256 } });
   if (existing !== null) {
-    return { installed: false, version: bundle.version };
+    return { installed: false, version: value.version, ringVersionId: existing.id };
   }
 
-  await storeRing(db, {
-    points: bundle.points,
-    source: `${bundle.source}. ${bundle.derivation}`,
-    license: bundle.license,
-    sourceDate: bundle.sourceDate,
+  const stored = await storeRing(db, {
+    points: value.points,
+    source: `${value.snapshotUrl} · отношение OSM ${value.osmRelationId} · ${value.derivation}`,
+    license: `${value.license}, ${value.attribution}`,
+    sourceDate: value.dataDate,
   });
 
-  return { installed: true, version: bundle.version };
+  /*
+   * В аудите — чем именно установлено кольцо, а не само кольцо.
+   *
+   * Координаты целиком в журнал не попадают: их десятки тысяч, и вопрос
+   * «какая геометрия действует» отвечается отпечатком и версией.
+   */
+  await writeAudit(db, {
+    action: 'FINANCE_MKAD_RING_INSTALLED',
+    entityType: 'MkadRingVersion',
+    entityId: stored.id,
+    actorUserId: null,
+    actorRoles: [],
+    source: 'bootstrap',
+    newValue: {
+      version: value.version,
+      sha256: value.sha256,
+      pointCount: value.pointCount,
+      lengthMeters: value.lengthMeters,
+      osmRelationId: value.osmRelationId,
+      dataDate: value.dataDate,
+      snapshotUrl: value.snapshotUrl,
+      snapshotMd5: value.snapshotMd5,
+      license: value.license,
+      builder: value.builder,
+    },
+    ip: null,
+    userAgent: null,
+  });
+
+  return { installed: true, version: value.version, ringVersionId: stored.id };
+}
+
+/**
+ * Действующая версия кольца.
+ *
+ * Не «последняя по времени», а ровно та, что лежит в поставке: версию
+ * назначает файл приложения, а не порядок строк в таблице.
+ */
+export async function activeRing(
+  db: Database,
+  directory: string = ASSETS,
+): Promise<{ id: string; points: RingPoint[]; sha256: string; version: string } | null> {
+  const value = bundle(directory);
+  const row = await db.mkadRingVersion.findUnique({
+    where: { sha256: value.sha256 },
+    select: { id: true },
+  });
+  if (row === null) {
+    return null;
+  }
+  return { id: row.id, points: value.points, sha256: value.sha256, version: value.version };
 }

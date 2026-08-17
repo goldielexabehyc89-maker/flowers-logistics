@@ -6,10 +6,9 @@
  * кольца и дорожный граф со временем меняются, а начисление за вчерашний
  * маршрут меняться не имеет права.
  *
- * Геометрия кольца НЕ зашита в код. Её загружает администратор отдельной
- * версией, и каждая версия неизменяема: придумывать «примерно кольцо» нельзя —
- * от него зависят деньги. Пока версии нет, расстояние не считается, а отчёт
- * честно говорит, что геометрия не загружена.
+ * Геометрия кольца НЕ зашита в код и не загружается через интерфейс: она
+ * приходит системным файлом поставки (`mkad-bundle.ts`), и каждая версия
+ * неизменяема. Придумывать «примерно кольцо» нельзя — от него зависят деньги.
  */
 
 import { createHash } from 'node:crypto';
@@ -158,20 +157,6 @@ export function toKmTenths(meters: number): number {
   return Math.round(meters / 100);
 }
 
-/** Действующая версия кольца. `null` — геометрия не загружена. */
-export async function activeRing(
-  db: Database,
-): Promise<{ id: string; points: RingPoint[] } | null> {
-  const row = await db.mkadRingVersion.findFirst({
-    orderBy: [{ createdAt: 'desc' }],
-    select: { id: true, points: true },
-  });
-  if (row === null) {
-    return null;
-  }
-  return { id: row.id, points: fromMicro(row.points) };
-}
-
 export interface StoreRingInput {
   points: RingPoint[];
   source: string;
@@ -233,6 +218,12 @@ export interface ComputeDistanceInput {
   graphSha256: string | null;
 }
 
+/** Действующее кольцо: его выбирает поставка, а не порядок строк в таблице. */
+export interface ActiveRing {
+  id: string;
+  points: RingPoint[];
+}
+
 export interface DistanceResult {
   meters: number;
   roundedKmTenths: number;
@@ -247,15 +238,10 @@ export interface DistanceResult {
  * него означал бы «за МКАД не выезжали», а это неправда.
  */
 export async function computeBeyondMkad(
-  db: Database,
+  ring: ActiveRing,
   router: DistanceRouter,
   input: ComputeDistanceInput,
 ): Promise<DistanceResult | null> {
-  const ring = await activeRing(db);
-  if (ring === null) {
-    return null;
-  }
-
   if (isInsideRing(ring.points, input.target)) {
     return { meters: 0, roundedKmTenths: 0, insideMkad: true };
   }

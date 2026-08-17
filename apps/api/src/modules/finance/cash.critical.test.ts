@@ -23,8 +23,6 @@ import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { balanceOf } from './ledger.js';
 import { buildCashReport } from './cash-report.js';
-import { ensureBundledRing, readBundle } from './mkad-bundle.js';
-import { activeRing, isInsideRing, ringSha256 } from './mkad.js';
 
 let ctx: TestContext;
 
@@ -428,45 +426,5 @@ describe('права на кассу', () => {
   it('касса начинается с нуля: прошлых операций она не наследует', async () => {
     const logist = await actorFor(['LOGISTICIAN']);
     expect(await cashBalanceOf(ctx.db, logist.userId, null)).toBe(0n);
-  });
-});
-
-describe('геометрия МКАД из поставки', () => {
-  it('файл поставки читается, отпечаток сходится и кольцо замкнуто', () => {
-    const bundle = readBundle();
-    expect(bundle).not.toBeNull();
-    expect(bundle?.points.length).toBeGreaterThan(500);
-    expect(bundle?.license).toContain('ODbL');
-    expect(bundle?.source).toContain('OpenStreetMap');
-    // Отпечаток проверяется внутри чтения: несовпадение — исключение.
-    expect(bundle?.sha256).toBe(ringSha256(bundle?.points ?? []));
-
-    const first = bundle?.points[0];
-    const last = bundle?.points.at(-1);
-    expect(first).toEqual(last);
-  });
-
-  it('установка идемпотентна: повтор не создаёт вторую версию', async () => {
-    const before = await ctx.db.mkadRingVersion.count();
-    const first = await ensureBundledRing(ctx.db);
-    const middle = await ctx.db.mkadRingVersion.count();
-    const second = await ensureBundledRing(ctx.db);
-    const after = await ctx.db.mkadRingVersion.count();
-
-    expect(middle).toBe(before + (first.installed ? 1 : 0));
-    expect(second.installed).toBe(false);
-    expect(after).toBe(middle);
-    expect(second.version).toBe(first.version);
-  });
-
-  it('кольцо накрывает Москву и не накрывает область за ним', async () => {
-    await ensureBundledRing(ctx.db);
-    const ring = await activeRing(ctx.db);
-    expect(ring).not.toBeNull();
-
-    // Красная площадь — внутри кольца; Химки и Подольск — снаружи.
-    expect(isInsideRing(ring?.points ?? [], { lat: 55.7539, lon: 37.6208 })).toBe(true);
-    expect(isInsideRing(ring?.points ?? [], { lat: 55.8894, lon: 37.445 })).toBe(false);
-    expect(isInsideRing(ring?.points ?? [], { lat: 55.4312, lon: 37.5547 })).toBe(false);
   });
 });

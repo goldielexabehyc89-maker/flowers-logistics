@@ -36,7 +36,8 @@ import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
 import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
-import { activeRing, computeBeyondMkad, saveDistanceSnapshot } from './mkad.js';
+import { computeBeyondMkad, saveDistanceSnapshot } from './mkad.js';
+import { activeRing, bundle } from './mkad-bundle.js';
 import { ValhallaClient } from '../integrations/valhalla/client.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf } from './export-pdf.js';
@@ -830,9 +831,17 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
 
   // --- Геометрия МКАД и расстояния ----------------------------------------
 
+  /**
+   * Состояние геометрии: только чтение.
+   *
+   * Действующей считается ровно та версия, отпечаток которой лежит в поставке,
+   * а не последняя строка таблицы: версию назначает файл приложения. Прежние
+   * версии показываются рядом — на них ссылаются снимки прошлых расчётов.
+   */
   app.get('/api/logistics/mkad', async (request) => {
     await authenticateWithRoles(request, deps, FINANCE_ROLES);
 
+    const shipped = bundle();
     const versions = await deps.db.mkadRingVersion.findMany({
       orderBy: [{ createdAt: 'desc' }],
       take: 20,
@@ -847,9 +856,23 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       },
     });
 
-    const current = versions[0] ?? null;
+    const current = versions.find((row) => row.sha256 === shipped.sha256) ?? null;
     return {
       configured: current !== null,
+      /** Что именно поставлено с приложением: источник, снимок и лицензия. */
+      bundled: {
+        version: shipped.version,
+        sha256: shipped.sha256,
+        osmRelationId: shipped.osmRelationId,
+        snapshotUrl: shipped.snapshotUrl,
+        snapshotMd5: shipped.snapshotMd5,
+        dataDate: shipped.dataDate,
+        pointCount: shipped.pointCount,
+        lengthMeters: shipped.lengthMeters,
+        license: shipped.license,
+        attribution: shipped.attribution,
+        builder: shipped.builder,
+      },
       active:
         current === null
           ? null
@@ -870,6 +893,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         license: row.license,
         sourceDate: row.sourceDate === null ? null : fromDateColumn(row.sourceDate),
         createdAt: row.createdAt.toISOString(),
+        active: row.sha256 === shipped.sha256,
       })),
     };
   });
@@ -921,7 +945,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       }
 
       const result = await computeBeyondMkad(
-        deps.db,
+        ring,
         {
           configured: router.configured,
           route: async (points, costing) => router.route(points, costing),

@@ -1,0 +1,10 @@
+{
+  "geometry": "mkad-2026-08-16.geojson",
+  "geometryVersion": "2026-08-16",
+  "geometrySha256": "aeaac009a445da1c258882a1ecc6833d7ea804cba589d5c79a52561f34e98972",
+  "osmRelationId": 2094222,
+  "dataDate": "2026-08-16",
+  "license": "ODbL-1.0",
+  "attribution": "© OpenStreetMap contributors",
+  "source": "https://download.geofabrik.de/russia/central-fed-district-260816.osm.pbf"
+}

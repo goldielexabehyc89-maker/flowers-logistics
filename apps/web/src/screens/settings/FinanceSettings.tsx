@@ -52,10 +52,25 @@ interface RingVersion {
   license: string | null;
   sourceDate: string | null;
   createdAt: string;
+  active?: boolean;
+}
+
+/** Что именно поставлено с приложением. Правке не подлежит: только чтение. */
+interface RingBundle {
+  version: string;
+  sha256: string;
+  osmRelationId: number;
+  snapshotUrl: string;
+  dataDate: string;
+  pointCount: number;
+  lengthMeters: number;
+  license: string;
+  attribution: string;
 }
 
 interface RingResponse {
   configured: boolean;
+  bundled: RingBundle;
   active: RingVersion | null;
   versions: RingVersion[];
 }
@@ -357,8 +372,8 @@ export function FinanceSettings(): React.JSX.Element {
           <h2>Геометрия МКАД</h2>
           <p className="muted text-sm">
             От неё считается расстояние за МКАД: дорожный путь от ближайшей точки кольца до адреса.
-            Загружается точная геометрия из названного источника; приблизительное кольцо система не
-            строит, потому что от него зависят деньги.
+            Точная геометрия входит в поставку приложения системным файлом; приблизительное кольцо
+            система не строит, потому что от него зависят деньги.
           </p>
         </div>
 
@@ -370,24 +385,27 @@ export function FinanceSettings(): React.JSX.Element {
           <>
             {ring.data.active === null ? (
               <p className="finance__warning" role="status" data-testid="mkad-missing">
-                Геометрия не загружена: расстояние за МКАД не считается, и в отчёте такие строки
-                показываются как «не рассчитано».
+                Геометрия из поставки не установлена: расстояние за МКАД не считается, и в отчёте
+                такие строки показываются как «не рассчитано».
               </p>
             ) : (
               <div className="finance__state" data-testid="mkad-active">
                 <p className="finance__ok">
-                  Действует версия от {formatMoscowDateTime(ring.data.active.createdAt)}, точек:{' '}
-                  {ring.data.active.pointCount}.
+                  Действует версия {ring.data.bundled.version}, точек:{' '}
+                  {ring.data.bundled.pointCount}, длина кольца:{' '}
+                  {(ring.data.bundled.lengthMeters / 1000).toFixed(1)} км.
                 </p>
                 <p className="muted text-sm">
-                  Источник: {ring.data.active.source}. Лицензия: {ring.data.active.license ?? '—'}.
-                  Актуальна на:{' '}
-                  {ring.data.active.sourceDate === null
-                    ? '—'
-                    : formatDate(ring.data.active.sourceDate)}
-                  .
+                  Источник: OpenStreetMap, отношение {ring.data.bundled.osmRelationId}, снимок{' '}
+                  {ring.data.bundled.snapshotUrl}. Данные на{' '}
+                  {formatDate(ring.data.bundled.dataDate)}.
                 </p>
-                <p className="muted text-sm">Отпечаток: {ring.data.active.sha256.slice(0, 16)}…</p>
+                <p className="muted text-sm">
+                  Лицензия: {ring.data.bundled.license}, {ring.data.bundled.attribution}.
+                </p>
+                <p className="muted text-sm" data-testid="mkad-sha">
+                  Отпечаток: {ring.data.bundled.sha256.slice(0, 16)}…
+                </p>
               </div>
             )}
 
@@ -398,7 +416,8 @@ export function FinanceSettings(): React.JSX.Element {
             */}
             <p className="muted text-sm">
               Геометрия поставляется вместе с приложением и обновляется новой версией файла при
-              обновлении. Прежние версии и снимки прошлых расчётов сохраняются.
+              обновлении. Прежние версии и снимки прошлых расчётов сохраняются. Вручную здесь
+              настраиваются только стоимость километра за МКАД и период действия тарифа.
             </p>
 
             {ring.data.versions.length > 1 && (
@@ -406,8 +425,9 @@ export function FinanceSettings(): React.JSX.Element {
                 <table className="finance__table" data-testid="mkad-versions">
                   <thead>
                     <tr>
-                      <th>Загружена</th>
+                      <th>Установлена</th>
                       <th>Точек</th>
+                      <th>Действует</th>
                       <th>Источник</th>
                       <th>Лицензия</th>
                       <th>Актуальна на</th>
@@ -418,6 +438,7 @@ export function FinanceSettings(): React.JSX.Element {
                       <tr key={item.id}>
                         <td>{formatMoscowDateTime(item.createdAt)}</td>
                         <td>{item.pointCount}</td>
+                        <td>{item.active === true ? 'да' : '—'}</td>
                         <td>{item.source}</td>
                         <td>{item.license ?? '—'}</td>
                         <td>{item.sourceDate === null ? '—' : formatDate(item.sourceDate)}</td>

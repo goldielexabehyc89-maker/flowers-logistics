@@ -3592,8 +3592,24 @@ test('история и отчёты: тариф, доставка, расчёт
    * Геометрия МКАД приходит с поставкой: загрузки через интерфейс нет.
    * Настройки показывают только состояние — версию, источник и лицензию.
    */
-  await expect(page.getByTestId('mkad-active')).toContainText('OpenStreetMap');
-  await expect(page.getByTestId('mkad-active')).toContainText('ODbL');
+  const mkad = page.getByTestId('mkad-active');
+  await expect(mkad).toContainText('OpenStreetMap');
+  await expect(mkad).toContainText('ODbL');
+  // Отношение, датированный снимок и версия названы прямо на экране.
+  await expect(mkad).toContainText('2094222');
+  await expect(mkad).toContainText('geofabrik');
+  await expect(page.getByTestId('mkad-sha')).toContainText('Отпечаток');
+
+  /*
+   * Управлять геометрией отсюда нельзя.
+   *
+   * Ни поля файла, ни кнопки загрузки: кольцо входит в поставку, и правятся
+   * здесь только тариф и стоимость километра за МКАД.
+   */
+  const settings = page.getByTestId('finance-settings');
+  await expect(settings.locator('input[type="file"]')).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: /геометри/i })).toHaveCount(0);
+  await expect(settings.getByRole('button', { name: /Загрузить/i })).toHaveCount(0);
 
   // 1. Обычный путь: сделка → лист → курьер → отгрузка.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
