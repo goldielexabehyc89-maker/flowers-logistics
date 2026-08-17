@@ -2075,16 +2075,18 @@ test('курьер: досрочность, «Не доставлен» с пр�
    * иначе семь равных по смыслу причин выглядят разными по весу.
    */
   const geometry = async (): Promise<{ widths: number[]; heights: number[] }> => {
-    const boxes = await reasons.evaluateAll((nodes: Element[]) =>
-      nodes.map((node) => {
-        const box = node.getBoundingClientRect();
-        return { width: box.width, height: box.height };
-      }),
-    );
-    return {
-      widths: boxes.map((box) => box.width),
-      heights: boxes.map((box) => box.height),
-    };
+    // Размеры берутся у каждой кнопки по отдельности: так измерение не зависит
+    // от того, что именно вернёт браузер из общего выражения.
+    const count = await reasons.count();
+    const widths: number[] = [];
+    const heights: number[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const box = await reasons.nth(index).boundingBox();
+      expect(box, `кнопка ${index}`).not.toBeNull();
+      widths.push(box?.width ?? 0);
+      heights.push(box?.height ?? 0);
+    }
+    return { widths, heights };
   };
 
   for (const size of [
@@ -4769,50 +4771,49 @@ test('два сеанса: справочник курьеров у админи
   const firstRow = admin.locator('.table tbody tr').first();
   await expect(firstRow).toBeVisible();
 
-  const centers = await firstRow.evaluate((row: Element) => {
-    /*
-     * Меряется центр САМОГО ТЕКСТА, а не ячейки.
-     *
-     * Ячейка растягивается на всю высоту строки при любом выравнивании,
-     * поэтому её середина совпала бы с кнопками даже тогда, когда текст
-     * прижат к верхнему краю. Диапазон по содержимому даёт настоящий
-     * прямоугольник строки текста.
-     */
-    const middleOf = (rect: DOMRect): number => rect.top + rect.height / 2;
-    const textMiddle = (cell: Element): number | null => {
+  /*
+   * Меряется центр САМОГО ТЕКСТА, а не ячейки.
+   *
+   * Ячейка растягивается на всю высоту строки при любом выравнивании, поэтому
+   * её середина совпала бы с кнопками даже тогда, когда текст прижат к
+   * верхнему краю. Диапазон по содержимому даёт настоящий прямоугольник
+   * строки текста.
+   *
+   * Опорой служит БЛОК действий, а не первая кнопка: на узком экране кнопки
+   * переносятся в две строки, и центр первой из них выше середины строки
+   * по построению.
+   */
+  const centers = (await admin.evaluate(`(() => {
+    const row = document.querySelector('.table tbody tr');
+    if (row === null) {
+      return null;
+    }
+    const middleOf = (rect) => rect.top + rect.height / 2;
+    const textMiddle = (cell) => {
       const range = document.createRange();
       range.selectNodeContents(cell);
       const rect = range.getBoundingClientRect();
       return rect.height === 0 ? null : middleOf(rect);
     };
 
-    /*
-     * Опорой служит БЛОК действий, а не первая кнопка.
-     *
-     * На узком экране кнопки переносятся в две строки, и центр первой из них
-     * оказывается выше середины строки по построению. Сравнивать с ним значит
-     * требовать невозможного; выравнивание же означает, что данные стоят
-     * на уровне середины ряда кнопок целиком.
-     */
     const actions = row.querySelector('td .row');
     return {
       button: actions === null ? null : middleOf(actions.getBoundingClientRect()),
       cells: Array.from(row.querySelectorAll('td'))
-        .filter(
-          (cell) => (cell.textContent ?? '').trim() !== '' && cell.querySelector('button') === null,
-        )
+        .filter((cell) => cell.textContent.trim() !== '' && cell.querySelector('button') === null)
         .map((cell) => ({
-          text: (cell.textContent ?? '').trim().slice(0, 20),
+          text: cell.textContent.trim().slice(0, 20),
           middle: textMiddle(cell),
         })),
     };
-  });
+  })()`)) as { button: number | null; cells: { text: string; middle: number | null }[] } | null;
 
-  expect(centers.button).not.toBeNull();
-  expect(centers.cells.length).toBeGreaterThanOrEqual(4);
-  for (const cell of centers.cells) {
+  expect(centers, 'строка таблицы не найдена').not.toBeNull();
+  expect(centers?.button).not.toBeNull();
+  expect(centers?.cells.length ?? 0).toBeGreaterThanOrEqual(4);
+  for (const cell of centers?.cells ?? []) {
     expect(cell.middle, cell.text).not.toBeNull();
-    expect(Math.abs((cell.middle ?? 0) - (centers.button ?? 0)), cell.text).toBeLessThanOrEqual(2);
+    expect(Math.abs((cell.middle ?? 0) - (centers?.button ?? 0)), cell.text).toBeLessThanOrEqual(2);
   }
 
   // Сервер тоже не отдаёт логисту чужие роли.
