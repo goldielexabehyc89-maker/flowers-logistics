@@ -30,7 +30,10 @@ import {
   cancelIssueSession,
   confirmCourier,
   issueOrder,
+  checkOrderForIssue,
   pickOrderToRouteCell,
+  resetIssueChecks,
+  shipRoute,
 } from './route-flow.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import { readAssemblyBoard } from './assembly-board.js';
@@ -481,6 +484,31 @@ export async function registerWarehouseFlowRoutes(
   });
 
   /** Отмена выдачи. Только администратор: уже выданное остаётся в истории. */
+  /** Внесение одного заказа в лист перед отгрузкой. Ничего не выдаёт. */
+  app.post('/api/warehouse/routes/:id/issue/check', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = z.object({ orderNumber: orderNumberSchema }).parse(request.body);
+
+    return checkOrderForIssue(flowDeps, actor, id, body, contextOf(request));
+  });
+
+  /** Сброс проверки: очищается только прогресс. */
+  app.post('/api/warehouse/routes/:id/issue/checks/reset', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    return resetIssueChecks(flowDeps, actor, id, contextOf(request));
+  });
+
+  /** Отгрузка ОДНОГО листа целиком одной транзакцией. */
+  app.post('/api/warehouse/routes/:id/ship', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+
+    return shipRoute(flowDeps, actor, id, contextOf(request));
+  });
+
   app.post('/api/warehouse/routes/:id/issue/cancel', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLOW_ADMIN_ROLES);
     const { id } = idParamSchema.parse(request.params);

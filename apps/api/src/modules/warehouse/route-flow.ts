@@ -704,6 +704,50 @@ export async function activateRouteWithinTransaction(
   });
 }
 
+/**
+ * Передача одной коробки курьеру ВНУТРИ уже открытой транзакции.
+ *
+ * Вынесено отдельно ровно затем, чтобы поштучная выдача и общая отгрузка
+ * листа выполняли одно и то же действие. Второй реализацией они разошлись бы
+ * в мелочах — и «выдано» на экране означало бы разное в зависимости от того,
+ * каким путём коробка уехала.
+ */
+async function releasePlacementToCourier(
+  tx: TransactionClient,
+  actor: AuthenticatedActor,
+  context: RequestContext,
+  input: {
+    placement: { id: string; cellId: string };
+    routeId: string;
+    orderId: string;
+    sessionId: string;
+    now: Date;
+  },
+): Promise<void> {
+  await tx.orderPlacement.update({
+    where: { id: input.placement.id },
+    data: {
+      releasedAt: input.now,
+      releasedById: actor.userId,
+      releaseReason: 'ISSUED_TO_COURIER',
+      issueSessionId: input.sessionId,
+    },
+  });
+
+  await writeAudit(tx, {
+    action: 'WAREHOUSE_ORDER_ISSUED',
+    entityType: 'OrderPlacement',
+    entityId: input.placement.id,
+    actorUserId: actor.userId,
+    actorRoles: actor.roles,
+    source: 'api',
+    oldValue: { cellId: input.placement.cellId },
+    newValue: { routeId: input.routeId, orderId: input.orderId, sessionId: input.sessionId },
+    ip: context.ip,
+    userAgent: context.userAgent,
+  });
+}
+
 export async function issueOrder(
   deps: FlowDeps,
   actor: AuthenticatedActor,
@@ -788,27 +832,12 @@ export async function issueOrder(
     }
 
     const now = new Date();
-    await tx.orderPlacement.update({
-      where: { id: current.id },
-      data: {
-        releasedAt: now,
-        releasedById: actor.userId,
-        releaseReason: 'ISSUED_TO_COURIER',
-        issueSessionId: session.id,
-      },
-    });
-
-    await writeAudit(tx, {
-      action: 'WAREHOUSE_ORDER_ISSUED',
-      entityType: 'OrderPlacement',
-      entityId: current.id,
-      actorUserId: actor.userId,
-      actorRoles: actor.roles,
-      source: 'api',
-      oldValue: { cellId: current.cellId },
-      newValue: { routeId, orderId: order.id, sessionId: session.id },
-      ip: context.ip,
-      userAgent: context.userAgent,
+    await releasePlacementToCourier(tx, actor, context, {
+      placement: current,
+      routeId,
+      orderId: order.id,
+      sessionId: session.id,
+      now,
     });
 
     const progress = await routeIssueProgress(tx, routeId);
@@ -1083,4 +1112,419 @@ export async function markRoutePlacementsForRelocation(
   });
 
   return marked.count;
+}
+
+// --- Проверка перед отгрузкой ------------------------------------------------
+
+export interface IssueCheckResult {
+  routeId: string;
+  orderId: string;
+  orderNumber: string;
+  /** Отметка уже стояла: повторный или конкурентный скан. */
+  unchanged: boolean;
+  checked: number;
+  total: number;
+}
+
+/**
+ * Прогресс проверки перед отгрузкой.
+ *
+ * Считается по ДЕЙСТВУЮЩИМ отметкам открытой сессии и действующему составу
+ * листа: заказ, выведенный из маршрута после проверки, перестаёт считаться
+ * внесённым, а не остаётся числом в счётчике.
+ */
+export async function issueCheckProgress(
+  tx: TransactionClient,
+  routeId: string,
+  sessionId: string | null,
+): Promise<{ checked: number; total: number; checkedOrderIds: Set<string> }> {
+  const participations = await tx.routeOrder.findMany({
+    where: { routeId, removedAt: null },
+    select: { orderId: true },
+  });
+  const orderIds = participations.map((row) => row.orderId);
+
+  if (sessionId === null || orderIds.length === 0) {
+    return { checked: 0, total: orderIds.length, checkedOrderIds: new Set() };
+  }
+
+  const marks = await tx.routeIssueCheck.findMany({
+    where: { sessionId, clearedAt: null, orderId: { in: orderIds } },
+    select: { orderId: true },
+  });
+  const checkedOrderIds = new Set(marks.map((row) => row.orderId));
+
+  return { checked: checkedOrderIds.size, total: orderIds.length, checkedOrderIds };
+}
+
+/**
+ * Внесение одного заказа в лист перед отгрузкой.
+ *
+ * Скан НИЧЕГО не выдаёт: размещение остаётся действующим, коробка стоит
+ * в ячейке. Это и есть смысл проверки — кладовщик собирает лист целиком
+ * и только после последней коробки происходит одна общая выдача. До неё
+ * можно уйти, сбросить проверку или обнаружить изменившийся состав,
+ * не выдав ни одного заказа.
+ */
+export async function checkOrderForIssue(
+  deps: FlowDeps,
+  actor: AuthenticatedActor,
+  routeId: string,
+  input: { orderNumber: string },
+  context: RequestContext,
+): Promise<IssueCheckResult> {
+  return deps.db.$transaction(async (tx: TransactionClient) => {
+    const route = await lockRoute(tx, routeId);
+    requireConfirmed(route);
+
+    const session = await tx.routeIssueSession.findFirst({
+      where: { routeId, state: 'OPEN' },
+      select: { id: true },
+    });
+    if (session === null) {
+      throw new AppError('CONFLICT', {
+        message: 'issue session is not open',
+        publicMessage: 'Сначала подтвердите назначенного курьера.',
+        conflict: { kind: 'ISSUE_SESSION_REQUIRED', routeNumber: route.number },
+      });
+    }
+
+    const order = await resolveOrderByNumber(tx, input.orderNumber);
+    const participation = await activeRouteOrder(tx, routeId, order.id);
+    if (participation === null) {
+      throw new AppError('CONFLICT', {
+        message: 'order is not in this route',
+        publicMessage: 'Этот заказ не входит в маршрутный лист.',
+        conflict: { kind: 'ORDER_NOT_IN_ROUTE', routeNumber: route.number, orderIds: [order.id] },
+      });
+    }
+
+    const blocked = blockingFlags(order);
+    if (blocked.length > 0) {
+      throw new AppError('CONFLICT', {
+        message: `order is blocked: ${blocked.join(',')}`,
+        publicMessage: blocked.includes('CANCELLED')
+          ? 'Заказ отменён — не выдавать.'
+          : 'Заказ помечен как проблемный: выдача недоступна.',
+        conflict: { kind: 'ORDER_BLOCKED', orderIds: [order.id] },
+      });
+    }
+
+    await assertReadyForIssue(tx, routeId, order.id, route.number);
+
+    /*
+     * Отметка вставляется с пропуском дубликата.
+     *
+     * Два кладовщика могут отсканировать одну коробку одновременно, и
+     * «сначала найти, потом вставить» такую гонку не ловит: параллельные
+     * транзакции не видят чужих незафиксированных вставок. Уникальный
+     * индекс ловит, и повтор становится обычным «уже внесено».
+     */
+    const inserted = await tx.routeIssueCheck.createMany({
+      data: [{ sessionId: session.id, orderId: order.id, checkedById: actor.userId }],
+      skipDuplicates: true,
+    });
+    const unchanged = inserted.count === 0;
+
+    const progress = await issueCheckProgress(tx, routeId, session.id);
+
+    if (!unchanged) {
+      await writeAudit(tx, {
+        action: 'WAREHOUSE_ISSUE_CHECKED',
+        entityType: 'RouteIssueSession',
+        entityId: session.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        source: 'api',
+        newValue: { routeId, orderId: order.id, checked: progress.checked },
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'warehouse.route_flow_changed',
+        payload: { routeId, orderId: order.id, action: 'ISSUE_CHECKED' },
+        audienceRoles: [...FLOW_AUDIENCE],
+      });
+    }
+
+    return {
+      routeId,
+      orderId: order.id,
+      orderNumber: order.number,
+      unchanged,
+      checked: progress.checked,
+      total: progress.total,
+    };
+  });
+}
+
+/**
+ * Сброс проверки.
+ *
+ * Очищается ТОЛЬКО прогресс: маршрут, размещения и соседние листы остаются
+ * как были. Отметки при этом не исчезают — они закрываются, и что именно
+ * вносили до сброса, видно и потом.
+ */
+export async function resetIssueChecks(
+  deps: FlowDeps,
+  actor: AuthenticatedActor,
+  routeId: string,
+  context: RequestContext,
+): Promise<{ routeId: string; cleared: number; checked: number; total: number }> {
+  return deps.db.$transaction(async (tx: TransactionClient) => {
+    const route = await lockRoute(tx, routeId);
+    requireConfirmed(route);
+
+    const session = await tx.routeIssueSession.findFirst({
+      where: { routeId, state: 'OPEN' },
+      select: { id: true },
+    });
+    if (session === null) {
+      throw new AppError('CONFLICT', {
+        message: 'issue session is not open',
+        publicMessage: 'Сначала подтвердите назначенного курьера.',
+        conflict: { kind: 'ISSUE_SESSION_REQUIRED', routeNumber: route.number },
+      });
+    }
+
+    const now = new Date();
+    const cleared = await tx.routeIssueCheck.updateMany({
+      where: { sessionId: session.id, clearedAt: null },
+      data: { clearedAt: now, clearedById: actor.userId },
+    });
+
+    if (cleared.count > 0) {
+      await writeAudit(tx, {
+        action: 'WAREHOUSE_ISSUE_CHECKS_RESET',
+        entityType: 'RouteIssueSession',
+        entityId: session.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        source: 'api',
+        newValue: { routeId, cleared: cleared.count },
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'warehouse.route_flow_changed',
+        payload: { routeId, action: 'ISSUE_CHECKS_RESET' },
+        audienceRoles: [...FLOW_AUDIENCE],
+      });
+    }
+
+    const progress = await issueCheckProgress(tx, routeId, session.id);
+    return { routeId, cleared: cleared.count, checked: progress.checked, total: progress.total };
+  });
+}
+
+export interface ShipRouteResult {
+  routeId: string;
+  routeNumber: string;
+  issued: number;
+  /** Лист уже был отгружен: повтор финального запроса ничего не выдал. */
+  unchanged: boolean;
+}
+
+/**
+ * Отгрузка ОДНОГО листа целиком одной транзакцией.
+ *
+ * Проверки повторяются здесь заново и под блокировкой строки маршрута.
+ * Между первым сканом и нажатием кнопки состав листа мог измениться, заказ
+ * мог быть отменён, курьер — заменён, а коробка — переставлена. Доверять
+ * накопленному прогрессу как разрешению нельзя: он говорит, что кладовщик
+ * видел коробки, а не что маршрут по-прежнему годен.
+ *
+ * Или выдаётся всё, или не выдаётся ничего: частично отгруженный лист
+ * означает коробки, разъехавшиеся по двум машинам.
+ */
+export async function shipRoute(
+  deps: FlowDeps,
+  actor: AuthenticatedActor,
+  routeId: string,
+  context: RequestContext,
+): Promise<ShipRouteResult> {
+  return deps.db.$transaction(async (tx: TransactionClient) => {
+    const route = await lockRoute(tx, routeId);
+
+    if (route.state === 'ACTIVE') {
+      /*
+       * Повтор финального запроса.
+       *
+       * Кнопка могла быть нажата дважды или ответ потерян по дороге. Лист
+       * уже уехал — это успех, а не ошибка, и второй выдачи не происходит.
+       */
+      const issued = await routeIssueProgress(tx, routeId);
+      return {
+        routeId,
+        routeNumber: route.number,
+        issued: issued.issued,
+        unchanged: true,
+      };
+    }
+
+    requireConfirmed(route);
+
+    const session = await tx.routeIssueSession.findFirst({
+      where: { routeId, state: 'OPEN' },
+      select: { id: true, courierUserId: true },
+    });
+    if (session === null) {
+      throw new AppError('CONFLICT', {
+        message: 'issue session is not open',
+        publicMessage: 'Сначала подтвердите назначенного курьера.',
+        conflict: { kind: 'ISSUE_SESSION_REQUIRED', routeNumber: route.number },
+      });
+    }
+
+    // Курьер листа мог смениться после подтверждения: коробки уехали бы
+    // не тому человеку.
+    const courier = await tx.deliveryRoute.findUniqueOrThrow({
+      where: { id: routeId },
+      select: { courierUserId: true },
+    });
+    if (courier.courierUserId === null || courier.courierUserId !== session.courierUserId) {
+      throw new AppError('CONFLICT', {
+        message: 'issue session courier differs from route courier',
+        publicMessage: 'Курьер маршрута изменился. Подтвердите курьера заново.',
+        conflict: { kind: 'ISSUE_SESSION_REQUIRED', routeNumber: route.number },
+      });
+    }
+    /*
+     * Курьер обязан быть действующим и сейчас.
+     *
+     * Между подтверждением и отгрузкой его могли заморозить: коробки
+     * уехали бы человеку, которому вход в систему уже закрыт.
+     */
+    await assertCourierAssignable(tx, actor, courier.courierUserId);
+
+    const participations = await tx.routeOrder.findMany({
+      where: { routeId, removedAt: null },
+      select: { orderId: true, order: { select: { externalName: true } } },
+      orderBy: { position: 'asc' },
+    });
+    if (participations.length === 0) {
+      throw new AppError('CONFLICT', {
+        message: 'route has no active orders',
+        publicMessage: 'В маршрутном листе нет заказов.',
+        conflict: { kind: 'ROUTE_EMPTY', routeNumber: route.number },
+      });
+    }
+
+    const progress = await issueCheckProgress(tx, routeId, session.id);
+    const now = new Date();
+
+    for (const participation of participations) {
+      if (!progress.checkedOrderIds.has(participation.orderId)) {
+        throw new AppError('CONFLICT', {
+          message: 'order is not checked',
+          publicMessage: `Заказ ${participation.order.externalName} ещё не внесён в лист.`,
+          conflict: { kind: 'ORDER_NOT_CHECKED', orderIds: [participation.orderId] },
+        });
+      }
+
+      const order = await tx.deliveryOrder.findUniqueOrThrow({
+        where: { id: participation.orderId },
+        select: {
+          id: true,
+          externalName: true,
+          inScope: true,
+          sourceArchived: true,
+          sourceMissing: true,
+          needsAttention: true,
+          cancelledInSource: true,
+          cancelledByLogistAt: true,
+        },
+      });
+      const blocked = blockingFlags({ ...order, number: order.externalName, deliveryDate: null });
+      if (blocked.length > 0) {
+        throw new AppError('CONFLICT', {
+          message: `order is blocked: ${blocked.join(',')}`,
+          publicMessage: blocked.includes('CANCELLED')
+            ? `Заказ ${order.externalName} отменён — не выдавать.`
+            : `Заказ ${order.externalName} помечен как проблемный: выдача недоступна.`,
+          conflict: { kind: 'ORDER_BLOCKED', orderIds: [order.id] },
+        });
+      }
+
+      const placement = await assertReadyForIssue(tx, routeId, order.id, route.number);
+
+      await releasePlacementToCourier(tx, actor, context, {
+        placement,
+        routeId,
+        orderId: order.id,
+        sessionId: session.id,
+        now,
+      });
+    }
+
+    await activateRouteWithinTransaction(tx, route, actor, context, now, {
+      issued: participations.length,
+      orderId: null,
+    });
+
+    await tx.routeIssueSession.update({
+      where: { id: session.id },
+      data: { state: 'COMPLETED', openKey: null, completedAt: now, version: { increment: 1 } },
+    });
+
+    return {
+      routeId,
+      routeNumber: route.number,
+      issued: participations.length,
+      unchanged: false,
+    };
+  });
+}
+
+/**
+ * Заказ готов к передаче курьеру: коробка стоит в ячейке ЭТОГО листа.
+ *
+ * Размещение берётся `FOR UPDATE`: между проверкой и выдачей его не должны
+ * переставить. Чужая маршрутная ячейка готовностью не считается — это полка
+ * другого курьера.
+ */
+async function assertReadyForIssue(
+  tx: TransactionClient,
+  routeId: string,
+  orderId: string,
+  routeNumber: string,
+): Promise<{ id: string; cellId: string }> {
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
+
+  const rows = await tx.$queryRaw<{ id: string; cellId: string; requiresRelocation: boolean }[]>`
+    SELECT "id", "cellId", "requiresRelocation" FROM "OrderPlacement"
+    WHERE "orderId" = ${orderId}::uuid AND "releasedAt" IS NULL FOR UPDATE
+  `;
+  const placement = rows[0] ?? null;
+
+  if (placement === null) {
+    throw new AppError('CONFLICT', {
+      message: 'order has no placement',
+      publicMessage: 'Заказа нет на складе: выдать его нельзя.',
+      conflict: { kind: 'ORDER_NOT_PLACED', orderIds: [orderId] },
+    });
+  }
+  if (placement.requiresRelocation) {
+    throw new AppError('CONFLICT', {
+      message: 'placement requires relocation',
+      publicMessage: 'Заказ требует перемещения: маршрут менялся после комплектования.',
+      conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', orderIds: [orderId] },
+    });
+  }
+
+  const binding = await tx.routeCellBinding.findFirst({
+    where: { routeId, cellId: placement.cellId, releasedAt: null },
+    select: { id: true },
+  });
+  if (binding === null) {
+    throw new AppError('CONFLICT', {
+      message: 'order is not in a route cell of this route',
+      publicMessage: 'Заказ не стоит в маршрутной ячейке этого листа.',
+      conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', routeNumber, orderIds: [orderId] },
+    });
+  }
+
+  return { id: placement.id, cellId: placement.cellId };
 }

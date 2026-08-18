@@ -100,6 +100,9 @@ export const AUDIT_ACTIONS = [
   'WAREHOUSE_COURIER_CONFIRMED',
   'WAREHOUSE_ORDER_ISSUED',
   'WAREHOUSE_ISSUE_CANCELLED',
+  // Проверка листа перед отгрузкой: внесение коробки и сброс проверки.
+  'WAREHOUSE_ISSUE_CHECKED',
+  'WAREHOUSE_ISSUE_CHECKS_RESET',
   // Маршрут физически передан курьеру и стал активным.
   'ROUTE_ISSUED_TO_COURIER',
   // Работа курьера (этап 6.6). В payload только идентификаторы, вид результата
