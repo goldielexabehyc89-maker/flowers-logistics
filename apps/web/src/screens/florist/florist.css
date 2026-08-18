@@ -308,6 +308,41 @@
   white-space: nowrap;
 }
 
+/*
+ * Факт смены карточкой: подпись сверху, значение под ней, обе по центру.
+ *
+ * Центр здесь не украшение. Значения разной длины — «18.08.2026, 12:44»
+ * и «1» — при выравнивании по левому краю выглядят как обрывки одной
+ * фразы; в карточке каждое читается само по себе, а строка не рвётся
+ * посередине даты.
+ */
+.florist__shift-fact {
+  flex: none;
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  min-width: 8.5rem;
+  padding: 4px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  text-align: center;
+}
+
+.florist__shift-fact-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+}
+
+.florist__shift-fact-value {
+  /* Дата не переносится: разорванное посередине время нечитаемо. */
+  white-space: nowrap;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
 .florist__shift-reason {
   flex: 1 1 auto;
   min-width: 0;
@@ -327,6 +362,12 @@
   .florist__shift-name {
     max-width: 100%;
     flex: 1 0 100%;
+  }
+
+  /* Обе карточки остаются в одной строке: они узкие и парные по смыслу. */
+  .florist__shift-fact {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .florist__shift-reason {

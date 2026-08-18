@@ -495,8 +495,23 @@ export function FloristScreen(): React.JSX.Element {
               */
               <li key={item.id} className="florist__shift" data-testid="shift-row">
                 <strong className="florist__shift-name">{item.userFullName}</strong>
-                <span className="muted text-sm">с {formatMoscowDateTime(item.startedAt)}</span>
-                <span className="muted text-sm">в сборке: {item.openAssignments}</span>
+                {/*
+                  Два факта смены — карточками с подписью над значением.
+                  Строкой «с 18.08.2026, 12:44 в сборке: 1» они сливались
+                  в сплошной текст и рвались переносом в произвольном месте:
+                  прочитать, где кончается время и начинается количество,
+                  можно было только вглядываясь.
+                */}
+                <span className="florist__shift-fact">
+                  <span className="florist__shift-fact-label">Смена с</span>
+                  <span className="florist__shift-fact-value">
+                    {formatMoscowDateTime(item.startedAt)}
+                  </span>
+                </span>
+                <span className="florist__shift-fact">
+                  <span className="florist__shift-fact-label">В сборке</span>
+                  <span className="florist__shift-fact-value">{item.openAssignments}</span>
+                </span>
                 <input
                   className="input florist__shift-reason"
                   aria-label={`Причина завершения смены ${item.userFullName}`}

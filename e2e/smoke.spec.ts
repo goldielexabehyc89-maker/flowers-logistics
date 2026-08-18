@@ -2193,6 +2193,37 @@ test('возврат: логист ждёт склад, склад приним�
   const before = Number((await tabCount.innerText()).trim());
   expect(before).toBeGreaterThan(0);
 
+  /*
+   * Счётчик стоит СПРАВА от названия, а не под ним.
+   *
+   * Проверяется геометрией, а не наличием: у вкладок верхней строки и у
+   * нижней мобильной полосы один и тот же класс, и стоит забыть раскладку —
+   * вкладка со счётчиком становится колонкой, вырастает вдвое и роняет
+   * названия соседних вкладок с общей строки.
+   */
+  const tabs = page.getByTestId('logistics-tabs').locator('.shell__tab');
+  const heights: number[] = [];
+  for (let index = 0; index < (await tabs.count()); index += 1) {
+    const box = await tabs.nth(index).boundingBox();
+    expect(box, `вкладка ${index}`).not.toBeNull();
+    heights.push(box?.height ?? 0);
+  }
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
+
+  const withCounter = await page
+    .getByTestId('logistics-tabs')
+    .locator('.shell__tab', { has: page.getByTestId('tab-count-resolutions') })
+    .boundingBox();
+  const counterBox = await tabCount.boundingBox();
+  expect(withCounter).not.toBeNull();
+  expect(counterBox).not.toBeNull();
+  // Число прижато к правому краю своей вкладки: значит, оно рядом с текстом.
+  const rightGap =
+    (withCounter?.x ?? 0) +
+    (withCounter?.width ?? 0) -
+    ((counterBox?.x ?? 0) + (counterBox?.width ?? 0));
+  expect(rightGap).toBeLessThanOrEqual(14);
+
   await page.getByRole('link', { name: 'Требуют решения' }).first().click();
   const row = page.locator(`[data-testid="resolution-row"][data-order-number="${orderNumber}"]`);
   await expect(row).toBeVisible();
