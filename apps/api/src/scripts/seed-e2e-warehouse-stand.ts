@@ -141,6 +141,13 @@ async function main(): Promise<number> {
     const routeCellA = await seedCell('RA-', 'ROUTE');
     const routeCellB = await seedCell('RB-', 'ROUTE');
     const routeCellC = await seedCell('RC-', 'ROUTE');
+    /*
+     * Свободная маршрутная полка.
+     *
+     * Без неё стенд не даёт проверить ни «В сборку» для листа без ячейки,
+     * ни «+ Доп. ячейка»: все остальные полки заняты.
+     */
+    const routeCellFree = await seedCell('RE-', 'ROUTE');
 
     let orderSeq = 0;
     async function seedOrder(
@@ -418,6 +425,7 @@ async function main(): Promise<number> {
       ['маршрутная ячейка A', routeCellA],
       ['маршрутная ячейка B', routeCellB],
       ['маршрутная ячейка C', routeCellC],
+      ['маршрутная ячейка свободная', routeCellFree],
       ['мл без ячейки', routeNoCell.number],
       ['мл собран', routeAssembled.number],
       ['мл частично', routePartial.number],

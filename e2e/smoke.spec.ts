@@ -6539,3 +6539,82 @@ test('камера: отказ, отсутствие устройства, об�
   await expect(brokenPage.locator('.toast-region')).toContainText(second);
   await broken.close();
 });
+
+/*
+ * Второй кладовщик видит чужую работу без перезагрузки.
+ *
+ * Назначенная полка, коробка, оставленная в хранении, и собранный целиком
+ * лист — всё это меняет работу второго человека прямо сейчас, а не после F5.
+ */
+test('два сеанса: ячейка, «Требуется перемещение» и переход в «Собранные»', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  const route = stand['мл без ячейки'] ?? '';
+  const freeCell = stand['маршрутная ячейка свободная'] ?? '';
+  const storage = stand['ячейка хранения A'] ?? '';
+  const first = stand['заказ ждёт приёмки'] ?? '';
+  const second = stand['заказ не собран'] ?? '';
+
+  const workerContext = await browser.newContext();
+  const watcherContext = await browser.newContext();
+  const worker = await workerContext.newPage();
+  const watcher = await watcherContext.newPage();
+
+  await login(watcher, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await watcher.getByTestId('wh-tab-picking').click();
+  const card = watcher.locator(`[data-testid="assembly-route"][data-route-number="${route}"]`);
+  await expect(card.getByTestId('assembly-route-cells')).toContainText('без ячейки');
+  await card.getByTestId('assembly-route-toggle').click();
+
+  await login(worker, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+
+  // 1. Первая коробка едет сразу в сборку и занимает свободную полку.
+  await worker.getByTestId('wh-scan-order').fill(first);
+  await worker.getByTestId('wh-scan-order').press('Enter');
+  await worker.getByTestId('wh-choice-assembly').click();
+  await worker.getByTestId('wh-scan-cell').fill(freeCell);
+  await worker.getByTestId('wh-place').click();
+  await expect(worker.locator('.toast-region')).toContainText(freeCell);
+
+  // Второй сеанс узнал о полке сам.
+  await expect(card.getByTestId('assembly-route-cells')).toContainText(freeCell);
+
+  // 2. Вторая коробка остаётся в хранении — это незаконченная работа.
+  await worker.getByTestId('wh-scan-order').fill(second);
+  await worker.getByTestId('wh-scan-order').press('Enter');
+  await worker.getByTestId('wh-choice-storage').click();
+  await worker.getByTestId('wh-scan-cell').fill(storage);
+  await worker.getByTestId('wh-place').click();
+  await expect(worker.locator('.toast-region')).toContainText(second);
+
+  // Второй сеанс видит и коробку в хранении, и её пометку.
+  const stored = card.locator('.wh-route__order', { hasText: second });
+  await expect(stored).toContainText('Требуется перемещение');
+  await expect(
+    watcher.getByTestId('assembly-active').locator(`[data-route-number="${route}"]`),
+  ).toBeVisible();
+
+  // 3. Коробку доносят до полки листа — лист собран целиком.
+  await worker.getByTestId('wh-scan-order').fill(second);
+  await worker.getByTestId('wh-scan-order').press('Enter');
+  await worker.getByTestId('wh-choice-assembly').click();
+  await worker.getByTestId('wh-scan-cell').fill(freeCell);
+  await worker.getByTestId('wh-place').click();
+  await expect(worker.locator('.toast-region')).toContainText(freeCell);
+
+  // Переход «Активные → Собранные» дошёл до второго сеанса без перезагрузки.
+  await expect(
+    watcher.getByTestId('assembly-active').locator(`[data-route-number="${route}"]`),
+  ).toHaveCount(0);
+  await watcher.getByTestId('assembly-assembled-toggle').click();
+  await expect(
+    watcher.getByTestId('assembly-assembled').locator(`[data-route-number="${route}"]`),
+  ).toBeVisible();
+
+  await workerContext.close();
+  await watcherContext.close();
+});
