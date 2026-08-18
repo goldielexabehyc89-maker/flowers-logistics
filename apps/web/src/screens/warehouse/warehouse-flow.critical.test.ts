@@ -48,7 +48,7 @@ function view(orders: RouteFlowOrderView[]): RouteFlowView {
     version: 1,
     deliveryDate: '2027-05-04',
     courier: { id: 'c', fullName: 'Курьер' },
-    routeCell: { id: 'rc', code: 'R-01' },
+    routeCells: [{ id: 'rc', code: 'R-01' }],
     issueSession: null,
     orders,
   };

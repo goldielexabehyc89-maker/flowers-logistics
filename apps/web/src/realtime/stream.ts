@@ -132,6 +132,11 @@ const WAREHOUSE_SCREEN: string[][] = [
   ['warehouse-placements'],
   ['warehouse-routes'],
   ['warehouse-route'],
+  // Доска сборки: подтверждённый лист, назначенная ячейка и переставленная
+  // коробка обязаны появляться у кладовщика сами. Без этого ключа экран
+  // показывал бы вчерашнюю картину до перезагрузки.
+  ['warehouse-assembly'],
+  ['warehouse-returns'],
 ];
 const FLORIST_SCREEN: string[][] = [
   ['florist-queue'],

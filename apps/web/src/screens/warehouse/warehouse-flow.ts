@@ -48,7 +48,8 @@ export interface RouteFlowView {
   version: number;
   deliveryDate: string;
   courier: { id: string; fullName: string } | null;
-  routeCell: { id: string; code: string } | null;
+  /** Маршрутные ячейки листа: их может быть несколько. */
+  routeCells: { id: string; code: string }[];
   issueSession: { id: string; courierUserId: string; state: IssueSessionState } | null;
   orders: RouteFlowOrderView[];
 }
@@ -64,7 +65,7 @@ export interface ScanContext {
     kind: StorageCellKind;
     requiresRelocation: boolean;
   } | null;
-  route: { id: string; number: string; routeCell: { id: string; code: string } | null } | null;
+  route: { id: string; number: string; routeCells: { id: string; code: string }[] } | null;
 }
 
 /** Человеческие названия признаков, блокирующих обычную работу. */

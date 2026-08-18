@@ -669,9 +669,11 @@ function StorageTab(): React.JSX.Element {
             {scanned.route !== null && (
               <p className="muted text-sm" data-testid="wh-order-route">
                 Заказ входит в подтверждённый лист {scanned.route.number}
-                {scanned.route.routeCell === null
+                {scanned.route.routeCells.length === 0
                   ? '. Маршрутная ячейка ещё не привязана.'
-                  : `. Маршрутная ячейка: ${scanned.route.routeCell.code}.`}
+                  : `. Маршрутные ячейки: ${scanned.route.routeCells
+                      .map((cell) => cell.code)
+                      .join(', ')}.`}
               </p>
             )}
 
@@ -1133,7 +1135,11 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
             </div>
             <div>
               <div className="field__label">Маршрутная ячейка</div>
-              <span data-testid="wh-route-cell">{view.routeCell?.code ?? 'не привязана'}</span>
+              <span data-testid="wh-route-cell">
+                {view.routeCells.length === 0
+                  ? 'не привязана'
+                  : view.routeCells.map((cell) => cell.code).join(', ')}
+              </span>
             </div>
             <div>
               <div className="field__label">{mode === 'picking' ? 'Скомплектовано' : 'Выдано'}</div>
@@ -1147,7 +1153,7 @@ function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
 
           {mode === 'picking' && view.state === 'CONFIRMED' && (
             <>
-              {view.routeCell === null ? (
+              {view.routeCells.length === 0 ? (
                 <div className="stack">
                   <ScanField
                     label="Маршрутная ячейка"

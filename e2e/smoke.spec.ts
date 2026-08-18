@@ -1210,7 +1210,25 @@ test('Сделки: точный выбор → расчёт → превью �
    */
   await expect(page.getByText('Загружаем черновики…')).toHaveCount(0);
   await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
-  const draftsBefore = await page.getByTestId('routing-drafts').locator('.routes__draft').count();
+
+  /*
+   * Число читается ДВА раза подряд и принимается, только когда совпало.
+   *
+   * Список черновиков подтягивается запросом, и однократный счёт мог
+   * попасть в промежуток между «загрузка кончилась» и «данные пришли»:
+   * дальше проверка сравнивала ноль с настоящим числом и падала
+   * не там, где ошибка.
+   */
+  const draftsLocator = page.getByTestId('routing-drafts').locator('.routes__draft');
+  let draftsBefore = await draftsLocator.count();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await page.waitForTimeout(250);
+    const again = await draftsLocator.count();
+    if (again === draftsBefore) {
+      break;
+    }
+    draftsBefore = again;
+  }
 
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
@@ -1922,38 +1940,82 @@ test('склад: приёмка → комплектование → пауза
   const placed = page.locator('[data-testid="wh-placement-row"]', { hasText: firstOrder });
   await expect(placed).toContainText(storageCell);
 
-  // 2. Комплектование: привязка маршрутной ячейки и перенос первого заказа.
+  /*
+   * 2. Комплектование в новом разделе «Сборка».
+   *
+   * Кладовщик открывает лист по НОМЕРУ — это окно последовательной
+   * проверки, — и вносит заказы парой «заказ + ячейка». Ячейка листа
+   * назначается тем же действием: отдельного шага «сначала привяжите
+   * полку» у человека с коробкой в руках нет.
+   */
   await page.getByTestId('wh-tab-picking').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText('не привязана');
+  const routeCard = page.locator(
+    `[data-testid="assembly-route"][data-route-number="${routeNumber}"]`,
+  );
+  await expect(routeCard).toBeVisible();
+  await expect(routeCard.getByTestId('assembly-route-cells')).toContainText('без ячейки');
 
-  await page.getByTestId('wh-bind-cell').fill(routeCell);
-  await page.getByTestId('wh-bind-submit').click();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
+  await routeCard.getByTestId('assembly-route-number').click();
+  const check = page.getByTestId('assembly-check');
+  await expect(check).toBeVisible();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 0 из 2');
 
-  // Ручной путь требует ту же пару «заказ → ячейка», что и камера: код ячейки
-  // из карточки листа больше не подставляется.
-  await page.getByTestId('wh-pick-order').fill(firstOrder);
-  await page.getByTestId('wh-pick-order').press('Enter');
-  await expect(page.getByTestId('wh-pick-scanned')).toHaveText(firstOrder);
-  await page.getByTestId('wh-pick-cell').fill(routeCell);
-  await page.getByTestId('wh-pick-submit').click();
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
+  /*
+   * Ручного ввода на экране нет: настройка выключена по умолчанию.
+   *
+   * Набранный руками номер доказывает только то, что человек его набрал,
+   * поэтому обычный режим работы — камера и аппаратный сканер.
+   */
+  await expect(page.getByTestId('assembly-check-manual')).toHaveCount(0);
 
-  // 3. Пауза и продолжение: уходим на другую вкладку и возвращаемся.
+  // Администратор разрешает ручной ввод — изменение действует сразу.
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const settings = await page.request.get('/api/settings/planning', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const version = ((await settings.json()) as { warehouseManualEntry: { version: number } })
+    .warehouseManualEntry.version;
+  const enabled = await page.request.put('/api/settings/warehouse/manual-entry', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { value: { enabled: true }, expectedVersion: version },
+  });
+  expect(enabled.status()).toBe(200);
+
+  await page.reload();
+  await page.getByTestId('wh-tab-picking').click();
+  await routeCard.getByTestId('assembly-route-number').click();
+  await expect(page.getByTestId('assembly-check-manual')).toBeVisible();
+
+  await page.getByTestId('assembly-check-manual-order').fill(firstOrder);
+  await page.getByTestId('assembly-check-manual-cell').fill(routeCell);
+  await check.getByRole('button', { name: 'Внести' }).click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 1 из 2');
+
+  // 3. Пауза и продолжение: закрываем окно, уходим на другую вкладку.
+  await page.getByTestId('assembly-check-done').click();
   await page.getByTestId('wh-tab-storage').click();
   await expect(page.getByTestId('wh-scan-order')).toBeVisible();
   await page.getByTestId('wh-tab-picking').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  // Прогресс не потерян.
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
 
-  await page.getByTestId('wh-pick-order').fill(secondOrder);
-  await page.getByTestId('wh-pick-order').press('Enter');
-  await expect(page.getByTestId('wh-pick-scanned')).toHaveText(secondOrder);
-  await page.getByTestId('wh-pick-cell').fill(routeCell);
-  await page.getByTestId('wh-pick-submit').click();
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
+  // Ячейка листа назначилась вместе с первым заказом и видна в карточке.
+  await expect(routeCard.getByTestId('assembly-route-cells')).toContainText(routeCell);
+
+  await routeCard.getByTestId('assembly-route-number').click();
+  // Прогресс не потерян: он выведен из того, что коробка стоит в ячейке.
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 1 из 2');
+
+  await page.getByTestId('assembly-check-manual-order').fill(secondOrder);
+  await page.getByTestId('assembly-check-manual-cell').fill(routeCell);
+  await check.getByRole('button', { name: 'Внести' }).click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 2');
+  await page.getByTestId('assembly-check-done').click();
+
+  // Полностью собранный лист ушёл в свёрнутую группу «Собранные».
+  await expect(page.getByTestId('assembly-assembled-toggle')).toBeVisible();
+  await expect(page.getByTestId('assembly-assembled-count')).not.toHaveText('0');
 
   // 4. Выдача: сначала подтверждение курьера, затем заказы по одному.
   await page.getByTestId('wh-tab-issue').click();
@@ -3030,11 +3092,11 @@ test('склад с камеры: приёмка, комплектование �
   // 1. Приёмка: камера открывается только по нажатию и ведёт пару шагов.
   expect(await cameraRunning()).toBe(false);
   await page.getByTestId('wh-scan-camera').click();
-  await expect(hint).toHaveText('Сканируйте QR заказа');
+  await expect(hint).toHaveText('Наведите камеру на QR-код заказа');
   expect(await cameraRunning()).toBe(true);
 
   await scan(firstOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR ячейки');
+    await expect(hint).toHaveText('Наведите камеру на QR-код ячейки');
   });
   await scan(storageCell, async () => {
     await expect(success).toContainText(firstOrder);
@@ -3050,46 +3112,48 @@ test('склад с камеры: приёмка, комплектование �
   // Второй заказ — новое нажатие: камера сама не запускается.
   await page.getByTestId('wh-scan-camera').click();
   await scan(secondOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR ячейки');
+    await expect(hint).toHaveText('Наведите камеру на QR-код ячейки');
   });
   await scan(storageCell, async () => {
     await expect(success).toContainText(secondOrder);
   });
   await expect(page.getByTestId('wh-scan-camera')).toBeVisible();
 
-  // 2. Комплектование: пара «заказ → маршрутная ячейка» для КАЖДОГО заказа.
+  /*
+   * 2. Комплектование камерой: пара «заказ → маршрутная ячейка».
+   *
+   * Быстрый скан «Сборки» сам находит лист заказа, а свободную полку
+   * назначает листу тем же действием: у человека с коробкой в руках нет
+   * отдельного шага «сначала привяжите ячейку».
+   */
   await page.getByTestId('wh-tab-picking').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  await page.getByTestId('wh-bind-cell').fill(routeCell);
-  await page.getByTestId('wh-bind-submit').click();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
-
-  await page.getByTestId('wh-pick-camera').click();
+  await page.getByTestId('assembly-scan').click();
   await scan(firstOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+    await expect(hint).toHaveText('Наведите камеру на QR-код маршрутной ячейки');
   });
 
-  // Чужая ячейка отказывает и ничего не переносит.
+  // Ячейка хранения маршрутной не становится: отказ и возврат к тому же шагу.
   await scan(storageCell, async () => {
     await expect(page.getByTestId('scan-error')).toBeVisible();
   });
   await page.getByTestId('scan-retry').click();
-  await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+  await expect(hint).toHaveText('Наведите камеру на QR-код маршрутной ячейки');
 
   await scan(routeCell, async () => {
     await expect(success).toContainText(firstOrder);
   });
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
 
   // Второй заказ — новая пара и новое нажатие.
-  await page.getByTestId('wh-pick-camera').click();
+  await page.getByTestId('assembly-scan').click();
   await scan(secondOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+    await expect(hint).toHaveText('Наведите камеру на QR-код маршрутной ячейки');
   });
   await scan(routeCell, async () => {
     await expect(success).toContainText(secondOrder);
   });
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
+
+  // Лист собран целиком и ушёл в свёрнутую группу «Собранные».
+  await expect(page.getByTestId('assembly-assembled-count')).not.toHaveText('0');
 
   // 3. Выдача: курьер подтверждается до камеры, сессия одна на весь лист.
   await page.getByTestId('wh-tab-issue').click();
@@ -3102,7 +3166,7 @@ test('склад с камеры: приёмка, комплектование �
     await expect(success).toContainText('1 из 2');
   });
   // Камера не закрылась между заказами.
-  await expect(hint).toHaveText('Сканируйте QR заказа');
+  await expect(hint).toHaveText('Наведите камеру на QR-код заказа');
   expect(await cameraRunning()).toBe(true);
 
   // Повтор того же заказа честно сообщает, что он уже выдан, и не двигает счётчик.
@@ -5219,7 +5283,7 @@ test('два сеанса: подтверждение листа доходит 
   await login(keeperPage, keeper.phone, keeper.pin);
   await expect(keeperPage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
   await keeperPage.getByTestId('wh-tab-picking').click();
-  await expect(keeperPage.getByTestId('wh-route-date')).toBeVisible();
+  await expect(keeperPage.getByTestId('assembly-scan')).toBeVisible();
 
   /*
    * Логист собирает лист из «Сделок» и подтверждает его.
@@ -5251,7 +5315,7 @@ test('два сеанса: подтверждение листа доходит 
 
   // Склад увидел подтверждённый лист сам, без перезагрузки.
   await expect(
-    keeperPage.getByTestId('wh-route-button').filter({ hasText: sheetNumber }),
+    keeperPage.locator(`[data-testid="assembly-route"][data-route-number="${sheetNumber}"]`),
   ).toHaveCount(1, { timeout: 25_000 });
 
   // Флорист увидел заказ листа в очереди — приоритет задаёт именно лист.
@@ -5310,7 +5374,8 @@ test('два сеанса: смена курьера доходит до скл�
   const keeperContext = await browser.newContext();
   const keeperPage = await keeperContext.newPage();
   await login(keeperPage, keeper.phone, keeper.pin);
-  await keeperPage.getByTestId('wh-tab-picking').click();
+  // Курьер листа виден в «Выдаче»: именно там кладовщик его подтверждает.
+  await keeperPage.getByTestId('wh-tab-issue').click();
 
   const sheetButton = keeperPage.getByTestId('wh-route-button').filter({ hasText: seeded.route });
   await expect(sheetButton).toHaveCount(1, { timeout: 25_000 });
