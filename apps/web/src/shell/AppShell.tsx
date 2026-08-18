@@ -135,8 +135,14 @@ export function AppShell(): React.JSX.Element {
     queryFn: () => client.get<{ unresolved: number }>('/api/logistics/resolutions/count'),
     enabled: logisticsVisible,
   });
-  const counters: Readonly<Record<string, number>> = {
-    resolutions: unresolved.data?.unresolved ?? 0,
+  /*
+   * До ответа сервера счётчика нет вовсе.
+   *
+   * Ноль в этот момент — не число, а отсутствие данных, и показывать его
+   * значило бы сказать «нерешённых нет» тогда, когда мы этого ещё не знаем.
+   */
+  const counters: Readonly<Record<string, number | undefined>> = {
+    resolutions: unresolved.data?.unresolved,
   };
   const mobile = splitMobileNavigation(roles);
 

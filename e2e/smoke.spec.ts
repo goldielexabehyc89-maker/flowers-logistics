@@ -2129,6 +2129,23 @@ test('курьер: досрочность, «Не доставлен» с пр�
   // 4. Последний результат завершил маршрут: активных доставок не осталось.
   await expect(page.getByText('Активных доставок нет')).toBeVisible();
 
+  /*
+   * 4а. Букет из машины никуда не делся вместе с маршрутом.
+   *
+   * Это главная проверка возврата: маршрут закрыт, список активных пуст,
+   * а обязательство вернуть недоставленный заказ на складе осталось на
+   * экране красным блоком. Исчезни оно вместе с маршрутом — товар
+   * компании уехал бы домой к курьеру без единой записи.
+   */
+  const returns = page.getByTestId('delivery-returns');
+  await expect(returns).toBeVisible();
+  const returned = returns.locator(`[data-order-number="${secondOrder}"]`);
+  await expect(returned).toContainText('У курьера');
+  await expect(returned).toContainText('Передайте заказ кладовщику');
+
+  await returned.getByTestId('delivery-return-departing').click();
+  await expect(returned).toContainText('Возвращается на склад');
+
   // 5. История текущего дня показывает оба результата и не скрывает данные.
   await page.getByRole('link', { name: 'История' }).first().click();
   await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
@@ -2147,6 +2164,81 @@ test('курьер: досрочность, «Не доставлен» с пр�
   await expect(
     page.locator(`[data-testid="delivery-history-item"][data-order-number="${secondOrder}"]`),
   ).toContainText('Нет ответа');
+});
+
+test('возврат: логист ждёт склад, склад принимает, повторная доставка открывается', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const orderNumber = process.env['E2E_WH_ORDER_2'] ?? '';
+  const storageCell = process.env['E2E_WH_STORAGE_CELL'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(orderNumber === '' || storageCell === '', 'не передана складская фикстура (E2E_WH_*)');
+
+  /*
+   * Сценарий продолжает курьерский: заказ признан недоставленным и физически
+   * едет обратно. Проверяется ровно то, ради чего вкладка существует, —
+   * что повторная доставка становится возможной ТОЛЬКО после приёмки складом.
+   */
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  // 1. Вкладка называет число нерешённых сервером, а не по видимым строкам.
+  // Счётчик появляется вместе с ответом сервера: до него числа нет вовсе,
+  // и ноль на экране означал бы «нерешённых нет» вместо «ещё не знаем».
+  const tabCount = page.getByTestId('tab-count-resolutions');
+  await expect(tabCount).toBeVisible();
+  await expect(tabCount).not.toHaveText('0');
+  const before = Number((await tabCount.innerText()).trim());
+  expect(before).toBeGreaterThan(0);
+
+  await page.getByRole('link', { name: 'Требуют решения' }).first().click();
+  const row = page.locator(`[data-testid="resolution-row"][data-order-number="${orderNumber}"]`);
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('Возвращается на склад');
+  await expect(row).toContainText('Нет ответа');
+
+  // 2. Пока букет не принят, повторная доставка недоступна — с объяснением.
+  const redeliver = row.getByTestId('resolution-redeliver');
+  await expect(redeliver).toBeDisabled();
+  await expect(redeliver).toHaveAttribute('title', /не принят складом/);
+
+  // 3. Склад принимает возврат: скан заказа и скан обычной ячейки хранения.
+  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await page.getByTestId('wh-tab-returns').click();
+  await page.getByTestId('wh-return-order').fill(orderNumber);
+  await page.getByTestId('wh-return-order').press('Enter');
+  await expect(page.getByTestId('wh-return-scanned')).toHaveText(orderNumber);
+  await page.getByTestId('wh-return-cell').fill(storageCell);
+  await page.getByTestId('wh-return-cell').press('Enter');
+  await expect(page.locator('.toast-region')).toContainText('принят в ячейку');
+
+  // Повторный скан той же пары — не ошибка и не второе размещение.
+  await page.getByTestId('wh-return-order').fill(orderNumber);
+  await page.getByTestId('wh-return-order').press('Enter');
+  await page.getByTestId('wh-return-cell').fill(storageCell);
+  await page.getByTestId('wh-return-cell').press('Enter');
+  await expect(page.locator('.toast-region')).toContainText('уже принят');
+
+  // 4. У логиста заказ стал пригодным для нового маршрута — без F5.
+  // Вкладки логистики видны только внутри раздела, поэтому сначала раздел.
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Требуют решения' }).first().click();
+  const afterRow = page.locator(
+    `[data-testid="resolution-row"][data-order-number="${orderNumber}"]`,
+  );
+  await expect(afterRow).toContainText('Принят складом');
+  await expect(afterRow.getByTestId('resolution-redeliver')).toBeEnabled();
+
+  await afterRow.getByTestId('resolution-redeliver').click();
+  await expect(page.locator('.toast-region')).toContainText('вернулся в «Сделки»');
+  // Решённая задача уходит из списка: вкладка называется «Требуют решения»,
+  // и разобранному в ней места нет.
+  await expect(afterRow).toHaveCount(0);
+
+  // 5. Счётчик вкладки уменьшился: решение закрыло задачу.
+  await expect(tabCount).toHaveText(String(before - 1));
 });
 
 test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({
