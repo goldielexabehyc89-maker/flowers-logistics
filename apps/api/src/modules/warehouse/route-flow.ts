@@ -17,9 +17,15 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
-import { assemblyRoundOf, FLOW_AUDIENCE, type FlowDeps, type RequestContext } from './placement.js';
+import {
+  assemblyRoundOf,
+  FLOW_AUDIENCE,
+  PLACEMENT_AUDIENCE,
+  type FlowDeps,
+  type RequestContext,
+} from './placement.js';
 import { assertCourierAssignable } from '../routing/service.js';
-import { releaseEmptyRouteBinding } from './route-cells.js';
+import { lockRouteCellBinding, releaseEmptyRouteBinding } from './route-cells.js';
 
 /**
  * Смена курьера и состояние листа нужны и складу, а не одной логистике.
@@ -358,6 +364,28 @@ export async function pickOrderToRouteCell(
     const current = rows[0] ?? null;
 
     /*
+     * Полка могла освободиться прямо сейчас.
+     *
+     * Соседний кладовщик уносит с неё последнюю коробку, и привязка
+     * закрывается сама. Строка привязки берётся под замок и перечитывается
+     * уже после блокировки заказа: без этого один видел бы полку пустой,
+     * второй — занятой, и на полке оказалась бы коробка листа, которому
+     * она больше не принадлежит.
+     */
+    const bindingNow = await lockRouteCellBinding(tx, cell.id);
+    if (bindingNow !== null && bindingNow.routeId !== routeId) {
+      throw new AppError('CONFLICT', {
+        message: 'route cell belongs to another route',
+        publicMessage: 'Эта маршрутная ячейка уже занята другим листом.',
+        conflict: { kind: 'ROUTE_CELL_ALREADY_BOUND', routeNumber: route.number },
+      });
+    }
+    if (bindingNow === null) {
+      // Полка свободна и человек стоит перед ней с коробкой этого листа.
+      await bindRouteCellWithin(tx, actor, route, input.cellCode, context);
+    }
+
+    /*
      * Коробки на складе ещё нет — и это законный случай.
      *
      * Кладовщик держит её в руках прямо сейчас: заказ приехал от флориста
@@ -403,7 +431,7 @@ export async function pickOrderToRouteCell(
       await publishRealtimeEvent(tx, {
         topic: 'warehouse.placement_changed',
         payload: { orderId: order.id, cellId: cell.id, action: 'RECEIVED' },
-        audienceRoles: [...FLOW_AUDIENCE],
+        audienceRoles: [...PLACEMENT_AUDIENCE],
       });
 
       const progress = await pickProgress(tx, routeId);

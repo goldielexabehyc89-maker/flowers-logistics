@@ -32,23 +32,27 @@ import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber, type ResolvedOrder } from './order-lookup.js';
 import { releaseEmptyRouteBinding } from './route-cells.js';
 
-/*
- * Кому уходят события движения коробок.
- *
- * Менеджер самовывоза здесь не лишний: самовывозный заказ появляется у него
- * в дне ровно тогда, когда склад положил букет в ячейку. Без него менеджер
- * узнавал бы о готовом заказе перезагрузкой, стоя перед покупателем.
- *
- * Ни номера заказа, ни кода ячейки в событии нет — только идентификаторы.
- */
-
 /** Складские операции доступны кладовщику и администратору. */
 export const FLOW_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
 /** Отмена сессии выдачи — только администратор. */
 export const FLOW_ADMIN_ROLES = ['ADMIN'] as const;
 
 /** Складские события. Логист видит их в маршрутных листах и «Сделках». */
-export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN', 'MANAGER'] as const;
+export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN'] as const;
+
+/*
+ * Кому уходит движение коробок по ячейкам.
+ *
+ * Менеджер самовывоза здесь не лишний: самовывозный заказ появляется у него
+ * в дне ровно тогда, когда склад положил букет в ячейку. Без этого события
+ * менеджер узнавал бы о готовом заказе перезагрузкой, стоя перед покупателем.
+ *
+ * Ход комплектования и выдачи ему при этом не рассылается: маршрутные листы
+ * к самовывозу отношения не имеют.
+ *
+ * Ни номера заказа, ни кода ячейки в событии нет — только идентификаторы.
+ */
+export const PLACEMENT_AUDIENCE = [...FLOW_AUDIENCE, 'MANAGER'] as const;
 
 export interface RequestContext {
   ip: string | null;
@@ -137,7 +141,7 @@ async function publishPlacement(
   await publishRealtimeEvent(tx, {
     topic: 'warehouse.placement_changed',
     payload,
-    audienceRoles: [...FLOW_AUDIENCE],
+    audienceRoles: [...PLACEMENT_AUDIENCE],
   });
 }
 
