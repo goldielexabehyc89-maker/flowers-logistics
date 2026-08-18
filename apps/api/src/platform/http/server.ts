@@ -29,6 +29,7 @@ import {
 } from '../../modules/warehouse/routes.js';
 import { registerDeliveryRoutes } from '../../modules/delivery/routes.js';
 import { registerFinanceRoutes } from '../../modules/finance/routes.js';
+import { registerReturnRoutes } from '../../modules/returns/routes.js';
 import { registerFloristRoutes } from '../../modules/fulfillment/routes.js';
 import { registerPickupRoutes } from '../../modules/pickup/routes.js';
 import { registerSettingsRoutes } from '../../modules/settings/routes.js';
@@ -149,6 +150,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   // Работа курьера: результат доставки и автоматическое завершение маршрута.
   await registerDeliveryRoutes(app, { db, config });
   await registerFinanceRoutes(app, { db, config });
+  registerReturnRoutes(app, { db, config });
   // Раздел флориста. Клиент МоегоСклада собирается внутри и только при наличии
   // токена: без него проксирование фотографий отвечает «Фото отсутствует»
   // и ни одного сетевого обращения не выполняет.

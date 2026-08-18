@@ -481,37 +481,40 @@ export function FloristScreen(): React.JSX.Element {
           <h3>Смены на сегодня</h3>
           <ul className="florist__list">
             {shiftsQuery.data.items.map((item) => (
-              <li key={item.id} className="florist__row" data-testid="shift-row">
-                <div className="florist__row-main">
-                  <strong>{item.userFullName}</strong>
-                  <span className="muted text-sm">с {formatMoscowDateTime(item.startedAt)}</span>
-                  <span className="muted text-sm">в сборке: {item.openAssignments}</span>
-                </div>
-                <div className="florist__row-side">
-                  <input
-                    className="input"
-                    aria-label={`Причина завершения смены ${item.userFullName}`}
-                    placeholder="Причина завершения"
-                    value={forceReason[item.id] ?? ''}
-                    onChange={(event) =>
-                      setForceReason((current) => ({ ...current, [item.id]: event.target.value }))
-                    }
-                  />
-                  <Button
-                    variant="secondary"
-                    data-testid="shift-force-close"
-                    disabled={action.isPending || (forceReason[item.id] ?? '').trim().length < 3}
-                    onClick={() =>
-                      action.mutate({
-                        path: `/api/florist/shifts/${item.id}/force-close`,
-                        body: { reason: (forceReason[item.id] ?? '').trim() },
-                        success: 'Смена завершена принудительно',
-                      })
-                    }
-                  >
-                    Завершить смену
-                  </Button>
-                </div>
+              /*
+                Одна смена — одна строка.
+
+                Список читают сверху вниз, выбирая нужного человека: карточки
+                в три экрана превращали пять флористов в прокрутку. Поле
+                причины и кнопка стоят в той же строке, а не под ней.
+              */
+              <li key={item.id} className="florist__shift" data-testid="shift-row">
+                <strong className="florist__shift-name">{item.userFullName}</strong>
+                <span className="muted text-sm">с {formatMoscowDateTime(item.startedAt)}</span>
+                <span className="muted text-sm">в сборке: {item.openAssignments}</span>
+                <input
+                  className="input florist__shift-reason"
+                  aria-label={`Причина завершения смены ${item.userFullName}`}
+                  placeholder="Причина завершения"
+                  value={forceReason[item.id] ?? ''}
+                  onChange={(event) =>
+                    setForceReason((current) => ({ ...current, [item.id]: event.target.value }))
+                  }
+                />
+                <Button
+                  variant="secondary"
+                  data-testid="shift-force-close"
+                  disabled={action.isPending || (forceReason[item.id] ?? '').trim().length < 3}
+                  onClick={() =>
+                    action.mutate({
+                      path: `/api/florist/shifts/${item.id}/force-close`,
+                      body: { reason: (forceReason[item.id] ?? '').trim() },
+                      success: 'Смена завершена принудительно',
+                    })
+                  }
+                >
+                  Завершить смену
+                </Button>
               </li>
             ))}
           </ul>

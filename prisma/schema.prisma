@@ -147,6 +147,12 @@ model User {
   deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
 
   createdTariffs     CourierTariffVersion[] @relation("TariffAuthor")
+  resolutions        OrderResolution[]       @relation("ResolutionDecidedBy")
+  returnsAsCourier   OrderReturn[]           @relation("ReturnCourier")
+  returnsAccepted    OrderReturn[]           @relation("ReturnAcceptedBy")
+  returnTransitions  OrderReturnTransition[] @relation("ReturnTransitionActor")
+  cancelledOrders    DeliveryOrder[]         @relation("OrderCancelledByLogist")
+
   cashEntries        LogistCashEntry[]      @relation("CashOwner")
   cashOperations     LogistCashEntry[]      @relation("CashActor")
   cashTransfers      LogistCashEntry[]      @relation("CashCourier")
@@ -511,6 +517,22 @@ model DeliveryOrder {
   externalStateName String?
   externalStateType String?
 
+  /// Заказ отменён в МоемСкладе.
+  ///
+  /// Признак отдельный, а не вывод из `externalStateType`: тип
+  /// `Unsuccessful` объединяет разные события — отказ, возврат, брак, — и
+  /// считать их одной отменой значило бы обещать одинаковое поведение там,
+  /// где бизнес-смысл разный. Первая версия распознаёт ровно один статус
+  /// «Отменен» по его идентификатору.
+  cancelledInSource   Boolean   @default(false)
+  cancelledInSourceAt DateTime?
+
+  /// Отмена решением логиста после недоставки. Внешняя отмена этого поля
+  /// не касается: у них разные авторы и разная ответственность.
+  cancelledByLogistAt   DateTime?
+  cancelledByLogistById String?   @db.Uuid
+  cancelledByLogist     User?     @relation("OrderCancelledByLogist", fields: [cancelledByLogistById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   /// Склад и способ доставки — два условия принадлежности к нашей области.
   ///
   /// Оба nullable: у ранее импортированного заказа значение может исчезнуть, и тогда
@@ -763,6 +785,8 @@ model DeliveryOrder {
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
   deliveryAttempts     DeliveryAttempt[]
+  resolutions          OrderResolution[]
+  returns              OrderReturn[]
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
@@ -1295,9 +1319,11 @@ model RouteOrder {
   movedToRouteId String?        @db.Uuid
   movedToRoute   DeliveryRoute? @relation("RouteOrderMovedTo", fields: [movedToRouteId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  conflicts RouteOrderConflict[]
-  attempts  DeliveryAttempt[]
-  distances RouteOrderDistance[]
+  conflicts   RouteOrderConflict[]
+  attempts    DeliveryAttempt[]
+  distances   RouteOrderDistance[]
+  resolutions OrderResolution[]
+  returns     OrderReturn[]
 
   @@index([routeId, position])
   @@index([orderId])
@@ -2047,6 +2073,10 @@ enum PlacementSource {
   RECEIVED
   /// Перемещение из другой ячейки.
   MOVED
+  /// Возврат от курьера после недоставки. Значение добавлено В КОНЕЦ:
+  /// PostgreSQL хранит порядок объявления, и вставка в середину сдвинула бы
+  /// уже записанные значения.
+  COURIER_RETURN
 }
 
 /// Фактическое местоположение заказа и вся история его движений.
@@ -2099,6 +2129,9 @@ model OrderPlacement {
   /// или отменили. Система не переносит его молча: физическое место меняет
   /// только человек штатным сканированием.
   requiresRelocation Boolean @default(false)
+
+  /// Возврат от курьера, породивший это размещение.
+  courierReturn OrderReturn?
 
   /// Факт выдачи покупателю, закрывший это размещение. Ровно один на запись.
   pickupIssue OrderPickupIssue?
@@ -2301,6 +2334,8 @@ model DeliveryAttempt {
   activeKey String? @unique @db.Uuid
 
   cancellation DeliveryAttemptCancellation?
+  resolution   OrderResolution?
+  orderReturn  OrderReturn?
   moneyFact    DeliveryMoneyFact?
 
   @@index([routeId, occurredAt])
@@ -2626,4 +2661,125 @@ model LogistCashEntry {
   @@index([courierUserId, operationDate])
   @@index([transferId])
   @@index([occurredAt])
+}
+
+/// Что логист решил делать с недоставленным заказом.
+enum OrderResolutionDecision {
+  /// Заказ отменяется: повторной доставки не будет.
+  CANCELLED
+  /// Заказ повезут снова: он возвращается в «Сделки».
+  REDELIVER
+}
+
+/// Заказ, требующий решения логиста после недоставки.
+///
+/// Появляется в той же транзакции, что и результат «Не доставлен», и живёт
+/// отдельно от самой попытки: попытка — это факт курьера и неизменяема, а
+/// решение принимает другой человек и позже. Без этой записи недоставленный
+/// заказ исчезал из работы вместе с завершением маршрута, и никто не отвечал
+/// за букет, оставшийся в машине.
+model OrderResolution {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Попытка, породившая задачу. Одна попытка — ровно одна задача.
+  attemptId String          @unique @db.Uuid
+  attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Снимок причины: переименование справочника прошлые задачи не переписывает.
+  reasonNameSnapshot String
+
+  createdAt DateTime @default(now())
+
+  decision    OrderResolutionDecision?
+  decidedAt   DateTime?
+  decidedById String?                  @db.Uuid
+  decidedBy   User?                    @relation("ResolutionDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Отмена ошибочного результата закрывает задачу связанной записью, а не
+  /// удалением: история недоставки остаётся.
+  closedAt     DateTime?
+  closedReason String?
+
+  /// Активная задача одна на заказ. Значение равно `orderId`, у закрытой — NULL.
+  activeKey String? @unique @db.Uuid
+
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+/// Куда физически делся букет после недоставки.
+enum OrderReturnState {
+  /// У курьера. Завершение маршрута доказательством возврата не является.
+  WITH_COURIER
+  /// Курьер объявил, что везёт заказ на склад.
+  RETURNING
+  /// Склад принял и положил в ячейку. Только это закрывает обязательство.
+  ACCEPTED
+  /// Возврат закрыт отменой ошибочного результата доставки.
+  CANCELLED
+}
+
+/// Физический возврат заказа от курьера на склад.
+///
+/// Местоположение товара меняется только подтверждением склада: ни завершение
+/// маршрута, ни решение логиста, ни отмена в МоемСкладе сами по себе букет
+/// из машины не перемещают.
+model OrderReturn {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  attemptId String          @unique @db.Uuid
+  attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Кто держит букет. Именно у него заказ остаётся в «Активных».
+  courierUserId String @db.Uuid
+  courier       User   @relation("ReturnCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  state OrderReturnState @default(WITH_COURIER)
+
+  createdAt    DateTime  @default(now())
+  acceptedAt   DateTime?
+  acceptedById String?   @db.Uuid
+  acceptedBy   User?     @relation("ReturnAcceptedBy", fields: [acceptedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Размещение, созданное приёмкой возврата.
+  placementId String?         @unique @db.Uuid
+  placement   OrderPlacement? @relation(fields: [placementId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Активный возврат один на заказ. Значение равно `orderId`, у закрытого — NULL.
+  activeKey String? @unique @db.Uuid
+
+  transitions OrderReturnTransition[]
+
+  @@index([orderId])
+  @@index([courierUserId, state])
+}
+
+/// Переход возврата. Записи только добавляются.
+model OrderReturnTransition {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  returnId String      @db.Uuid
+  return   OrderReturn @relation(fields: [returnId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  fromState OrderReturnState
+  toState   OrderReturnState
+
+  occurredAt  DateTime @default(now())
+  actorUserId String?  @db.Uuid
+  actor       User?    @relation("ReturnTransitionActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reason      String?
+
+  @@index([returnId, occurredAt])
 }

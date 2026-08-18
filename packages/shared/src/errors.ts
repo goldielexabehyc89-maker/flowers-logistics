@@ -202,6 +202,13 @@ export const CONFLICT_KINDS = [
   'MANUAL_ISSUE_DISABLED',
   /** Отгрузить маршрут без назначенного курьера нельзя. */
   'ROUTE_COURIER_REQUIRED',
+  // Недоставленный заказ: решение логиста и физический возврат.
+  'RESOLUTION_ALREADY_DECIDED',
+  'RETURN_ALREADY_ACCEPTED',
+  'RETURN_NOT_FOUND',
+  'ORDER_AWAITS_RETURN',
+  /** У заказа уже есть действующее размещение: приёмка возврата невозможна. */
+  'ORDER_ALREADY_PLACED',
   /** Отменять нечего: маршрут не отгружен. */
   'ROUTE_NOT_ACTIVE',
 ] as const;

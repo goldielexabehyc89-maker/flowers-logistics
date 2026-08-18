@@ -280,3 +280,56 @@
     flex: 1 1 auto;
   }
 }
+
+/*
+ * Строка смены.
+ *
+ * Одна смена — одна компактная строка: ФИО, начало, счётчик, причина и кнопка.
+ * Прежде это была карточка в три экрана на пять человек, и выбор нужного
+ * флориста превращался в прокрутку.
+ *
+ * Поле причины забирает свободное место, остальное прижато к содержимому.
+ */
+.florist__shift {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.florist__shift-name {
+  flex: none;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.florist__shift-reason {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * Телефон: аккуратный перенос без горизонтальной прокрутки.
+ *
+ * Имя занимает всю ширину строки, поле и кнопка встают под ним парой —
+ * ужимать их в одну линию на 360 пикселях значит обрезать и то и другое.
+ */
+@media (max-width: 640px) {
+  .florist__shift {
+    flex-wrap: wrap;
+  }
+
+  .florist__shift-name {
+    max-width: 100%;
+    flex: 1 0 100%;
+  }
+
+  .florist__shift-reason {
+    flex: 1 1 140px;
+  }
+}

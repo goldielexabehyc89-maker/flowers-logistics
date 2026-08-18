@@ -37,6 +37,7 @@ import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { setSuggestionsStatus } from '../integrations/dadata/status.js';
 import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
 import { addressState, effectiveAddress } from './address.js';
+import { activeReturnsOf } from '../returns/service.js';
 import {
   MAX_QUERY_LENGTH,
   MIN_QUERY_LENGTH,
@@ -305,6 +306,15 @@ async function dealCards(db: Database, ids: string[]) {
     return [];
   }
 
+  /*
+   * Заказы, букет которых ещё у курьера.
+   *
+   * Одним запросом на страницу, а не по строке: карточка обязана сказать
+   * «ожидается возврат» до того, как логист попробует поставить заказ
+   * в маршрут и получит отказ сервера.
+   */
+  const awaitingReturn = await activeReturnsOf(db, ids);
+
   const rows = await db.deliveryOrder.findMany({
     where: { id: { in: ids } },
     select: {
@@ -313,6 +323,8 @@ async function dealCards(db: Database, ids: string[]) {
       address: true,
       localAddress: true,
       addressConflict: true,
+      cancelledInSource: true,
+      cancelledByLogistAt: true,
       recipient: true,
       comment: true,
       deliveryDate: true,
@@ -389,18 +401,29 @@ async function dealCards(db: Database, ids: string[]) {
         draftRouteId: participation?.routeId ?? null,
         draftRouteNumber: participation?.route.number ?? null,
         /*
-         * Выбрать можно заказ без блокирующего внимания, с точкой, с датой
-         * и не занятый черновиком.
+         * Выбрать можно заказ без блокирующего внимания, с точкой, с датой,
+         * не занятый черновиком и физически находящийся у нас.
          *
          * Дата названа отдельно: «Требует внимания» её больше не включает,
          * а положить заказ без даты в маршрут конкретного дня всё равно
          * нельзя — сервер откажет, и предлагать выбор было бы обманом.
+         *
+         * Ожидание возврата — то же самое, только про товар: пока букет
+         * едет в машине курьера, ставить его в новый маршрут значит обещать
+         * доставку тем, чего на складе нет.
          */
         selectable:
           !row.needsAttention &&
           row.deliveryDate !== null &&
           row.geoState === 'RESOLVED' &&
-          participation === undefined,
+          participation === undefined &&
+          !awaitingReturn.has(row.id) &&
+          !row.cancelledInSource &&
+          row.cancelledByLogistAt === null,
+        /** Букет ещё у курьера: заказ виден, но в маршрут не берётся. */
+        awaitingReturn: awaitingReturn.get(row.id) ?? null,
+        /** Отменён — у нас решением логиста либо в МоемСкладе. */
+        cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
         // Готов к отправке: собран флористом ЛИБО уже размещён на складе.
         // Логисту важен факт готовности, а не путь, которым он наступил.
         assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,

@@ -161,6 +161,12 @@ export const AUDIT_ACTIONS = [
   'FINANCE_DISTANCE_CORRECTED',
   // Касса логиста. В записи — вид, сумма, день и владелец кассы; автор берётся
   // из самой записи аудита и с владельцем кассы не смешивается.
+  // Решение логиста по недоставленному заказу и движение возврата.
+  'ORDER_CANCELLED_BY_LOGIST',
+  'ORDER_REDELIVERY_REQUESTED',
+  'ORDER_RETURN_ACCEPTED',
+  'ORDER_CANCELLED_IN_SOURCE',
+  'ORDER_CANCELLATION_WITHDRAWN',
   'FINANCE_CASH_MOVED',
   'FINANCE_CASH_REVERSED',
 ] as const;
