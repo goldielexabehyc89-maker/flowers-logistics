@@ -92,12 +92,26 @@ export interface LogisticsTab {
   key: string;
   path: string;
   title: string;
+  /**
+   * Показывать ли рядом с названием счётчик нерешённых задач.
+   *
+   * Значение берётся у сервера, а не считается по загруженной странице:
+   * список постраничный, и число из него означало бы «столько видно», а не
+   * «столько есть».
+   */
+  counter?: 'resolutions';
 }
 
 export const LOGISTICS_TABS: readonly LogisticsTab[] = [
   { key: 'deals', path: '/logistics/deals', title: 'Сделки' },
   { key: 'routing', path: '/logistics/routing', title: 'Маршрутизация' },
   { key: 'route-sheets', path: '/logistics/route-sheets', title: 'Маршрутные листы' },
+  {
+    key: 'resolutions',
+    path: '/logistics/resolutions',
+    title: 'Требуют решения',
+    counter: 'resolutions',
+  },
   { key: 'history', path: '/logistics/history', title: 'История' },
   { key: 'reports', path: '/logistics/reports', title: 'Отчёты' },
 ];

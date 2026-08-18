@@ -587,6 +587,23 @@
   background: var(--color-surface-hover);
 }
 
+/*
+ * Счётчик нерешённых недоставок.
+ *
+ * Рядом с названием, а не вместо него: «Требуют решения 3» читается как
+ * состояние работы, тогда как одинокое число ничего не называет. Ноль
+ * показывается тоже — исчезающий счётчик неотличим от несчитающегося.
+ */
+.shell__tab-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Активный раздел выглядит выбранной кнопкой, остальные — невыбранными. */
 .shell__tab--active {
   border-color: var(--color-border);

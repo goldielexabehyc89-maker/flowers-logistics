@@ -1,0 +1,26 @@
+/*
+ * Вкладка «Требуют решения».
+ *
+ * Своего оформления почти нет: это обычная таблица общего вида. Отдельными
+ * остаются два места — адрес, который длиннее остальных ячеек, и пара кнопок
+ * решения, которой нужен перенос на телефоне.
+ */
+
+.resolutions__address {
+  max-width: 22rem;
+}
+
+.resolutions__actions {
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+@media (max-width: 640px) {
+  .resolutions__address {
+    max-width: none;
+  }
+
+  .resolutions__actions > * {
+    flex: 1 1 auto;
+  }
+}

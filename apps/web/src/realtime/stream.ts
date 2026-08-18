@@ -143,6 +143,8 @@ const DELIVERY_SCREEN: string[][] = [
   ['delivery-active'],
   ['delivery-history'],
   ['delivery-reasons'],
+  // Обязательство вернуть букет живёт дольше маршрута и обновляется отдельно.
+  ['delivery-returns'],
 ];
 const USERS_SCREEN: string[][] = [
   ['users'],

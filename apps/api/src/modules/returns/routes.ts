@@ -16,6 +16,7 @@ import {
   countUnresolved,
   decideCancel,
   decideRedeliver,
+  listAcceptedReturns,
   listPendingReturns,
   listResolutions,
   markReturning,
@@ -29,6 +30,7 @@ const WAREHOUSE_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
 const COURIER_ROLES = ['ADMIN', 'COURIER'] as const;
 
 const idParamSchema = z.object({ id: z.string().uuid() });
+const orderParamSchema = z.object({ orderId: z.string().uuid() });
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
@@ -82,16 +84,20 @@ export function registerReturnRoutes(app: AppServer, deps: ReturnsDeps): void {
   });
 
   /** Курьер объявляет, что везёт заказ на склад. */
-  app.post('/api/delivery/returns/:id/returning', async (request) => {
+  app.post('/api/delivery/returns/:orderId/returning', async (request) => {
     const actor = await authenticateWithRoles(request, deps, COURIER_ROLES);
-    const { id } = idParamSchema.parse(request.params);
-    return markReturning({ db: deps.db }, actor, id);
+    const { orderId } = orderParamSchema.parse(request.params);
+    return markReturning({ db: deps.db }, actor, orderId);
   });
 
-  /** Очередь возвратов склада. */
+  /** Очередь возвратов склада: чего ждём и что уже принято. */
   app.get('/api/warehouse/returns', async (request) => {
     await authenticateWithRoles(request, deps, WAREHOUSE_ROLES);
-    return { items: await listPendingReturns(deps.db) };
+    const [pending, accepted] = await Promise.all([
+      listPendingReturns(deps.db),
+      listAcceptedReturns(deps.db),
+    ]);
+    return { pending, accepted };
   });
 
   /** Приёмка возврата: скан заказа и скан ячейки одной операцией. */

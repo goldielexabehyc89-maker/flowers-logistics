@@ -20,6 +20,7 @@
 
 import type { $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
+import { effectiveAddress } from '../orders/address.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
@@ -201,6 +202,8 @@ export interface ResolutionView {
   id: string;
   orderId: string;
   orderNumber: string;
+  /** Рабочий адрес: тот же, что видел курьер. */
+  address: string | null;
   routeNumber: string | null;
   courier: { id: string; fullName: string } | null;
   reasonName: string;
@@ -237,7 +240,12 @@ export async function listResolutions(
         decidedAt: true,
         decidedBy: { select: { fullName: true } },
         order: {
-          select: { externalName: true, returns: { select: { state: true, createdAt: true } } },
+          select: {
+            externalName: true,
+            address: true,
+            localAddress: true,
+            returns: { select: { state: true, createdAt: true } },
+          },
         },
         routeOrder: {
           select: {
@@ -263,6 +271,7 @@ export async function listResolutions(
         id: row.id,
         orderId: row.orderId,
         orderNumber: row.order.externalName,
+        address: effectiveAddress(row.order),
         routeNumber: row.routeOrder.route.number,
         courier: row.routeOrder.route.courier,
         reasonName: row.reasonNameSnapshot,
@@ -548,6 +557,20 @@ export async function acceptReturn(
             unchanged: true,
           };
         }
+        /*
+         * Тот же заказ, но другая ячейка: букет уже принят и лежит на месте.
+         *
+         * Кладовщику важно услышать не «возврата нет», а где товар сейчас:
+         * иначе он будет искать причину отказа вместо того, чтобы забрать
+         * заказ из названной ячейки.
+         */
+        if (placement !== null) {
+          throw new AppError('CONFLICT', {
+            message: 'return already accepted into another cell',
+            publicMessage: `Возврат уже принят в ячейку ${placement.cell.code}.`,
+            conflict: { kind: 'ORDER_ALREADY_PLACED' },
+          });
+        }
       }
 
       throw new AppError('CONFLICT', {
@@ -661,45 +684,98 @@ export async function acceptReturn(
 }
 
 /** Возвраты, которые склад ещё не принял. Компактная очередь режима «Возвраты». */
-export async function listPendingReturns(db: Database): Promise<
-  {
-    orderId: string;
-    orderNumber: string;
-    state: $Enums.OrderReturnState;
-    courier: string | null;
-    reasonName: string;
-    decision: $Enums.OrderResolutionDecision | null;
-  }[]
-> {
-  const rows = await db.orderReturn.findMany({
-    where: { activeKey: { not: null } },
-    orderBy: { createdAt: 'asc' },
+export interface WarehouseReturnView {
+  orderId: string;
+  orderNumber: string;
+  state: $Enums.OrderReturnState;
+  courier: string | null;
+  reasonName: string;
+  decision: $Enums.OrderResolutionDecision | null;
+  /** Отменённый заказ выдавать нельзя — склад обязан это видеть. */
+  cancelled: boolean;
+  /** Куда принят. У ожидающих пусто. */
+  cellCode: string | null;
+  acceptedAt: string | null;
+}
+
+const WAREHOUSE_RETURN_SELECT = {
+  orderId: true,
+  state: true,
+  acceptedAt: true,
+  courier: { select: { fullName: true } },
+  attempt: { select: { reasonNameSnapshot: true } },
+  placement: { select: { cell: { select: { code: true } } } },
+  order: {
     select: {
-      orderId: true,
-      state: true,
-      courier: { select: { fullName: true } },
-      attempt: { select: { reasonNameSnapshot: true } },
-      order: {
-        select: {
-          externalName: true,
-          resolutions: {
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-            select: { decision: true },
-          },
-        },
+      externalName: true,
+      cancelledInSource: true,
+      cancelledByLogistAt: true,
+      resolutions: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { decision: true },
       },
     },
-  });
+  },
+} as const;
 
-  return rows.map((row) => ({
+interface WarehouseReturnRow {
+  orderId: string;
+  state: $Enums.OrderReturnState;
+  acceptedAt: Date | null;
+  courier: { fullName: string } | null;
+  attempt: { reasonNameSnapshot: string | null };
+  placement: { cell: { code: string } } | null;
+  order: {
+    externalName: string;
+    cancelledInSource: boolean;
+    cancelledByLogistAt: Date | null;
+    resolutions: { decision: $Enums.OrderResolutionDecision | null }[];
+  };
+}
+
+function warehouseReturnView(row: WarehouseReturnRow): WarehouseReturnView {
+  return {
     orderId: row.orderId,
     orderNumber: row.order.externalName,
     state: row.state,
     courier: row.courier?.fullName ?? null,
     reasonName: row.attempt.reasonNameSnapshot ?? 'Причина не указана',
     decision: row.order.resolutions[0]?.decision ?? null,
-  }));
+    cancelled: row.order.cancelledInSource || row.order.cancelledByLogistAt !== null,
+    cellCode: row.placement?.cell.code ?? null,
+    acceptedAt: row.acceptedAt === null ? null : row.acceptedAt.toISOString(),
+  };
+}
+
+/** Возвраты, которых склад ещё ждёт. */
+export async function listPendingReturns(db: Database): Promise<WarehouseReturnView[]> {
+  const rows = await db.orderReturn.findMany({
+    where: { activeKey: { not: null } },
+    orderBy: { createdAt: 'asc' },
+    select: WAREHOUSE_RETURN_SELECT,
+  });
+  return rows.map(warehouseReturnView);
+}
+
+/**
+ * Недавно принятые возвраты.
+ *
+ * Кладовщику нужен не только список ожидаемого, но и подтверждение того, что
+ * он уже принял: иначе после скана заказ исчезает с экрана и остаётся
+ * непонятным, записалась приёмка или нет.
+ */
+export async function listAcceptedReturns(
+  db: Database,
+  limit = 30,
+): Promise<WarehouseReturnView[]> {
+  const rows = await db.orderReturn.findMany({
+    where: { state: 'ACCEPTED' },
+    orderBy: { acceptedAt: 'desc' },
+    take: limit,
+    select: WAREHOUSE_RETURN_SELECT,
+  });
+  return rows.map(warehouseReturnView);
 }
 
 /** Активный возврат заказа: нужен «Активным» курьера и «Сделкам» логиста. */
