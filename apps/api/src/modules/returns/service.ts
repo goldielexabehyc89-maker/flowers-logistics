@@ -531,7 +531,7 @@ export async function acceptReturn(
         orderBy: { acceptedAt: 'desc' },
         select: { placementId: true },
       });
-      if (accepted?.placementId != null) {
+      if (accepted?.placementId !== undefined && accepted.placementId !== null) {
         const placement = await tx.orderPlacement.findUnique({
           where: { id: accepted.placementId },
           select: { id: true, cell: { select: { code: true } } },
