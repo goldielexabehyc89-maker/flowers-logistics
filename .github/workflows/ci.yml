@@ -527,6 +527,9 @@ jobs:
             echo "storage=$(get 'ячейка хранения' 1)"
             echo "withcourier=$(get 'у курьера' 1)"
             echo "returning=$(get 'возвращается' 1)"
+            echo "accepted=$(get 'принят' 1)"
+            echo "cancelledlogist=$(get 'отменён логистом' 1)"
+            echo "inroutecell=$(get 'отменён в маршрутной' 1)"
             echo "freecancelled=$(get 'отменён свободный' 1)"
             echo "indraft=$(get 'отменён в черновике' 1)"
             echo "draft=$(get 'черновик' 1)"
@@ -560,6 +563,9 @@ jobs:
           E2E_RET_STORAGE_CELL: ${{ steps.seed-returns.outputs.storage }}
           E2E_RET_WITH_COURIER: ${{ steps.seed-returns.outputs.withcourier }}
           E2E_RET_RETURNING: ${{ steps.seed-returns.outputs.returning }}
+          E2E_RET_ACCEPTED: ${{ steps.seed-returns.outputs.accepted }}
+          E2E_RET_CANCELLED_LOGIST: ${{ steps.seed-returns.outputs.cancelledlogist }}
+          E2E_RET_IN_ROUTE_CELL: ${{ steps.seed-returns.outputs.inroutecell }}
           E2E_RET_FREE_CANCELLED: ${{ steps.seed-returns.outputs.freecancelled }}
           E2E_RET_IN_DRAFT: ${{ steps.seed-returns.outputs.indraft }}
           E2E_RET_DRAFT: ${{ steps.seed-returns.outputs.draft }}

@@ -27,6 +27,7 @@ import {
   recordDeliveryResult,
   type DeliveryDeps,
 } from '../delivery/service.js';
+import { isAssembled } from '../orders/routes.js';
 import {
   acceptReturn,
   countUnresolved,
@@ -129,6 +130,35 @@ async function seedActiveDelivery(courierId: string): Promise<{
     orderNumber: number,
     routeId: route.id,
   };
+}
+
+/**
+ * Новое участие заказа в свежем маршруте.
+ *
+ * Ровно то, что делает логист после решения «повторно доставить»: прежнее
+ * участие уже закрыто решением, и заказ можно поставить в следующий лист.
+ */
+async function addToNewRoute(
+  orderId: string,
+  courierUserId: string,
+): Promise<{ routeOrderId: string }> {
+  const creator = await actorFor(['ADMIN']);
+  const route = await ctx.db.deliveryRoute.create({
+    data: {
+      number: unique('RN'),
+      deliveryDate: toDateColumn(DAY),
+      state: 'ACTIVE',
+      vehicleType: 'CAR',
+      createdById: creator.userId,
+      courierUserId,
+    },
+    select: { id: true },
+  });
+  const participation = await ctx.db.routeOrder.create({
+    data: { routeId: route.id, orderId, position: 1, addedById: creator.userId },
+    select: { id: true },
+  });
+  return { routeOrderId: participation.id };
 }
 
 /** Недоставка: результат курьера с причиной из справочника. */
@@ -524,6 +554,238 @@ describe('повторная доставка', () => {
     expect(
       await ctx.db.routeOrder.count({ where: { orderId: delivery.orderId, removedAt: null } }),
     ).toBe(0);
+  });
+});
+
+// --- 5а. Повторные возвраты и неизменность заказа ----------------------------
+
+describe('повторный возврат и неизменность заказа', () => {
+  it('второй возврат того же заказа получает -otm-2', async () => {
+    const courier = await actorFor(['COURIER']);
+    const keeper = await actorFor(['WAREHOUSE']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const first = await seedActiveDelivery(courier.userId);
+    await failDelivery(courier, first.routeOrderId);
+
+    const firstReturn = await ctx.db.orderReturn.findUniqueOrThrow({
+      where: { activeKey: first.orderId },
+      select: { displayNumber: true, sequence: true },
+    });
+    expect(firstReturn.displayNumber).toBe(`${first.orderNumber}-otm`);
+    expect(firstReturn.sequence).toBe(1);
+
+    // Круг замыкается: склад принял, логист отправил, курьер снова не довёз.
+    const cell = await seedCell('STORAGE');
+    await acceptReturn(
+      { db: ctx.db },
+      keeper,
+      { orderNumber: first.orderNumber, cellCode: cell.code },
+      CONTEXT,
+    );
+    const task = await ctx.db.orderResolution.findUniqueOrThrow({
+      where: { activeKey: first.orderId },
+      select: { id: true },
+    });
+    await decideRedeliverSameBouquet({ db: ctx.db }, logist, task.id, CONTEXT);
+
+    const second = await addToNewRoute(first.orderId, courier.userId);
+    await failDelivery(courier, second.routeOrderId);
+
+    const secondReturn = await ctx.db.orderReturn.findUniqueOrThrow({
+      where: { activeKey: first.orderId },
+      select: { displayNumber: true, sequence: true },
+    });
+    expect(secondReturn.displayNumber).toBe(`${first.orderNumber}-otm-2`);
+    expect(secondReturn.sequence).toBe(2);
+
+    // Заказ при этом остался ОДИН и с прежним номером.
+    expect(await ctx.db.deliveryOrder.count({ where: { externalName: first.orderNumber } })).toBe(
+      1,
+    );
+  });
+
+  it('приёмка одного возврата не закрывает другой', async () => {
+    const courier = await actorFor(['COURIER']);
+    const keeper = await actorFor(['WAREHOUSE']);
+    const left = await seedActiveDelivery(courier.userId);
+    const right = await seedActiveDelivery(courier.userId);
+    await failDelivery(courier, left.routeOrderId);
+    await failDelivery(courier, right.routeOrderId);
+
+    const cell = await seedCell('STORAGE');
+    await acceptReturn(
+      { db: ctx.db },
+      keeper,
+      { orderNumber: left.orderNumber, cellCode: cell.code },
+      CONTEXT,
+    );
+
+    const closed = await ctx.db.orderReturn.findFirstOrThrow({
+      where: { orderId: left.orderId },
+      select: { state: true, activeKey: true },
+    });
+    const untouched = await ctx.db.orderReturn.findFirstOrThrow({
+      where: { orderId: right.orderId },
+      select: { state: true, activeKey: true },
+    });
+
+    expect(closed.state).toBe('ACCEPTED');
+    expect(closed.activeKey).toBeNull();
+    // Соседний возврат не тронут: приёмка закрывает ровно свою карточку.
+    expect(untouched.state).toBe('WITH_COURIER');
+    expect(untouched.activeKey).toBe(right.orderId);
+  });
+
+  it('карточку возврата можно отсканировать вместо номера заказа', async () => {
+    const courier = await actorFor(['COURIER']);
+    const keeper = await actorFor(['WAREHOUSE']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    await failDelivery(courier, delivery.routeOrderId);
+    const cell = await seedCell('STORAGE');
+
+    const card = await ctx.db.orderReturn.findUniqueOrThrow({
+      where: { activeKey: delivery.orderId },
+      select: { displayNumber: true },
+    });
+
+    const accepted = await acceptReturn(
+      { db: ctx.db },
+      keeper,
+      { orderNumber: card.displayNumber, cellCode: cell.code },
+      CONTEXT,
+    );
+    expect(accepted.orderNumber).toBe(delivery.orderNumber);
+  });
+
+  it('один заказ не получает двух активных участий в маршруте', async () => {
+    const courier = await actorFor(['COURIER']);
+    const creator = await actorFor(['ADMIN']);
+    const delivery = await seedActiveDelivery(courier.userId);
+
+    const other = await ctx.db.deliveryRoute.create({
+      data: {
+        number: unique('RR2'),
+        deliveryDate: toDateColumn(DAY),
+        state: 'DRAFT',
+        vehicleType: 'CAR',
+        createdById: creator.userId,
+      },
+      select: { id: true },
+    });
+
+    /*
+     * Правило держит БАЗА, а не договорённость кода.
+     *
+     * Два активных участия означают, что один букет обещан двум курьерам,
+     * и заметить это по коду невозможно: маршруты создают разные экраны.
+     */
+    await expect(
+      ctx.db.routeOrder.create({
+        data: {
+          routeId: other.id,
+          orderId: delivery.orderId,
+          position: 1,
+          addedById: creator.userId,
+        },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('пересборка не меняет заказ, но обнуляет сборку и печать', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const florist = await actorFor(['FLORIST']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    await failDelivery(courier, delivery.routeOrderId);
+
+    const before = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: delivery.orderId },
+      select: { externalId: true, externalName: true, assemblyRound: true },
+    });
+
+    /*
+     * Заказ уже собран и лежит в ячейке — как это и бывает после недоставки.
+     *
+     * Отметки завершения проставляются полностью: база не принимает
+     * «собран» без времени, автора и ревизии, и половинчатая запись
+     * проверяла бы не то состояние, которое бывает в жизни.
+     */
+    const revision = await ctx.db.orderFulfillmentRevision.create({
+      data: {
+        orderId: delivery.orderId,
+        reason: 'INITIAL_IMPORT',
+        externalUpdated: new Date(),
+        snapshotHash: unique('hash'),
+        snapshot: {},
+        changedFields: [],
+      },
+      select: { id: true },
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: {
+        fulfillmentProcessState: 'ASSEMBLED',
+        fulfillmentAssigneeId: florist.userId,
+        // База требует и время назначения: собранный заказ всегда чей-то.
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentAssembledAt: new Date(),
+        fulfillmentAssembledById: florist.userId,
+        fulfillmentAssembledRevisionId: revision.id,
+      },
+    });
+    const cell = await seedCell('STORAGE');
+    await ctx.db.orderPlacement.create({
+      data: {
+        orderId: delivery.orderId,
+        cellId: cell.id,
+        source: 'RECEIVED',
+        placedById: florist.userId,
+        assemblyRound: before.assemblyRound,
+      },
+    });
+
+    const task = await ctx.db.orderResolution.findUniqueOrThrow({
+      where: { activeKey: delivery.orderId },
+      select: { id: true },
+    });
+    await decideReassemble({ db: ctx.db }, logist, task.id, CONTEXT);
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: delivery.orderId },
+      select: {
+        externalId: true,
+        externalName: true,
+        assemblyRound: true,
+        fulfillmentProcessState: true,
+        fulfillmentAssigneeId: true,
+      },
+    });
+
+    // Главное: заказ тот же самый. Ни второго заказа, ни нового номера.
+    expect(after.externalId).toBe(before.externalId);
+    expect(after.externalName).toBe(before.externalName);
+    expect(await ctx.db.deliveryOrder.count({ where: { externalName: before.externalName } })).toBe(
+      1,
+    );
+
+    // И при этом сборка начинается заново.
+    expect(after.assemblyRound).toBe(before.assemblyRound + 1);
+    expect(after.fulfillmentProcessState).toBe('NEW');
+    expect(after.fulfillmentAssigneeId).toBeNull();
+
+    // Старый букет остался на полке, но готовым заказ больше не считается.
+    const placement = await ctx.db.orderPlacement.findFirstOrThrow({
+      where: { orderId: delivery.orderId, releasedAt: null },
+      select: { assemblyRound: true },
+    });
+    expect(placement.assemblyRound).toBe(before.assemblyRound);
+    expect(
+      isAssembled({
+        fulfillmentProcessState: after.fulfillmentProcessState,
+        assemblyRound: after.assemblyRound,
+        placements: [{ assemblyRound: placement.assemblyRound }],
+      }),
+    ).toBe(false);
   });
 });
 

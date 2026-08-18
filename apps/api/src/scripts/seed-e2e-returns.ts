@@ -135,6 +135,24 @@ async function main(): Promise<number> {
           address: 'Москва, проверочный адрес возврата',
           recipient: 'Проверочный получатель',
           inScope: true,
+          /*
+           * Точка нужна, чтобы заказ было видно на обеих картах.
+           *
+           * Координаты фиксированные и синтетические: это центр Москвы,
+           * а не чей-то настоящий адрес.
+           */
+          geoState: 'RESOLVED',
+          geoSource: 'MANUAL',
+          geoPrecision: 'EXACT_HOUSE',
+          geoLatMicro: 55_751_244,
+          geoLonMicro: 37_618_423,
+          geoResolvedAt: new Date(),
+          // Производственная область: после пересборки заказ обязан
+          // появиться в очереди флориста.
+          fulfillmentInScope: true,
+          fulfillmentCompositionState: 'READY',
+          fulfillmentSnapshotHash: `seed-${suffix}`,
+          fulfillmentCompositionSyncedAt: new Date(),
         },
         select: { id: true },
       });

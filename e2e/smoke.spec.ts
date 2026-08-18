@@ -1200,6 +1200,15 @@ test('Сделки: точный выбор → расчёт → превью �
   // а не «сделать так, чтобы их стало два» — соседние сценарии оставляют свои.
   await page.getByRole('link', { name: 'Логистика' }).first().click();
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  /*
+   * Считать черновики можно только после загрузки списка.
+   *
+   * Прежнее ожидание принимало и состояние «Загружаем черновики…»: список
+   * ещё пуст, счёт получался нулевым, и дальше проверка сравнивала его
+   * с настоящим числом. Пока у дня не бывало черновиков, ошибка не
+   * проявлялась.
+   */
+  await expect(page.getByText('Загружаем черновики…')).toHaveCount(0);
   await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
   const draftsBefore = await page.getByTestId('routing-drafts').locator('.routes__draft').count();
 
@@ -2505,10 +2514,281 @@ test('отмена из МоегоСклада видна на стадиях, �
     await page.getByTestId('deals-search').fill(draftOrder);
     const returned = page.locator(`[data-testid="deal-card"][data-order-number="${draftOrder}"]`);
     await expect(returned).toBeVisible();
-    await expect(returned.getByTestId('deal-blocked')).not.toHaveText('Заказ отменён');
+    /*
+     * Пометки отмены нет вовсе, и заказ снова можно выбрать.
+     *
+     * Это и есть «безопасное нераспределённое состояние»: не «отмена снята,
+     * но заказ где-то числится», а обычная свободная сделка.
+     */
+    await expect(returned.getByTestId('deal-blocked')).toHaveCount(0);
+    await expect(returned).toHaveAttribute('data-selectable', 'yes');
   } finally {
     await floristContext.close();
   }
+});
+
+test('тот же букет: заказ возвращается в «Сделки» без новой сборки, печати и дублей', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const orderNumber = process.env['E2E_RET_RETURNING'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(orderNumber === '', 'не передана фикстура возвратов (E2E_RET_*)');
+
+  /*
+   * Сценарий продолжает предыдущий: возврат уже принят складом, а решение
+   * «отправить тот же букет» принято. Проверяется его последствие — заказ
+   * снова можно везти, и при этом он ОДИН.
+   */
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  // Решение принимается здесь же: возврат этого заказа склад уже принял
+  // в предыдущем сценарии, и «тот же букет» стал доступен.
+  await page.getByRole('link', { name: 'Требуют решения' }).first().click();
+  const task = page.locator(`[data-testid="resolution-row"][data-order-number="${orderNumber}"]`);
+  await expect(task).toContainText('Принят складом');
+  await task.getByTestId('resolution-redeliver').click();
+  await page.getByTestId('redelivery-same').click();
+  await expect(page.locator('.toast-region')).toContainText('с тем же букетом');
+
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByTestId('deals-search').fill(orderNumber);
+
+  const cards = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
+  // Ровно одна карточка: второго заказа не появилось ни под каким номером.
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toHaveAttribute('data-selectable', 'yes');
+
+  // Заказ по-прежнему числится собранным: пересобирать его никто не просил.
+  const numberWithSuffix = page.locator('[data-testid="deal-card"]').filter({
+    hasText: `${orderNumber}-otm`,
+  });
+  await expect(numberWithSuffix).toHaveCount(0);
+
+  // Новый маршрут строится тем же обычным путём и принимает заказ.
+  await cards.first().click();
+  await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 1');
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await clickAndAwait(
+    page,
+    page.getByTestId('create-route-draft'),
+    'POST',
+    '/api/routes/from-selection',
+  );
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
+
+  /*
+   * Второго активного участия не появилось.
+   *
+   * Прежнее закрылось решением логиста, и это единственная причина, по
+   * которой заказ вообще удалось поставить в новый лист: база не приняла бы
+   * два активных участия одного заказа.
+   */
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByTestId('deals-search').fill(orderNumber);
+  // Заказы черновиков в рабочем списке скрыты — показываем их явно.
+  await page.getByTestId('deals-include-drafts').check();
+  const inDraft = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
+  await expect(inDraft).toHaveCount(1);
+  await expect(inDraft.getByTestId('deal-blocked')).toHaveText('Уже в черновике маршрута');
+});
+
+test('пересборка: заказ возвращается флористу и логисту, номер и связь прежние', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  const orderNumber = process.env['E2E_RET_ACCEPTED'] ?? '';
+  const floristPhone = process.env['E2E_RET_FLORIST_PHONE'] ?? '';
+  const floristPin = process.env['E2E_RET_FLORIST_PIN'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    orderNumber === '' || floristPhone === '',
+    'не передана фикстура возвратов (E2E_RET_*)',
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Требуют решения' }).first().click();
+
+  const row = page.locator(`[data-testid="resolution-row"][data-order-number="${orderNumber}"]`);
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('Принят складом');
+
+  // Второй сеанс флориста открыт заранее: пересборка обязана дойти без F5.
+  const floristContext = await browser.newContext();
+  const floristPage = await floristContext.newPage();
+
+  try {
+    await login(floristPage, floristPhone, floristPin);
+    /*
+     * Поиск по номеру, а не прокрутка.
+     *
+     * В очереди дня десятки заказов, и нужный лежал бы на второй странице:
+     * проверка доказывала бы порядок сортировки вместо появления работы.
+     * Поиск считает сервер — ровно так его и используют.
+     */
+    await floristPage.getByTestId('florist-search').fill(orderNumber);
+    const queueRow = floristPage.locator(
+      `[data-testid="florist-row"][data-order-number="${orderNumber}"]`,
+    );
+    await expect(queueRow).toBeVisible();
+    // До решения заказ ждёт логиста и в работу флористу не годится: он
+    // числится за маршрутом, из которого его ещё не вывели.
+    await expect(queueRow.getByTestId('row-claim')).toHaveCount(1);
+
+    await row.getByTestId('resolution-redeliver').click();
+    await page.getByTestId('redelivery-reassemble').click();
+    await expect(page.locator('.toast-region')).toContainText('передан на пересборку');
+
+    /*
+     * Заказ появился в очереди флориста САМ.
+     *
+     * Это и есть смысл пересборки: работа возвращается людям, а не ждёт,
+     * пока кто-нибудь обновит страницу.
+     */
+    await expect(queueRow).toBeVisible({ timeout: 20_000 });
+    await expect(queueRow).toContainText(orderNumber);
+
+    // Номер прежний: «-otm» и «повтор» к номеру заказа не приписываются.
+    await expect(
+      floristPage.locator('[data-testid="florist-row"]').filter({ hasText: `${orderNumber}-otm` }),
+    ).toHaveCount(0);
+
+    // У логиста заказ снова в «Сделках» и ОДИН.
+    await page.getByRole('link', { name: 'Сделки' }).first().click();
+    await page.getByTestId('deals-search').fill(orderNumber);
+    await expect(
+      page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`),
+    ).toHaveCount(1);
+  } finally {
+    await floristContext.close();
+  }
+});
+
+test('склад: «Требуется перемещение» и «Отменённые» не показывают заказ дважды', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const inRouteCell = process.env['E2E_RET_IN_ROUTE_CELL'] ?? '';
+  const cancelled = process.env['E2E_RET_CANCELLED_LOGIST'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(inRouteCell === '' || cancelled === '', 'не передана фикстура возвратов (E2E_RET_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Склад' }).first().click();
+
+  const relocation = page.getByTestId('wh-group-relocation');
+  const cancelledGroup = page.getByTestId('wh-group-cancelled');
+
+  // Отменённый заказ в маршрутной ячейке мешает работе прямо сейчас — он
+  // стоит в первой группе и ТОЛЬКО в ней.
+  await expect(relocation).toContainText(inRouteCell);
+  await expect(cancelledGroup).not.toContainText(inRouteCell);
+
+  // Группа отменённых свёрнута и названа числом.
+  const toggle = page.getByTestId('wh-group-cancelled-toggle');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByTestId('wh-group-cancelled-count')).not.toHaveText('0');
+  await expect(cancelledGroup).not.toContainText(cancelled);
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(cancelledGroup).toContainText(cancelled);
+
+  // Ровно два выхода у отменённого букета, свободного текста нет.
+  const row = cancelledGroup.locator(`tr:has-text("${cancelled}")`);
+  await expect(row.getByTestId('wh-withdraw-reassembly')).toBeVisible();
+  await expect(row.getByTestId('wh-withdraw-write-off')).toBeVisible();
+
+  await row.getByTestId('wh-withdraw-write-off').click();
+  await expect(page.locator('.toast-region')).toContainText('снят с хранения');
+  // Заказ ушёл со склада целиком: строки нет ни в одной группе. Пустая
+  // группа при этом исчезает сама — показывать заголовок без строк незачем.
+  await expect(
+    page.locator('[data-testid="wh-placement-row"]').filter({ hasText: cancelled }),
+  ).toHaveCount(0);
+});
+
+test('печать: «Общие» показывают серверный набор за 48 часов, а не свой список', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  /*
+   * Администратор не собирает заказы, поэтому «своих» заданий печати у него
+   * нет вовсе. Это и делает проверку честной: всё, что появится после
+   * включения «Общих», пришло с сервера, а не осталось на экране.
+   */
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Флорист' }).first().click();
+  await page.getByRole('button', { name: 'Печать' }).click();
+  await page.getByTestId('print-filter-printed').click();
+
+  await expect(page.getByTestId('florist-print-list')).toHaveCount(0);
+
+  await page.getByTestId('print-general').locator('input').check();
+  const list = page.getByTestId('florist-print-list');
+  await expect(list).toBeVisible();
+  await expect(list.getByTestId('print-row').first()).toBeVisible();
+});
+
+test('карты: собранный заказ окрашен одинаково в «Сделках» и «Маршрутизации»', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const orderNumber = process.env['E2E_RET_WITH_COURIER'] ?? '';
+  const cellCode = process.env['E2E_RET_STORAGE_CELL'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(orderNumber === '' || cellCode === '', 'не передана фикстура возвратов (E2E_RET_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  /*
+   * Готовность создаётся здесь же, а не берётся у соседнего сценария.
+   *
+   * Букет этого заказа ещё у курьера; склад принимает возврат, и заказ
+   * становится готовым к отправке — по второму признаку готовности,
+   * «лежит в ячейке». Именно его и проверяет цвет.
+   */
+  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await page.getByTestId('wh-tab-returns').click();
+  await page.getByTestId('wh-return-order').fill(orderNumber);
+  await page.getByTestId('wh-return-order').press('Enter');
+  await page.getByTestId('wh-return-cell').fill(cellCode);
+  await page.getByTestId('wh-return-cell').press('Enter');
+  await expect(page.locator('.toast-region')).toContainText('принят в ячейку');
+
+  /*
+   * Цвет собранного один на обе карты и задан владельцем.
+   *
+   * Проверяется вычисленный цвет, а не имя класса: класс можно оставить,
+   * а правило переписать — и точка станет другого цвета, не сломав ни одной
+   * проверки.
+   */
+  const expected = 'rgb(176, 201, 101)';
+
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  const dealsDot = page.locator('.map-point--assembled .map-point__dot').first();
+  await expect(dealsDot).toBeVisible();
+  await expect(dealsDot).toHaveCSS('background-color', expected);
+
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  const routingDot = page.locator('.map-point--assembled .map-point__dot').first();
+  await expect(routingDot).toBeVisible();
+  await expect(routingDot).toHaveCSS('background-color', expected);
 });
 
 test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({

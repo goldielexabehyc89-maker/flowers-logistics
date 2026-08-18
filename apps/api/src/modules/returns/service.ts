@@ -573,6 +573,17 @@ export async function decideReassemble(
         fulfillmentAssigneeId: null,
         fulfillmentAssignedAt: null,
         fulfillmentShiftId: null,
+        /*
+         * Следы завершённой сборки снимаются вместе с состоянием.
+         *
+         * База требует именно этого: незавершённая сборка не оставляет
+         * отметок о завершении. Оставь мы их, заказ выглядел бы одновременно
+         * и несобранным, и собранным — а прежняя сборка при этом никуда
+         * не девается: она остаётся в ревизиях, печати и аудите.
+         */
+        fulfillmentAssembledAt: null,
+        fulfillmentAssembledById: null,
+        fulfillmentAssembledRevisionId: null,
         fulfillmentProcessVersion: { increment: 1 },
       },
       select: { externalName: true, assemblyRound: true },
