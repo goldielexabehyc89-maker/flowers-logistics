@@ -14,6 +14,7 @@ import { authenticateWithRoles } from '../auth/guards.js';
 import {
   acceptReturn,
   countUnresolved,
+  decideAcknowledge,
   decideCancel,
   decideRedeliver,
   listAcceptedReturns,
@@ -75,6 +76,13 @@ export function registerReturnRoutes(app: AppServer, deps: ReturnsDeps): void {
     const actor = await authenticateWithRoles(request, deps, RESOLUTION_ROLES);
     const { id } = idParamSchema.parse(request.params);
     return decideCancel({ db: deps.db }, actor, id, contextOf(request));
+  });
+
+  /** Задача разобрана вручную: заказ не меняется. */
+  app.post('/api/logistics/resolutions/:id/acknowledge', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, RESOLUTION_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return decideAcknowledge({ db: deps.db }, actor, id, contextOf(request));
   });
 
   app.post('/api/logistics/resolutions/:id/redeliver', async (request) => {

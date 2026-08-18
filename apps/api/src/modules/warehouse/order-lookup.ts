@@ -25,6 +25,8 @@ export interface ResolvedOrder {
   sourceArchived: boolean;
   sourceMissing: boolean;
   needsAttention: boolean;
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
 }
 
 const ORDER_SELECT = {
@@ -35,6 +37,8 @@ const ORDER_SELECT = {
   sourceArchived: true,
   sourceMissing: true,
   needsAttention: true,
+  cancelledInSource: true,
+  cancelledByLogistAt: true,
 } as const;
 
 /**
@@ -111,6 +115,8 @@ export async function resolveOrderByNumber(
     sourceArchived: order.sourceArchived,
     sourceMissing: order.sourceMissing,
     needsAttention: order.needsAttention,
+    cancelledInSource: order.cancelledInSource,
+    cancelledByLogistAt: order.cancelledByLogistAt,
   };
 }
 
@@ -131,6 +137,16 @@ export function blockingFlags(order: ResolvedOrder): string[] {
   }
   if (order.sourceMissing) {
     flags.push('SOURCE_MISSING');
+  }
+  /*
+   * Отменённый заказ комплектовать и выдавать нельзя.
+   *
+   * Разместить его по-прежнему можно — он физически на складе, и отказ
+   * в приёмке означал бы потерянную коробку. А вот уехать к клиенту он
+   * не должен ни в каком виде.
+   */
+  if (order.cancelledInSource || order.cancelledByLogistAt !== null) {
+    flags.push('CANCELLED');
   }
   return flags;
 }

@@ -266,7 +266,9 @@ export async function pickOrderToRouteCell(
     if (blocked.length > 0) {
       throw new AppError('CONFLICT', {
         message: `order is blocked: ${blocked.join(',')}`,
-        publicMessage: 'Заказ помечен как проблемный: комплектование недоступно.',
+        publicMessage: blocked.includes('CANCELLED')
+          ? 'Заказ отменён — не выдавать. Комплектование недоступно.'
+          : 'Заказ помечен как проблемный: комплектование недоступно.',
         conflict: { kind: 'ORDER_BLOCKED', orderIds: [order.id] },
       });
     }
@@ -659,7 +661,9 @@ export async function issueOrder(
     if (blocked.length > 0) {
       throw new AppError('CONFLICT', {
         message: `order is blocked: ${blocked.join(',')}`,
-        publicMessage: 'Заказ помечен как проблемный: выдача недоступна.',
+        publicMessage: blocked.includes('CANCELLED')
+          ? 'Заказ отменён — не выдавать.'
+          : 'Заказ помечен как проблемный: выдача недоступна.',
         conflict: { kind: 'ORDER_BLOCKED', orderIds: [order.id] },
       });
     }

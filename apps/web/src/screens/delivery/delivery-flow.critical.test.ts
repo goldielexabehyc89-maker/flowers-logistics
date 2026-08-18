@@ -163,6 +163,7 @@ describe('объединённый список', () => {
       number: `N-${index}`,
       address: null,
       point: null,
+      cancelled: false,
       recipient: null,
       comment: null,
       intervalStartMinute: null,

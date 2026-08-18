@@ -64,12 +64,20 @@ function isAdmin(actor: Actor): boolean {
   return actor.roles.includes('ADMIN');
 }
 
-/** Заказ пригоден к сборке только целиком: область, источник и состав вместе. */
+/**
+ * Заказ пригоден к сборке только целиком: область, источник, состав и отмена.
+ *
+ * Отмена стоит здесь, а не проверкой «до»: между проверкой и записью заказ
+ * успевает отмениться очередным проходом импорта, и флорист начинал бы
+ * собирать букет, которого уже никто не ждёт.
+ */
 const ASSEMBLABLE = {
   fulfillmentInScope: true,
   sourceArchived: false,
   sourceMissing: false,
   fulfillmentCompositionState: 'READY',
+  cancelledInSource: false,
+  cancelledByLogistAt: null,
 } as const;
 
 interface StoredOrder {
@@ -83,6 +91,8 @@ interface StoredOrder {
   sourceArchived: boolean;
   sourceMissing: boolean;
   fulfillmentCompositionState: string;
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
 }
 
 async function readOrder(db: Database | TransactionClient, id: string): Promise<StoredOrder> {
@@ -99,6 +109,8 @@ async function readOrder(db: Database | TransactionClient, id: string): Promise<
       sourceArchived: true,
       sourceMissing: true,
       fulfillmentCompositionState: true,
+      cancelledInSource: true,
+      cancelledByLogistAt: true,
     },
   });
   if (order === null) {
@@ -194,6 +206,15 @@ function assertAssignmentShift(order: StoredOrder, shiftId: string | null): void
  * ровно ту гонку, от которой избавляет условная запись.
  */
 function explainClaimFailure(order: StoredOrder): never {
+  // Отмена называется отдельно: «состав не подтверждён» отправило бы флориста
+  // искать несуществующую проблему в составе.
+  if (order.cancelledInSource || order.cancelledByLogistAt !== null) {
+    throw new AppError('CONFLICT', {
+      message: 'order is cancelled',
+      publicMessage: 'Заказ отменён: собирать его не нужно.',
+      conflict: { kind: 'ORDER_CANCELLED' },
+    });
+  }
   if (
     !order.fulfillmentInScope ||
     order.sourceArchived ||

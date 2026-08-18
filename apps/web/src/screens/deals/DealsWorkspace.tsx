@@ -638,7 +638,14 @@ export function DealsWorkspace(): React.JSX.Element {
                             !
                           </span>
                           <span className="deals__attention-text" data-testid="deal-blocked">
-                            {attention?.label ?? UNSELECTABLE_LABELS[blocked]}
+                            {/*
+                              Отмена и невозвращённый букет называются прямо.
+                              Подпись «требует внимания» отправила бы логиста
+                              чинить адрес там, где чинить нечего.
+                            */}
+                            {blocked === 'CANCELLED' || blocked === 'AWAITING_RETURN'
+                              ? UNSELECTABLE_LABELS[blocked]
+                              : (attention?.label ?? UNSELECTABLE_LABELS[blocked])}
                           </span>
                           {attention !== null && actionLabel !== null && (
                             <button

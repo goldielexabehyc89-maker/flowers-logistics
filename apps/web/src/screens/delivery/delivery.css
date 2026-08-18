@@ -278,3 +278,18 @@
   color: var(--color-text);
   font-size: 14px;
 }
+
+/*
+ * Отменённый заказ в руках курьера.
+ *
+ * Красная строка внутри карточки, а не исчезновение заказа: букет физически
+ * в машине, и убрать его с экрана значило бы потерять след товара.
+ */
+.delivery__cancelled {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-weight: 600;
+}

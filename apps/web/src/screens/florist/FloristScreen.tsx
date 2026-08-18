@@ -397,6 +397,11 @@ export function FloristScreen(): React.JSX.Element {
           {item.overdue && <StatusBadge tone="error">Просрочен</StatusBadge>}
           {routeLabel(item) !== null && <StatusBadge tone="info">{routeLabel(item)}</StatusBadge>}
           {item.changedSinceClaim && <StatusBadge tone="warning">Заказ изменён</StatusBadge>}
+          {/*
+            Отменённый заказ остаётся в списке видимым и помеченным.
+            Исчезнувший заказ флорист ищет, а помеченный — пропускает.
+          */}
+          {item.cancelled === true && <StatusBadge tone="error">Отменён — не собирать</StatusBadge>}
         </div>
 
         <div className="florist__row-side">
@@ -409,7 +414,7 @@ export function FloristScreen(): React.JSX.Element {
           {item.processState === 'NEW' && (
             <Button
               variant="primary"
-              disabled={action.isPending || !hasActiveShift}
+              disabled={action.isPending || !hasActiveShift || item.cancelled === true}
               data-testid="row-claim"
               onClick={() =>
                 action.mutate({

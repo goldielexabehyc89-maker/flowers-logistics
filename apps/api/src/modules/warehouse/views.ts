@@ -29,11 +29,16 @@ function flagsOf(order: {
   inScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
 }): string[] {
   const flags: string[] = [];
   if (!order.inScope) flags.push('OUT_OF_SCOPE');
   if (order.sourceArchived) flags.push('SOURCE_ARCHIVED');
   if (order.sourceMissing) flags.push('SOURCE_MISSING');
+  // Отменённый заказ нельзя ни комплектовать, ни выдавать. Из ячейки он при
+  // этом автоматически не уезжает: товар двигают руками и осознанно.
+  if (order.cancelledInSource || order.cancelledByLogistAt !== null) flags.push('CANCELLED');
   return flags;
 }
 
@@ -65,6 +70,8 @@ export async function listPlacedOrders(
             deliveryDate: true,
             inScope: true,
             sourceArchived: true,
+            cancelledInSource: true,
+            cancelledByLogistAt: true,
             sourceMissing: true,
             routeOrders: {
               where: { removedAt: null },
@@ -144,6 +151,8 @@ export async function getRouteFlow(db: Database, routeId: string): Promise<Route
               deliveryDate: true,
               inScope: true,
               sourceArchived: true,
+              cancelledInSource: true,
+              cancelledByLogistAt: true,
               sourceMissing: true,
               placements: {
                 where: { releasedAt: null },

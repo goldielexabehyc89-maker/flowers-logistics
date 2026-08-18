@@ -25,6 +25,7 @@ import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
+import { enqueueOrderCancel } from '../integrations/moysklad/cancel-outbox.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 
 /**
@@ -200,6 +201,8 @@ async function publishReturnEvent(
 
 export interface ResolutionView {
   id: string;
+  /** Из-за чего появилась задача: недоставка или отмена после доставки. */
+  kind: $Enums.OrderResolutionKind;
   orderId: string;
   orderNumber: string;
   /** Рабочий адрес: тот же, что видел курьер. */
@@ -233,6 +236,7 @@ export async function listResolutions(
       skip: query.offset,
       select: {
         id: true,
+        kind: true,
         orderId: true,
         reasonNameSnapshot: true,
         createdAt: true,
@@ -269,6 +273,7 @@ export async function listResolutions(
 
       return {
         id: row.id,
+        kind: row.kind,
         orderId: row.orderId,
         orderNumber: row.order.externalName,
         address: effectiveAddress(row.order),
@@ -320,7 +325,15 @@ async function lockPending(
 
 export interface DecisionResult {
   orderId: string;
+  orderNumber: string;
   decision: $Enums.OrderResolutionDecision;
+  /**
+   * Что произошло с отметкой в МоемСкладе.
+   *
+   * Отдельно от самого решения: наше решение уже действует, а сообщение
+   * наружу только поставлено в очередь. Интерфейс обязан говорить именно это.
+   */
+  sourceCancel?: $Enums.SourceCancelState;
 }
 
 /**
@@ -352,9 +365,23 @@ export async function decideCancel(
       },
     });
 
-    await tx.deliveryOrder.update({
+    const order = await tx.deliveryOrder.update({
       where: { id: task.orderId },
       data: { cancelledByLogistAt: now, cancelledByLogistById: actor.userId },
+      select: { externalId: true, externalName: true },
+    });
+
+    /*
+     * Сообщение наружу ставится в очередь В ЭТОЙ ЖЕ транзакции.
+     *
+     * Иначе возможны обе беды сразу: отменённый у нас заказ, о котором
+     * МойСклад никогда не узнает, и отправленная отметка об отмене, которой
+     * у нас не случилось.
+     */
+    await enqueueOrderCancel(tx, {
+      orderId: task.orderId,
+      externalId: order.externalId,
+      now,
     });
 
     await writeAudit(tx, {
@@ -371,7 +398,12 @@ export async function decideCancel(
 
     await publishReturnEvent(tx, 'order.resolution_changed', task.orderId);
 
-    return { orderId: task.orderId, decision: 'CANCELLED' as const };
+    return {
+      orderId: task.orderId,
+      orderNumber: order.externalName,
+      decision: 'CANCELLED' as const,
+      sourceCancel: 'QUEUED' as const,
+    };
   });
 }
 
@@ -393,6 +425,10 @@ export async function decideRedeliver(
 
   return deps.db.$transaction(async (tx) => {
     const task = await lockPending(tx, resolutionId);
+    const order = await tx.deliveryOrder.findUniqueOrThrow({
+      where: { id: task.orderId },
+      select: { externalName: true },
+    });
 
     await tx.orderResolution.update({
       where: { id: task.id },
@@ -419,7 +455,66 @@ export async function decideRedeliver(
 
     await publishReturnEvent(tx, 'order.resolution_changed', task.orderId);
 
-    return { orderId: task.orderId, decision: 'REDELIVER' as const };
+    return {
+      orderId: task.orderId,
+      orderNumber: order.externalName,
+      decision: 'REDELIVER' as const,
+    };
+  });
+}
+
+/**
+ * «Разобрано»: задача закрывается, а заказ не меняется.
+ *
+ * Единственное решение для отмены, пришедшей после доставки. Система здесь
+ * не вправе действовать сама — букет у клиента, деньги, возможно, получены, —
+ * поэтому закрывается ровно задача, и остаётся след, кто это сделал.
+ */
+export async function decideAcknowledge(
+  deps: ReturnDeps,
+  actor: AuthenticatedActor,
+  resolutionId: string,
+  context: { ip: string | null; userAgent: string | null },
+): Promise<DecisionResult> {
+  const now = clockOf(deps)();
+
+  return deps.db.$transaction(async (tx) => {
+    const task = await lockPending(tx, resolutionId);
+    const order = await tx.deliveryOrder.findUniqueOrThrow({
+      where: { id: task.orderId },
+      select: { externalName: true },
+    });
+
+    await tx.orderResolution.update({
+      where: { id: task.id },
+      data: {
+        decision: 'ACKNOWLEDGED',
+        decidedAt: now,
+        decidedById: actor.userId,
+        activeKey: null,
+        closedAt: now,
+      },
+    });
+
+    await writeAudit(tx, {
+      action: 'ORDER_RESOLUTION_ACKNOWLEDGED',
+      entityType: 'DeliveryOrder',
+      entityId: task.orderId,
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      source: 'api',
+      newValue: { resolutionId: task.id, decision: 'ACKNOWLEDGED' },
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+
+    await publishReturnEvent(tx, 'order.resolution_changed', task.orderId);
+
+    return {
+      orderId: task.orderId,
+      orderNumber: order.externalName,
+      decision: 'ACKNOWLEDGED' as const,
+    };
   });
 }
 

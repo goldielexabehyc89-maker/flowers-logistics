@@ -220,6 +220,14 @@ export interface ActiveDeliveryOrder {
   intervalEndMinute: number | null;
   cashToCollectMinor: string;
   cashCollectable: boolean;
+  /**
+   * Заказ отменён — в МоемСкладе или решением логиста.
+   *
+   * Курьеру это меняет работу: везти его больше не нужно, а букет надо
+   * вернуть на склад. Автоматически из маршрута заказ не исчезает: он
+   * физически в машине, и делать вид, что его там нет, нельзя.
+   */
+  cancelled: boolean;
   /** Действующий результат, если он уже есть. */
   result: AttemptView | null;
 }
@@ -392,6 +400,8 @@ export async function listActiveDeliveries(
               manualIntervalEndMinute: true,
               cashToCollectMinor: true,
               cashCollectable: true,
+              cancelledInSource: true,
+              cancelledByLogistAt: true,
             },
           },
           attempts: {
@@ -429,6 +439,9 @@ export async function listActiveDeliveries(
             participation.order.manualIntervalEndMinute ?? participation.order.intervalEndMinute,
           cashToCollectMinor: participation.order.cashToCollectMinor.toString(),
           cashCollectable: participation.order.cashCollectable,
+          cancelled:
+            participation.order.cancelledInSource ||
+            participation.order.cancelledByLogistAt !== null,
           result: attempt === undefined ? null : toAttemptView(attempt, actor, now),
         };
       }),

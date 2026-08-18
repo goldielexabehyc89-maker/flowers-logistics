@@ -112,6 +112,8 @@ export interface QueueItem {
   hasPrintForm: boolean;
   /** Производственные данные изменились после того, как заказ взяли в работу. */
   changedSinceClaim: boolean;
+  /** Заказ отменён: собирать его нельзя, и это видно прямо в очереди. */
+  cancelled: boolean;
 }
 
 export interface QueueResult extends PageInfo {
@@ -186,6 +188,8 @@ function orderSelect(date: string | null) {
     manualIntervalEndMinute: true,
     fulfillmentProcessState: true,
     fulfillmentAssignedAt: true,
+    cancelledInSource: true,
+    cancelledByLogistAt: true,
     fulfillmentAssignee: { select: { id: true, fullName: true } },
     printForms: { select: { id: true }, take: 1 },
     // Последняя производственная ревизия: по ней видно, менялся ли заказ после
@@ -473,6 +477,8 @@ function toQueueItem(
     printForms: { id: string }[];
     fulfillmentRevisions: { receivedAt: Date }[];
     routeOrders: { position: number | null; route: { id: string; number: string } }[];
+    cancelledInSource: boolean;
+    cancelledByLogistAt: Date | null;
   },
   minutes: { startMinute: number | null; endMinute: number | null },
   context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number },
@@ -502,6 +508,9 @@ function toQueueItem(
           },
     hasPrintForm: row.printForms.length > 0,
     changedSinceClaim: hasChangedSinceClaim(row),
+    // Отменённый заказ остаётся в списке, но собирать его нельзя: исчезнувший
+    // из очереди заказ выглядит как потерянный, а не как отменённый.
+    cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
   };
 }
 

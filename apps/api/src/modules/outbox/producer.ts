@@ -9,7 +9,7 @@
 import type { TransactionClient } from '../auth/sessions.js';
 
 /** Разрешённые темы. Обработчик выбирается только из этого списка. */
-export const OUTBOX_TOPICS = ['test.ping'] as const;
+export const OUTBOX_TOPICS = ['test.ping', 'moysklad.order_cancel'] as const;
 export type OutboxTopic = (typeof OUTBOX_TOPICS)[number];
 
 const FORBIDDEN_PAYLOAD_FIELDS =

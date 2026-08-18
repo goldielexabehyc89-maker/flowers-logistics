@@ -26,6 +26,7 @@ import './resolutions.css';
 
 export interface ResolutionRow {
   id: string;
+  kind: 'FAILED_DELIVERY' | 'CANCELLED_AFTER_DELIVERY';
   orderId: string;
   orderNumber: string;
   address: string | null;
@@ -34,7 +35,7 @@ export interface ResolutionRow {
   reasonName: string;
   failedAt: string;
   returnState: 'WITH_COURIER' | 'RETURNING' | 'ACCEPTED' | 'CANCELLED' | null;
-  decision: 'CANCELLED' | 'REDELIVER' | null;
+  decision: 'CANCELLED' | 'REDELIVER' | 'ACKNOWLEDGED' | null;
   decidedAt: string | null;
   decidedBy: string | null;
 }
@@ -74,18 +75,27 @@ export function ResolutionsScreen(): React.JSX.Element {
   });
 
   const decide = useMutation({
-    mutationFn: (input: { id: string; action: 'cancel-order' | 'redeliver' }) =>
-      client.post<{ orderNumber: string; decision: string }>(
+    mutationFn: (input: { id: string; action: 'cancel-order' | 'redeliver' | 'acknowledge' }) =>
+      client.post<{ orderNumber: string; decision: string; sourceCancel?: string }>(
         `/api/logistics/resolutions/${input.id}/${input.action}`,
         {},
       ),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ['logistics-resolutions'] });
       await queryClient.invalidateQueries({ queryKey: ['deal-cards'] });
+      /*
+       * Формулировка ровно по тому, что произошло.
+       *
+       * Отмена действует у нас немедленно, а отметка в МоемСкладе только
+       * поставлена в очередь. Сказать «отменён в МоемСкладе» значило бы
+       * пообещать то, чего никто не проверял.
+       */
       showToast(
         result.decision === 'CANCELLED'
-          ? `Заказ ${result.orderNumber} отменён`
-          : `Заказ ${result.orderNumber} вернулся в «Сделки»`,
+          ? `Заказ ${result.orderNumber} отменён. Отметка для МоегоСклада поставлена в очередь`
+          : result.decision === 'ACKNOWLEDGED'
+            ? `Задача по заказу ${result.orderNumber} закрыта`
+            : `Заказ ${result.orderNumber} вернулся в «Сделки»`,
         'success',
       );
     },
@@ -163,14 +173,35 @@ export function ResolutionsScreen(): React.JSX.Element {
                       <td className="resolutions__address">{row.address ?? '—'}</td>
                       <td>{row.courier?.fullName ?? '—'}</td>
                       <td>{formatMoscowDateTime(row.failedAt)}</td>
-                      <td>{row.reasonName}</td>
+                      <td>
+                        {row.reasonName}
+                        {row.kind === 'CANCELLED_AFTER_DELIVERY' && (
+                          <div>
+                            <StatusBadge tone="error">Требуется коррекция</StatusBadge>
+                          </div>
+                        )}
+                      </td>
                       <td>
                         <StatusBadge tone={ready ? 'success' : 'warning'}>
                           {RETURN_STATE_LABELS[row.returnState ?? ''] ?? '—'}
                         </StatusBadge>
                       </td>
                       <td>
-                        {row.decision === null ? (
+                        {row.decision === null && row.kind === 'CANCELLED_AFTER_DELIVERY' ? (
+                          /*
+                           * Отмена пришла после доставки: букет у клиента,
+                           * деньги, возможно, получены. Система здесь ничего
+                           * не меняет — человек разбирается и закрывает задачу.
+                           */
+                          <Button
+                            variant="ghost"
+                            disabled={busy}
+                            data-testid="resolution-acknowledge"
+                            onClick={() => decide.mutate({ id: row.id, action: 'acknowledge' })}
+                          >
+                            Разобрано
+                          </Button>
+                        ) : row.decision === null ? (
                           <div className="row resolutions__actions">
                             <Button
                               variant="ghost"
@@ -196,7 +227,11 @@ export function ResolutionsScreen(): React.JSX.Element {
                           </div>
                         ) : (
                           <span className="muted text-sm">
-                            {row.decision === 'CANCELLED' ? 'Отменён' : 'Повторная доставка'}
+                            {row.decision === 'CANCELLED'
+                              ? 'Отменён'
+                              : row.decision === 'ACKNOWLEDGED'
+                                ? 'Разобрано'
+                                : 'Повторная доставка'}
                             {row.decidedBy === null ? '' : ` · ${row.decidedBy}`}
                           </span>
                         )}

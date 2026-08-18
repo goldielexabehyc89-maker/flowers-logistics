@@ -533,6 +533,19 @@ model DeliveryOrder {
   cancelledByLogistById String?   @db.Uuid
   cancelledByLogist     User?     @relation("OrderCancelledByLogist", fields: [cancelledByLogistById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Что на самом деле произошло с отменой НА СТОРОНЕ МоегоСклада.
+  ///
+  /// Отдельно от решения логиста намеренно. Решение записано у нас и уже
+  /// действует; отправка наружу — другая операция, у которой своя судьба:
+  /// она может быть запрещена настройкой контура, может не дойти и может
+  /// потребовать повторов. Интерфейс обязан показывать это состояние честно,
+  /// а не выдавать наше решение за отметку в источнике.
+  sourceCancelState       SourceCancelState @default(NOT_REQUESTED)
+  sourceCancelRequestedAt DateTime?
+  sourceCancelSentAt      DateTime?
+  /// Последняя ошибка отправки. Только текст диагностики, без секретов.
+  sourceCancelError       String?
+
   /// Склад и способ доставки — два условия принадлежности к нашей области.
   ///
   /// Оба nullable: у ранее импортированного заказа значение может исчезнуть, и тогда
@@ -1186,6 +1199,20 @@ enum DeliveryAttemptCancelKind {
 }
 
 /// Почему заказ покинул состав маршрута.
+/// Судьба исходящей отметки об отмене в МоемСкладе.
+enum SourceCancelState {
+  /// Наружу ничего не требовалось.
+  NOT_REQUESTED
+  /// Поставлено в очередь и ждёт отправки.
+  QUEUED
+  /// Отправка запрещена настройкой контура: наружу не ушло ничего.
+  BLOCKED
+  /// Отметка принята МоимСкладом.
+  SENT
+  /// Отправка не удалась; причина сохранена и попытки продолжаются.
+  FAILED
+}
+
 enum RouteOrderRemovalReason {
   /// Возвращён в нераспределённые.
   RETURNED_TO_UNASSIGNED
@@ -1193,6 +1220,8 @@ enum RouteOrderRemovalReason {
   MOVED_TO_ANOTHER_ROUTE
   /// Маршрут отменён: участие закрывается вместе с ним, история сохраняется.
   ROUTE_CANCELLED
+  /// С заказа сняли отмену: он возвращается нераспределённым, автора нет.
+  SOURCE_CANCELLATION_WITHDRAWN
 }
 
 /// Известное расхождение уже распределённого заказа с маршрутом.
@@ -2669,6 +2698,20 @@ enum OrderResolutionDecision {
   CANCELLED
   /// Заказ повезут снова: он возвращается в «Сделки».
   REDELIVER
+  /// Задача разобрана: система ничего не меняла, человек решил вопрос сам.
+  ACKNOWLEDGED
+}
+
+/// Из-за чего у логиста появилась задача.
+enum OrderResolutionKind {
+  /// Курьер не смог доставить: букет надо вернуть и решить его судьбу.
+  FAILED_DELIVERY
+  /// Заказ отменён в МоемСкладе уже ПОСЛЕ доставки.
+  ///
+  /// Автоматически такой заказ не меняется: букет у клиента, деньги, возможно,
+  /// получены. Разбирается это руками, поэтому появляется задача, а не
+  /// молчаливое изменение состояния.
+  CANCELLED_AFTER_DELIVERY
 }
 
 /// Заказ, требующий решения логиста после недоставки.
@@ -2692,6 +2735,8 @@ model OrderResolution {
   attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   /// Снимок причины: переименование справочника прошлые задачи не переписывает.
+  kind OrderResolutionKind @default(FAILED_DELIVERY)
+
   reasonNameSnapshot String
 
   createdAt DateTime @default(now())

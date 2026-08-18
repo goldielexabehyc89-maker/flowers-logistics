@@ -30,6 +30,8 @@ export interface QueueItemView {
   route: { id: string; number: string; position: number | null } | null;
   hasPrintForm: boolean;
   changedSinceClaim: boolean;
+  /** Заказ отменён: собирать нельзя. Из списка при этом не исчезает. */
+  cancelled?: boolean;
 }
 
 /**
@@ -113,6 +115,8 @@ export interface OrderCardView {
     assembledById: string | null;
   };
   changedSinceClaim: boolean;
+  /** Заказ отменён: собирать нельзя. Из списка при этом не исчезает. */
+  cancelled?: boolean;
   print: { formId: string | null; jobs: CardPrintJobView[] };
 }
 

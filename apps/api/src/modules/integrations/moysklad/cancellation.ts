@@ -71,6 +71,13 @@ export async function applyCancellation(
     },
   });
 
+  if (input.cancelled) {
+    await markRouteCellPlacement(tx, input.orderId);
+    await openCorrectionTaskIfDelivered(tx, input.orderId);
+  } else {
+    await releaseFromRoutes(tx, input.orderId);
+  }
+
   await writeAudit(tx, {
     action: input.cancelled ? 'ORDER_CANCELLED_IN_SOURCE' : 'ORDER_CANCELLATION_WITHDRAWN',
     entityType: 'DeliveryOrder',
@@ -94,4 +101,106 @@ export async function applyCancellation(
   });
 
   return true;
+}
+
+/**
+ * Отменённый заказ, лежащий в МАРШРУТНОЙ ячейке, помечается к перемещению.
+ *
+ * Сам он никуда не едет: товар двигают руками. Но маршрутная ячейка означает
+ * «готово к выдаче курьеру», и отменённый заказ обязан быть виден кладовщику
+ * как требующий перемещения, а не стоять там молча до момента выдачи.
+ */
+async function markRouteCellPlacement(tx: TransactionClient, orderId: string): Promise<void> {
+  const placement = await tx.orderPlacement.findFirst({
+    where: { orderId, releasedAt: null, cell: { kind: 'ROUTE' } },
+    select: { id: true, requiresRelocation: true },
+  });
+  if (placement === null || placement.requiresRelocation) {
+    return;
+  }
+  await tx.orderPlacement.update({
+    where: { id: placement.id },
+    data: { requiresRelocation: true },
+  });
+}
+
+/**
+ * Отмена, пришедшая ПОСЛЕ доставки, задачей заканчивается, а не изменением.
+ *
+ * Букет у клиента, деньги, возможно, получены. Любое автоматическое действие
+ * здесь было бы вымыслом: система не знает, вернули ли товар и что решили
+ * с оплатой. Поэтому появляется задача логисту и администратору.
+ */
+async function openCorrectionTaskIfDelivered(
+  tx: TransactionClient,
+  orderId: string,
+): Promise<void> {
+  const delivered = await tx.deliveryAttempt.findFirst({
+    where: { orderId, outcome: 'DELIVERED', activeKey: { not: null } },
+    select: { id: true, routeOrderId: true, occurredAt: true },
+  });
+  if (delivered === null) {
+    return;
+  }
+
+  // У заказа уже есть открытая задача — второй такой же не нужно.
+  const active = await tx.orderResolution.findUnique({
+    where: { activeKey: orderId },
+    select: { id: true },
+  });
+  const sameAttempt = await tx.orderResolution.findUnique({
+    where: { attemptId: delivered.id },
+    select: { id: true },
+  });
+  if (active !== null || sameAttempt !== null) {
+    return;
+  }
+
+  await tx.orderResolution.create({
+    data: {
+      orderId,
+      routeOrderId: delivered.routeOrderId,
+      attemptId: delivered.id,
+      kind: 'CANCELLED_AFTER_DELIVERY',
+      reasonNameSnapshot: 'Отменён в МоемСкладе после доставки',
+      activeKey: orderId,
+    },
+  });
+
+  await publishRealtimeEvent(tx, {
+    topic: 'order.resolution_changed',
+    payload: { orderId },
+    audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+  });
+}
+
+/**
+ * Снятие отмены возвращает заказ в БЕЗОПАСНОЕ нераспределённое состояние.
+ *
+ * Прежние маршрут, курьер, флорист и ячейка не восстанавливаются намеренно:
+ * пока заказ был отменён, день ушёл вперёд — курьер уехал, лист закрылся,
+ * ячейка занята другим. Участие в незакрытом маршруте закрывается, и заказ
+ * снова появляется в «Сделках» как нераспределённый. Маршруты, где заказ уже
+ * получил результат, не трогаются: их история неприкосновенна.
+ */
+async function releaseFromRoutes(tx: TransactionClient, orderId: string): Promise<void> {
+  const participations = await tx.routeOrder.findMany({
+    where: {
+      orderId,
+      removedAt: null,
+      route: { state: { in: ['DRAFT', 'CONFIRMED', 'ACTIVE'] } },
+      attempts: { none: { activeKey: { not: null } } },
+    },
+    select: { id: true },
+  });
+
+  for (const participation of participations) {
+    await tx.routeOrder.update({
+      where: { id: participation.id },
+      data: {
+        removedAt: new Date(),
+        removalReason: 'SOURCE_CANCELLATION_WITHDRAWN',
+      },
+    });
+  }
 }

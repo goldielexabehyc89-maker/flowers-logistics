@@ -36,6 +36,8 @@ export interface AttemptView {
 }
 
 export interface ActiveOrderView {
+  /** Заказ отменён: везти его не нужно, надо вернуть на склад. */
+  cancelled: boolean;
   routeOrderId: string;
   orderId: string;
   position: number;

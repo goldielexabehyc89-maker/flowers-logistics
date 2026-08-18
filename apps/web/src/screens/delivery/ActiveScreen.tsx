@@ -565,6 +565,17 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         </div>
       ) : null}
 
+      {/*
+        Отмена заказа, случившаяся уже в пути.
+        Заказ не исчезает из маршрута: он физически в машине, и курьер обязан
+        знать, что везти его больше не нужно, а надо вернуть.
+      */}
+      {order.cancelled ? (
+        <p className="delivery__cancelled" data-testid="delivery-cancelled">
+          Не доставлять — вернуть на склад.
+        </p>
+      ) : null}
+
       {position === 'early' && !done ? (
         <p className="delivery__warning" data-testid="delivery-early-warning">
           Интервал ещё не начался. Подтвердить можно — предупреждение не запрет.
@@ -581,7 +592,7 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
           <Button
             data-testid="delivery-open-delivered"
             onClick={() => props.onAsk('DELIVERED')}
-            disabled={props.busy}
+            disabled={props.busy || order.cancelled}
           >
             Доставлен
           </Button>

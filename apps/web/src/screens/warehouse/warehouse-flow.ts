@@ -72,6 +72,7 @@ export const BLOCK_LABELS: Record<string, string> = {
   OUT_OF_SCOPE: 'Не наша доставка',
   SOURCE_ARCHIVED: 'Архивирован в МоемСкладе',
   SOURCE_MISSING: 'Не найден в МоемСкладе',
+  CANCELLED: 'Отменён — не выдавать',
 };
 
 export function blockLabel(flag: string): string {

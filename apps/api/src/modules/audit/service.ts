@@ -167,6 +167,10 @@ export const AUDIT_ACTIONS = [
   'ORDER_RETURN_ACCEPTED',
   'ORDER_CANCELLED_IN_SOURCE',
   'ORDER_CANCELLATION_WITHDRAWN',
+  // Судьба исходящей отметки об отмене: ушла, не ушла или запрещена.
+  'ORDER_RESOLUTION_ACKNOWLEDGED',
+  'ORDER_CANCEL_SENT',
+  'ORDER_CANCEL_NOT_SENT',
   'FINANCE_CASH_MOVED',
   'FINANCE_CASH_REVERSED',
 ] as const;

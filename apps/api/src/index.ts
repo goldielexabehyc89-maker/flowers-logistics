@@ -16,6 +16,7 @@ import { createMaintenanceRunner } from './platform/maintenance.js';
 import { createNotifier } from './modules/realtime/notifier.js';
 import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
+import { createOrderCancelHandler } from './modules/integrations/moysklad/cancel-outbox.js';
 import { MoyskladClient } from './modules/integrations/moysklad/client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
 import {
@@ -61,7 +62,19 @@ async function main(): Promise<void> {
   const outbox = createOutboxWorker({
     db,
     logger,
-    handlers: { 'test.ping': createTestPingHandler(logger) },
+    handlers: {
+      'test.ping': createTestPingHandler(logger),
+      /*
+       * Отмена заказа в МоемСкладе.
+       *
+       * Транспорта нет намеренно: серверный клиент интеграции принимает
+       * только GET и HEAD во всех окружениях, а `MOYSKLAD_READ_ONLY=true`
+       * остаётся условием допуска. Обработчик честно помечает такие заказы
+       * «наружу не ушло» — вместо того чтобы копить их в очереди или
+       * выдавать наше решение за отметку в источнике.
+       */
+      'moysklad.order_cancel': createOrderCancelHandler({ db, logger, transport: null }),
+    },
   });
   outbox.start();
 
