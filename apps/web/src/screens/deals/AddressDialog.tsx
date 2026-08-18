@@ -13,7 +13,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
-import { Button, Field, Modal, StatusBadge, TextInput } from '../../ui/components';
+import { Button, Modal, StatusBadge } from '../../ui/components';
 import type { DealCard } from './selection';
 import {
   acceptSuggestion,
@@ -24,6 +24,7 @@ import {
   typeInSuggestBox,
   type SuggestBox,
 } from '../logistics/address-suggestions';
+import { AddressSuggestField } from '../../ui/AddressSuggestField';
 
 interface Suggestion {
   value: string;
@@ -186,42 +187,30 @@ export function AddressDialog({
           </div>
         )}
 
-        <Field label="Новый адрес" hint={availabilityHint(available)}>
-          {(props) => (
-            <TextInput
-              {...props}
-              value={draft}
-              data-testid="address-input"
-              onChange={(event) => {
-                setDraft(event.target.value);
-                setChosen(null);
-                setBox((current) => typeInSuggestBox(current, event.target.value));
-              }}
-            />
-          )}
-        </Field>
-
-        {suggestListOpen && suggestions.data !== undefined && (
-          <ul className="stack" data-testid="address-suggestions">
-            {suggestions.data.suggestions.map((item) => (
-              <li key={item.value}>
-                <button
-                  type="button"
-                  className="deals__link"
-                  onClick={() => {
-                    setChosen(item);
-                    setDraft(item.value);
-                    // Выбор закрывает список и не отправляет новый запрос.
-                    setBox(acceptSuggestion(item.value));
-                  }}
-                >
-                  {item.value}
-                  {item.exact ? ' · точка найдена' : ' · без точной привязки'}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        {/*
+          Поле и подсказки — один общий компонент на все формы адреса:
+          поведение списка обязано совпадать везде, где правят адрес.
+        */}
+        <AddressSuggestField
+          label="Новый адрес"
+          hint={availabilityHint(available)}
+          value={draft}
+          inputTestId="address-input"
+          listTestId="address-suggestions"
+          suggestions={suggestions.data?.suggestions ?? []}
+          open={suggestListOpen}
+          onChange={(text) => {
+            setDraft(text);
+            setChosen(null);
+            setBox((current) => typeInSuggestBox(current, text));
+          }}
+          onPick={(item) => {
+            setChosen(item);
+            setDraft(item.value);
+            // Выбор закрывает список и не отправляет новый запрос.
+            setBox(acceptSuggestion(item.value));
+          }}
+        />
 
         {chosen !== null && chosen.exact && (
           <p className="muted text-sm" data-testid="address-preview">

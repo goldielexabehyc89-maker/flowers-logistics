@@ -143,6 +143,8 @@ const DELIVERY_SCREEN: string[][] = [
   ['delivery-active'],
   ['delivery-history'],
   ['delivery-reasons'],
+  // Обязательство вернуть букет живёт дольше маршрута и обновляется отдельно.
+  ['delivery-returns'],
 ];
 const USERS_SCREEN: string[][] = [
   ['users'],
@@ -200,6 +202,35 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * Производственные события трогают очередь флориста И «Сделки»: признак
    * «Собран» логист видит в своём списке и на карте.
    */
+  /*
+   * Недоставленный заказ: задача логиста и физический возврат букета.
+   *
+   * Ключи трёх ролей сразу: логист видит задачу, курьер — обязательство
+   * вернуть, склад — очередь приёмки. Экран решает сам, что перечитать.
+   */
+  'order.resolution_changed': [
+    ['logistics-resolutions'],
+    ...DEALS_SCREEN,
+    ...DELIVERY_SCREEN,
+    ...WAREHOUSE_SCREEN,
+  ],
+  'order.return_changed': [
+    ['logistics-resolutions'],
+    ['warehouse-returns'],
+    ...DEALS_SCREEN,
+    ...DELIVERY_SCREEN,
+    ...WAREHOUSE_SCREEN,
+  ],
+  /* Отмена в МоемСкладе меняет работу всех, кто держит заказ в руках. */
+  'order.cancellation_changed': [
+    ...DEALS_SCREEN,
+    ...ROUTING_SCREEN,
+    ...FLORIST_SCREEN,
+    ...WAREHOUSE_SCREEN,
+    ...DELIVERY_SCREEN,
+    ['logistics-resolutions'],
+  ],
+
   'order.fulfillment_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN, ...WAREHOUSE_SCREEN],
   'order.fulfillment_process_changed': [
     ...FLORIST_SCREEN,

@@ -572,8 +572,23 @@
   display: none;
 }
 
-.shell__tab {
+/*
+ * Вкладки верхней строки.
+ *
+ * Селектор ОБЯЗАН быть вложенным. Класс `.shell__tab` носят и вкладки нижней
+ * мобильной полосы, где вкладка — колонка «значок над подписью» во всю
+ * высоту. Одноимённое правило раньше молча доставалось обеим полосам сразу:
+ * счётчик уезжал под название здесь, а любая правка раскладки ломала
+ * нижнюю полосу на телефоне.
+ */
+.shell__tabs .shell__tab {
   flex: 0 0 auto;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: baseline;
+  /* Отступ счётчика — расстоянием строки, а не полем самого счётчика. */
+  gap: 6px;
+  min-height: 0;
   padding: 4px 10px;
   border: 1px solid transparent;
   border-radius: var(--radius-2, 8px);
@@ -583,12 +598,28 @@
   white-space: nowrap;
 }
 
-.shell__tab:hover {
+.shell__tabs .shell__tab:hover {
   background: var(--color-surface-hover);
 }
 
+/*
+ * Счётчик нерешённых недоставок.
+ *
+ * Рядом с названием, а не вместо него: «Требуют решения 3» читается как
+ * состояние работы, тогда как одинокое число ничего не называет. Ноль
+ * показывается тоже — исчезающий счётчик неотличим от несчитающегося.
+ */
+.shell__tab-count {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Активный раздел выглядит выбранной кнопкой, остальные — невыбранными. */
-.shell__tab--active {
+.shell__tabs .shell__tab--active {
   border-color: var(--color-border);
   background: var(--color-surface);
   color: var(--color-text);

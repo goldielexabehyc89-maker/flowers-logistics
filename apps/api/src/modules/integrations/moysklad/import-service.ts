@@ -29,6 +29,7 @@ import {
   type ManualInterval,
 } from '../../orders/attention.js';
 import { recordOrderConflicts } from '../../routing/conflicts.js';
+import { applyCancellation, isCancelledInSource } from './cancellation.js';
 import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
 import {
   automaticGeocodingAddress,
@@ -49,6 +50,15 @@ export interface ApplyResult {
 }
 
 export interface ApplyOptions {
+  /**
+   * Идентификатор статуса «Отменен» этого аккаунта МоегоСклада.
+   *
+   * `null` или отсутствие значения означает «распознавание отмен выключено»:
+   * ни один заказ отменённым не считается. Значение приходит из настройки
+   * окружения и в коде не хранится.
+   */
+  cancelledStateId?: string | null;
+
   /**
    * Ставить ли адрес в очередь геокодирования.
    *
@@ -74,6 +84,7 @@ interface StoredOrder {
   geoLonMicro: number | null;
   /// Поколение адреса: постановка новой версии в очередь увеличивает его.
   geoGeneration: number;
+  cancelledInSource: boolean;
   /// Ручной интервал логиста: синхронизация обязана его учитывать и не затирать.
   manualIntervalStartMinute: number | null;
   manualIntervalEndMinute: number | null;
@@ -140,7 +151,7 @@ async function lockByExternalId(
     SELECT "id", "version", "inScope", "fulfillmentInScope", "sourceMissing",
            "manualIntervalStartMinute", "manualIntervalEndMinute",
            "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration",
-           "address", "geocodeAddress",
+           "address", "geocodeAddress", "cancelledInSource",
            "localAddress", "sourceAddressAtLocalEdit", "addressConflict"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
@@ -256,6 +267,16 @@ async function createOrder(
     );
   }
 
+  if (isCancelledInSource(snapshot, options.cancelledStateId ?? null)) {
+    // Заказ приехал уже отменённым: в работу он не попадает вовсе.
+    await applyCancellation(tx, {
+      orderId: created.id,
+      cancelled: true,
+      previous: false,
+      now,
+    });
+  }
+
   const changedFields = diffSnapshots(null, snapshot);
   await writeRevision(tx, created.id, snapshot, changedFields, 'INITIAL_IMPORT');
   await writeOrderAudit(tx, 'ORDER_IMPORTED', created.id, snapshot, changedFields, 1, [
@@ -348,6 +369,20 @@ async function updateOrder(
       },
     });
   }
+
+  /*
+   * Отмена в источнике.
+   *
+   * Признак снимается ровно так же, как ставится: если статус перестал быть
+   * «Отменен», заказ возвращается в работу нераспределённым. Физическое место
+   * букета при этом не меняется — незавершённый возврат остаётся возвратом.
+   */
+  await applyCancellation(tx, {
+    orderId: existing.id,
+    cancelled: isCancelledInSource(snapshot, options.cancelledStateId ?? null),
+    previous: existing.cancelledInSource,
+    now,
+  });
 
   const reason = restoring
     ? 'SOURCE_RESTORED'

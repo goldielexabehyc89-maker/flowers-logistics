@@ -37,6 +37,7 @@ import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { setSuggestionsStatus } from '../integrations/dadata/status.js';
 import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
 import { addressState, effectiveAddress } from './address.js';
+import { activeReturnsOf } from '../returns/service.js';
 import {
   MAX_QUERY_LENGTH,
   MIN_QUERY_LENGTH,
@@ -201,6 +202,8 @@ function toListItem(order: {
   geoLatMicro: number | null;
   geoLonMicro: number | null;
   geoReviewReason: string | null;
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
   version: number;
   updatedAt: Date;
 }) {
@@ -247,6 +250,18 @@ function toListItem(order: {
     },
     needsAttention: order.needsAttention,
     attentionReasons: order.attentionReasons,
+    /*
+     * Отмена: у неё два независимых автора.
+     *
+     * Пришедшая из МоегоСклада и решённая логистом — разные факты с разной
+     * ответственностью, и интерфейс обязан различать их, а не показывать
+     * один общий флажок.
+     */
+    cancellation: {
+      cancelled: order.cancelledInSource || order.cancelledByLogistAt !== null,
+      cancelledInSource: order.cancelledInSource,
+      byLogist: order.cancelledByLogistAt !== null,
+    },
     // Координаты уходят десятичными строками: целые микроградусы наружу
     // не показываются, а число с плавающей точкой в контракте не появляется.
     geo: {
@@ -305,6 +320,15 @@ async function dealCards(db: Database, ids: string[]) {
     return [];
   }
 
+  /*
+   * Заказы, букет которых ещё у курьера.
+   *
+   * Одним запросом на страницу, а не по строке: карточка обязана сказать
+   * «ожидается возврат» до того, как логист попробует поставить заказ
+   * в маршрут и получит отказ сервера.
+   */
+  const awaitingReturn = await activeReturnsOf(db, ids);
+
   const rows = await db.deliveryOrder.findMany({
     where: { id: { in: ids } },
     select: {
@@ -313,6 +337,8 @@ async function dealCards(db: Database, ids: string[]) {
       address: true,
       localAddress: true,
       addressConflict: true,
+      cancelledInSource: true,
+      cancelledByLogistAt: true,
       recipient: true,
       comment: true,
       deliveryDate: true,
@@ -334,9 +360,10 @@ async function dealCards(db: Database, ids: string[]) {
        * с пустым `releasedAt`; второго такого места не существует физически.
        */
       fulfillmentProcessState: true,
+      assemblyRound: true,
       placements: {
         where: { releasedAt: null },
-        select: { id: true },
+        select: { id: true, assemblyRound: true },
         take: 1,
       },
       routeOrders: {
@@ -389,24 +416,63 @@ async function dealCards(db: Database, ids: string[]) {
         draftRouteId: participation?.routeId ?? null,
         draftRouteNumber: participation?.route.number ?? null,
         /*
-         * Выбрать можно заказ без блокирующего внимания, с точкой, с датой
-         * и не занятый черновиком.
+         * Выбрать можно заказ без блокирующего внимания, с точкой, с датой,
+         * не занятый черновиком и физически находящийся у нас.
          *
          * Дата названа отдельно: «Требует внимания» её больше не включает,
          * а положить заказ без даты в маршрут конкретного дня всё равно
          * нельзя — сервер откажет, и предлагать выбор было бы обманом.
+         *
+         * Ожидание возврата — то же самое, только про товар: пока букет
+         * едет в машине курьера, ставить его в новый маршрут значит обещать
+         * доставку тем, чего на складе нет.
          */
         selectable:
           !row.needsAttention &&
           row.deliveryDate !== null &&
           row.geoState === 'RESOLVED' &&
-          participation === undefined,
-        // Готов к отправке: собран флористом ЛИБО уже размещён на складе.
-        // Логисту важен факт готовности, а не путь, которым он наступил.
-        assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
+          participation === undefined &&
+          !awaitingReturn.has(row.id) &&
+          !row.cancelledInSource &&
+          row.cancelledByLogistAt === null,
+        /** Букет ещё у курьера: заказ виден, но в маршрут не берётся. */
+        awaitingReturn: awaitingReturn.get(row.id) ?? null,
+        /** Отменён — у нас решением логиста либо в МоемСкладе. */
+        cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
+        /*
+         * Готов к отправке: собран флористом ЛИБО уже размещён на складе.
+         *
+         * Логисту важен факт готовности, а не путь, которым он наступил.
+         * Но считается он по ТЕКУЩЕМУ кругу сборки: после пересборки старый
+         * букет остаётся на полке, и засчитывать его готовностью значило бы
+         * отправить курьера за тем, что уже признано негодным.
+         */
+        assembled: isAssembled(row),
       },
     ];
   });
+}
+
+/**
+ * Готов ли заказ к отправке ПРЯМО СЕЙЧАС.
+ *
+ * Два равноправных признака: флорист отметил «Собран» либо букет физически
+ * лежит в ячейке. Оба считаются по текущему кругу сборки — после пересборки
+ * старый букет и старая отметка относятся к прошлому кругу, и выдавать их
+ * за готовность нельзя.
+ *
+ * Функция одна на список и на карту: разойдясь, они показывали бы разный
+ * цвет одной и той же точке.
+ */
+export function isAssembled(order: {
+  fulfillmentProcessState: string;
+  assemblyRound: number;
+  placements: { assemblyRound: number }[];
+}): boolean {
+  if (order.fulfillmentProcessState === 'ASSEMBLED') {
+    return true;
+  }
+  return order.placements.some((placement) => placement.assemblyRound === order.assemblyRound);
 }
 
 export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Promise<void> {
@@ -609,6 +675,15 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         manualIntervalEndMinute: true,
         address: true,
         localAddress: true,
+        // Готовность считается ТЕМ ЖЕ правилом, что и в «Сделках»: разойдясь,
+        // две карты красили бы одну точку по-разному.
+        fulfillmentProcessState: true,
+        assemblyRound: true,
+        placements: {
+          where: { releasedAt: null },
+          select: { id: true, assemblyRound: true },
+          take: 1,
+        },
         routeOrders: {
           where: { removedAt: null },
           select: { position: true, route: { select: { id: true, number: true, state: true } } },
@@ -631,6 +706,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
           // Рабочий адрес: по нему поедет курьер.
           address: effectiveAddress(order),
+          assembled: isAssembled(order),
           // Разные визуальные состояния берутся из факта участия, а не угадываются.
           assigned: participation !== undefined,
           routeId: participation?.route.id ?? null,
@@ -965,7 +1041,12 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         manualIntervalStartMinute: true,
         manualIntervalEndMinute: true,
         fulfillmentProcessState: true,
-        placements: { where: { releasedAt: null }, select: { id: true }, take: 1 },
+        assemblyRound: true,
+        placements: {
+          where: { releasedAt: null },
+          select: { id: true, assemblyRound: true },
+          take: 1,
+        },
         routeOrders: { where: { removedAt: null }, select: { routeId: true }, take: 1 },
       },
     });
@@ -980,7 +1061,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         lon: fromMicro(row.geoLonMicro ?? 0),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,
         endMinute: row.manualIntervalEndMinute ?? row.intervalEndMinute,
-        assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
+        assembled: isAssembled(row),
         /*
          * Пригодность решает сервер и отдаёт её вместе с точкой.
          *

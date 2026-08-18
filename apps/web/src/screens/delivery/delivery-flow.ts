@@ -36,6 +36,8 @@ export interface AttemptView {
 }
 
 export interface ActiveOrderView {
+  /** Заказ отменён: везти его не нужно, надо вернуть на склад. */
+  cancelled: boolean;
   routeOrderId: string;
   orderId: string;
   position: number;
@@ -235,4 +237,22 @@ export function formatCash(minor: string): string {
   const value = Number(minor);
   if (!Number.isFinite(value)) return '—';
   return `${(value / 100).toFixed(2)} ₽`;
+}
+
+/**
+ * Сумма к получению крупно и без копеек, когда их нет.
+ *
+ * Курьер читает эту строку на ходу, одной рукой держа коробку: «4 990 ₽»
+ * схватывается взглядом, «4990.00 ₽» — нет. Копейки показываются только
+ * если они есть: дописанные ноли создают вид точности, которой в
+ * наличном расчёте не бывает.
+ */
+export function formatCashToCollect(minor: string): string {
+  const value = Number(minor);
+  if (!Number.isFinite(value)) return '—';
+
+  const rubles = Math.trunc(value / 100);
+  const pennies = Math.abs(value % 100);
+  const grouped = rubles.toLocaleString('ru-RU').replace(/\u00A0/g, ' ');
+  return pennies === 0 ? `${grouped} ₽` : `${grouped},${String(pennies).padStart(2, '0')} ₽`;
 }

@@ -223,3 +223,87 @@
     padding: 14px 16px;
   }
 }
+
+/* --- Возврат на склад ------------------------------------------------------ */
+
+/*
+ * Красный блок обязательств.
+ *
+ * Он намеренно громкий и стоит выше маршрутов: недоставленный букет — это
+ * товар компании, который сейчас едет в личной машине. Пока склад его не
+ * принял, у курьера остаётся незакрытая работа, даже если все маршруты
+ * показаны завершёнными.
+ */
+.delivery__returns {
+  padding: var(--space-3);
+  border: 2px solid var(--color-error);
+  border-radius: var(--radius-md);
+  background: var(--color-error-soft);
+}
+
+.delivery__returns-title {
+  margin: 0 0 var(--space-2);
+  color: var(--color-error);
+  font-size: 16px;
+}
+
+.delivery__returns-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.delivery__return {
+  display: grid;
+  gap: 4px;
+}
+
+.delivery__return-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.delivery__return-state {
+  color: var(--color-error);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.delivery__return-note {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+/*
+ * Отменённый заказ в руках курьера.
+ *
+ * Красная строка внутри карточки, а не исчезновение заказа: букет физически
+ * в машине, и убрать его с экрана значило бы потерять след товара.
+ */
+.delivery__cancelled {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+/*
+ * Сумма к получению наличными.
+ *
+ * Крупно и жирно, сразу под номером заказа: курьер читает её у двери,
+ * одной рукой держа коробку. Строка, потерявшаяся среди адреса и
+ * комментария, стоит поездки обратно за деньгами.
+ */
+.delivery__cash {
+  margin-top: 2px;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}

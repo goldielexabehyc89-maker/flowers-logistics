@@ -13,6 +13,21 @@
 /** Минимальная длина запроса. Короче сервер всё равно ответит пустым списком. */
 export const MIN_SUGGEST_QUERY = 3;
 
+/**
+ * Сколько подсказок показывать.
+ *
+ * Четыре — это выбор, а не чтение списка. Длинный перечень адресов,
+ * отличающихся корпусом, разбирают дольше, чем дописывают номер дома
+ * руками; к тому же список, закрывающий половину карточки, прячет то,
+ * ради чего адрес и правят.
+ */
+export const MAX_SUGGESTIONS = 4;
+
+/** Видимая часть подсказок: ровно столько, сколько показываем. */
+export function visibleSuggestions<T>(items: readonly T[]): T[] {
+  return items.slice(0, MAX_SUGGESTIONS);
+}
+
 export interface AddressSuggestion {
   value: string;
   latMicro: number | null;

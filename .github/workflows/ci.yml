@@ -330,6 +330,10 @@ jobs:
       # разбор геометрии и контракт при этом настоящие. Конфигурация не
       # позволяет включить это вне APP_ENV=local.
       VALHALLA_TEST_ROUTE: 'true'
+      # Вход, воспроизводящий ВНЕШНИЙ сигнал отмены из МоегоСклада. В
+      # интерфейсе его вызвать нечем, а без него браузерный сценарий отмены
+      # не существует. Конфигурация допускает флаг только при APP_ENV=local.
+      E2E_TEST_HOOKS: 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -505,6 +509,32 @@ jobs:
             echo "cell=$(get 'ячейка самовывоза')"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Создать фикстуру возвратов и отмен
+        id: seed-returns
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Заказы во всех состояниях возврата и отмены сразу: только рядом
+          # видно, что задача логиста, обязательство курьера и пометки
+          # склада описывают один и тот же букет.
+          output="$(npm run --silent seed:e2e-returns)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n "$2p"; }
+          {
+            echo "courierphone=$(get 'курьер' 1)"
+            echo "courierpin=$(get 'пин курьера' 1)"
+            echo "floristphone=$(get 'флорист' 1)"
+            echo "floristpin=$(get 'пин флориста' 1)"
+            echo "storage=$(get 'ячейка хранения' 1)"
+            echo "withcourier=$(get 'у курьера' 1)"
+            echo "returning=$(get 'возвращается' 1)"
+            echo "accepted=$(get 'принят' 1)"
+            echo "cancelledlogist=$(get 'отменён логистом' 1)"
+            echo "inroutecell=$(get 'отменён в маршрутной' 1)"
+            echo "freecancelled=$(get 'отменён свободный' 1)"
+            echo "indraft=$(get 'отменён в черновике' 1)"
+            echo "draft=$(get 'черновик' 1)"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Браузерный smoke
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
@@ -526,6 +556,19 @@ jobs:
           # подменяет только старт расчёта, а читает и применяет настоящее.
           E2E_PLAN_SELECTED_NUMBERS: ${{ steps.seed-plan.outputs.selectednumbers }}
           E2E_PLAN_FOREIGN_NUMBER: ${{ steps.seed-plan.outputs.foreignnumber }}
+          E2E_RET_COURIER_PHONE: ${{ steps.seed-returns.outputs.courierphone }}
+          E2E_RET_COURIER_PIN: ${{ steps.seed-returns.outputs.courierpin }}
+          E2E_RET_FLORIST_PHONE: ${{ steps.seed-returns.outputs.floristphone }}
+          E2E_RET_FLORIST_PIN: ${{ steps.seed-returns.outputs.floristpin }}
+          E2E_RET_STORAGE_CELL: ${{ steps.seed-returns.outputs.storage }}
+          E2E_RET_WITH_COURIER: ${{ steps.seed-returns.outputs.withcourier }}
+          E2E_RET_RETURNING: ${{ steps.seed-returns.outputs.returning }}
+          E2E_RET_ACCEPTED: ${{ steps.seed-returns.outputs.accepted }}
+          E2E_RET_CANCELLED_LOGIST: ${{ steps.seed-returns.outputs.cancelledlogist }}
+          E2E_RET_IN_ROUTE_CELL: ${{ steps.seed-returns.outputs.inroutecell }}
+          E2E_RET_FREE_CANCELLED: ${{ steps.seed-returns.outputs.freecancelled }}
+          E2E_RET_IN_DRAFT: ${{ steps.seed-returns.outputs.indraft }}
+          E2E_RET_DRAFT: ${{ steps.seed-returns.outputs.draft }}
           E2E_WH_CAM_STORAGE: ${{ steps.seed-warehouse-camera.outputs.storage }}
           E2E_WH_CAM_ROUTE_CELL: ${{ steps.seed-warehouse-camera.outputs.routecell }}
           E2E_WH_CAM_ROUTE: ${{ steps.seed-warehouse-camera.outputs.route }}

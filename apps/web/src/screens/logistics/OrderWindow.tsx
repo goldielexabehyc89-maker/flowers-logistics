@@ -30,9 +30,35 @@ import { formatMinutes, type OrderView } from '../deals/deals';
 import './order-window.css';
 
 /** Ответ существующего read-only контракта одного заказа. */
+/**
+ * Что показывать про отмену заказа.
+ *
+ * Автор отмены назван прямо: пришла ли она из МоегоСклада или её принял
+ * логист после недоставки. Обещаний о том, что происходит на стороне
+ * МоегоСклада, здесь нет — исходящей записи у системы пока не существует.
+ */
+export function cancellationLine(cancellation: {
+  cancelled: boolean;
+  cancelledInSource: boolean;
+  byLogist: boolean;
+}): string | null {
+  if (!cancellation.cancelled) {
+    return null;
+  }
+  if (cancellation.cancelledInSource) {
+    return 'Отменён в МоемСкладе';
+  }
+  return 'Отменён логистом после недоставки';
+}
+
 export interface OrderWindowView {
   order: OrderView & {
     sourceAddress: string | null;
+    cancellation: {
+      cancelled: boolean;
+      cancelledInSource: boolean;
+      byLogist: boolean;
+    };
     addressCorrected: boolean;
     addressConflict: boolean;
     geo: {
@@ -213,6 +239,12 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
     <>
       <Modal open title={`Заказ ${view.number}`} onClose={onClose}>
         <div className="order-window" data-testid="order-window">
+          {cancellationLine(view.cancellation) !== null && (
+            <div className="order-window__cancelled" data-testid="order-window-cancelled">
+              {cancellationLine(view.cancellation)}
+            </div>
+          )}
+
           <div className="order-window__row">
             <span className="order-window__label">Состояние в МоёмСкладе</span>
             <span className="order-window__value">{view.externalState.name ?? '—'}</span>

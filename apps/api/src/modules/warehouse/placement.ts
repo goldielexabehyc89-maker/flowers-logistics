@@ -159,6 +159,20 @@ export async function countActivePlacements(
 
 // --- Приёмка -----------------------------------------------------------------
 
+/**
+ * Текущий круг сборки заказа.
+ *
+ * Размещение всегда принадлежит кругу, который идёт сейчас: букет, принятый
+ * после пересборки, — это уже другой букет, и путать его с прошлым нельзя.
+ */
+export async function assemblyRoundOf(tx: TransactionClient, orderId: string): Promise<number> {
+  const order = await tx.deliveryOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { assemblyRound: true },
+  });
+  return order.assemblyRound;
+}
+
 export interface ReceiveInput {
   /** Отсканированный номер заказа. */
   orderNumber: string;
@@ -203,6 +217,7 @@ export async function receiveOrder(
   return deps.db
     .$transaction(async (tx: TransactionClient) => {
       const order = await resolveOrderByNumber(tx, input.orderNumber);
+      const round = await assemblyRoundOf(tx, order.id);
       await lockOrder(tx, order.id);
 
       const cell = await resolveCell(tx, input.cellCode, { requireActive: true });
@@ -247,6 +262,8 @@ export async function receiveOrder(
           source: current === null ? 'RECEIVED' : 'MOVED',
           placedAt: now,
           placedById: actor.userId,
+          // Букет принадлежит тому кругу сборки, который идёт сейчас.
+          assemblyRound: round,
         },
         select: { id: true },
       });
@@ -296,9 +313,18 @@ function toResult(
 
 // --- Изъятие -----------------------------------------------------------------
 
+/**
+ * Почему букет уходит из ячейки.
+ *
+ * Список закрытый и короткий. Свободный текст не отвечал на единственный
+ * важный вопрос — поехал букет на пересборку или списан, — и посчитать
+ * такие изъятия потом было нельзя.
+ */
+export type WithdrawReason = 'REASSEMBLY' | 'WRITE_OFF';
+
 export interface WithdrawInput {
   orderNumber: string;
-  reason: string;
+  reason: WithdrawReason;
 }
 
 /**
@@ -314,13 +340,7 @@ export async function withdrawOrder(
   input: WithdrawInput,
   context: RequestContext,
 ): Promise<{ orderId: string; orderNumber: string; withdrawn: boolean }> {
-  const reason = input.reason.trim();
-  if (reason.length < 3 || reason.length > 500) {
-    throw new AppError('VALIDATION_FAILED', {
-      message: 'withdraw reason is required',
-      publicMessage: 'Укажите причину изъятия: от 3 до 500 символов.',
-    });
-  }
+  const reason = input.reason;
 
   return deps.db.$transaction(async (tx: TransactionClient) => {
     const order = await resolveOrderByNumber(tx, input.orderNumber);
@@ -338,6 +358,7 @@ export async function withdrawOrder(
         releasedAt: new Date(),
         releasedById: actor.userId,
         releaseReason: 'WITHDRAWN',
+        withdrawReason: reason,
       },
     });
 

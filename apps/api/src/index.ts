@@ -95,6 +95,14 @@ async function main(): Promise<void> {
     enqueueOnImport,
     // Источник запроса к геокодеру. Адрес заказа этим не управляется.
     addressSource: config.MOYSKLAD_GEOCODING_ADDRESS_SOURCE,
+    /*
+     * Статус «Отменен» распознаётся только по настроенному идентификатору.
+     *
+     * Пустая настройка выключает распознавание целиком. Это осознанное
+     * состояние, а не поломка: в production конфигурация обязана его
+     * содержать и запуск без него не проходит.
+     */
+    cancelledStateId: config.MOYSKLAD_CANCELLED_STATE_ID ?? null,
   };
   await reportStartupStatus(moysklad, config);
 

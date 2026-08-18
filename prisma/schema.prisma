@@ -147,6 +147,12 @@ model User {
   deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
 
   createdTariffs     CourierTariffVersion[] @relation("TariffAuthor")
+  resolutions        OrderResolution[]       @relation("ResolutionDecidedBy")
+  returnsAsCourier   OrderReturn[]           @relation("ReturnCourier")
+  returnsAccepted    OrderReturn[]           @relation("ReturnAcceptedBy")
+  returnTransitions  OrderReturnTransition[] @relation("ReturnTransitionActor")
+  cancelledOrders    DeliveryOrder[]         @relation("OrderCancelledByLogist")
+
   cashEntries        LogistCashEntry[]      @relation("CashOwner")
   cashOperations     LogistCashEntry[]      @relation("CashActor")
   cashTransfers      LogistCashEntry[]      @relation("CashCourier")
@@ -511,6 +517,32 @@ model DeliveryOrder {
   externalStateName String?
   externalStateType String?
 
+  /// Заказ отменён в МоемСкладе.
+  ///
+  /// Признак отдельный, а не вывод из `externalStateType`: тип
+  /// `Unsuccessful` объединяет разные события — отказ, возврат, брак, — и
+  /// считать их одной отменой значило бы обещать одинаковое поведение там,
+  /// где бизнес-смысл разный. Первая версия распознаёт ровно один статус
+  /// «Отменен» по его идентификатору.
+  cancelledInSource   Boolean   @default(false)
+  cancelledInSourceAt DateTime?
+
+  /// Круг сборки заказа.
+  ///
+  /// Заказ при повторной доставке НЕ дублируется: тот же внутренний
+  /// идентификатор, тот же внешний UUID и тот же номер МоегоСклада. Но
+  /// пересборка обязана начинаться с чистого листа, поэтому у сборки есть
+  /// номер круга, и прежние печать с размещением к новому кругу
+  /// не относятся.
+  assemblyRound Int @default(1)
+
+  /// Отмена решением логиста после недоставки. Внешняя отмена этого поля
+  /// не касается: у них разные авторы и разная ответственность.
+  cancelledByLogistAt   DateTime?
+  cancelledByLogistById String?   @db.Uuid
+  cancelledByLogist     User?     @relation("OrderCancelledByLogist", fields: [cancelledByLogistById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+
   /// Склад и способ доставки — два условия принадлежности к нашей области.
   ///
   /// Оба nullable: у ранее импортированного заказа значение может исчезнуть, и тогда
@@ -763,6 +795,8 @@ model DeliveryOrder {
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
   deliveryAttempts     DeliveryAttempt[]
+  resolutions          OrderResolution[]
+  returns              OrderReturn[]
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
@@ -775,6 +809,11 @@ model DeliveryOrder {
   @@index([fulfillmentInScope, deliveryDate, fulfillmentProcessState], map: "DeliveryOrder_fulfillmentProcess_idx")
   /// «Мои заказы» и поиск незавершённых назначений при завершении смены.
   @@index([fulfillmentAssigneeId, fulfillmentProcessState], map: "DeliveryOrder_fulfillmentAssignee_idx")
+  /// Отбор заказов по состоянию геокодирования внутри дня: им пользуется
+  /// фоновый разбор адресов и экран «Сделок».
+  @@index([geoState, deliveryDate])
+  /// Кто правил адрес: разбор действий конкретного логиста.
+  @@index([localAddressSetById])
 }
 
 /// Неизменяемая история внешних версий заказа.
@@ -1039,6 +1078,10 @@ model OrderPrintForm {
 
   /// Версия шаблона бланка. Меняется вместе с формой, чтобы старый бланк
   /// оставался воспроизводимым ровно таким, каким его печатали.
+  /// Круг сборки, для которого напечатан бланк: печать прошлого круга
+  /// новую сборку закрытой не делает.
+  assemblyRound Int @default(1)
+
   templateVersion Int
 
   /// Данные бланка: номер, московские дата и интервал, состав, текст открытки
@@ -1169,6 +1212,8 @@ enum RouteOrderRemovalReason {
   MOVED_TO_ANOTHER_ROUTE
   /// Маршрут отменён: участие закрывается вместе с ним, история сохраняется.
   ROUTE_CANCELLED
+  /// С заказа сняли отмену: он возвращается нераспределённым, автора нет.
+  SOURCE_CANCELLATION_WITHDRAWN
 }
 
 /// Известное расхождение уже распределённого заказа с маршрутом.
@@ -1295,10 +1340,14 @@ model RouteOrder {
   movedToRouteId String?        @db.Uuid
   movedToRoute   DeliveryRoute? @relation("RouteOrderMovedTo", fields: [movedToRouteId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  conflicts RouteOrderConflict[]
-  attempts  DeliveryAttempt[]
-  distances RouteOrderDistance[]
+  conflicts   RouteOrderConflict[]
+  attempts    DeliveryAttempt[]
+  distances   RouteOrderDistance[]
+  resolutions OrderResolution[]
+  returns     OrderReturn[]
 
+  /// Одно активное участие на заказ. Частичный индекс объявлен миграцией:
+  /// Prisma не умеет выражать условие `WHERE "removedAt" IS NULL`.
   @@index([routeId, position])
   @@index([orderId])
 }
@@ -1606,6 +1655,8 @@ model RouteMatrixCache {
 
   @@index([expiresAt])
   @@index([status, lockedAt])
+  /// Уборка записей прежней ревизии графа выбирает их по отпечатку.
+  @@index([graphSha256])
 }
 
 /// Общее состояние провайдера геокодирования.
@@ -1627,7 +1678,7 @@ model GeocodingProviderState {
   haltedReason String?
   haltedAt     DateTime?
 
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
 /// Неизменяемая история геоданных заказа.
@@ -2047,6 +2098,10 @@ enum PlacementSource {
   RECEIVED
   /// Перемещение из другой ячейки.
   MOVED
+  /// Возврат от курьера после недоставки. Значение добавлено В КОНЕЦ:
+  /// PostgreSQL хранит порядок объявления, и вставка в середину сдвинула бы
+  /// уже записанные значения.
+  COURIER_RETURN
 }
 
 /// Фактическое местоположение заказа и вся история его движений.
@@ -2099,6 +2154,18 @@ model OrderPlacement {
   /// или отменили. Система не переносит его молча: физическое место меняет
   /// только человек штатным сканированием.
   requiresRelocation Boolean @default(false)
+
+  /// Круг сборки, которому принадлежит лежащий в ячейке букет.
+  ///
+  /// Букет прошлого круга остаётся на полке до решения человека, но готовым
+  /// к отправке он больше не считается: заказ ушёл на пересборку.
+  assemblyRound Int @default(1)
+
+  /// Почему размещение освобождено изъятием. Только для `WITHDRAWN`.
+  withdrawReason PlacementWithdrawReason?
+
+  /// Возврат от курьера, породивший это размещение.
+  courierReturn OrderReturn?
 
   /// Факт выдачи покупателю, закрывший это размещение. Ровно один на запись.
   pickupIssue OrderPickupIssue?
@@ -2301,6 +2368,8 @@ model DeliveryAttempt {
   activeKey String? @unique @db.Uuid
 
   cancellation DeliveryAttemptCancellation?
+  resolution   OrderResolution?
+  orderReturn  OrderReturn?
   moneyFact    DeliveryMoneyFact?
 
   @@index([routeId, occurredAt])
@@ -2626,4 +2695,165 @@ model LogistCashEntry {
   @@index([courierUserId, operationDate])
   @@index([transferId])
   @@index([occurredAt])
+}
+
+/// Что логист решил делать с недоставленным заказом.
+enum OrderResolutionDecision {
+  /// Заказ отменяется: повторной доставки не будет.
+  CANCELLED
+  /// Заказ повезут снова. Значение прежних решений: вариант тогда не
+  /// выбирался. Новые решения всегда называют способ явно.
+  REDELIVER
+  /// Задача разобрана: система ничего не меняла, человек решил вопрос сам.
+  ACKNOWLEDGED
+  /// Повезут ТОТ ЖЕ букет: он вернулся на склад целым, пересобирать нечего.
+  REDELIVER_SAME_BOUQUET
+  /// Заказ уходит на пересборку: нужны новая сборка и новая печать.
+  REDELIVER_REASSEMBLE
+}
+
+/// Почему размещение освобождено изъятием.
+enum PlacementWithdrawReason {
+  /// Букет уходит флористам на пересборку.
+  REASSEMBLY
+  /// Букет списывается: везти или пересобирать нечего.
+  WRITE_OFF
+}
+
+/// Из-за чего у логиста появилась задача.
+enum OrderResolutionKind {
+  /// Курьер не смог доставить: букет надо вернуть и решить его судьбу.
+  FAILED_DELIVERY
+  /// Заказ отменён в МоемСкладе уже ПОСЛЕ доставки.
+  ///
+  /// Автоматически такой заказ не меняется: букет у клиента, деньги, возможно,
+  /// получены. Разбирается это руками, поэтому появляется задача, а не
+  /// молчаливое изменение состояния.
+  CANCELLED_AFTER_DELIVERY
+}
+
+/// Заказ, требующий решения логиста после недоставки.
+///
+/// Появляется в той же транзакции, что и результат «Не доставлен», и живёт
+/// отдельно от самой попытки: попытка — это факт курьера и неизменяема, а
+/// решение принимает другой человек и позже. Без этой записи недоставленный
+/// заказ исчезал из работы вместе с завершением маршрута, и никто не отвечал
+/// за букет, оставшийся в машине.
+model OrderResolution {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Попытка, породившая задачу. Одна попытка — ровно одна задача.
+  attemptId String          @unique @db.Uuid
+  attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Снимок причины: переименование справочника прошлые задачи не переписывает.
+  kind OrderResolutionKind @default(FAILED_DELIVERY)
+
+  reasonNameSnapshot String
+
+  createdAt DateTime @default(now())
+
+  decision    OrderResolutionDecision?
+  decidedAt   DateTime?
+  decidedById String?                  @db.Uuid
+  decidedBy   User?                    @relation("ResolutionDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Отмена ошибочного результата закрывает задачу связанной записью, а не
+  /// удалением: история недоставки остаётся.
+  closedAt     DateTime?
+  closedReason String?
+
+  /// Активная задача одна на заказ. Значение равно `orderId`, у закрытой — NULL.
+  activeKey String? @unique @db.Uuid
+
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+/// Куда физически делся букет после недоставки.
+enum OrderReturnState {
+  /// У курьера. Завершение маршрута доказательством возврата не является.
+  WITH_COURIER
+  /// Курьер объявил, что везёт заказ на склад.
+  RETURNING
+  /// Склад принял и положил в ячейку. Только это закрывает обязательство.
+  ACCEPTED
+  /// Возврат закрыт отменой ошибочного результата доставки.
+  CANCELLED
+}
+
+/// Физический возврат заказа от курьера на склад.
+///
+/// Местоположение товара меняется только подтверждением склада: ни завершение
+/// маршрута, ни решение логиста, ни отмена в МоемСкладе сами по себе букет
+/// из машины не перемещают.
+model OrderReturn {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  routeOrderId String     @db.Uuid
+  routeOrder   RouteOrder @relation(fields: [routeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  attemptId String          @unique @db.Uuid
+  attempt   DeliveryAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Кто держит букет. Именно у него заказ остаётся в «Активных».
+  courierUserId String @db.Uuid
+  courier       User   @relation("ReturnCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Порядковый номер возврата этого заказа: первый, второй, третий.
+  sequence Int @default(1)
+
+  /// Отображаемый номер карточки возврата: «номер-otm», «номер-otm-2».
+  ///
+  /// Собственный номер, а не номер заказа: карточка возврата — отдельная
+  /// внутренняя сущность без внешнего UUID и без связи с заказом
+  /// МоегоСклада. Курьер подтверждает возврат именно по ней.
+  displayNumber String @unique
+
+  state OrderReturnState @default(WITH_COURIER)
+
+  createdAt    DateTime  @default(now())
+  acceptedAt   DateTime?
+  acceptedById String?   @db.Uuid
+  acceptedBy   User?     @relation("ReturnAcceptedBy", fields: [acceptedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Размещение, созданное приёмкой возврата.
+  placementId String?         @unique @db.Uuid
+  placement   OrderPlacement? @relation(fields: [placementId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Активный возврат один на заказ. Значение равно `orderId`, у закрытого — NULL.
+  activeKey String? @unique @db.Uuid
+
+  transitions OrderReturnTransition[]
+
+  @@unique([orderId, sequence])
+  @@index([orderId])
+  @@index([courierUserId, state])
+}
+
+/// Переход возврата. Записи только добавляются.
+model OrderReturnTransition {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  returnId String      @db.Uuid
+  return   OrderReturn @relation(fields: [returnId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  fromState OrderReturnState
+  toState   OrderReturnState
+
+  occurredAt  DateTime @default(now())
+  actorUserId String?  @db.Uuid
+  actor       User?    @relation("ReturnTransitionActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reason      String?
+
+  @@index([returnId, occurredAt])
 }

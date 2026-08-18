@@ -19,6 +19,7 @@ import {
   DELIVERY_ROLES,
   cancelDeliveryResult,
   listActiveDeliveries,
+  listCourierReturns,
   listDeliveryHistory,
   listFailureReasons,
   recordDeliveryResult,
@@ -81,6 +82,18 @@ export async function registerDeliveryRoutes(
   deps: DeliveryRouteDeps,
 ): Promise<void> {
   /** Активные доставки: курьеру — свои, менеджерам — все. */
+  /*
+   * Возвраты курьера отдаются вместе с активными доставками.
+   *
+   * Один запрос на экран: обязательство вернуть букет — часть той же работы,
+   * и второй поход на сервер оставил бы окно, в котором список уже обновился,
+   * а возвраты ещё нет.
+   */
+  app.get('/api/delivery/returns', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, DELIVERY_ROLES);
+    return { items: await listCourierReturns(deps, actor) };
+  });
+
   app.get('/api/delivery/active', async (request) => {
     const actor = await authenticateWithRoles(request, deps, DELIVERY_ROLES);
     const query = activeQuerySchema.parse(request.query);

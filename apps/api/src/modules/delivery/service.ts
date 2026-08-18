@@ -32,6 +32,7 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { moscowCalendarDate } from '@fl/shared';
 import { accrueDeliveryResult, reverseDeliveryAccruals } from '../finance/accrual.js';
+import { closeAfterCancelledResult, openAfterFailedDelivery } from '../returns/service.js';
 // Рабочий адрес считается в одном месте на весь продукт, а не переписывается здесь.
 import { effectiveAddress } from '../orders/address.js';
 import { fromMicro } from '../orders/geo.js';
@@ -219,8 +220,29 @@ export interface ActiveDeliveryOrder {
   intervalEndMinute: number | null;
   cashToCollectMinor: string;
   cashCollectable: boolean;
+  /**
+   * Заказ отменён — в МоемСкладе или решением логиста.
+   *
+   * Курьеру это меняет работу: везти его больше не нужно, а букет надо
+   * вернуть на склад. Автоматически из маршрута заказ не исчезает: он
+   * физически в машине, и делать вид, что его там нет, нельзя.
+   */
+  cancelled: boolean;
   /** Действующий результат, если он уже есть. */
   result: AttemptView | null;
+}
+
+/** Обязательство вернуть букет: живёт дольше маршрута. */
+export interface CourierReturnView {
+  returnId: string;
+  orderId: string;
+  orderNumber: string;
+  /** Собственный номер карточки возврата: «номер-otm», «номер-otm-2». */
+  displayNumber: string;
+  routeNumber: string;
+  reasonName: string;
+  state: $Enums.OrderReturnState;
+  failedAt: Date;
 }
 
 export interface ActiveDeliveryRoute {
@@ -296,6 +318,46 @@ export interface ActiveQuery {
  * Курьер видит ТОЛЬКО свои `ACTIVE`-маршруты. Это проверяется здесь, на сервере,
  * а не скрытием раздела: скрытая кнопка данных не защищает.
  */
+/**
+ * Возвраты, которые числятся за курьером.
+ *
+ * Отдельно от маршрутов намеренно: маршрут может быть уже завершён, а букет
+ * всё ещё лежит в машине. Обязательство снимает только приёмка складом.
+ */
+export async function listCourierReturns(
+  deps: DeliveryDeps,
+  actor: AuthenticatedActor,
+): Promise<CourierReturnView[]> {
+  const manager = isManager(actor);
+  const rows = await deps.db.orderReturn.findMany({
+    where: {
+      activeKey: { not: null },
+      ...(manager ? {} : { courierUserId: actor.userId }),
+    },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      id: true,
+      orderId: true,
+      state: true,
+      displayNumber: true,
+      order: { select: { externalName: true } },
+      attempt: { select: { reasonNameSnapshot: true, occurredAt: true } },
+      routeOrder: { select: { route: { select: { number: true } } } },
+    },
+  });
+
+  return rows.map((row) => ({
+    returnId: row.id,
+    orderId: row.orderId,
+    orderNumber: row.order.externalName,
+    displayNumber: row.displayNumber,
+    routeNumber: row.routeOrder.route.number,
+    reasonName: row.attempt.reasonNameSnapshot ?? 'Причина не указана',
+    state: row.state,
+    failedAt: row.attempt.occurredAt,
+  }));
+}
+
 export async function listActiveDeliveries(
   deps: DeliveryDeps,
   actor: AuthenticatedActor,
@@ -342,6 +404,8 @@ export async function listActiveDeliveries(
               manualIntervalEndMinute: true,
               cashToCollectMinor: true,
               cashCollectable: true,
+              cancelledInSource: true,
+              cancelledByLogistAt: true,
             },
           },
           attempts: {
@@ -379,6 +443,9 @@ export async function listActiveDeliveries(
             participation.order.manualIntervalEndMinute ?? participation.order.intervalEndMinute,
           cashToCollectMinor: participation.order.cashToCollectMinor.toString(),
           cashCollectable: participation.order.cashCollectable,
+          cancelled:
+            participation.order.cancelledInSource ||
+            participation.order.cancelledByLogistAt !== null,
           result: attempt === undefined ? null : toAttemptView(attempt, actor, now),
         };
       }),
@@ -571,6 +638,25 @@ export async function recordDeliveryResult(
       actorUserId: actor.userId,
       outcome: created.outcome,
     });
+
+    /*
+     * Недоставленный заказ не растворяется вместе с маршрутом.
+     *
+     * В той же транзакции появляются два обязательства: задача решения
+     * логиста и физический возврат букета. Иначе завершение маршрута
+     * выглядело бы концом истории, хотя товар остаётся в машине курьера
+     * и решать его судьбу ещё некому.
+     */
+    if (created.outcome === 'NOT_DELIVERED') {
+      await openAfterFailedDelivery(tx, {
+        attemptId: created.id,
+        orderId: participation.orderId,
+        routeOrderId,
+        courierUserId: actor.userId,
+        reasonNameSnapshot: created.reasonNameSnapshot ?? 'Причина не указана',
+        now,
+      });
+    }
 
     const remaining = await remainingOrders(tx, route.id);
     const completed = remaining === 0;
@@ -810,6 +896,19 @@ export async function cancelDeliveryResult(
      * с причиной. По учёту видно и то, что деньги начислялись, и то, почему
      * их сняли — это и есть требование неизменяемости.
      */
+    /*
+     * Отмена результата закрывает и обязательства.
+     *
+     * Ошибка кнопкой возвратом не является: букет никуда не ехал. Записи
+     * не удаляются — закрываются связанной операцией, и история недоставки
+     * остаётся видимой.
+     */
+    await closeAfterCancelledResult(tx, {
+      attemptId,
+      actorUserId: actor.userId,
+      now,
+    });
+
     await reverseDeliveryAccruals(tx, {
       attemptId,
       actorUserId: actor.userId,

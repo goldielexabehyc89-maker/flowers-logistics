@@ -36,6 +36,7 @@ import {
   SCAN_HINTS,
   blockLabel,
   cellLabel,
+  groupPlacements,
   issueBlocker,
   issueProgress,
   pickProgress,
@@ -45,13 +46,35 @@ import {
   type ScanContext,
 } from './warehouse-flow';
 
-type Tab = 'storage' | 'picking' | 'issue';
+type Tab = 'storage' | 'picking' | 'issue' | 'returns';
 
 const TABS: readonly { key: Tab; title: string }[] = [
   { key: 'storage', title: 'Склад' },
   { key: 'picking', title: 'Сборка' },
   { key: 'issue', title: 'Выдача' },
+  { key: 'returns', title: 'Возвраты' },
 ];
+
+/** Что сейчас с букетом, который не доставили. */
+const RETURN_STATE_LABELS: Readonly<Record<string, string>> = {
+  WITH_COURIER: 'У курьера',
+  RETURNING: 'Возвращается на склад',
+  ACCEPTED: 'Принят складом',
+  CANCELLED: 'Отменён',
+};
+
+interface WarehouseReturnView {
+  orderId: string;
+  orderNumber: string;
+  displayNumber: string;
+  state: keyof typeof RETURN_STATE_LABELS;
+  courier: string | null;
+  reasonName: string;
+  decision: 'CANCELLED' | 'REDELIVER' | null;
+  cancelled: boolean;
+  cellCode: string | null;
+  acceptedAt: string | null;
+}
 
 export function WarehouseScreen(): React.JSX.Element {
   const [tab, setTab] = useState<Tab>('storage');
@@ -88,7 +111,202 @@ export function WarehouseScreen(): React.JSX.Element {
       {tab === 'storage' && <StorageTab />}
       {tab === 'picking' && <RouteTab mode="picking" />}
       {tab === 'issue' && <RouteTab mode="issue" />}
+      {tab === 'returns' && <ReturnsTab />}
     </section>
+  );
+}
+
+/**
+ * Режим «Возвраты»: приёмка недоставленного букета обратно на склад.
+ *
+ * Отдельно от обычной приёмки намеренно. Обычная приёмка принимает СОБРАННЫЙ
+ * заказ от флориста, а здесь физически возвращается тот, что уже уезжал:
+ * пока склад его не принял, он числится в машине курьера, и логист не может
+ * ни отправить его повторно, ни считать вопрос закрытым.
+ *
+ * Пара «заказ + ячейка» уходит одним запросом: приёмки без ячейки не бывает.
+ */
+function ReturnsTab(): React.JSX.Element {
+  const { client } = useAuth();
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  const reportError = useApiError();
+
+  const [orderInput, setOrderInput] = useState('');
+  const [cellInput, setCellInput] = useState('');
+  const [scannedOrder, setScannedOrder] = useState<string | null>(null);
+
+  const returns = useQuery({
+    queryKey: ['warehouse-returns'],
+    queryFn: () =>
+      client.get<{ pending: WarehouseReturnView[]; accepted: WarehouseReturnView[] }>(
+        '/api/warehouse/returns',
+      ),
+  });
+
+  const accept = useMutation({
+    mutationFn: (input: { orderNumber: string; cellCode: string }) =>
+      client.post<{
+        orderNumber: string;
+        cellCode: string;
+        cancelled: boolean;
+        unchanged: boolean;
+      }>('/api/warehouse/returns/accept', input),
+    onSuccess: async (result) => {
+      setScannedOrder(null);
+      setCellInput('');
+      setOrderInput('');
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-returns'] });
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+      showToast(
+        result.unchanged
+          ? `Возврат ${result.orderNumber} уже принят в ячейку ${result.cellCode}`
+          : `Возврат ${result.orderNumber} принят в ячейку ${result.cellCode}`,
+        'success',
+      );
+      if (result.cancelled) {
+        // Отменённый заказ выдавать нельзя, и узнать об этом надо сразу.
+        showToast(`Заказ ${result.orderNumber} отменён — не выдавать`, 'error');
+      }
+    },
+    onError: (error: unknown) => {
+      // Заказ остаётся подтверждённым: повторяется только скан ячейки.
+      setCellInput('');
+      reportError(error, 'Не удалось принять возврат.');
+    },
+  });
+
+  return (
+    <>
+      <div className="card stack">
+        <h3>Приёмка возврата</h3>
+        <p className="muted text-sm">
+          Заказ, который курьер не смог доставить. Кладётся в обычную ячейку хранения — маршрутная
+          означала бы «готов к выдаче».
+        </p>
+
+        {scannedOrder === null ? (
+          <ScanField
+            label="Заказ"
+            hint={SCAN_HINTS.ORDER}
+            value={orderInput}
+            onChange={setOrderInput}
+            onSubmit={() => {
+              const number = orderInput.trim();
+              if (number !== '') {
+                setScannedOrder(number);
+              }
+            }}
+            autoFocus
+            testId="wh-return-order"
+            disabled={accept.isPending}
+          />
+        ) : (
+          <div className="stack">
+            <div className="row">
+              <div>
+                <div className="field__label">Заказ</div>
+                <strong data-testid="wh-return-scanned">{scannedOrder}</strong>
+              </div>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setScannedOrder(null);
+                  setCellInput('');
+                }}
+              >
+                Другой заказ
+              </Button>
+            </div>
+            <ScanField
+              label="Ячейка хранения"
+              hint={SCAN_HINTS.CELL}
+              value={cellInput}
+              onChange={setCellInput}
+              onSubmit={() => {
+                if (cellInput.trim() !== '') {
+                  accept.mutate({ orderNumber: scannedOrder, cellCode: cellInput });
+                }
+              }}
+              autoFocus
+              testId="wh-return-cell"
+              disabled={accept.isPending}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="card stack">
+        <h3>Ждут приёмки</h3>
+        {returns.isPending && <LoadingState title="Загружаем возвраты…" />}
+        {returns.isError && (
+          <ErrorState
+            title="Не удалось загрузить возвраты"
+            onRetry={() => void returns.refetch()}
+          />
+        )}
+        {returns.data !== undefined &&
+          (returns.data.pending.length === 0 ? (
+            <EmptyState title="Возвратов нет" />
+          ) : (
+            <ReturnsTable items={returns.data.pending} showCell={false} />
+          ))}
+      </div>
+
+      {returns.data !== undefined && returns.data.accepted.length > 0 && (
+        <div className="card stack">
+          <h3>Принятые возвраты</h3>
+          <ReturnsTable items={returns.data.accepted} showCell />
+        </div>
+      )}
+    </>
+  );
+}
+
+function ReturnsTable({
+  items,
+  showCell,
+}: {
+  items: readonly WarehouseReturnView[];
+  showCell: boolean;
+}): React.JSX.Element {
+  return (
+    <div className="table-wrap">
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Возврат</th>
+            <th>Курьер</th>
+            <th>Причина</th>
+            <th>Состояние</th>
+            {showCell && <th>Ячейка</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr
+              key={item.orderId}
+              data-order-number={item.orderNumber}
+              data-return-number={item.displayNumber}
+            >
+              <td>
+                <strong>{item.displayNumber}</strong>
+                <div className="muted text-sm">заказ {item.orderNumber}</div>
+                {item.cancelled && (
+                  <div data-testid="wh-return-cancelled">
+                    <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>
+                  </div>
+                )}
+              </td>
+              <td>{item.courier ?? '—'}</td>
+              <td>{item.reasonName}</td>
+              <td>{RETURN_STATE_LABELS[item.state] ?? item.state}</td>
+              {showCell && <td>{item.cellCode ?? '—'}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -501,14 +719,100 @@ function StorageTab(): React.JSX.Element {
           />
         )}
         {placements.isSuccess && placements.data.items.length > 0 && (
-          <PlacementTable items={placements.data.items} />
+          <PlacementGroups items={placements.data.items} />
         )}
       </div>
     </>
   );
 }
 
-function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Element {
+/**
+ * Складской список группами.
+ *
+ * Порядок задан правилом в `warehouse-flow.ts`: сначала то, что мешает
+ * работе прямо сейчас, потом мёртвый груз, потом обычное хранение.
+ */
+function PlacementGroups({ items }: { items: PlacedOrderView[] }): React.JSX.Element {
+  const groups = groupPlacements(items);
+  const { showToast } = useToast();
+  const reportError = useApiError();
+  const queryClient = useQueryClient();
+  const { client } = useAuth();
+  // Отменённые свёрнуты по умолчанию: их бывает много, и разворачивать ими
+  // весь экран при каждом открытии склада незачем.
+  const [cancelledOpen, setCancelledOpen] = useState(false);
+
+  const withdraw = useMutation({
+    mutationFn: (input: { orderNumber: string; reason: 'REASSEMBLY' | 'WRITE_OFF' }) =>
+      client.post<{ orderNumber: string; withdrawn: boolean }>(
+        '/api/warehouse/placements/withdraw',
+        input,
+      ),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+      showToast(
+        result.withdrawn
+          ? `Заказ ${result.orderNumber} снят с хранения`
+          : `Заказ ${result.orderNumber} на складе уже не числится`,
+        'success',
+      );
+    },
+    onError: (error: unknown) => reportError(error, 'Не удалось снять заказ с хранения.'),
+  });
+
+  return (
+    <div className="stack">
+      {groups.relocation.length > 0 && (
+        <div className="stack" data-testid="wh-group-relocation">
+          <h4 className="wh-group__title">Требуется перемещение · {groups.relocation.length}</h4>
+          <PlacementTable items={groups.relocation} />
+        </div>
+      )}
+
+      {groups.cancelled.length > 0 && (
+        <div className="stack" data-testid="wh-group-cancelled">
+          {/*
+            Одна строка высотой с обычную: свёрнутая группа не должна
+            выглядеть весомее самих заказов.
+          */}
+          <button
+            type="button"
+            className="wh-group__toggle"
+            data-testid="wh-group-cancelled-toggle"
+            aria-expanded={cancelledOpen}
+            onClick={() => setCancelledOpen((open) => !open)}
+          >
+            <span>Отменённые</span>
+            <span className="wh-group__count" data-testid="wh-group-cancelled-count">
+              {groups.cancelled.length}
+            </span>
+            <span aria-hidden="true">{cancelledOpen ? '▾' : '▸'}</span>
+          </button>
+
+          {cancelledOpen && (
+            <PlacementTable
+              items={groups.cancelled}
+              onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
+              busy={withdraw.isPending}
+            />
+          )}
+        </div>
+      )}
+
+      {groups.rest.length > 0 && <PlacementTable items={groups.rest} />}
+    </div>
+  );
+}
+
+function PlacementTable({
+  items,
+  onWithdraw,
+  busy,
+}: {
+  items: PlacedOrderView[];
+  onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
+  busy?: boolean;
+}): React.JSX.Element {
   return (
     <div className="table-wrap">
       <table className="table">
@@ -519,6 +823,7 @@ function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Elem
             <th>Тип</th>
             <th>Маршрут</th>
             <th>Пометки</th>
+            {onWithdraw !== undefined && <th>Снять с хранения</th>}
           </tr>
         </thead>
         <tbody>
@@ -540,6 +845,33 @@ function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Elem
                   </StatusBadge>
                 ))}
               </td>
+              {onWithdraw !== undefined && (
+                <td>
+                  {/*
+                    Ровно два выхода у отменённого букета: обратно к флористам
+                    или в списание. Третьего смысла нет, а свободный текст
+                    потом нельзя посчитать.
+                  */}
+                  <div className="row resolutions__actions">
+                    <Button
+                      variant="ghost"
+                      disabled={busy === true}
+                      data-testid="wh-withdraw-reassembly"
+                      onClick={() => onWithdraw(item.orderNumber, 'REASSEMBLY')}
+                    >
+                      Передать на пересборку
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={busy === true}
+                      data-testid="wh-withdraw-write-off"
+                      onClick={() => onWithdraw(item.orderNumber, 'WRITE_OFF')}
+                    >
+                      Списать
+                    </Button>
+                  </div>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

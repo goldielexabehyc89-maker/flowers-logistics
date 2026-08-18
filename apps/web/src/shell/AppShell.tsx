@@ -16,6 +16,7 @@
  * пока сессия проверяется, показывается экран ожидания, а не пустой каркас с меню.
  */
 
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import {
@@ -120,6 +121,29 @@ export function AppShell(): React.JSX.Element {
 
   const roles = user?.roles ?? [];
   const sections = visibleSections(roles);
+
+  /*
+   * Счётчик нерешённых недоставок для вкладки «Требуют решения».
+   *
+   * Живёт в оболочке, а не на самой вкладке: число обязано быть видно и тогда,
+   * когда логист работает в «Сделках». Ключ общий со списком, поэтому событие
+   * `order.resolution_changed` обновляет и то и другое одним касанием.
+   */
+  const logisticsVisible = roles.includes('ADMIN') || roles.includes('LOGISTICIAN');
+  const unresolved = useQuery({
+    queryKey: ['logistics-resolutions', 'count'],
+    queryFn: () => client.get<{ unresolved: number }>('/api/logistics/resolutions/count'),
+    enabled: logisticsVisible,
+  });
+  /*
+   * До ответа сервера счётчика нет вовсе.
+   *
+   * Ноль в этот момент — не число, а отсутствие данных, и показывать его
+   * значило бы сказать «нерешённых нет» тогда, когда мы этого ещё не знаем.
+   */
+  const counters: Readonly<Record<string, number | undefined>> = {
+    resolutions: unresolved.data?.unresolved,
+  };
   const mobile = splitMobileNavigation(roles);
 
   /**
@@ -331,6 +355,11 @@ export function AppShell(): React.JSX.Element {
                   aria-current={location.pathname.startsWith(tab.path) ? 'page' : undefined}
                 >
                   {tab.title}
+                  {tab.counter !== undefined && counters[tab.counter] !== undefined && (
+                    <span className="shell__tab-count" data-testid={`tab-count-${tab.key}`}>
+                      {counters[tab.counter]}
+                    </span>
+                  )}
                 </NavLink>
               ))}
             </nav>

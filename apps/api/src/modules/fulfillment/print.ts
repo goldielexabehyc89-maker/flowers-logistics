@@ -115,9 +115,32 @@ export interface PrintJobPage extends PageInfo {
  * по идентификатору, — поэтому `skip`/`take` дают ровно ту же страницу, что и
  * срез в памяти. Группового правила, как у очереди сборки, тут нет.
  */
+/**
+ * Окно «Общих» заданий: двое суток скользящим окном.
+ *
+ * Без границы «общий» список превратился бы в архив за всё время: печать
+ * недельной давности уже никого не касается, а листать её приходится
+ * каждому. Двое суток покрывают вчерашнюю смену и сегодняшнюю — ровно то,
+ * что человек ещё может доделать руками.
+ */
+export const GENERAL_WINDOW_MS = 48 * 60 * 60 * 1000;
+
 export async function listPrintJobs(
   db: Database,
-  input: { filter: PrintFilter } & Partial<PageRequest>,
+  input: {
+    filter: PrintFilter;
+    /**
+     * Показывать задания всех флористов и рабочих мест.
+     *
+     * Выключено — свои: те заказы, что закреплены за этим человеком. Иначе
+     * флорист разбирает чужую печать вместо своей. Включено — общие, но
+     * только за последние двое суток.
+     */
+    general?: boolean;
+    /** Кто спрашивает. Нужен ровно для отбора «своих». */
+    actorUserId: string;
+    now?: Date;
+  } & Partial<PageRequest>,
 ): Promise<PrintJobPage> {
   const states =
     input.filter === 'attention'
@@ -127,7 +150,22 @@ export async function listPrintJobs(
         : (['PENDING', 'ERROR', 'PRINTED'] as const);
 
   const page = normalizePageRequest(input);
-  const where = { state: { in: [...states] } };
+  const general = input.general === true;
+  const now = input.now ?? new Date();
+
+  /*
+   * Отбор считает СЕРВЕР.
+   *
+   * И «свои», и окно двух суток — часть запроса, а не фильтр загруженной
+   * страницы: иначе на второй странице оказалось бы совсем другое множество,
+   * а счётчик врал бы о размере списка.
+   */
+  const where = {
+    state: { in: [...states] },
+    ...(general
+      ? { createdAt: { gte: new Date(now.getTime() - GENERAL_WINDOW_MS) } }
+      : { order: { fulfillmentAssigneeId: input.actorUserId } }),
+  };
 
   // Счёт и страница читаются одним запросом к пулу: разница между ними
   // возможна только при одновременной печати, и клиент в этом случае

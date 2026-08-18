@@ -119,7 +119,14 @@ export function splitForMap(
 
 export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
-  const [zoomedOut, setZoomedOut] = useState(true);
+  /*
+   * По умолчанию точки показываются ПООТДЕЛЬНОСТИ.
+   *
+   * Группировка удобна на обзорном масштабе, но логист приходит на карту
+   * работать с конкретными заказами: свёрнутая группа скрывает и номер,
+   * и готовность, и заставляет первым делом нажимать «Показать отдельно».
+   */
+  const [zoomedOut, setZoomedOut] = useState(false);
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [basemapFailed, setBasemapFailed] = useState(false);

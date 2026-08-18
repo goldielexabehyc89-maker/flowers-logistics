@@ -28,7 +28,7 @@ import {
 } from '../../ui/components';
 import {
   cancelWindowLeftMs,
-  formatCash,
+  formatCashToCollect,
   groupRoutes,
   intervalPosition,
   moscowMinutesOfDay,
@@ -46,6 +46,82 @@ import {
 import './delivery.css';
 
 const ACTIVE_KEY = ['delivery-active'];
+const RETURNS_KEY = ['delivery-returns'];
+
+/** Обязательство вернуть букет на склад. */
+interface CourierReturnView {
+  returnId: string;
+  orderId: string;
+  orderNumber: string;
+  displayNumber: string;
+  routeNumber: string;
+  reasonName: string;
+  state: 'WITH_COURIER' | 'RETURNING' | 'ACCEPTED' | 'CANCELLED';
+  failedAt: string;
+}
+
+const RETURN_STATE_LABELS: Readonly<Record<string, string>> = {
+  WITH_COURIER: 'У курьера',
+  RETURNING: 'Возвращается на склад',
+  ACCEPTED: 'Принят складом',
+};
+
+/**
+ * Красный блок «Вернуть на склад».
+ *
+ * Отдельно от маршрутов намеренно: маршрут завершается последним результатом,
+ * а букет из машины при этом никуда не девается. Блок исчезает ровно тогда,
+ * когда кладовщик назначил заказу ячейку, — не раньше и без обновления
+ * страницы.
+ */
+function ReturnsBlock({
+  items,
+  onDeparting,
+  busy,
+}: {
+  items: readonly CourierReturnView[];
+  onDeparting: (orderId: string) => void;
+  busy: boolean;
+}): React.JSX.Element | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="delivery__returns" data-testid="delivery-returns">
+      <h3 className="delivery__returns-title">Вернуть на склад</h3>
+      <ul className="delivery__returns-list">
+        {items.map((item) => (
+          <li key={item.returnId} className="delivery__return" data-order-number={item.orderNumber}>
+            <div className="delivery__return-head">
+              {/*
+                Номер карточки возврата, а не номер заказа: кладовщик примет
+                именно её, и разные попытки одного заказа должны различаться.
+              */}
+              <strong>{item.displayNumber}</strong>
+              <span className="delivery__return-state">
+                {RETURN_STATE_LABELS[item.state] ?? item.state}
+              </span>
+            </div>
+            <p className="delivery__return-note">
+              Передайте заказ кладовщику: пока склад его не принял, он числится за вами.
+            </p>
+            {item.state === 'WITH_COURIER' && (
+              <Button
+                variant="ghost"
+                disabled={busy}
+                data-testid="delivery-return-departing"
+                onClick={() => onDeparting(item.orderId)}
+              >
+                Везу на склад
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 function minutesLabel(minute: number | null): string {
   if (minute === null) return '—';
@@ -87,6 +163,11 @@ export function ActiveScreen(): React.JSX.Element {
   const active = useQuery({
     queryKey: ACTIVE_KEY,
     queryFn: () => client.get<{ routes: ActiveRouteView[] }>('/api/delivery/active'),
+  });
+
+  const returns = useQuery({
+    queryKey: RETURNS_KEY,
+    queryFn: () => client.get<{ items: CourierReturnView[] }>('/api/delivery/returns'),
   });
 
   const reasons = useQuery({
@@ -141,6 +222,15 @@ export function ActiveScreen(): React.JSX.Element {
     onError: (error: unknown) => void afterFailure(error, 'Нет интернета. Статус не сохранён'),
   });
 
+  const departing = useMutation({
+    mutationFn: (orderId: string) =>
+      client.post<{ state: string }>(`/api/delivery/returns/${orderId}/returning`, {}),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: RETURNS_KEY });
+    },
+    onError: (error: unknown) => void afterFailure(error, 'Не удалось отметить выезд на склад.'),
+  });
+
   const cancel = useMutation({
     mutationFn: (attemptId: string) =>
       client.post<{ routeReopened: boolean }>(`/api/delivery/attempts/${attemptId}/cancel`, {}),
@@ -159,21 +249,35 @@ export function ActiveScreen(): React.JSX.Element {
   }
 
   const allRoutes = active.data?.routes ?? [];
+  const returnItems = returns.data?.items ?? [];
   const reasonList = reasons.data?.items ?? [];
   const routes = groupRoutes(allRoutes, routeFilter === '' ? null : routeFilter);
   const minutes = moscowMinutesOfDay(now);
 
   if (allRoutes.length === 0) {
+    // Возвраты показываются и без маршрутов: обязательство переживает маршрут.
     return (
-      <EmptyState
-        title="Активных доставок нет"
-        description="Маршрут появится здесь после того, как склад выдаст его курьеру."
-      />
+      <div className="delivery">
+        <ReturnsBlock
+          items={returnItems}
+          busy={departing.isPending}
+          onDeparting={(orderId) => departing.mutate(orderId)}
+        />
+        <EmptyState
+          title="Активных доставок нет"
+          description="Маршрут появится здесь после того, как склад выдаст его курьеру."
+        />
+      </div>
     );
   }
 
   return (
     <div className="delivery">
+      <ReturnsBlock
+        items={returnItems}
+        busy={departing.isPending}
+        onDeparting={(orderId) => departing.mutate(orderId)}
+      />
       <div className="delivery__filters">
         <Field label="Маршрут">
           {(fieldProps) => (
@@ -430,6 +534,18 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         </span>
       </div>
 
+      {/*
+        Деньги — сразу под номером и крупно.
+        Курьер узнаёт о наличных у двери, а не в конце карточки после адреса,
+        комментария и предупреждений: пропущенная строка означает поездку
+        обратно за деньгами.
+      */}
+      {order.cashCollectable && (
+        <div className="delivery__cash" data-testid="delivery-cash">
+          Получить наличными: {formatCashToCollect(order.cashToCollectMinor)}
+        </div>
+      )}
+
       {order.address === null ? null : (
         <div className="delivery__order-line">
           {/*
@@ -460,10 +576,16 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         <div className="delivery__order-muted">{order.recipient}</div>
       )}
       {order.comment === null ? null : <div className="delivery__order-muted">{order.comment}</div>}
-      {order.cashCollectable ? (
-        <div className="delivery__order-line">
-          К получению: <strong>{formatCash(order.cashToCollectMinor)}</strong>
-        </div>
+
+      {/*
+        Отмена заказа, случившаяся уже в пути.
+        Заказ не исчезает из маршрута: он физически в машине, и курьер обязан
+        знать, что везти его больше не нужно, а надо вернуть.
+      */}
+      {order.cancelled ? (
+        <p className="delivery__cancelled" data-testid="delivery-cancelled">
+          Не доставлять — вернуть на склад.
+        </p>
       ) : null}
 
       {position === 'early' && !done ? (
@@ -482,7 +604,7 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
           <Button
             data-testid="delivery-open-delivered"
             onClick={() => props.onAsk('DELIVERED')}
-            disabled={props.busy}
+            disabled={props.busy || order.cancelled}
           >
             Доставлен
           </Button>

@@ -26,6 +26,7 @@ import { HistoryScreen } from './screens/delivery/HistoryScreen';
  */
 import { HistoryScreen as LogisticsHistoryScreen } from './screens/logistics/HistoryScreen';
 import { ReportsScreen } from './screens/logistics/ReportsScreen';
+import { ResolutionsScreen } from './screens/logistics/ResolutionsScreen';
 import { DealsWorkspace } from './screens/deals/DealsWorkspace';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
@@ -142,6 +143,7 @@ export function App(): React.JSX.Element {
           <Route path="deals" element={<DealsWorkspace />} />
           <Route path="routing" element={<RoutingScreen />} />
           <Route path="route-sheets" element={<RouteSheetsScreen />} />
+          <Route path="resolutions" element={<ResolutionsScreen />} />
           <Route path="history" element={<LogisticsHistoryScreen />} />
           <Route path="reports" element={<ReportsScreen />} />
         </Route>

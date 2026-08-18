@@ -87,6 +87,20 @@ const configSchema = z.object({
    *                  настройкой, которой код не поддерживает, нельзя.
    */
   MOYSKLAD_READ_ONLY: z.enum(['true', 'false']).optional(),
+
+  /**
+   * Идентификатор статуса «Отменен» в МоемСкладе.
+   *
+   * Значение принадлежит конкретному аккаунту и в репозитории не хранится:
+   * в другом аккаунте у того же статуса другой идентификатор, а название
+   * администратор переименовывает в любой момент.
+   *
+   * Пустое значение — это НЕ «отмен не бывает», а «распознавание отмен
+   * выключено». В local и staging это допустимо: контур настраивают
+   * постепенно. В production пустое значение недопустимо — отменённые
+   * заказы молча уезжали бы клиентам.
+   */
+  MOYSKLAD_CANCELLED_STATE_ID: z.string().trim().optional(),
   /** Автоматический фоновый опрос. По умолчанию выключен во всех окружениях. */
   MOYSKLAD_SYNC_ENABLED: z
     .enum(['true', 'false'])
@@ -285,6 +299,21 @@ const configSchema = z.object({
     .transform((value) => value === 'true'),
 
   /**
+   * Входы, существующие только ради браузерных проверок.
+   *
+   * Нужны там, где сигнал приходит ИЗВНЕ и в интерфейсе его вызвать нечем:
+   * отмена заказа приходит из МоегоСклада проходом импорта, и без такого
+   * входа браузерный сценарий не мог бы её воспроизвести вовсе.
+   *
+   * Допустимо только в local: в staging и production такой вход означал бы
+   * возможность менять состояние заказов запросом мимо всех правил.
+   */
+  E2E_TEST_HOOKS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
+  /**
    * Верхняя граница числа точек матрицы: она растёт квадратично.
    *
    * Значение по умолчанию берётся из общего источника, а не пишется числом:
@@ -400,10 +429,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   assertMoyskladEnvironment(parsed.data);
+  assertCancelledStateEnvironment(parsed.data);
   assertDadataEnvironment(parsed.data);
   assertTestSolverEnvironment(parsed.data);
   assertTestSuggestionsEnvironment(parsed.data);
   assertTestRouteEnvironment(parsed.data);
+  assertTestHooksEnvironment(parsed.data);
   assertGeocodingSource(parsed.data);
 
   return Object.freeze({
@@ -446,6 +477,39 @@ export function moyskladAccess(data: {
     return 'staging-read-only';
   }
   return 'denied';
+}
+
+/** Идентификаторы МоегоСклада приходят и уходят только в этом виде. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Признак отмены обязан быть настроен там, где отменённый заказ дорог.
+ *
+ * В production молчание недопустимо: без идентификатора статус «Отменен»
+ * ничем не отличается от обычного, и отменённый заказ поехал бы к клиенту.
+ * В local и staging пустое значение — обычное состояние настраиваемого
+ * контура, и запуск оно не останавливает.
+ *
+ * Мусор вместо идентификатора отвергается везде: молча не распознавать
+ * отмену из-за опечатки в переменной хуже, чем не стартовать.
+ */
+function assertCancelledStateEnvironment(data: z.infer<typeof configSchema>): void {
+  const raw = data.MOYSKLAD_CANCELLED_STATE_ID;
+  const value = raw === undefined || raw === '' ? null : raw;
+
+  if (value !== null && !UUID_PATTERN.test(value)) {
+    throw new Error(
+      'MOYSKLAD_CANCELLED_STATE_ID должен быть UUID статуса «Отменен» из МоегоСклада: ' +
+        'по значению другого вида отмена не распознаётся вовсе',
+    );
+  }
+
+  if (value === null && data.APP_ENV === 'production') {
+    throw new Error(
+      'MOYSKLAD_CANCELLED_STATE_ID обязателен при APP_ENV=production: без него ' +
+        'отменённые заказы неотличимы от обычных и уезжают клиенту',
+    );
+  }
 }
 
 function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
@@ -585,6 +649,26 @@ function assertTestRouteEnvironment(data: z.infer<typeof configSchema>): void {
     throw new Error(
       'VALHALLA_TEST_ROUTE=true допустим только при APP_ENV=local: подменённую ' +
         'геометрию нельзя выдавать за расчёт маршрутизатора',
+    );
+  }
+}
+
+/**
+ * Тестовые входы недопустимы нигде, кроме локального окружения.
+ *
+ * Проверка отдельная и жёсткая: этот флаг открывает запрос, меняющий
+ * состояние заказа в обход импорта. В рабочем контуре такого входа быть
+ * не должно ни на минуту.
+ */
+function assertTestHooksEnvironment(data: z.infer<typeof configSchema>): void {
+  if (!data.E2E_TEST_HOOKS) {
+    return;
+  }
+
+  if (data.APP_ENV !== 'local' || data.APP_ENVIRONMENT_MARKER === 'production') {
+    throw new Error(
+      'E2E_TEST_HOOKS=true допустим только при APP_ENV=local: вход, меняющий ' +
+        'состояние заказа мимо импорта, в рабочем контуре существовать не может',
     );
   }
 }

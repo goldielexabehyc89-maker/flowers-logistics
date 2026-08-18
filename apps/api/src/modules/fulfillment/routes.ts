@@ -83,7 +83,6 @@ const queueQuerySchema = z.object({
 
 const reasonSchema = z.string().trim().min(MIN_REASON_LENGTH).max(MAX_REASON_LENGTH);
 
-const forceCloseSchema = z.object({ reason: reasonSchema });
 const reopenSchema = z.object({ reason: reasonSchema });
 const assignSchema = z.object({
   floristId: uuid,
@@ -96,6 +95,8 @@ const assembleSchema = z.object({
 
 const printQuerySchema = z.object({
   filter: z.enum(['attention', 'printed', 'all']).default('attention'),
+  /** «Общие»: задания всех флористов за последние двое суток. */
+  general: z.enum(['true', 'false']).default('false'),
   ...pageQueryShape,
 });
 
@@ -189,14 +190,9 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   app.post('/api/florist/shifts/:id/force-close', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
     const { id } = idParamSchema.parse(request.params);
-    const body = forceCloseSchema.parse(request.body);
 
-    return forceCloseShift(
-      deps.db,
-      actor,
-      { shiftId: id, reason: body.reason },
-      contextOf(request),
-    );
+    // Тело запроса не читается вовсе: причины у завершения смены нет.
+    return forceCloseShift(deps.db, actor, { shiftId: id }, contextOf(request));
   });
 
   // --- Очередь и карточка ---------------------------------------------------
@@ -299,10 +295,12 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   // --- Печать ---------------------------------------------------------------
 
   app.get('/api/florist/print-jobs', async (request) => {
-    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const query = printQuerySchema.parse(request.query);
     return listPrintJobs(deps.db, {
       filter: query.filter,
+      general: query.general === 'true',
+      actorUserId: actor.userId,
       limit: query.limit,
       offset: query.offset,
     });

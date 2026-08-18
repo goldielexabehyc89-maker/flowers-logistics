@@ -42,10 +42,15 @@ export interface DealCard {
    * а не путь, которым она наступила.
    */
   assembled: boolean;
+  /** Заказ отменён — в МоемСкладе или решением логиста. */
+  cancelled?: boolean;
+  /** Букет ещё не вернулся на склад: состояние возврата или `null`. */
+  awaitingReturn?: string | null;
 }
 
 /** Почему заказ нельзя выбрать. `null` — можно. */
-export type UnselectableReason = 'ATTENTION' | 'IN_DRAFT' | 'NO_POINT';
+export type UnselectableReason =
+  'ATTENTION' | 'IN_DRAFT' | 'NO_POINT' | 'CANCELLED' | 'AWAITING_RETURN';
 
 /**
  * Причина недоступности выбора.
@@ -54,6 +59,20 @@ export type UnselectableReason = 'ATTENTION' | 'IN_DRAFT' | 'NO_POINT';
  * причина выглядит как поломка.
  */
 export function unselectableReason(order: DealCard): UnselectableReason | null {
+  /*
+   * Отмена и невозвращённый букет проверяются ПЕРВЫМИ.
+   *
+   * Обе причины физические и неустранимые на этом экране: отменённый заказ
+   * везти нельзя вовсе, а тот, что лежит в машине курьера, нельзя поставить
+   * в маршрут, потому что на складе его нет. Назвать вместо них «требует
+   * внимания» значило бы отправить логиста чинить адрес.
+   */
+  if (order.cancelled === true) {
+    return 'CANCELLED';
+  }
+  if (order.awaitingReturn !== undefined && order.awaitingReturn !== null) {
+    return 'AWAITING_RETURN';
+  }
   if (order.draftRouteId !== null) {
     return 'IN_DRAFT';
   }
@@ -70,6 +89,8 @@ export const UNSELECTABLE_LABELS: Record<UnselectableReason, string> = {
   ATTENTION: 'Требует внимания: сначала устраните причину',
   IN_DRAFT: 'Уже в черновике маршрута',
   NO_POINT: 'Нет подтверждённой точки на карте',
+  CANCELLED: 'Заказ отменён',
+  AWAITING_RETURN: 'Ждёт возврата на склад: букет ещё у курьера',
 };
 
 /**

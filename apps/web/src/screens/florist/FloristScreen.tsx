@@ -122,8 +122,15 @@ export function FloristScreen(): React.JSX.Element {
    */
   const [assembledOpen, setAssembledOpen] = useState(false);
   const [printFilter, setPrintFilter] = useState<'attention' | 'printed'>('attention');
+  /**
+   * «Общие»: задания всех флористов за последние двое суток.
+   *
+   * Выключено — свои: разбирать чужую печать вместо своей флорист не должен.
+   * Окно и отбор считает сервер, поэтому счётчик и продолжение списка
+   * говорят об одном и том же множестве.
+   */
+  const [printGeneral, setPrintGeneral] = useState(false);
   /** Причина принудительного завершения — своя у каждой смены в списке. */
-  const [forceReason, setForceReason] = useState<Record<string, string>>({});
   /** Что человек набрал, и что из этого уже ушло на сервер. */
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
@@ -175,10 +182,11 @@ export function FloristScreen(): React.JSX.Element {
   });
 
   const printQuery = useInfiniteQuery({
-    queryKey: ['florist-print-jobs', printFilter],
+    queryKey: ['florist-print-jobs', printFilter, printGeneral],
     queryFn: ({ pageParam }) =>
       client.get<PrintJobsResponse>(
-        `/api/florist/print-jobs?filter=${printFilter}&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}`,
+        `/api/florist/print-jobs?filter=${printFilter}&general=${String(printGeneral)}` +
+          `&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}`,
       ),
     initialPageParam: 0,
     getNextPageParam: (last: PrintJobsResponse) => nextPageOffset(last) ?? undefined,
@@ -211,7 +219,7 @@ export function FloristScreen(): React.JSX.Element {
 
   useEffect(() => {
     queryClient.setQueriesData<unknown>({ queryKey: ['florist-print-jobs'] }, collapseToFirstPage);
-  }, [printFilter, queryClient]);
+  }, [printFilter, printGeneral, queryClient]);
 
   const queuePages = queueQuery.data?.pages ?? [];
   const queueItems = mergePages(queuePages);
@@ -397,6 +405,11 @@ export function FloristScreen(): React.JSX.Element {
           {item.overdue && <StatusBadge tone="error">Просрочен</StatusBadge>}
           {routeLabel(item) !== null && <StatusBadge tone="info">{routeLabel(item)}</StatusBadge>}
           {item.changedSinceClaim && <StatusBadge tone="warning">Заказ изменён</StatusBadge>}
+          {/*
+            Отменённый заказ остаётся в списке видимым и помеченным.
+            Исчезнувший заказ флорист ищет, а помеченный — пропускает.
+          */}
+          {item.cancelled === true && <StatusBadge tone="error">Отменён — не собирать</StatusBadge>}
         </div>
 
         <div className="florist__row-side">
@@ -409,7 +422,7 @@ export function FloristScreen(): React.JSX.Element {
           {item.processState === 'NEW' && (
             <Button
               variant="primary"
-              disabled={action.isPending || !hasActiveShift}
+              disabled={action.isPending || !hasActiveShift || item.cancelled === true}
               data-testid="row-claim"
               onClick={() =>
                 action.mutate({
@@ -481,37 +494,47 @@ export function FloristScreen(): React.JSX.Element {
           <h3>Смены на сегодня</h3>
           <ul className="florist__list">
             {shiftsQuery.data.items.map((item) => (
-              <li key={item.id} className="florist__row" data-testid="shift-row">
-                <div className="florist__row-main">
-                  <strong>{item.userFullName}</strong>
-                  <span className="muted text-sm">с {formatMoscowDateTime(item.startedAt)}</span>
-                  <span className="muted text-sm">в сборке: {item.openAssignments}</span>
-                </div>
-                <div className="florist__row-side">
-                  <input
-                    className="input"
-                    aria-label={`Причина завершения смены ${item.userFullName}`}
-                    placeholder="Причина завершения"
-                    value={forceReason[item.id] ?? ''}
-                    onChange={(event) =>
-                      setForceReason((current) => ({ ...current, [item.id]: event.target.value }))
-                    }
-                  />
-                  <Button
-                    variant="secondary"
-                    data-testid="shift-force-close"
-                    disabled={action.isPending || (forceReason[item.id] ?? '').trim().length < 3}
-                    onClick={() =>
-                      action.mutate({
-                        path: `/api/florist/shifts/${item.id}/force-close`,
-                        body: { reason: (forceReason[item.id] ?? '').trim() },
-                        success: 'Смена завершена принудительно',
-                      })
-                    }
-                  >
-                    Завершить смену
-                  </Button>
-                </div>
+              /*
+                Одна смена — одна строка.
+
+                Список читают сверху вниз, выбирая нужного человека: карточки
+                в три экрана превращали пять флористов в прокрутку. Поле
+                причины и кнопка стоят в той же строке, а не под ней.
+              */
+              <li key={item.id} className="florist__shift" data-testid="shift-row">
+                <strong className="florist__shift-name">{item.userFullName}</strong>
+                {/*
+                  Два факта смены — карточками с подписью над значением.
+                  Строкой «с 18.08.2026, 12:44 в сборке: 1» они сливались
+                  в сплошной текст и рвались переносом в произвольном месте:
+                  прочитать, где кончается время и начинается количество,
+                  можно было только вглядываясь.
+                */}
+                <span className="florist__shift-fact">
+                  <span className="florist__shift-fact-label">Смена с</span>
+                  <span className="florist__shift-fact-value">
+                    {formatMoscowDateTime(item.startedAt)}
+                  </span>
+                </span>
+                <span className="florist__shift-fact">
+                  <span className="florist__shift-fact-label">В сборке</span>
+                  <span className="florist__shift-fact-value">{item.openAssignments}</span>
+                </span>
+                <span className="florist__shift-spacer" />
+                <Button
+                  variant="secondary"
+                  data-testid="shift-force-close"
+                  disabled={action.isPending}
+                  onClick={() =>
+                    action.mutate({
+                      path: `/api/florist/shifts/${item.id}/force-close`,
+                      body: {},
+                      success: 'Смена завершена принудительно',
+                    })
+                  }
+                >
+                  Завершить смену
+                </Button>
               </li>
             ))}
           </ul>
@@ -757,6 +780,20 @@ export function FloristScreen(): React.JSX.Element {
               { value: 'printed', label: 'Напечатанные', testId: 'print-filter-printed' },
             ]}
           />
+
+          {/*
+            «Общие» — не фильтр, а расширение: свои задания сменяются
+            заданиями всей мастерской за последние двое суток. Поэтому
+            переключатель стоит рядом, а не среди разделов.
+          */}
+          <label className="toggle" data-testid="print-general">
+            <input
+              type="checkbox"
+              checked={printGeneral}
+              onChange={(event) => setPrintGeneral(event.target.checked)}
+            />
+            Общие (48 часов)
+          </label>
         </div>
       )}
 
@@ -773,9 +810,11 @@ export function FloristScreen(): React.JSX.Element {
         <EmptyState
           title="Заданий нет"
           description={
-            printFilter === 'attention'
-              ? 'Все бланки напечатаны.'
-              : 'Напечатанных бланков пока нет.'
+            printGeneral
+              ? 'За последние двое суток в этом разделе заданий нет.'
+              : printFilter === 'attention'
+                ? 'Все ваши бланки напечатаны.'
+                : 'Ваших напечатанных бланков пока нет.'
           }
         />
       )}

@@ -39,6 +39,8 @@ export interface MapPoint {
   endMinute?: number | null;
   address?: string | null;
   assigned: boolean;
+  /** Собран: отметка флориста ЛИБО букет в ячейке текущего круга сборки. */
+  assembled?: boolean;
   routeId: string | null;
   routeNumber: string | null;
   position: number | null;
@@ -148,6 +150,9 @@ export function markerContentOf(
     // которая ещё никуда не входит, номер приписывать нечему.
     `${MARKER_CLASS}--${numbered ? 'picked' : 'free'}`,
     ...(point.needsAttention ? [`${MARKER_CLASS}--attention`] : []),
+    // Собранность — состояние заказа, а не выбора: она видна и у свободной
+    // точки, и у остановки с номером.
+    ...(point.assembled === true ? [`${MARKER_CLASS}--assembled`] : []),
     ...(options.selected ? [`${MARKER_CLASS}--selected`] : []),
   ];
 
