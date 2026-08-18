@@ -181,3 +181,56 @@ export function groupPlacements<T extends { requiresRelocation: boolean; blocked
 
   return { relocation, cancelled, rest };
 }
+
+// --- Доска сборки ------------------------------------------------------------
+
+/**
+ * Стадия заказа в листе. Считает сервер: «готов» — это действующее
+ * размещение в маршрутной ячейке ИМЕННО этого листа.
+ */
+export type RouteOrderStage = 'NOT_ASSEMBLED' | 'AWAITING_INTAKE' | 'IN_STORAGE' | 'READY';
+
+/** Подписи стадий. Текст, значок и цвет различают их вместе, а не поодиночке. */
+export const STAGE_LABELS: Record<RouteOrderStage, string> = {
+  NOT_ASSEMBLED: 'Не собран',
+  AWAITING_INTAKE: 'Ожидает приёмки',
+  IN_STORAGE: 'В хранении',
+  READY: 'Готов',
+};
+
+export const STAGE_TONES: Record<RouteOrderStage, 'neutral' | 'info' | 'warning' | 'success'> = {
+  NOT_ASSEMBLED: 'neutral',
+  AWAITING_INTAKE: 'info',
+  IN_STORAGE: 'warning',
+  READY: 'success',
+};
+
+export interface AssemblyOrderView {
+  orderId: string;
+  orderNumber: string;
+  position: number;
+  startMinute: number | null;
+  endMinute: number | null;
+  cellCode: string | null;
+  cellKind: StorageCellKind | null;
+  stage: RouteOrderStage;
+  requiresRelocation: boolean;
+  cancelled: boolean;
+}
+
+export interface AssemblyRouteView {
+  routeId: string;
+  routeNumber: string;
+  deliveryDate: string;
+  earliestMinute: number | null;
+  courier: { id: string; fullName: string } | null;
+  cells: { id: string; code: string }[];
+  total: number;
+  ready: number;
+  orders: AssemblyOrderView[];
+}
+
+export interface AssemblyBoard {
+  active: AssemblyRouteView[];
+  assembled: AssemblyRouteView[];
+}

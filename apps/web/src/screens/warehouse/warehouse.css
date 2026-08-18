@@ -1,0 +1,161 @@
+/*
+ * Рабочее место кладовщика: карточки листов и окна проверки.
+ *
+ * Всё рассчитано на телефон в одной руке: строки компактные, кнопки
+ * крупные, ничто не уезжает за правый край. Карточка листа по умолчанию
+ * свёрнута — кладовщику нужен выбор листа, а не чтение одного.
+ */
+
+/* Кнопка сканирования занимает ширину карточки: целиться в неё не нужно. */
+.wh-scan {
+  display: flex;
+  justify-content: center;
+}
+
+.wh-scan__button {
+  width: 100%;
+}
+
+.wh-route__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.wh-route__main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Номер листа — кнопка: нажатие открывает проверку, а не раскрывает состав. */
+.wh-route__number {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent-hover);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+/*
+ * Ячейки листа справа и по центру по вертикали.
+ *
+ * Одна ячейка стоит посередине строки, несколько — столбиком, и вся группа
+ * центрируется целиком: так видно, что это один список, а не подпись
+ * к соседней строке.
+ */
+.wh-route__cells {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 4px;
+}
+
+.wh-route__cell {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.wh-route__toggle {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.wh-route__orders,
+.wh-check__list {
+  display: grid;
+  gap: 4px;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wh-route__order,
+.wh-check__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.wh-route__position {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.wh-route__order-number {
+  font-weight: 600;
+}
+
+.wh-route__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* Окно проверки: то же компактное окно, что и у камеры. */
+.wh-check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(460px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
+}
+
+.wh-check__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 17px;
+}
+
+.wh-check__progress {
+  margin: 0;
+  font-weight: 600;
+}
+
+.wh-check__bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  overflow: hidden;
+}
+
+.wh-check__bar span {
+  display: block;
+  height: 100%;
+  background: var(--color-success);
+}

@@ -26,6 +26,7 @@ import {
 import {
   canAccept,
   initialState,
+  scanTitle,
   isFinished,
   reduce,
   stepHint,
@@ -43,6 +44,13 @@ export interface ScannerScreenProps {
   /** Что именно происходит: «Приёмка», «Лист R-12» и подобное. */
   operation: string;
   /**
+   * Ожидаемая ячейка, если она известна заранее.
+   *
+   * Попадает в заголовок: «Сканирование ячейки 8». Кладовщик не должен
+   * помнить, какую именно полку у него спрашивают.
+   */
+  expectedCell?: string | null;
+  /**
    * Выполняет намерение машины. Возвращает событие, которым машина продолжит
    * работу. Сеть живёт здесь, а не в машине и не в камере.
    */
@@ -53,6 +61,7 @@ export interface ScannerScreenProps {
 export function ScannerScreen({
   chain,
   operation,
+  expectedCell,
   onIntent,
   onClose,
 }: ScannerScreenProps): React.JSX.Element {
@@ -158,111 +167,145 @@ export function ScannerScreen({
   }, [stopCamera, onClose]);
 
   const hint = useMemo(() => stepHint(state), [state]);
+  const title = useMemo(() => scanTitle(state, expectedCell ?? null), [state, expectedCell]);
   const busy = !canAccept(state);
 
+  const close = useCallback((): void => {
+    stopCamera();
+    void dispatch({ type: 'cancel' });
+    onClose();
+  }, [dispatch, onClose, stopCamera]);
+
+  /*
+   * Окно, а не весь экран.
+   *
+   * Камера во весь экран не оставляет человеку ориентира: не видно, где он
+   * находится и что происходит под окном. Компактное окно с отступами
+   * держит и то и другое, а рамка считывания показывает, куда наводить.
+   */
   return (
-    <section className="scanner" role="dialog" aria-modal="true" aria-label="Сканирование">
-      <header className="scanner__bar">
-        <div>
-          <div className="field__label">{operation}</div>
-          <strong data-testid="scan-hint">{hint}</strong>
-        </div>
-        <Button
-          variant="ghost"
-          data-testid="scan-cancel"
-          onClick={() => {
-            stopCamera();
-            void dispatch({ type: 'cancel' });
-            onClose();
-          }}
-        >
-          Отмена
-        </Button>
-      </header>
-
-      {cameraError === null ? (
-        <video
-          ref={videoRef}
-          className="scanner__video"
-          data-testid="scan-video"
-          playsInline
-          muted
-        />
-      ) : (
-        <p className="scanner__failure" role="alert" data-testid="scan-camera-error">
-          {cameraError}
-        </p>
-      )}
-
-      {state.progress !== null && (
-        <p className="scanner__progress" data-testid="scan-progress">
-          {state.progress.done} из {state.progress.total}
-        </p>
-      )}
-
-      {/* Результат читается программой чтения с экрана: ни цвет, ни звук
-          не являются единственным способом узнать исход. */}
-      <div aria-live="assertive" className="scanner__live">
-        {state.notice !== null && (
-          <div
-            className={`scanner__notice scanner__notice--${state.notice.kind}`}
-            data-testid={state.notice.kind === 'success' ? 'scan-success' : 'scan-error'}
+    <div className="scanner-backdrop" role="presentation" onClick={close}>
+      <section
+        className="scanner"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="scanner__bar">
+          <div>
+            <strong className="scanner__title" data-testid="scan-title">
+              {title}
+            </strong>
+            <div className="field__label">{operation}</div>
+          </div>
+          <button
+            type="button"
+            className="scanner__close"
+            aria-label="Закрыть сканирование"
+            data-testid="scan-close"
+            onClick={close}
           >
-            <p>{state.notice.text}</p>
-            {state.notice.kind === 'error' && (
+            ✕
+          </button>
+        </header>
+
+        {cameraError === null ? (
+          <div className="scanner__frame">
+            <video
+              ref={videoRef}
+              className="scanner__video"
+              data-testid="scan-video"
+              playsInline
+              muted
+            />
+            {/* Рамка считывания: показывает, куда наводить, и ничего не решает. */}
+            <span className="scanner__reticle" aria-hidden="true" />
+          </div>
+        ) : (
+          <p className="scanner__failure" role="alert" data-testid="scan-camera-error">
+            {cameraError}
+          </p>
+        )}
+
+        <p className="scanner__hint" data-testid="scan-hint">
+          {hint}
+        </p>
+
+        {state.progress !== null && (
+          <p className="scanner__progress" data-testid="scan-progress">
+            {state.progress.done} из {state.progress.total}
+          </p>
+        )}
+
+        {/* Результат читается программой чтения с экрана: ни цвет, ни звук
+          не являются единственным способом узнать исход. */}
+        <div aria-live="assertive" className="scanner__live">
+          {state.notice !== null && (
+            <div
+              className={`scanner__notice scanner__notice--${state.notice.kind}`}
+              data-testid={state.notice.kind === 'success' ? 'scan-success' : 'scan-error'}
+            >
+              <p>{state.notice.text}</p>
+              {state.notice.kind === 'error' && (
+                <div className="row">
+                  <Button
+                    variant="primary"
+                    data-testid="scan-retry"
+                    onClick={() => void dispatch({ type: 'retry' })}
+                  >
+                    Повторить
+                  </Button>
+                  <Button
+                    data-testid="scan-error-cancel"
+                    onClick={() => {
+                      stopCamera();
+                      void dispatch({ type: 'cancel' });
+                      onClose();
+                    }}
+                  >
+                    Отмена
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {state.step === 'ROUTE_CELL_CONSENT' && (
+            <div className="scanner__notice" data-testid="scan-consent">
+              <p>
+                Это маршрутная ячейка. Положить заказ сразу в маршрутный лист? Отказ вернёт к
+                сканированию другой ячейки.
+              </p>
               <div className="row">
                 <Button
                   variant="primary"
-                  data-testid="scan-retry"
-                  onClick={() => void dispatch({ type: 'retry' })}
+                  data-testid="scan-consent-yes"
+                  onClick={() => void dispatch({ type: 'consentAnswered', agreed: true })}
                 >
-                  Повторить
+                  Да, в маршрутную ячейку
                 </Button>
                 <Button
-                  data-testid="scan-error-cancel"
-                  onClick={() => {
-                    stopCamera();
-                    void dispatch({ type: 'cancel' });
-                    onClose();
-                  }}
+                  data-testid="scan-consent-no"
+                  onClick={() => void dispatch({ type: 'consentAnswered', agreed: false })}
                 >
-                  Отмена
+                  Выбрать другую
                 </Button>
               </div>
-            )}
-          </div>
-        )}
-
-        {state.step === 'ROUTE_CELL_CONSENT' && (
-          <div className="scanner__notice" data-testid="scan-consent">
-            <p>
-              Это маршрутная ячейка. Положить заказ сразу в маршрутный лист? Отказ вернёт к
-              сканированию другой ячейки.
-            </p>
-            <div className="row">
-              <Button
-                variant="primary"
-                data-testid="scan-consent-yes"
-                onClick={() => void dispatch({ type: 'consentAnswered', agreed: true })}
-              >
-                Да, в маршрутную ячейку
-              </Button>
-              <Button
-                data-testid="scan-consent-no"
-                onClick={() => void dispatch({ type: 'consentAnswered', agreed: false })}
-              >
-                Выбрать другую
-              </Button>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      {busy && state.notice === null && state.step !== 'ROUTE_CELL_CONSENT' && (
-        <p className="muted text-sm" data-testid="scan-busy">
-          Отправляем…
-        </p>
-      )}
-    </section>
+        {busy && state.notice === null && state.step !== 'ROUTE_CELL_CONSENT' && (
+          <p className="muted text-sm" data-testid="scan-busy">
+            Отправляем…
+          </p>
+        )}
+
+        <Button className="scanner__cancel" data-testid="scan-cancel" onClick={close}>
+          Отмена
+        </Button>
+      </section>
+    </div>
   );
 }

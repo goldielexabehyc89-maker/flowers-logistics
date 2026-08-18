@@ -228,3 +228,43 @@ a {
   margin: 0;
   font-size: 15px;
 }
+
+/*
+ * Разделы склада: четыре равные вкладки на всю ширину.
+ *
+ * Равная ширина здесь не про симметрию. Кладовщик переключается между
+ * разделами десятки раз за смену, часто одной рукой и не глядя: кнопки
+ * разной ширины заставляют целиться. Полоса растянута на рабочую область
+ * и не прокручивается вбок — уехавшая за край четвёртая вкладка
+ * означала бы, что о ней просто не узнают.
+ */
+.wh-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.wh-tabs__item {
+  min-height: 40px;
+  padding: 6px 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 15px;
+  text-align: center;
+  cursor: pointer;
+}
+
+/* Активная вкладка отличается заливкой и весом знака, а не только цветом. */
+.wh-tabs__item--active {
+  border-color: var(--color-border);
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  font-weight: 600;
+}

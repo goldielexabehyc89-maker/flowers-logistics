@@ -27,7 +27,16 @@ export type ScanChain =
   /** Комплектование: заказ → маршрутная ячейка, и так для каждого заказа. */
   | 'PICK'
   /** Выдача: заказ за заказом в одной открытой сессии. */
-  | 'ISSUE';
+  | 'ISSUE'
+  /**
+   * Только ячейка: назначение маршрутной полки листу.
+   *
+   * Заказа в этой цепочке нет вовсе — человек показывает камере полку,
+   * а не коробку. Отдельная цепочка нужна затем, чтобы окно сканирования
+   * осталось одним на весь склад: второе окно «только для ячейки» вело бы
+   * себя по-своему в мелочах.
+   */
+  | 'CELL_ONLY';
 
 /** Шаг, которого ждёт машина. */
 export type ScanStep =
@@ -95,7 +104,8 @@ export type ScanEvent =
 export function initialState(chain: ScanChain): ScanState {
   return {
     chain,
-    step: 'ORDER',
+    // Цепочка ячейки начинается сразу с ячейки: заказа в ней нет.
+    step: chain === 'CELL_ONLY' ? 'CELL' : 'ORDER',
     orderNumber: null,
     pendingCellCode: null,
     busy: false,
@@ -124,15 +134,36 @@ export function canAccept(state: ScanState): boolean {
 /** Подсказка текущего шага. Видна постоянно, а не всплывает на секунду. */
 export function stepHint(state: ScanState): string {
   if (state.step === 'ORDER') {
-    return 'Сканируйте QR заказа';
+    return 'Наведите камеру на QR-код заказа';
   }
   if (state.step === 'CELL') {
-    return state.chain === 'PICK' ? 'Сканируйте QR маршрутной ячейки' : 'Сканируйте QR ячейки';
+    return state.chain === 'RECEIVE'
+      ? 'Наведите камеру на QR-код ячейки'
+      : 'Наведите камеру на QR-код маршрутной ячейки';
   }
   if (state.step === 'ROUTE_CELL_CONSENT') {
     return 'Подтвердите, что заказ кладётся сразу в маршрутную ячейку';
   }
   return 'Готово';
+}
+
+/**
+ * Заголовок окна сканирования.
+ *
+ * Он отвечает на единственный вопрос человека с коробкой в руках: что
+ * подносить к камере СЕЙЧАС. Как только предмет назван — номер заказа или
+ * код ожидаемой ячейки, — он попадает в заголовок: «Сканирование ячейки 8»
+ * читается на ходу, а «Сканирование ячейки» заставляет вспоминать, какой.
+ */
+export function scanTitle(state: ScanState, expectedCell?: string | null): string {
+  if (state.step === 'ORDER') {
+    return 'Сканирование заказа';
+  }
+  if (state.step === 'CELL' || state.step === 'ROUTE_CELL_CONSENT') {
+    const cell = expectedCell ?? null;
+    return cell === null ? 'Сканирование ячейки' : `Сканирование ячейки ${cell}`;
+  }
+  return 'Сканирование';
 }
 
 /** Что именно машина ждёт от сервера после принятого кода. */
@@ -143,7 +174,9 @@ export type ScanIntent =
   /** Отправить готовую пару. */
   | { kind: 'submitPair'; orderNumber: string; cellCode: string }
   /** Выдать заказ: пары здесь нет, достаточно номера. */
-  | { kind: 'issueOrder'; orderNumber: string };
+  | { kind: 'issueOrder'; orderNumber: string }
+  /** Назначить маршрутную ячейку листу: заказа в этой цепочке нет. */
+  | { kind: 'submitCell'; cellCode: string };
 
 export interface ScanTransition {
   state: ScanState;
@@ -190,6 +223,14 @@ export function reduce(state: ScanState, event: ScanEvent): ScanTransition {
         return {
           state: { ...state, ...accepted },
           intent: { kind: 'resolveOrder', code: event.code },
+        };
+      }
+
+      if (state.chain === 'CELL_ONLY') {
+        // Пары нет: назначение полки — операция сама по себе.
+        return {
+          state: { ...state, ...accepted },
+          intent: { kind: 'submitCell', cellCode: event.code },
         };
       }
 

@@ -18,6 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canAccept,
+  scanTitle,
   initialState,
   isFinished,
   reduce,
@@ -95,7 +96,9 @@ describe('приёмка: пара заказ → ячейка', () => {
 
     expect(intents).toEqual([{ kind: 'resolveOrder', code: 'W-1' }]);
     expect(state.step).toBe('CELL');
-    expect(stepHint(state)).toBe('Сканируйте QR ячейки');
+    // Формулировка приведена к общей для всего склада: под камерой человек
+    // читает одну и ту же строку в любом сценарии.
+    expect(stepHint(state)).toBe('Наведите камеру на QR-код ячейки');
   });
 
   it('вторая пара уходит одним запросом и завершает цепочку', () => {
@@ -169,7 +172,7 @@ describe('комплектование: ячейка из скана, а не и
       { type: 'orderResolved', orderNumber: 'W-7' },
     ]).state;
 
-    expect(stepHint(state)).toBe('Сканируйте QR маршрутной ячейки');
+    expect(stepHint(state)).toBe('Наведите камеру на QR-код маршрутной ячейки');
   });
 
   it('успех завершает цепочку одного заказа: следующий начинается заново', () => {
@@ -262,5 +265,32 @@ describe('уведомления', () => {
     ]).state;
 
     expect(state.notice?.text).toBe('Заказ помечен проблемным.');
+  });
+});
+
+// --- Цепочка только ячейки ---------------------------------------------------
+
+describe('назначение маршрутной ячейки', () => {
+  it('начинается сразу с ячейки и не собирает пару', () => {
+    /*
+     * Заказа в этой цепочке нет вовсе: человек показывает камере полку.
+     * Требовать сначала коробку значило бы придумывать шаг, которого
+     * в жизни нет.
+     */
+    const start = initialState('CELL_ONLY');
+    expect(start.step).toBe('CELL');
+
+    const { intent } = reduce(start, { type: 'scanned', code: 'R-08' });
+    expect(intent).toEqual({ kind: 'submitCell', cellCode: 'R-08' });
+  });
+
+  it('заголовок называет ожидаемую ячейку, когда она известна', () => {
+    const start = initialState('PICK');
+    const afterOrder = reduce(start, { type: 'scanned', code: '12345' }).state;
+    const resolved = reduce(afterOrder, { type: 'orderResolved', orderNumber: '12345' }).state;
+
+    expect(scanTitle(resolved, null)).toBe('Сканирование ячейки');
+    expect(scanTitle(resolved, '8')).toBe('Сканирование ячейки 8');
+    expect(scanTitle(start, null)).toBe('Сканирование заказа');
   });
 });

@@ -24,12 +24,12 @@ import {
   ErrorState,
   Field,
   LoadingState,
-  SegmentedControl,
   Select,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
 import { ScannerScreen } from '../../scan/ScannerScreen';
+import { AssemblyTab } from './AssemblyTab';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
   CELL_KIND_LABELS,
@@ -77,39 +77,46 @@ interface WarehouseReturnView {
 }
 
 export function WarehouseScreen(): React.JSX.Element {
+  const { client } = useAuth();
   const [tab, setTab] = useState<Tab>('storage');
+
+  /*
+   * Ручной ввод разрешает администратор, а не экран.
+   *
+   * Значение приходит с сервера и обновляется вместе с остальными
+   * запросами: перезапуск приложения для смены настройки не нужен.
+   */
+  const settings = useQuery({
+    queryKey: ['warehouse-settings'],
+    queryFn: () => client.get<{ manualEntry: boolean }>('/api/warehouse/settings'),
+  });
+  const manualEntry = settings.data?.manualEntry ?? false;
 
   return (
     <section className="stack">
-      <div className="card stack">
-        <div>
-          <h2>Склад</h2>
-          <p className="muted text-sm">
-            Приёмка собранных заказов в ячейки, комплектование подтверждённых маршрутных листов и
-            выдача курьеру. Поля работают со сканером и с ручным вводом.
-          </p>
-        </div>
-        {/*
-          Переключатель режимов — тот же общий компонент, что у флориста.
-          Раньше это был ряд обычных кнопок: основная заливка на выбранной
-          и призрачная на остальных. Выглядело оно как три самостоятельных
-          действия, а не как выбор одного режима из трёх, и не совпадало
-          с соседним рабочим местом ни рамкой, ни высотой.
-        */}
-        <SegmentedControl
-          label="Разделы склада"
-          value={tab}
-          onChange={setTab}
-          options={TABS.map((item) => ({
-            value: item.key,
-            label: item.title,
-            testId: `wh-tab-${item.key}`,
-          }))}
-        />
-      </div>
+      {/*
+        Повторного заголовка и описания здесь нет намеренно.
+        Раздел уже назван системной шапкой, а объяснение приёмки,
+        комплектования и выдачи занимало треть экрана телефона у человека,
+        который приходит сюда работать, а не читать.
+      */}
+      <nav className="wh-tabs" aria-label="Разделы склада" data-testid="wh-tabs">
+        {TABS.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            className={item.key === tab ? 'wh-tabs__item wh-tabs__item--active' : 'wh-tabs__item'}
+            aria-current={item.key === tab ? 'page' : undefined}
+            data-testid={`wh-tab-${item.key}`}
+            onClick={() => setTab(item.key)}
+          >
+            {item.title}
+          </button>
+        ))}
+      </nav>
 
       {tab === 'storage' && <StorageTab />}
-      {tab === 'picking' && <RouteTab mode="picking" />}
+      {tab === 'picking' && <AssemblyTab manualEntry={manualEntry} />}
       {tab === 'issue' && <RouteTab mode="issue" />}
       {tab === 'returns' && <ReturnsTab />}
     </section>
