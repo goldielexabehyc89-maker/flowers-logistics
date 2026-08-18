@@ -23,6 +23,7 @@ import type { AppLogger } from '../../../platform/logging/logger.js';
 import type { OutboxHandler, OutboxMessageView } from '../../outbox/worker.js';
 import { enqueueOutbox } from '../../outbox/producer.js';
 import { writeAudit } from '../../audit/service.js';
+import { MoyskladError, type MoyskladClient } from './client.js';
 
 /** Тема очереди. Значение живёт в `OUTBOX_TOPICS` и проверяется реестром. */
 export const ORDER_CANCEL_TOPIC = 'moysklad.order_cancel';
@@ -30,15 +31,55 @@ export const ORDER_CANCEL_TOPIC = 'moysklad.order_cancel';
 /**
  * Транспорт отправки.
  *
- * Функция, а не клиент: настоящий сетевой вызов появится вместе с разрешением
- * писать наружу, а до тех пор подставляется либо `null` (запись запрещена),
- * либо поддельный транспорт в проверках. Ни один путь этого модуля не
- * обращается к сети сам.
+ * Функция, а не клиент: настоящий транспорт собирается из клиента
+ * `createMoyskladCancelTransport`, а в проверках и на стенде подставляется
+ * поддельный. Сам этот модуль к сети не обращается никогда.
  */
 export type CancelTransport = (input: {
   externalId: string;
   orderId: string;
 }) => Promise<{ alreadyCancelled: boolean }>;
+
+/**
+ * Временная ли неудача.
+ *
+ * Разница не косметическая. Временную ошибку очередь обязана повторить —
+ * иначе отмена потеряется из-за одной пятисотки. Окончательную повторять
+ * бессмысленно: «нет такого заказа» и «нет прав» через пять минут не
+ * исправятся сами, а бесконечные повторы прячут проблему вместо того, чтобы
+ * её показать.
+ */
+export function isTemporaryFailure(error: unknown): boolean {
+  if (error instanceof MoyskladError) {
+    return (
+      error.code === 'RATE_LIMITED' ||
+      error.code === 'SERVER_ERROR' ||
+      error.code === 'TRANSPORT_ERROR' ||
+      error.code === 'BAD_RESPONSE'
+    );
+  }
+  // Незнакомая ошибка считается временной: потерять отмену хуже, чем повторить.
+  return true;
+}
+
+/**
+ * Настоящий транспорт поверх клиента МоегоСклада.
+ *
+ * Здесь нет ни одного решения: идентификатор статуса приходит значением,
+ * замок режима чтения стоит внутри клиента, а весь разбор ошибок живёт
+ * в обработчике. Такой транспорт нельзя «случайно включить» — его создаёт
+ * только `index.ts` и только при разрешённой записи.
+ */
+export function createMoyskladCancelTransport(deps: {
+  client: Pick<MoyskladClient, 'cancelCustomerOrder'>;
+  stateId: string;
+}): CancelTransport {
+  return async (input) =>
+    deps.client.cancelCustomerOrder({
+      orderId: input.externalId,
+      stateId: deps.stateId,
+    });
+}
 
 /**
  * Ставит отметку в очередь.
@@ -145,18 +186,49 @@ export function createOrderCancelHandler(deps: CancelHandlerDeps): OutboxHandler
       });
     } catch (error) {
       /*
-       * Ошибка фиксируется В ЗАКАЗЕ и перебрасывается дальше.
+       * Ошибка фиксируется В ЗАКАЗЕ всегда, а перебрасывается — не всегда.
        *
-       * Первое нужно человеку: он видит, что отметка не ушла и почему.
-       * Второе нужно очереди: без исключения сообщение считалось бы
-       * обработанным, и повторов не было бы вовсе.
+       * Запись в заказ нужна человеку: он видит, что отметка не ушла и почему.
+       * Исключение нужно очереди: без него сообщение считается обработанным,
+       * и повтора не будет. Поэтому временную ошибку мы перебрасываем, а
+       * окончательную — нет: повторять «нет такого заказа» бессмысленно,
+       * и место в очереди она занимала бы вечно.
+       *
+       * Текст берётся ТОЛЬКО из наших постоянных сообщений: ответ чужой
+       * системы может содержать и адрес запроса, и данные заказа.
        */
-      const text = error instanceof Error ? error.message : String(error);
+      const temporary = isTemporaryFailure(error);
+      const text =
+        error instanceof MoyskladError
+          ? error.message
+          : temporary
+            ? 'Временная ошибка отправки'
+            : 'Отправка отклонена МоимСкладом';
+
       await deps.db.deliveryOrder.update({
         where: { id: orderId },
-        data: { sourceCancelState: 'FAILED', sourceCancelError: text.slice(0, 500) },
+        data: { sourceCancelState: 'FAILED', sourceCancelError: text.slice(0, 200) },
       });
-      throw error;
+
+      if (temporary) {
+        throw error;
+      }
+
+      await deps.db.$transaction(async (tx) => {
+        await writeAudit(tx, {
+          action: 'ORDER_CANCEL_NOT_SENT',
+          entityType: 'DeliveryOrder',
+          entityId: orderId,
+          actorUserId: null,
+          actorRoles: [],
+          source: 'worker',
+          newValue: { sourceCancelState: 'FAILED', permanent: true },
+        });
+      });
+      deps.logger.warn(
+        { outbox: { id: message.id, topic: message.topic } },
+        'отмена не принята МоимСкладом: повторять нечего',
+      );
     }
   };
 }

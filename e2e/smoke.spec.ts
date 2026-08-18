@@ -2241,6 +2241,224 @@ test('возврат: логист ждёт склад, склад приним�
   await expect(tabCount).toHaveText(String(before - 1));
 });
 
+test('два логиста решают одну задачу: побеждает первый, второй получает конфликт', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  const orderNumber = process.env['E2E_RET_WITH_COURIER'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(orderNumber === '', 'не передана фикстура возвратов (E2E_RET_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  // Второй участник — настоящий логист, а не второй сеанс того же человека:
+  // конфликт обязан разбираться между разными людьми.
+  const secondPhone = uniquePhone();
+  const created = await page.request.post('/api/users', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { fullName: 'Логист смены', phone: secondPhone, roles: ['LOGISTICIAN'] },
+  });
+  expect(created.status()).toBe(201);
+  const secondPin = '8642';
+  const activation = (await created.json()) as { activationCode: string };
+  const activated = await page.request.post('/api/auth/activate', {
+    data: { phone: secondPhone, code: activation.activationCode, pin: secondPin },
+  });
+  expect(activated.status()).toBe(200);
+
+  const secondContext = await browser.newContext();
+  /*
+   * Поток обновлений второго экрана намеренно оборван.
+   *
+   * Проверяется именно КОНФЛИКТ: логист, чей экран ещё не обновился, жмёт
+   * кнопку по устаревшим данным. С живым потоком строка исчезла бы сама,
+   * и нажимать стало бы не на что — сценарий проверял бы realtime, а не
+   * разбор одновременных решений.
+   */
+  await secondContext.route('**/api/realtime/**', (route) => route.abort());
+  const secondPage = await secondContext.newPage();
+
+  try {
+    await login(secondPage, secondPhone, secondPin);
+    await secondPage.getByRole('link', { name: 'Требуют решения' }).first().click();
+    const secondRow = secondPage.locator(
+      `[data-testid="resolution-row"][data-order-number="${orderNumber}"]`,
+    );
+    await expect(secondRow).toBeVisible();
+
+    // Первый логист решает задачу.
+    await page.getByRole('link', { name: 'Требуют решения' }).first().click();
+    const firstRow = page.locator(
+      `[data-testid="resolution-row"][data-order-number="${orderNumber}"]`,
+    );
+    await expect(firstRow).toBeVisible();
+    await firstRow.getByTestId('resolution-cancel').click();
+    await expect(page.locator('.toast-region')).toContainText('отменён');
+    await expect(firstRow).toHaveCount(0);
+
+    // Второй нажимает по устаревшему экрану и получает понятный отказ.
+    await secondRow.getByTestId('resolution-cancel').click();
+    await expect(secondPage.locator('.toast-region')).toContainText('уже принято');
+
+    // И сразу видит настоящее положение дел: задачи в списке больше нет.
+    await expect(secondRow).toHaveCount(0);
+  } finally {
+    await secondContext.close();
+  }
+});
+
+test('два сеанса: приёмка возврата складом убирает красный блок у курьера без F5', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  const orderNumber = process.env['E2E_RET_RETURNING'] ?? '';
+  const cellCode = process.env['E2E_RET_STORAGE_CELL'] ?? '';
+  const courierPhone = process.env['E2E_RET_COURIER_PHONE'] ?? '';
+  const courierPin = process.env['E2E_RET_COURIER_PIN'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    orderNumber === '' || cellCode === '' || courierPhone === '' || courierPin === '',
+    'не передана фикстура возвратов (E2E_RET_*)',
+  );
+
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+
+  try {
+    await login(courierPage, courierPhone, courierPin);
+    const block = courierPage.getByTestId('delivery-returns');
+    const entry = block.locator(`[data-order-number="${orderNumber}"]`);
+    await expect(entry).toBeVisible();
+    await expect(entry).toContainText('Возвращается на склад');
+
+    // Кладовщик принимает возврат в другом сеансе.
+    await login(page, ADMIN_PHONE, ADMIN_PIN);
+    await page.getByRole('link', { name: 'Склад' }).first().click();
+    await page.getByTestId('wh-tab-returns').click();
+    await page.getByTestId('wh-return-order').fill(orderNumber);
+    await page.getByTestId('wh-return-order').press('Enter');
+    await page.getByTestId('wh-return-cell').fill(cellCode);
+    await page.getByTestId('wh-return-cell').press('Enter');
+    await expect(page.locator('.toast-region')).toContainText('принят в ячейку');
+
+    /*
+     * Экран курьера обновляется САМ.
+     *
+     * Ни перезагрузки, ни перехода: обязательство снято приёмкой, и курьер
+     * обязан это увидеть — иначе он повезёт на склад то, что там уже лежит.
+     */
+    await expect(entry).toHaveCount(0);
+  } finally {
+    await courierContext.close();
+  }
+});
+
+test('отмена из МоегоСклада видна на стадиях, а её снятие возвращает заказ нераспределённым', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  const freeOrder = process.env['E2E_RET_FREE_CANCELLED'] ?? '';
+  const draftOrder = process.env['E2E_RET_IN_DRAFT'] ?? '';
+  const draftNumber = process.env['E2E_RET_DRAFT'] ?? '';
+  const floristPhone = process.env['E2E_RET_FLORIST_PHONE'] ?? '';
+  const floristPin = process.env['E2E_RET_FLORIST_PIN'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    freeOrder === '' || draftOrder === '' || draftNumber === '' || floristPhone === '',
+    'не передана фикстура возвратов (E2E_RET_*)',
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  // 1. Свободная сделка: отменённый заказ помечен и выбрать его нельзя.
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByTestId('deals-search').fill(freeOrder);
+  const freeCard = page.locator(`[data-testid="deal-card"][data-order-number="${freeOrder}"]`);
+  await expect(freeCard).toBeVisible();
+  await expect(freeCard.getByTestId('deal-blocked')).toHaveText('Заказ отменён');
+  await expect(freeCard).toHaveAttribute('data-selectable', 'no');
+
+  // 2. Окно заказа говорит честно: у нас отменён, наружу не ушло.
+  await freeCard.getByTestId('order-number').first().click();
+  await expect(page.getByTestId('order-window-cancelled')).toContainText('Отменён в МоемСкладе');
+  await page.getByRole('button', { name: 'Закрыть' }).first().click();
+
+  // 3. Флорист видит отмену на своём заказе и собирать его не должен.
+  const floristContext = await browser.newContext();
+  const floristPage = await floristContext.newPage();
+
+  try {
+    await login(floristPage, floristPhone, floristPin);
+    // Заказ закреплён за этим флористом, поэтому он живёт во вкладке «Мои
+    // заказы», а не в общей очереди.
+    await floristPage.getByRole('button', { name: 'Мои заказы' }).click();
+    const floristRow = floristPage.locator(
+      `[data-testid="florist-row"][data-order-number="${draftOrder}"]`,
+    );
+    await expect(floristRow).toBeVisible();
+    await expect(floristRow).toContainText('Отменён — не собирать');
+
+    // 4. В маршруте заказ тоже помечен, а не исчез молча.
+    await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+    const draftCard = page.locator(`[data-draft-number="${draftNumber}"]`);
+    await expect(draftCard).toBeVisible();
+    await draftCard.locator('.routes__draft-head').click();
+    await expect(draftCard).toHaveAttribute('data-expanded', 'true');
+    // Остановка ищется по номеру заказа в тексте: собственного атрибута
+    // у неё нет, а привязка к позиции ломалась бы от любой пересортировки.
+    const stop = page.locator('[data-testid="route-stop"]').filter({ hasText: draftOrder });
+    await expect(stop).toContainText('Отменён — не выдавать');
+
+    /*
+     * 5. Отмену сняли в МоегоСкладе.
+     *
+     * Сигнал приходит извне — проходом импорта, — и в интерфейсе его вызвать
+     * нечем. Локальный вход воспроизводит ровно сигнал, а последствия
+     * считает та же доменная функция, что и настоящий импорт.
+     */
+    const withdrawn = await page.request.post('/api/testing/source-cancellation', {
+      headers: { authorization: `Bearer ${token}` },
+      data: { orderNumber: draftOrder, cancelled: false },
+    });
+    expect(withdrawn.status()).toBe(200);
+
+    // 6. Заказ вышел из маршрута сам: прежний черновик не восстанавливается.
+    await expect(stop).toHaveCount(0);
+
+    // 7. И у флориста его больше нет: сборка отпущена, заказ снова общий.
+    await expect(floristRow).toHaveCount(0);
+
+    // 8. В «Сделках» заказ вернулся обычным: пометки отмены больше нет.
+    await page.getByRole('link', { name: 'Сделки' }).first().click();
+    await page.getByTestId('deals-search').fill(draftOrder);
+    const returned = page.locator(`[data-testid="deal-card"][data-order-number="${draftOrder}"]`);
+    await expect(returned).toBeVisible();
+    await expect(returned.getByTestId('deal-blocked')).not.toHaveText('Заказ отменён');
+  } finally {
+    await floristContext.close();
+  }
+});
+
 test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({
   page,
   browser,

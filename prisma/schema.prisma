@@ -812,6 +812,11 @@ model DeliveryOrder {
   @@index([fulfillmentInScope, deliveryDate, fulfillmentProcessState], map: "DeliveryOrder_fulfillmentProcess_idx")
   /// «Мои заказы» и поиск незавершённых назначений при завершении смены.
   @@index([fulfillmentAssigneeId, fulfillmentProcessState], map: "DeliveryOrder_fulfillmentAssignee_idx")
+  /// Отбор заказов по состоянию геокодирования внутри дня: им пользуется
+  /// фоновый разбор адресов и экран «Сделок».
+  @@index([geoState, deliveryDate])
+  /// Кто правил адрес: разбор действий конкретного логиста.
+  @@index([localAddressSetById])
 }
 
 /// Неизменяемая история внешних версий заказа.
@@ -1661,6 +1666,8 @@ model RouteMatrixCache {
 
   @@index([expiresAt])
   @@index([status, lockedAt])
+  /// Уборка записей прежней ревизии графа выбирает их по отпечатку.
+  @@index([graphSha256])
 }
 
 /// Общее состояние провайдера геокодирования.
@@ -1682,7 +1689,7 @@ model GeocodingProviderState {
   haltedReason String?
   haltedAt     DateTime?
 
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
 /// Неизменяемая история геоданных заказа.

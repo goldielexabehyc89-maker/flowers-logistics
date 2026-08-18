@@ -16,7 +16,11 @@ import { createMaintenanceRunner } from './platform/maintenance.js';
 import { createNotifier } from './modules/realtime/notifier.js';
 import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
-import { createOrderCancelHandler } from './modules/integrations/moysklad/cancel-outbox.js';
+import {
+  createMoyskladCancelTransport,
+  createOrderCancelHandler,
+} from './modules/integrations/moysklad/cancel-outbox.js';
+import { CANCELLED_STATE_ID } from './modules/integrations/moysklad/cancellation.js';
 import { MoyskladClient } from './modules/integrations/moysklad/client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
 import {
@@ -59,6 +63,24 @@ async function main(): Promise<void> {
   await maintenance.runOnce();
   maintenance.start();
 
+  /*
+   * Клиент МоегоСклада один на процесс.
+   *
+   * У него общая очередь и общий лимитер: и чтение синхронизации, и
+   * единственная операция записи расходуют один лимит аккаунта. Второй
+   * клиент означал бы два независимых потока обращений к чужой системе.
+   */
+  const moyskladWritesAllowed = config.MOYSKLAD_READ_ONLY === 'false';
+  const moyskladClient = new MoyskladClient({
+    config: {
+      baseUrl: MOYSKLAD_BASE_URL,
+      token: config.MOYSKLAD_TOKEN ?? null,
+      ids: MOYSKLAD_IDS,
+      // Единственное место, где запись вообще может быть разрешена.
+      writesAllowed: moyskladWritesAllowed,
+    },
+  });
+
   const outbox = createOutboxWorker({
     db,
     logger,
@@ -67,13 +89,22 @@ async function main(): Promise<void> {
       /*
        * Отмена заказа в МоемСкладе.
        *
-       * Транспорта нет намеренно: серверный клиент интеграции принимает
-       * только GET и HEAD во всех окружениях, а `MOYSKLAD_READ_ONLY=true`
-       * остаётся условием допуска. Обработчик честно помечает такие заказы
-       * «наружу не ушло» — вместо того чтобы копить их в очереди или
-       * выдавать наше решение за отметку в источнике.
+       * Транспорт появляется ТОЛЬКО при явно разрешённой записи. При
+       * `MOYSKLAD_READ_ONLY=true` его нет вовсе, и обработчик честно помечает
+       * такие заказы «наружу не ушло» — вместо того чтобы копить их в очереди
+       * или выдавать наше решение за отметку в источнике. Второй замок стоит
+       * в самом клиенте: даже переданный сюда транспорт не дошёл бы до сети.
        */
-      'moysklad.order_cancel': createOrderCancelHandler({ db, logger, transport: null }),
+      'moysklad.order_cancel': createOrderCancelHandler({
+        db,
+        logger,
+        transport: moyskladWritesAllowed
+          ? createMoyskladCancelTransport({
+              client: moyskladClient,
+              stateId: CANCELLED_STATE_ID,
+            })
+          : null,
+      }),
     },
   });
   outbox.start();
@@ -94,13 +125,7 @@ async function main(): Promise<void> {
   // ненастроенной.
   const moysklad = {
     db,
-    client: new MoyskladClient({
-      config: {
-        baseUrl: MOYSKLAD_BASE_URL,
-        token: config.MOYSKLAD_TOKEN ?? null,
-        ids: MOYSKLAD_IDS,
-      },
-    }),
+    client: moyskladClient,
     logger,
     ids: MOYSKLAD_IDS,
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,

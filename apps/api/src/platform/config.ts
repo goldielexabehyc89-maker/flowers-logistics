@@ -285,6 +285,21 @@ const configSchema = z.object({
     .transform((value) => value === 'true'),
 
   /**
+   * Входы, существующие только ради браузерных проверок.
+   *
+   * Нужны там, где сигнал приходит ИЗВНЕ и в интерфейсе его вызвать нечем:
+   * отмена заказа приходит из МоегоСклада проходом импорта, и без такого
+   * входа браузерный сценарий не мог бы её воспроизвести вовсе.
+   *
+   * Допустимо только в local: в staging и production такой вход означал бы
+   * возможность менять состояние заказов запросом мимо всех правил.
+   */
+  E2E_TEST_HOOKS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
+  /**
    * Верхняя граница числа точек матрицы: она растёт квадратично.
    *
    * Значение по умолчанию берётся из общего источника, а не пишется числом:
@@ -404,6 +419,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   assertTestSolverEnvironment(parsed.data);
   assertTestSuggestionsEnvironment(parsed.data);
   assertTestRouteEnvironment(parsed.data);
+  assertTestHooksEnvironment(parsed.data);
   assertGeocodingSource(parsed.data);
 
   return Object.freeze({
@@ -449,15 +465,32 @@ export function moyskladAccess(data: {
 }
 
 function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
-  // Режима записи не существует ни в одном окружении: клиент отвергает всё,
-  // кроме GET и HEAD, безусловно. Настройка, обещающая обратное, — это ошибка
-  // развёртывания, а не выбор режима, поэтому запуск останавливается.
+  /*
+   * Где вообще допустимо разрешать запись.
+   *
+   * Универсальной записи у клиента нет и с этим значением: открывается ровно
+   * одна названная операция — отмена заказа. Но и её нельзя включать где
+   * попало:
+   *
+   * - production с совпавшим маркером — рабочий контур, ради него операция
+   *   и вводилась;
+   * - local — поддельный HTTP в проверках и на стенде, живого аккаунта там нет;
+   * - staging остаётся ТОЛЬКО НА ЧТЕНИЕ по решению владельца: он смотрит
+   *   в рабочий аккаунт, и запись оттуда меняла бы настоящие заказы.
+   */
   if (data.MOYSKLAD_READ_ONLY === 'false') {
-    throw new Error(
-      'MOYSKLAD_READ_ONLY=false не поддерживается: серверный контур МоегоСклада ' +
-        'работает только на чтение во всех окружениях, включая production. ' +
-        'Операции записи вводятся отдельным заданием с идемпотентностью и аудитом',
-    );
+    // Маркер обязан совпасть: смешанная пара — это ошибка развёртывания,
+    // и разрешать по ней запись в чужую систему нельзя.
+    const writable =
+      (data.APP_ENV === 'production' && data.APP_ENVIRONMENT_MARKER === 'production') ||
+      (data.APP_ENV === 'local' && data.APP_ENVIRONMENT_MARKER === 'local');
+    if (!writable) {
+      throw new Error(
+        'MOYSKLAD_READ_ONLY=false допустим только при APP_ENV=production ' +
+          'с APP_ENVIRONMENT_MARKER=production либо при APP_ENV=local: ' +
+          'staging работает с рабочим аккаунтом только на чтение',
+      );
+    }
   }
 
   const access = moyskladAccess(data);
@@ -585,6 +618,26 @@ function assertTestRouteEnvironment(data: z.infer<typeof configSchema>): void {
     throw new Error(
       'VALHALLA_TEST_ROUTE=true допустим только при APP_ENV=local: подменённую ' +
         'геометрию нельзя выдавать за расчёт маршрутизатора',
+    );
+  }
+}
+
+/**
+ * Тестовые входы недопустимы нигде, кроме локального окружения.
+ *
+ * Проверка отдельная и жёсткая: этот флаг открывает запрос, меняющий
+ * состояние заказа в обход импорта. В рабочем контуре такого входа быть
+ * не должно ни на минуту.
+ */
+function assertTestHooksEnvironment(data: z.infer<typeof configSchema>): void {
+  if (!data.E2E_TEST_HOOKS) {
+    return;
+  }
+
+  if (data.APP_ENV !== 'local' || data.APP_ENVIRONMENT_MARKER === 'production') {
+    throw new Error(
+      'E2E_TEST_HOOKS=true допустим только при APP_ENV=local: вход, меняющий ' +
+        'состояние заказа мимо импорта, в рабочем контуре существовать не может',
     );
   }
 }

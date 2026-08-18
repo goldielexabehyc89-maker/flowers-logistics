@@ -75,7 +75,7 @@ export async function applyCancellation(
     await markRouteCellPlacement(tx, input.orderId);
     await openCorrectionTaskIfDelivered(tx, input.orderId);
   } else {
-    await releaseFromRoutes(tx, input.orderId);
+    await returnToUnassigned(tx, input.orderId);
   }
 
   await writeAudit(tx, {
@@ -183,7 +183,7 @@ async function openCorrectionTaskIfDelivered(
  * снова появляется в «Сделках» как нераспределённый. Маршруты, где заказ уже
  * получил результат, не трогаются: их история неприкосновенна.
  */
-async function releaseFromRoutes(tx: TransactionClient, orderId: string): Promise<void> {
+async function returnToUnassigned(tx: TransactionClient, orderId: string): Promise<void> {
   const participations = await tx.routeOrder.findMany({
     where: {
       orderId,
@@ -203,4 +203,32 @@ async function releaseFromRoutes(tx: TransactionClient, orderId: string): Promis
       },
     });
   }
+
+  /*
+   * Незавершённая сборка тоже отпускается.
+   *
+   * Флорист, за которым заказ числился до отмены, за это время занялся
+   * другим: вернуть ему заказ молча значило бы записать работу на человека,
+   * который о ней не знает. Заказ возвращается в общую очередь, и его берут
+   * заново.
+   *
+   * Уже СОБРАННЫЙ заказ не трогается: букет физически существует, и делать
+   * вид, что сборки не было, нельзя.
+   */
+  await tx.deliveryOrder.updateMany({
+    where: { id: orderId, fulfillmentProcessState: 'IN_ASSEMBLY' },
+    data: {
+      fulfillmentProcessState: 'NEW',
+      fulfillmentAssigneeId: null,
+      fulfillmentAssignedAt: null,
+      fulfillmentShiftId: null,
+      fulfillmentProcessVersion: { increment: 1 },
+    },
+  });
+
+  await publishRealtimeEvent(tx, {
+    topic: 'order.fulfillment_process_changed',
+    payload: { orderId },
+    audienceRoles: ['ADMIN', 'FLORIST', 'LOGISTICIAN', 'WAREHOUSE'],
+  });
 }

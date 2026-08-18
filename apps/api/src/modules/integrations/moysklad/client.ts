@@ -1,21 +1,25 @@
 /**
- * Read-only клиент МоегоСклада.
+ * Клиент МоегоСклада: чтение и РОВНО ОДНА названная операция записи.
  *
- * Единственная сетевая граница — `send`. Все обращения проходят через неё,
- * и другого места, где вызывается `fetch`, в клиенте нет.
+ * Единственная сетевая граница — `execute`. Другого места, где вызывается
+ * `fetch`, в клиенте нет.
  *
- * Проверка метода БЕЗУСЛОВНА и не настраивается: ни одно окружение и ни одно
- * значение конфигурации не может довести до `fetch` метод, отличный от `GET`
- * и `HEAD`. Запись в живой аккаунт вводится отдельным заданием — узкой
- * именованной операцией с идемпотентностью и аудитом, а не заранее открытым
- * универсальным глаголом (`FUL-006`).
+ * Универсальной записи по-прежнему не существует. `send` остаётся строго
+ * read-only и при любом другом методе отвечает `METHOD_NOT_ALLOWED` с нулём
+ * сетевых вызовов: произвольный `POST path` продуктовым API клиента не
+ * является ни при каких настройках (`FUL-006`, `ENV-004`).
  *
- * Отсутствие публичной операции записи защитой само по себе не считается:
- * договорённость «мы не будем это вызывать» проверить нельзя, а проверку
- * метода — можно (`ENV-004`). Поэтому `send` остаётся видимым, но при любом
- * запрещённом методе отвечает `METHOD_NOT_ALLOWED` и нулём сетевых вызовов:
- * произвольный `POST path` продуктовым API клиента не является ни при каких
- * настройках.
+ * Запись введена так, как это и было условлено: узкой именованной операцией
+ * `cancelCustomerOrder` с идемпотентностью и аудитом на стороне вызывающего.
+ * У неё два независимых замка, и оба проверяются ДО сети:
+ *
+ * 1. `writesAllowed` — разрешение окружения. Оно берётся из
+ *    `MOYSKLAD_READ_ONLY`: при `true` операция отвечает `WRITE_FORBIDDEN`
+ *    и не выполняет ни одного обращения;
+ * 2. отсутствие токена — `NOT_CONFIGURED`.
+ *
+ * Проверка «а вдруг кто-то передаст сюда PUT» не нужна: метод и путь у этой
+ * операции зашиты в коде и снаружи не задаются.
  *
  * Лимит аккаунта общий для всех приложений, поэтому темп консервативный:
  * одно обращение одновременно и не чаще одного запроса в секунду. Часы
@@ -42,6 +46,8 @@ import {
 export type MoyskladErrorCode =
   | 'NOT_CONFIGURED'
   | 'METHOD_NOT_ALLOWED'
+  /** Окружение работает только на чтение: запись запрещена до сети. */
+  | 'WRITE_FORBIDDEN'
   | 'INVALID_QUERY'
   | 'UNAUTHORIZED'
   | 'FORBIDDEN'
@@ -82,6 +88,7 @@ export class MoyskladError extends Error {
 const MESSAGES: Record<MoyskladErrorCode, string> = {
   NOT_CONFIGURED: 'Интеграция с МоимСкладом не настроена',
   METHOD_NOT_ALLOWED: 'Контур МоегоСклада работает только на чтение',
+  WRITE_FORBIDDEN: 'Отправка в МойСклад заблокирована режимом только чтение',
   INVALID_QUERY: 'Некорректные параметры запроса к МоемуСкладу',
   UNAUTHORIZED: 'МойСклад отклонил авторизацию',
   FORBIDDEN: 'У пользователя интеграции нет прав на эту операцию',
@@ -178,6 +185,8 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 
 export class MoyskladClient {
   private readonly config: MoyskladConfig;
+  /** Разрешена ли запись. Значение окружения, а не решение вызывающего. */
+  private readonly writesAllowed: boolean;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -191,6 +200,8 @@ export class MoyskladClient {
 
   constructor(deps: MoyskladClientDeps) {
     this.config = deps.config;
+    // Отсутствующее значение — запрет: см. `MoyskladConfig.writesAllowed`.
+    this.writesAllowed = deps.config.writesAllowed === true;
     this.fetchImpl = deps.fetch ?? globalThis.fetch;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -457,6 +468,51 @@ export class MoyskladClient {
    * Проверка метода выполняется ДО постановки в очередь и до любого обращения
    * к сети: запрещённый глагол не тратит ни лимит аккаунта, ни место в очереди.
    */
+  /**
+   * Перевод заказа покупателя в статус «Отменен».
+   *
+   * Официальный способ: `PUT /entity/customerorder/{id}` с ссылкой на статус
+   * в поле `state`. Идентификатор статуса согласован владельцем и приходит
+   * значением — угадывать его по названию нельзя, названия переименовывают.
+   *
+   * Операция сначала ЧИТАЕТ заказ. Это не лишний запрос, а идемпотентность:
+   * повторная доставка сообщения очереди не должна писать второй раз, а уже
+   * отменённый в источнике заказ — вообще не должен вызывать запись.
+   */
+  async cancelCustomerOrder(input: {
+    orderId: string;
+    stateId: string;
+  }): Promise<{ alreadyCancelled: boolean }> {
+    if (!this.writesAllowed) {
+      // До сети дело не доходит: замок стоит здесь, а не в вызывающем коде.
+      throw new MoyskladError('WRITE_FORBIDDEN');
+    }
+    if (!UUID_PATTERN.test(input.orderId) || !UUID_PATTERN.test(input.stateId)) {
+      throw new MoyskladError('INVALID_QUERY');
+    }
+
+    const current = await this.request(
+      'GET',
+      `/entity/customerorder/${input.orderId}?expand=state`,
+      readJson,
+    );
+    if (stateIdOf(current) === input.stateId) {
+      return { alreadyCancelled: true };
+    }
+
+    await this.write(`/entity/customerorder/${input.orderId}`, {
+      state: {
+        meta: {
+          href: `${this.config.baseUrl}/entity/customerorder/metadata/states/${input.stateId}`,
+          type: 'state',
+          mediaType: 'application/json',
+        },
+      },
+    });
+
+    return { alreadyCancelled: false };
+  }
+
   async send(method: string, path: string): Promise<unknown> {
     if (!isReadOnlyMethod(method)) {
       throw new MoyskladError('METHOD_NOT_ALLOWED');
@@ -482,6 +538,22 @@ export class MoyskladClient {
       () => this.execute(method, path, read, extra),
     );
     // Очередь не должна падать целиком из-за одной неудачи.
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
+   * Единственный путь записи. Через ту же очередь и тот же лимитер:
+   * лимит аккаунта общий, и запись его тоже расходует.
+   */
+  private write(path: string, body: unknown): Promise<unknown> {
+    const run = this.queue.then(
+      () => this.execute('PUT', path, readJson, { body }),
+      () => this.execute('PUT', path, readJson, { body }),
+    );
     this.queue = run.then(
       () => undefined,
       () => undefined,
@@ -516,7 +588,9 @@ export class MoyskladClient {
           Authorization: `Bearer ${token}`,
           Accept: 'application/json;charset=utf-8',
           'Accept-Encoding': 'gzip',
+          ...(extra.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
+        ...(extra.body === undefined ? {} : { body: JSON.stringify(extra.body) }),
         signal: AbortSignal.timeout(this.timeoutMs),
         // Политика переадресации задаётся вызывающей стороной: для JSON она
         // не важна, а для файла означает разницу между «наш адрес» и «любой».
@@ -552,6 +626,8 @@ type ResponseReader<T> = (response: Response) => Promise<T>;
 /** Транспортные особенности одного обращения. Метод сюда не входит намеренно. */
 interface TransportOptions {
   redirect?: 'manual' | 'error' | 'follow';
+  /** Тело запроса. Есть только у названной операции записи. */
+  body?: unknown;
 }
 
 /**
@@ -631,6 +707,26 @@ function numberHeader(response: Response, name: string): number | null {
   }
   const value = Number(raw);
   return Number.isFinite(value) ? value : null;
+}
+
+/** Идентификаторы приходят и уходят только в этом виде. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Идентификатор статуса из ответа о заказе.
+ *
+ * Берётся из `state.meta.href` — развёрнутый статус кладёт туда ссылку,
+ * последний сегмент которой и есть идентификатор. Ничего не додумывается:
+ * непонятный ответ даёт `null`, и запись выполняется как обычно.
+ */
+function stateIdOf(order: unknown): string | null {
+  const state = (order as { state?: { meta?: { href?: unknown } } } | null)?.state;
+  const href = state?.meta?.href;
+  if (typeof href !== 'string') {
+    return null;
+  }
+  const tail = href.split('/').pop() ?? '';
+  return UUID_PATTERN.test(tail) ? tail : null;
 }
 
 function statusToCode(status: number): MoyskladErrorCode {

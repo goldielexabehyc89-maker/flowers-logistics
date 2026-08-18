@@ -1,5 +1,5 @@
 /**
- * Стенд ручной приёмки: возвраты и отмены во всех состояниях сразу.
+ * Возвраты и отмены во всех состояниях сразу.
  *
  * Проверять такой контур «по одному сценарию за раз» бесполезно: половина
  * ошибок видна только рядом — когда на одном экране лежат заказ, ждущий
@@ -12,7 +12,7 @@
  * Fail closed. Скрипт отказывается работать где-либо, кроме локального
  * окружения с одноразовой базой.
  *
- *   npm run seed:stand-returns
+ *   npm run seed:e2e-returns
  */
 
 import { randomUUID } from 'node:crypto';
@@ -191,6 +191,7 @@ async function main(): Promise<number> {
     const accepted = await seedOrder('принят');
     const cancelledByLogist = await seedOrder('отменён-логистом');
     const afterDelivery = await seedOrder('отменён-после-доставки');
+    const inDraftRoute = await seedOrder('отменён-в-черновике');
 
     const participations = {
       withCourier: await attach(withCourier.id),
@@ -267,11 +268,81 @@ async function main(): Promise<number> {
     await cancelInSource(afterDelivery.id);
     report.push(`заказ: ${afterDelivery.number} — отменён после доставки, нужна коррекция`);
 
+    /*
+     * 8. Отменён, находясь В ЧЕРНОВИКЕ маршрута и в сборке у флориста.
+     *
+     * Ровно тот случай, ради которого снятие отмены существует: заказ
+     * обязан вернуться нераспределённым, а не к прежнему маршруту
+     * и прежнему флористу.
+     */
+    const floristPhone = `+79${stamp}${String((Date.now() + 7) % 1000).padStart(3, '0')}`;
+    const florist = await db.user.create({
+      data: {
+        phone: floristPhone,
+        fullName: 'Флорист стенда возвратов',
+        status: 'ACTIVE',
+        pinHash: await hashSecretCode(COURIER_PIN, config.AUTH_PIN_PEPPER),
+        roles: { create: [{ role: 'FLORIST' }] },
+      },
+      select: { id: true },
+    });
+    const shift = await db.floristShift.create({
+      data: { userId: florist.id, startedAt: new Date(), activeKey: florist.id },
+      select: { id: true },
+    });
+    const draft = await db.deliveryRoute.create({
+      data: {
+        number: `DR-${stamp}`,
+        deliveryDate: toDateColumn(day),
+        state: 'DRAFT',
+        vehicleType: 'CAR',
+        createdById: admin.id,
+      },
+      select: { id: true, number: true },
+    });
+    await db.routeOrder.create({
+      data: { routeId: draft.id, orderId: inDraftRoute.id, position: 1, addedById: admin.id },
+    });
+    await db.deliveryOrder.update({
+      where: { id: inDraftRoute.id },
+      data: {
+        // Производственная область и подтверждённый состав: без них заказ
+        // не появился бы в очереди флориста вовсе.
+        fulfillmentInScope: true,
+        fulfillmentCompositionState: 'READY',
+        fulfillmentSnapshotHash: 'seed-hash',
+        fulfillmentCompositionSyncedAt: new Date(),
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        fulfillmentAssigneeId: florist.id,
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentShiftId: shift.id,
+      },
+    });
+    await cancelInSource(inDraftRoute.id);
+    report.push(`заказ: ${inDraftRoute.number} — отменён в черновике ${draft.number} и в сборке`);
+
     process.stdout.write(`маршрут: ${route.number}\n`);
+    process.stdout.write(`черновик: ${draft.number}\n`);
     process.stdout.write(`курьер: ${courierPhone}\n`);
     process.stdout.write(`пин курьера: ${COURIER_PIN}\n`);
     process.stdout.write(`ячейка хранения: ${cell.normalizedCode}\n`);
     process.stdout.write(`маршрутная ячейка: ${routeCell.normalizedCode}\n`);
+    /*
+     * Значения читает и человек, и браузерная проверка.
+     *
+     * Поэтому ключи именованные, а не «заказ 1, заказ 2»: порядок строк
+     * менялся бы вместе со сценарием, и проверка молча брала бы не тот заказ.
+     */
+    process.stdout.write(`флорист: ${floristPhone}\n`);
+    process.stdout.write(`пин флориста: ${COURIER_PIN}\n`);
+    process.stdout.write(`у курьера: ${withCourier.number}\n`);
+    process.stdout.write(`возвращается: ${returning.number}\n`);
+    process.stdout.write(`принят: ${accepted.number}\n`);
+    process.stdout.write(`отменён логистом: ${cancelledByLogist.number}\n`);
+    process.stdout.write(`отменён свободный: ${freeCancelled.number}\n`);
+    process.stdout.write(`отменён в маршрутной: ${inRouteCell.number}\n`);
+    process.stdout.write(`отменён после доставки: ${afterDelivery.number}\n`);
+    process.stdout.write(`отменён в черновике: ${inDraftRoute.number}\n`);
     for (const line of report) {
       process.stdout.write(`${line}\n`);
     }

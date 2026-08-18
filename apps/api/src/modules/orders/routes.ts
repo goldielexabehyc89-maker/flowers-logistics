@@ -202,6 +202,9 @@ function toListItem(order: {
   geoLatMicro: number | null;
   geoLonMicro: number | null;
   geoReviewReason: string | null;
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
+  sourceCancelState: string;
   version: number;
   updatedAt: Date;
 }) {
@@ -248,6 +251,19 @@ function toListItem(order: {
     },
     needsAttention: order.needsAttention,
     attentionReasons: order.attentionReasons,
+    /*
+     * Отмена: НАША и судьба отметки в источнике — рядом, но врозь.
+     *
+     * Это два разных факта, и слепить их в один нельзя. Внутри системы заказ
+     * отменён сразу; ушла ли об этом отметка в МойСклад — зависит от режима
+     * контура и от сети, и интерфейс обязан называть это состояние честно.
+     */
+    cancellation: {
+      cancelled: order.cancelledInSource || order.cancelledByLogistAt !== null,
+      cancelledInSource: order.cancelledInSource,
+      byLogist: order.cancelledByLogistAt !== null,
+      sourceCancelState: order.sourceCancelState,
+    },
     // Координаты уходят десятичными строками: целые микроградусы наружу
     // не показываются, а число с плавающей точкой в контракте не появляется.
     geo: {

@@ -45,10 +45,11 @@ function client(
   fetchImpl: typeof globalThis.fetch,
   clock = controlledClock(),
   token: string | null = TOKEN,
+  writesAllowed = false,
 ) {
   return {
     instance: new MoyskladClient({
-      config: { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS },
+      config: { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS, writesAllowed },
       fetch: fetchImpl,
       now: clock.now,
       sleep: clock.sleep,
@@ -161,12 +162,16 @@ describe('режим только чтения: HTTP-метод проверяе
     expect(seen).toEqual(['GET']);
   });
 
-  it('запись невозможна ни в одном серверном окружении и ни при какой конфигурации', async () => {
-    // Окружения перебираются целиком, включая попытку снять режим чтения
-    // конфигурацией: она обязана остановить запуск, а не открыть запись.
+  it('универсальная запись невозможна ни в одном окружении, включая режим записи', async () => {
+    /*
+     * Правило не изменилось и не смягчилось: произвольного глагола у клиента
+     * нет НИ ПРИ КАКОЙ конфигурации. Разрешение записи открывает ровно одну
+     * названную операцию — отмену заказа, — а `send` остаётся read-only.
+     */
     const environments = [
       { APP_ENV: 'production', APP_ENVIRONMENT_MARKER: 'production' },
       { APP_ENV: 'production', APP_ENVIRONMENT_MARKER: 'production', MOYSKLAD_READ_ONLY: 'true' },
+      { APP_ENV: 'production', APP_ENVIRONMENT_MARKER: 'production', MOYSKLAD_READ_ONLY: 'false' },
       { APP_ENV: 'staging', APP_ENVIRONMENT_MARKER: 'staging', MOYSKLAD_READ_ONLY: 'true' },
     ];
 
@@ -184,18 +189,69 @@ describe('режим только чтения: HTTP-метод проверяе
 
       expect(fetchState.calls, env.APP_ENV).toBe(0);
     }
+  });
 
-    // Попытка объявить режим записи не доходит до клиента вовсе: конфигурация
-    // приложения останавливает запуск раньше, чем клиент будет создан.
+  it('режим только чтения запрещает и названную операцию отмены', async () => {
+    // Молчание конфигурации — тоже запрет: отсутствующее значение
+    // `MOYSKLAD_READ_ONLY` не открывает запись.
+    const environments = [
+      { APP_ENV: 'production', APP_ENVIRONMENT_MARKER: 'production' },
+      { APP_ENV: 'staging', APP_ENVIRONMENT_MARKER: 'staging', MOYSKLAD_READ_ONLY: 'true' },
+    ];
+
+    for (const env of environments) {
+      const config = loadMoyskladConfig({ ...env, MOYSKLAD_TOKEN: TOKEN } as NodeJS.ProcessEnv);
+      const fetchState = countingFetch();
+      const instance = new MoyskladClient({ config, fetch: fetchState.impl, minIntervalMs: 0 });
+
+      await expect(
+        instance.cancelCustomerOrder({
+          orderId: '11111111-2222-3333-4444-555555555555',
+          stateId: '45533b00-2ea3-11ed-0a80-09c5000d6027',
+        }),
+        env.APP_ENV,
+      ).rejects.toMatchObject({ code: 'WRITE_FORBIDDEN' });
+
+      expect(fetchState.calls, env.APP_ENV).toBe(0);
+    }
+  });
+
+  it('снять режим чтения можно только там, где это осмысленно', () => {
+    const base = {
+      DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      ...TEST_SECRETS,
+    } as NodeJS.ProcessEnv;
+
+    /*
+     * Staging смотрит в РАБОЧИЙ аккаунт. Разрешённая там запись меняла бы
+     * настоящие заказы живого магазина, поэтому запуск останавливается.
+     */
     expect(() =>
       loadConfig({
-        DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
-        ...TEST_SECRETS,
+        ...base,
+        APP_ENV: 'staging',
+        APP_ENVIRONMENT_MARKER: 'staging',
+        MOYSKLAD_READ_ONLY: 'false',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_READ_ONLY=false допустим только/);
+
+    // Production — ради него операция и вводилась; local — поддельный HTTP.
+    expect(
+      loadConfig({
+        ...base,
         APP_ENV: 'production',
         APP_ENVIRONMENT_MARKER: 'production',
         MOYSKLAD_READ_ONLY: 'false',
-      } as NodeJS.ProcessEnv),
-    ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
+      } as NodeJS.ProcessEnv).MOYSKLAD_READ_ONLY,
+    ).toBe('false');
+    expect(
+      loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        MOYSKLAD_READ_ONLY: 'false',
+      } as NodeJS.ProcessEnv).MOYSKLAD_READ_ONLY,
+    ).toBe('false');
   });
 
   it('политику нельзя дополнить во время исполнения', () => {
@@ -401,5 +457,139 @@ describe('загрузка заказов', () => {
     expect(serialized).not.toContain('Тестовая улица');
     expect(serialized).not.toContain('не число');
     expect(serialized).not.toContain('A-1');
+  });
+});
+
+// --- Единственная операция записи ---------------------------------------------
+
+describe('отмена заказа: единственная операция записи', () => {
+  /** Согласованный владельцем статус «Отменен». Угадывать его нельзя. */
+  const STATE = '45533b00-2ea3-11ed-0a80-09c5000d6027';
+  const ORDER = '11111111-2222-3333-4444-555555555555';
+
+  interface Call {
+    url: string;
+    method: string | undefined;
+    body: string | undefined;
+    headers: Record<string, string>;
+  }
+
+  function recordingFetch(respond: (call: Call, index: number) => Response): {
+    calls: Call[];
+    impl: typeof globalThis.fetch;
+  } {
+    const calls: Call[] = [];
+    const impl = (async (url: string, init?: RequestInit) => {
+      const call: Call = {
+        url,
+        method: init?.method,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+      };
+      calls.push(call);
+      return respond(call, calls.length - 1);
+    }) as unknown as typeof globalThis.fetch;
+    return { calls, impl };
+  }
+
+  it('при режиме только чтения отказывает с нулём сетевых вызовов', async () => {
+    const fetchState = recordingFetch(() => jsonResponse({}));
+    const { instance } = client(fetchState.impl, controlledClock(), TOKEN, false);
+
+    await expect(
+      instance.cancelCustomerOrder({ orderId: ORDER, stateId: STATE }),
+    ).rejects.toMatchObject({ code: 'WRITE_FORBIDDEN' });
+
+    /*
+     * Ноль обращений — это и есть смысл запрета.
+     *
+     * Отказ по ответу сервера означал бы, что запрос уже ушёл в чужую систему
+     * и был отклонён ею, а не нами.
+     */
+    expect(fetchState.calls).toHaveLength(0);
+  });
+
+  it('при разрешённой записи читает состояние и ставит согласованный статус', async () => {
+    const fetchState = recordingFetch((call) =>
+      call.method === 'GET'
+        ? jsonResponse({
+            id: ORDER,
+            state: {
+              meta: {
+                href: `${MOYSKLAD_BASE_URL}/entity/customerorder/metadata/states/99999999-0000-0000-0000-000000000000`,
+              },
+            },
+          })
+        : jsonResponse({ id: ORDER }),
+    );
+    const { instance } = client(fetchState.impl, controlledClock(), TOKEN, true);
+
+    const result = await instance.cancelCustomerOrder({ orderId: ORDER, stateId: STATE });
+    expect(result.alreadyCancelled).toBe(false);
+    expect(fetchState.calls.map((call) => call.method)).toEqual(['GET', 'PUT']);
+
+    const write = fetchState.calls[1];
+    expect(write?.url).toBe(`${MOYSKLAD_BASE_URL}/entity/customerorder/${ORDER}`);
+    // Тело — официальный способ: ссылка на статус, а не выдуманное поле.
+    expect(JSON.parse(write?.body ?? '{}')).toEqual({
+      state: {
+        meta: {
+          href: `${MOYSKLAD_BASE_URL}/entity/customerorder/metadata/states/${STATE}`,
+          type: 'state',
+          mediaType: 'application/json',
+        },
+      },
+    });
+  });
+
+  it('уже отменённый заказ второй записи не получает', async () => {
+    const fetchState = recordingFetch(() =>
+      jsonResponse({
+        id: ORDER,
+        state: {
+          meta: {
+            href: `${MOYSKLAD_BASE_URL}/entity/customerorder/metadata/states/${STATE}`,
+          },
+        },
+      }),
+    );
+    const { instance } = client(fetchState.impl, controlledClock(), TOKEN, true);
+
+    const result = await instance.cancelCustomerOrder({ orderId: ORDER, stateId: STATE });
+    expect(result.alreadyCancelled).toBe(true);
+    // Ровно одно обращение — чтение. Записи не было.
+    expect(fetchState.calls.map((call) => call.method)).toEqual(['GET']);
+  });
+
+  it('ошибка записи не выносит наружу ни токена, ни адреса запроса', async () => {
+    const fetchState = recordingFetch((call) =>
+      call.method === 'GET'
+        ? jsonResponse({ id: ORDER })
+        : jsonResponse({ errors: [{ error: `отказ по заказу ${ORDER}` }] }, { status: 500 }),
+    );
+    const { instance } = client(fetchState.impl, controlledClock(), TOKEN, true);
+
+    const error = await instance
+      .cancelCustomerOrder({ orderId: ORDER, stateId: STATE })
+      .catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(MoyskladError);
+    const serialized = JSON.stringify({
+      message: (error as MoyskladError).message,
+      code: (error as MoyskladError).code,
+      stack: (error as MoyskladError).stack,
+    });
+    expect(serialized).not.toContain(TOKEN);
+    expect(serialized).not.toContain(ORDER);
+  });
+
+  it('чужой идентификатор в запись не попадает', async () => {
+    const fetchState = recordingFetch(() => jsonResponse({}));
+    const { instance } = client(fetchState.impl, controlledClock(), TOKEN, true);
+
+    await expect(
+      instance.cancelCustomerOrder({ orderId: '../../entity/organization', stateId: STATE }),
+    ).rejects.toMatchObject({ code: 'INVALID_QUERY' });
+    expect(fetchState.calls).toHaveLength(0);
   });
 });

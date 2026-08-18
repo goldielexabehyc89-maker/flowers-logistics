@@ -30,9 +30,46 @@ import { formatMinutes, type OrderView } from '../deals/deals';
 import './order-window.css';
 
 /** Ответ существующего read-only контракта одного заказа. */
+/**
+ * Что показывать про отмену заказа.
+ *
+ * Правило одно и оно жёсткое: интерфейс не имеет права сказать «отменён
+ * в МоемСкладе», пока отметка туда действительно не ушла. Пока контур
+ * работает только на чтение, честная формулировка — «внутри системы
+ * отменён, отправка заблокирована».
+ */
+export function cancellationLine(cancellation: {
+  cancelled: boolean;
+  sourceCancelState: string;
+}): string | null {
+  if (!cancellation.cancelled) {
+    return null;
+  }
+  if (cancellation.sourceCancelState === 'SENT') {
+    return 'Отменён в МоемСкладе';
+  }
+  if (cancellation.sourceCancelState === 'BLOCKED') {
+    return 'Внутри системы отменён. Отправка в МойСклад заблокирована режимом только чтение';
+  }
+  if (cancellation.sourceCancelState === 'FAILED') {
+    return 'Внутри системы отменён. Отправку в МойСклад выполнить не удалось';
+  }
+  if (cancellation.sourceCancelState === 'QUEUED') {
+    return 'Внутри системы отменён. Отметка для МоегоСклада поставлена в очередь';
+  }
+  // NOT_REQUESTED: отмена пришла ИЗ МоегоСклада, отправлять туда нечего.
+  return 'Отменён в МоемСкладе';
+}
+
 export interface OrderWindowView {
   order: OrderView & {
     sourceAddress: string | null;
+    cancellation: {
+      cancelled: boolean;
+      cancelledInSource: boolean;
+      byLogist: boolean;
+      sourceCancelState: string;
+    };
     addressCorrected: boolean;
     addressConflict: boolean;
     geo: {
@@ -213,6 +250,12 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
     <>
       <Modal open title={`Заказ ${view.number}`} onClose={onClose}>
         <div className="order-window" data-testid="order-window">
+          {cancellationLine(view.cancellation) !== null && (
+            <div className="order-window__cancelled" data-testid="order-window-cancelled">
+              {cancellationLine(view.cancellation)}
+            </div>
+          )}
+
           <div className="order-window__row">
             <span className="order-window__label">Состояние в МоёмСкладе</span>
             <span className="order-window__value">{view.externalState.name ?? '—'}</span>

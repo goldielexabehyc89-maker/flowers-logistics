@@ -96,3 +96,19 @@
   color: var(--log-selected-text);
   text-decoration: underline;
 }
+
+/*
+ * Отмена заказа в окне.
+ *
+ * Красная строка, а не значок: тут написано не «что-то не так», а два
+ * конкретных факта — отменён ли заказ у нас и что произошло с отметкой
+ * в МоемСкладе. Второй факт живёт отдельно намеренно: он зависит от режима
+ * контура и от сети, и выдавать наше решение за отметку в источнике нельзя.
+ */
+.order-window__cancelled {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-weight: 600;
+}

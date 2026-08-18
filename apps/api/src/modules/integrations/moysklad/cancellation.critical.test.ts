@@ -27,7 +27,14 @@ import type { AuthenticatedActor } from '../../auth/guards.js';
 import type { Role } from '@fl/shared';
 import { toDateColumn } from './delivery-date.js';
 import { applyCancellation, isCancelledInSource, isOtherUnsuccessful } from './cancellation.js';
-import { createOrderCancelHandler, enqueueOrderCancel } from './cancel-outbox.js';
+import {
+  createMoyskladCancelTransport,
+  createOrderCancelHandler,
+  enqueueOrderCancel,
+  isTemporaryFailure,
+} from './cancel-outbox.js';
+import { MoyskladClient, MoyskladError } from './client.js';
+import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
 import { claimOrder } from '../../fulfillment/assembly.js';
 import { blockingFlags, resolveOrderByNumber } from '../../warehouse/order-lookup.js';
 import { decideCancel } from '../../returns/service.js';
@@ -502,7 +509,14 @@ describe('исходящая отметка об отмене', () => {
       select: { sourceCancelState: true, sourceCancelError: true },
     });
     expect(failed.sourceCancelState).toBe('FAILED');
-    expect(failed.sourceCancelError).toContain('503');
+    /*
+     * Текст НАШ, а не чужой.
+     *
+     * Сообщение внешней системы может содержать и адрес запроса, и данные
+     * заказа, поэтому в базу кладётся постоянная формулировка, а подробности
+     * остаются в журнале очереди.
+     */
+    expect(failed.sourceCancelError).toBe('Временная ошибка отправки');
 
     const succeeding = createOrderCancelHandler({
       db: ctx.db,
@@ -522,5 +536,186 @@ describe('исходящая отметка об отмене', () => {
     expect(sent.sourceCancelSentAt).not.toBeNull();
     expect(sent.sourceCancelError).toBeNull();
     expect(calls).toEqual(['fail', 'ok']);
+  });
+});
+
+// --- Настоящий транспорт ------------------------------------------------------
+
+describe('транспорт очереди поверх клиента МоегоСклада', () => {
+  const STATE = '45533b00-2ea3-11ed-0a80-09c5000d6027';
+
+  async function queued(): Promise<{ id: string; externalId: string; number: string }> {
+    const order = await seedOrder();
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { externalId: true },
+    });
+    await ctx.db.$transaction(async (tx) => {
+      await enqueueOrderCancel(tx, {
+        orderId: order.id,
+        externalId: stored.externalId,
+        now: new Date(),
+      });
+    });
+    return { id: order.id, externalId: stored.externalId, number: order.number };
+  }
+
+  function messageFor(order: { id: string; externalId: string }) {
+    return {
+      id: randomUUID(),
+      topic: 'moysklad.order_cancel',
+      idempotencyKey: `moysklad-cancel:${order.id}`,
+      payload: { orderId: order.id, externalId: order.externalId },
+      attempts: 1,
+      maxAttempts: 5,
+    };
+  }
+
+  /** Поддельный HTTP. Настоящих запросов в проверках нет ни одного. */
+  function fakeClient(
+    respond: (method: string | undefined) => Response,
+    writesAllowed = true,
+  ): { client: MoyskladClient; methods: (string | undefined)[] } {
+    const methods: (string | undefined)[] = [];
+    const client = new MoyskladClient({
+      config: {
+        baseUrl: MOYSKLAD_BASE_URL,
+        token: 'fake-token',
+        ids: MOYSKLAD_IDS,
+        writesAllowed,
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        methods.push(init?.method);
+        return respond(init?.method);
+      }) as unknown as typeof globalThis.fetch,
+      minIntervalMs: 0,
+    });
+    return { client, methods };
+  }
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('удачная отправка ставит статус и отмечается временем', async () => {
+    const order = await queued();
+    const { client, methods } = fakeClient((method) =>
+      method === 'GET' ? json({ id: order.externalId }) : json({ id: order.externalId }),
+    );
+
+    const handler = createOrderCancelHandler({
+      db: ctx.db,
+      logger,
+      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
+    });
+    await handler(messageFor(order));
+
+    expect(methods).toEqual(['GET', 'PUT']);
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { sourceCancelState: true, sourceCancelSentAt: true, sourceCancelError: true },
+    });
+    expect(stored.sourceCancelState).toBe('SENT');
+    expect(stored.sourceCancelSentAt).not.toBeNull();
+    expect(stored.sourceCancelError).toBeNull();
+  });
+
+  it('временная ошибка перебрасывается ради повтора очередью', async () => {
+    const order = await queued();
+    const { client } = fakeClient((method) =>
+      method === 'GET' ? json({ id: order.externalId }) : json({ errors: [] }, 503),
+    );
+
+    const handler = createOrderCancelHandler({
+      db: ctx.db,
+      logger,
+      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
+    });
+
+    // Исключение обязательно: без него очередь сочла бы дело сделанным.
+    await expect(handler(messageFor(order))).rejects.toBeInstanceOf(MoyskladError);
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { sourceCancelState: true, sourceCancelError: true },
+    });
+    expect(stored.sourceCancelState).toBe('FAILED');
+    expect(stored.sourceCancelError).not.toBeNull();
+  });
+
+  it('окончательная ошибка сохраняется и повторов не вызывает', async () => {
+    const order = await queued();
+    const { client } = fakeClient((method) =>
+      method === 'GET' ? json({ id: order.externalId }) : json({ errors: [] }, 404),
+    );
+
+    const handler = createOrderCancelHandler({
+      db: ctx.db,
+      logger,
+      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
+    });
+
+    /*
+     * Исключения нет намеренно: «нет такого заказа» через пять минут само
+     * не исправится, и вечные повторы прятали бы проблему вместо показа.
+     */
+    await expect(handler(messageFor(order))).resolves.toBeUndefined();
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { sourceCancelState: true, sourceCancelError: true },
+    });
+    expect(stored.sourceCancelState).toBe('FAILED');
+    expect(stored.sourceCancelError).toBe('Запрошенный объект в МоемСкладе не найден');
+
+    const audit = await ctx.db.auditLog.findFirst({
+      where: { entityId: order.id, action: 'ORDER_CANCEL_NOT_SENT' },
+      select: { newValue: true },
+    });
+    expect(audit).not.toBeNull();
+  });
+
+  it('классификация неудач названа явно', () => {
+    expect(isTemporaryFailure(new MoyskladError('SERVER_ERROR', 500))).toBe(true);
+    expect(isTemporaryFailure(new MoyskladError('RATE_LIMITED', 429))).toBe(true);
+    expect(isTemporaryFailure(new MoyskladError('TRANSPORT_ERROR'))).toBe(true);
+    expect(isTemporaryFailure(new MoyskladError('NOT_FOUND', 404))).toBe(false);
+    expect(isTemporaryFailure(new MoyskladError('FORBIDDEN', 403))).toBe(false);
+    expect(isTemporaryFailure(new MoyskladError('UNAUTHORIZED', 401))).toBe(false);
+    expect(isTemporaryFailure(new MoyskladError('WRITE_FORBIDDEN'))).toBe(false);
+  });
+
+  it('ни токен, ни данные заказа не попадают в аудит и в заказ', async () => {
+    const order = await queued();
+    const { client } = fakeClient((method) =>
+      method === 'GET'
+        ? json({ id: order.externalId })
+        : json({ errors: [{ error: `нельзя отменить ${order.number}` }] }, 403),
+    );
+
+    const handler = createOrderCancelHandler({
+      db: ctx.db,
+      logger,
+      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
+    });
+    await handler(messageFor(order));
+
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { sourceCancelError: true },
+    });
+    const audit = await ctx.db.auditLog.findMany({
+      where: { entityId: order.id },
+      select: { newValue: true, oldValue: true },
+    });
+    const events = await ctx.db.realtimeEvent.findMany({ select: { payload: true } });
+
+    const serialized = JSON.stringify({ error: stored.sourceCancelError, audit, events });
+    expect(serialized).not.toContain('fake-token');
+    expect(serialized).not.toContain(order.number);
+    expect(serialized).not.toContain('синтетический адрес отмены');
   });
 });

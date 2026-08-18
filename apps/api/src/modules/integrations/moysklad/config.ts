@@ -83,6 +83,17 @@ export interface MoyskladConfig {
   /** `null`, если токен не задан: интеграция остаётся не настроенной. */
   token: string | null;
   ids: typeof MOYSKLAD_IDS;
+  /**
+   * Разрешена ли ЕДИНСТВЕННАЯ операция записи — отмена заказа.
+   *
+   * Значение окружения, а не выбор вызывающего кода: `MOYSKLAD_READ_ONLY=true`
+   * запрещает запись до любого обращения к сети. Универсальной записи у клиента
+   * нет и с этим флагом тоже — открывается ровно одна названная операция.
+   *
+   * Необязательное намеренно: отсутствие значения означает ЗАПРЕТ. Забытое
+   * поле должно приводить к отказу в записи, а не к молчаливому разрешению.
+   */
+  writesAllowed?: boolean;
 }
 
 /**
@@ -95,10 +106,17 @@ export function loadMoyskladConfig(env: NodeJS.ProcessEnv = process.env): Moyskl
   const raw = env['MOYSKLAD_TOKEN'];
   const token = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
 
-  // Режима записи у клиента нет вовсе: политика `GET`/`HEAD` безусловна
-  // и в конфигурацию не выносится. `MOYSKLAD_READ_ONLY` остаётся условием
-  // ДОПУСКА окружения и проверяется в `platform/config.ts`.
-  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS };
+  /*
+   * Запись разрешена ТОЛЬКО явным `MOYSKLAD_READ_ONLY=false`.
+   *
+   * Молчание — это запрет: отсутствующее значение означает «контур
+   * не настраивали», и открывать по умолчанию запись в чужую систему
+   * по такому признаку нельзя. Где именно допустимо значение `false`,
+   * решает `platform/config.ts`: staging остаётся только на чтение.
+   */
+  const writesAllowed = env['MOYSKLAD_READ_ONLY'] === 'false';
+
+  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS, writesAllowed };
 }
 
 /** Интеграция считается настроенной только при наличии токена. */
