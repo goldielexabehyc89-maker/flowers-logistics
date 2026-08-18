@@ -483,6 +483,14 @@ export function RouteCard({
                   {!item.order.deliveryDateMatchesRoute && (
                     <StatusBadge tone="error">Дата не совпадает</StatusBadge>
                   )}
+                  {/*
+                    Отмена остаётся в составе видимой: убрать заказ молча
+                    значило бы потерять след букета, который, возможно,
+                    уже собран и лежит в маршрутной ячейке.
+                  */}
+                  {item.order.cancelled === true && (
+                    <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>
+                  )}
                 </div>
                 {/* Адрес — одна строка с обрезкой; полный виден подсказкой. */}
                 <div className="routes__stop-address" title={item.order.address ?? undefined}>

@@ -633,6 +633,8 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
               inScope: true,
               sourceMissing: true,
               sourceArchived: true,
+              cancelledInSource: true,
+              cancelledByLogistAt: true,
               // Единственное денежное поле маршрутного листа: курьеру нужно знать,
               // сколько взять. Суммы заказа, оплаты и признаки аномалии здесь лишние.
               cashCollectable: true,
@@ -713,6 +715,14 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
           sourceMissing: item.order.sourceMissing,
           sourceArchived: item.order.sourceArchived,
         },
+        /*
+         * Отменённый заказ остаётся в составе и помечается.
+         *
+         * Автоматически из маршрута он не исчезает: букет может быть уже
+         * собран, лежать в маршрутной ячейке или ехать в машине. Логист
+         * обязан увидеть отмену и решить сам, а выдачу склад уже не пропустит.
+         */
+        cancelled: item.order.cancelledInSource || item.order.cancelledByLogistAt !== null,
       },
     })),
   };

@@ -35,6 +35,8 @@ export interface RouteOrderView {
     recipient: string | null;
     comment: string | null;
     needsAttention: boolean;
+    /** Заказ отменён: из состава не исчезает, но выдавать его нельзя. */
+    cancelled?: boolean;
     attentionReasons: string[];
     cashToCollect: string | null;
     scope: { inScope: boolean; sourceMissing: boolean; sourceArchived: boolean };
