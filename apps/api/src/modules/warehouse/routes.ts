@@ -32,7 +32,9 @@ import {
   issueOrder,
   pickOrderToRouteCell,
 } from './route-flow.js';
-import { resolveOrderByNumber } from './order-lookup.js';
+import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
+import { readAssemblyBoard } from './assembly-board.js';
+import { readWarehouseManualEntry } from '../settings/service.js';
 import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import {
   CELL_READ_ROLES,
@@ -275,7 +277,12 @@ const withdrawSchema = z.object({
   reason: z.enum(['REASSEMBLY', 'WRITE_OFF']),
 });
 const bindSchema = z.object({ cellCode: cellCodeSchema });
-const pickSchema = z.object({ orderNumber: orderNumberSchema, cellCode: cellCodeSchema });
+const pickSchema = z.object({
+  orderNumber: orderNumberSchema,
+  cellCode: cellCodeSchema,
+  /** Назначить свободную маршрутную полку этому листу тем же действием. */
+  bindIfFree: z.boolean().optional(),
+});
 const confirmCourierSchema = z.object({ courierUserId: uuid });
 const issueSchema = z.object({ orderNumber: orderNumberSchema });
 const cancelIssueSchema = z.object({
@@ -298,6 +305,20 @@ export async function registerWarehouseFlowRoutes(
   const flowDeps = { db: deps.db };
 
   /** Что сейчас физически лежит на складе. */
+  /**
+   * Настройки рабочего места кладовщика.
+   *
+   * Отдельный запрос, а не общий экран настроек: у кладовщика нет прав
+   * на настройки планирования, а знать, показывать ли поле ручного ввода,
+   * он обязан. Значение читается, но не меняется — менять его может
+   * только администратор в своём разделе.
+   */
+  app.get('/api/warehouse/settings', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    const manualEntry = await readWarehouseManualEntry(deps.db);
+    return { manualEntry: manualEntry.value.enabled };
+  });
+
   app.get('/api/warehouse/placements', async (request) => {
     await authenticateWithRoles(request, deps, FLOW_ROLES);
     const query = placedQuerySchema.parse(request.query);
@@ -346,14 +367,9 @@ export async function registerWarehouseFlowRoutes(
     return {
       orderId: order.id,
       orderNumber: order.number,
-      blockedBy:
-        order.inScope === false || order.sourceArchived || order.sourceMissing
-          ? [
-              ...(order.inScope ? [] : ['OUT_OF_SCOPE']),
-              ...(order.sourceArchived ? ['SOURCE_ARCHIVED'] : []),
-              ...(order.sourceMissing ? ['SOURCE_MISSING'] : []),
-            ]
-          : [],
+      // Признаки берутся общей функцией: отменённый заказ обязан быть
+      // назван отменённым и здесь, а не только в списке размещений.
+      blockedBy: blockingFlags(order),
       needsAttention: order.needsAttention,
       currentCell:
         placement === null
@@ -370,7 +386,9 @@ export async function registerWarehouseFlowRoutes(
           : {
               id: route.id,
               number: route.number,
-              routeCell: route.cellBindings[0]?.cell ?? null,
+              // Ячеек у листа может быть несколько: экран показывает все,
+              // потому что положить коробку можно в любую из них.
+              routeCells: route.cellBindings.map((binding) => binding.cell),
             },
     };
   });
@@ -406,6 +424,17 @@ export async function registerWarehouseFlowRoutes(
     const { deliveryDate } = dateQuerySchema.parse(request.query);
 
     return { items: await listConfirmedRoutes(deps.db, deliveryDate) };
+  });
+
+  /**
+   * Доска сборки: активные и собранные листы одним ответом.
+   *
+   * Порядок и разделение считает сервер по полному набору — клиент
+   * упорядочил бы только загруженную страницу.
+   */
+  app.get('/api/warehouse/assembly', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    return readAssemblyBoard(deps.db);
   });
 
   app.get('/api/warehouse/routes/:id', async (request) => {

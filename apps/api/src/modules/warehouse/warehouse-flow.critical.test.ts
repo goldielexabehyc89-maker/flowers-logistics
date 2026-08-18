@@ -265,6 +265,26 @@ describe('независимость от FLORIST', () => {
       expect(code, file).not.toMatch(/florist/i);
     }
   });
+
+  it('доска сборки читает состояние сборки, но ничего им не запрещает', async () => {
+    /*
+     * Граница проведена по НАЗНАЧЕНИЮ файла, а не по слову в тексте.
+     *
+     * Физические операции обязаны оставаться независимыми: коробку
+     * принимают потому, что она стоит перед кладовщиком. Доска сборки —
+     * это экран: кладовщику нужно знать, идти ли за букетом к флористу
+     * или ждать, пока его донесут. Поэтому читать состояние сборки ей
+     * можно, а звать операции чужого модуля — нет.
+     */
+    const { readFileSync } = await import('node:fs');
+    const board = readFileSync(new URL('assembly-board.ts', import.meta.url), 'utf8');
+
+    expect(board).not.toMatch(/modules\/fulfillment/);
+    expect(board).not.toMatch(/claimOrder|completeAssembly|printForm/);
+
+    // И сама доска ничего не меняет: только запросы на чтение.
+    expect(board).not.toMatch(/\.(create|update|updateMany|delete|deleteMany)\(/);
+  });
 });
 
 // --- 2. Номер заказа ---------------------------------------------------------

@@ -2199,6 +2199,9 @@ model RouteCellBinding {
   releasedById String?   @db.Uuid
   releasedBy   User?     @relation("RouteCellReleasedBy", fields: [releasedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Несколько действующих ячеек у листа разрешены, повторная привязка той
+  /// же ячейки — нет. Частичные уникальные индексы объявлены миграцией:
+  /// Prisma не умеет выражать условие `WHERE "releasedAt" IS NULL`.
   @@index([routeId])
   @@index([cellId])
 }

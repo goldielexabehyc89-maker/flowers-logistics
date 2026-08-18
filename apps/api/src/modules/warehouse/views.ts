@@ -108,7 +108,7 @@ export interface RouteFlowOrderView extends PlacedOrderView {
   position: number;
   /** Заказ уже выдан курьеру в текущей сессии. */
   issued: boolean;
-  /** Заказ лежит именно в маршрутной ячейке этого листа. */
+  /** Заказ лежит именно в маршрутной ячейке ЭТОГО листа. */
   inRouteCell: boolean;
 }
 
@@ -119,7 +119,13 @@ export interface RouteFlowView {
   version: number;
   deliveryDate: string;
   courier: { id: string; fullName: string } | null;
-  routeCell: { id: string; code: string } | null;
+  /**
+   * Маршрутные ячейки листа. Их может быть несколько.
+   *
+   * Поле множественное намеренно: одна полка не вмещает полтора десятка
+   * коробок, а «первая из списка» скрывала бы остальные от кладовщика.
+   */
+  routeCells: { id: string; code: string }[];
   issueSession: {
     id: string;
     courierUserId: string;
@@ -180,7 +186,8 @@ export async function getRouteFlow(db: Database, routeId: string): Promise<Route
     return null;
   }
 
-  const routeCell = route.cellBindings[0]?.cell ?? null;
+  const routeCells = route.cellBindings.map((binding) => binding.cell);
+  const routeCellIds = new Set(routeCells.map((cell) => cell.id));
   const session = route.issueSessions[0] ?? null;
 
   // Выданность считается по маршруту, а не по открытой сессии: коробка не
@@ -217,7 +224,7 @@ export async function getRouteFlow(db: Database, routeId: string): Promise<Route
       routeId: route.id,
       position: participation.position,
       issued: issuedIds.has(order.id),
-      inRouteCell: routeCell !== null && placement?.cell.id === routeCell.id,
+      inRouteCell: placement !== null && routeCellIds.has(placement.cell.id),
     };
   });
 
@@ -228,7 +235,7 @@ export async function getRouteFlow(db: Database, routeId: string): Promise<Route
     version: route.version,
     deliveryDate: fromDateColumn(route.deliveryDate),
     courier: route.courier,
-    routeCell,
+    routeCells,
     issueSession: session,
     orders,
   };

@@ -94,6 +94,113 @@ export interface BindCellResult {
  * ячейка» держат частичные уникальные индексы, а не проверка в коде: две
  * параллельные привязки иначе прошли бы обе.
  */
+/**
+ * Привязка маршрутной ячейки ВНУТРИ уже открытой транзакции.
+ *
+ * Вынесено отдельно, потому что назначение ячейки бывает не самостоятельным
+ * действием, а первой половиной одного шага: кладовщик сканирует свободную
+ * полку и тут же кладёт в неё коробку. Две транзакции подряд оставили бы
+ * промежуток, в котором лист уже занял полку, а заказ туда ещё не попал.
+ */
+export async function bindRouteCellWithin(
+  tx: TransactionClient,
+  actor: AuthenticatedActor,
+  route: { id: string; number: string },
+  cellCode: string,
+  context: RequestContext,
+): Promise<{ cellId: string; cellCode: string; unchanged: boolean }> {
+  const { normalizedCode } = normalizeCellCode(cellCode);
+
+  const cell = await tx.storageCell.findUnique({
+    where: { normalizedCode },
+    select: { id: true, code: true, kind: true, isActive: true },
+  });
+
+  if (cell === null) {
+    throw new AppError('NOT_FOUND', {
+      message: 'storage cell not found',
+      publicMessage: 'Ячейка с таким кодом не найдена.',
+    });
+  }
+  if (cell.kind !== 'ROUTE') {
+    throw new AppError('CONFLICT', {
+      message: 'cell is not a route cell',
+      publicMessage: 'Это ячейка хранения. Для маршрутного листа нужна маршрутная ячейка.',
+      conflict: { kind: 'CELL_KIND_MISMATCH' },
+    });
+  }
+  if (!cell.isActive) {
+    throw new AppError('CONFLICT', {
+      message: 'storage cell is inactive',
+      publicMessage: 'Ячейка выключена и в работе не используется.',
+      conflict: { kind: 'CELL_INACTIVE' },
+    });
+  }
+
+  /*
+   * Вторая ячейка листа — это норма, а не ошибка.
+   *
+   * Полтора десятка коробок на одну полку не помещаются. Запрещено другое:
+   * отдать ту же полку второму листу — на ней встретились бы коробки двух
+   * курьеров. Это держит частичный уникальный индекс по ячейке.
+   *
+   * Повтор той же ячейки идемпотентен: кладовщик мог отсканировать её
+   * дважды, и вторая привязка означала бы, что освобождать полку придётся
+   * столько же раз.
+   */
+  const existing = await tx.routeCellBinding.findFirst({
+    where: { routeId: route.id, cellId: cell.id, releasedAt: null },
+    select: { id: true },
+  });
+  if (existing !== null) {
+    return { cellId: cell.id, cellCode: cell.code, unchanged: true };
+  }
+
+  const foreign = await tx.routeCellBinding.findFirst({
+    where: { cellId: cell.id, releasedAt: null },
+    select: { route: { select: { number: true } } },
+  });
+  if (foreign !== null) {
+    // Ту же причину поймал бы уникальный индекс, но названная заранее
+    // она объясняет кладовщику, куда делась полка.
+    throw new AppError('CONFLICT', {
+      message: 'cell belongs to another route',
+      publicMessage: `Ячейка занята маршрутным листом ${foreign.route.number}.`,
+      conflict: { kind: 'ROUTE_CELL_ALREADY_BOUND', routeNumber: foreign.route.number },
+    });
+  }
+
+  const created = await tx.routeCellBinding.create({
+    data: {
+      routeId: route.id,
+      cellId: cell.id,
+      cellKind: 'ROUTE',
+      boundById: actor.userId,
+    },
+    select: { id: true },
+  });
+
+  await writeAudit(tx, {
+    action: 'WAREHOUSE_ROUTE_CELL_BOUND',
+    entityType: 'RouteCellBinding',
+    entityId: created.id,
+    actorUserId: actor.userId,
+    actorRoles: actor.roles,
+    source: 'api',
+    newValue: { routeId: route.id, cellId: cell.id },
+    ip: context.ip,
+    userAgent: context.userAgent,
+  });
+
+  await publishRealtimeEvent(tx, {
+    topic: 'warehouse.route_flow_changed',
+    payload: { routeId: route.id, cellId: cell.id, action: 'CELL_BOUND' },
+    audienceRoles: [...FLOW_AUDIENCE],
+  });
+
+  return { cellId: cell.id, cellCode: cell.code, unchanged: false };
+}
+
 export async function bindRouteCell(
   deps: FlowDeps,
   actor: AuthenticatedActor,
@@ -101,84 +208,13 @@ export async function bindRouteCell(
   input: BindCellInput,
   context: RequestContext,
 ): Promise<BindCellResult> {
-  const { normalizedCode } = normalizeCellCode(input.cellCode);
-
   try {
     return await deps.db.$transaction(async (tx: TransactionClient) => {
       const route = await lockRoute(tx, routeId);
       requireConfirmed(route);
 
-      const cell = await tx.storageCell.findUnique({
-        where: { normalizedCode },
-        select: { id: true, code: true, kind: true, isActive: true },
-      });
-
-      if (cell === null) {
-        throw new AppError('NOT_FOUND', {
-          message: 'storage cell not found',
-          publicMessage: 'Ячейка с таким кодом не найдена.',
-        });
-      }
-      if (cell.kind !== 'ROUTE') {
-        throw new AppError('CONFLICT', {
-          message: 'cell is not a route cell',
-          publicMessage: 'Это ячейка хранения. Для маршрутного листа нужна маршрутная ячейка.',
-          conflict: { kind: 'CELL_KIND_MISMATCH' },
-        });
-      }
-      if (!cell.isActive) {
-        throw new AppError('CONFLICT', {
-          message: 'storage cell is inactive',
-          publicMessage: 'Ячейка выключена и в работе не используется.',
-          conflict: { kind: 'CELL_INACTIVE' },
-        });
-      }
-
-      const existing = await tx.routeCellBinding.findFirst({
-        where: { routeId, releasedAt: null },
-        select: { id: true, cellId: true },
-      });
-
-      if (existing !== null) {
-        if (existing.cellId === cell.id) {
-          return { routeId, cellId: cell.id, cellCode: cell.code, unchanged: true };
-        }
-        throw new AppError('CONFLICT', {
-          message: 'route already bound to another cell',
-          publicMessage: 'У маршрутного листа уже есть маршрутная ячейка.',
-          conflict: { kind: 'ROUTE_CELL_ALREADY_BOUND', routeNumber: route.number },
-        });
-      }
-
-      const created = await tx.routeCellBinding.create({
-        data: {
-          routeId,
-          cellId: cell.id,
-          cellKind: 'ROUTE',
-          boundById: actor.userId,
-        },
-        select: { id: true },
-      });
-
-      await writeAudit(tx, {
-        action: 'WAREHOUSE_ROUTE_CELL_BOUND',
-        entityType: 'RouteCellBinding',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        source: 'api',
-        newValue: { routeId, cellId: cell.id },
-        ip: context.ip,
-        userAgent: context.userAgent,
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'warehouse.route_flow_changed',
-        payload: { routeId, action: 'CELL_BOUND' },
-        audienceRoles: [...FLOW_AUDIENCE],
-      });
-
-      return { routeId, cellId: cell.id, cellCode: cell.code, unchanged: false };
+      const bound = await bindRouteCellWithin(tx, actor, route, input.cellCode, context);
+      return { routeId, ...bound };
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -197,6 +233,15 @@ export async function bindRouteCell(
 export interface PickInput {
   orderNumber: string;
   cellCode: string;
+  /**
+   * Разрешить назначить отсканированную свободную полку этому листу.
+   *
+   * Нужно там, где кладовщик собирает лист по факту: он сканирует коробку
+   * и свободную полку, а не ходит сначала в настройки листа. Назначение
+   * и размещение происходят одной транзакцией — иначе остаётся промежуток,
+   * в котором полка уже занята листом, а коробка ещё нет.
+   */
+  bindIfFree?: boolean | undefined;
 }
 
 export interface PickResult {
@@ -229,11 +274,18 @@ export async function pickOrderToRouteCell(
     const route = await lockRoute(tx, routeId);
     requireConfirmed(route);
 
-    const binding = await tx.routeCellBinding.findFirst({
+    /*
+     * Годится ЛЮБАЯ действующая ячейка этого листа.
+     *
+     * Ячеек у листа может быть несколько, и требовать одну конкретную
+     * значило бы заставлять кладовщика помнить, какую полку он занял первой.
+     * Чужая ячейка при этом по-прежнему не принимается.
+     */
+    const bindings = await tx.routeCellBinding.findMany({
       where: { routeId, releasedAt: null },
-      select: { cellId: true },
+      select: { cellId: true, cell: { select: { code: true } } },
     });
-    if (binding === null) {
+    if (bindings.length === 0 && input.bindIfFree !== true) {
       throw new AppError('CONFLICT', {
         message: 'route has no bound cell',
         publicMessage: 'Сначала привяжите маршрутную ячейку к этому листу.',
@@ -246,11 +298,25 @@ export async function pickOrderToRouteCell(
       where: { normalizedCode },
       select: { id: true, code: true, isActive: true },
     });
-    if (cell === null || cell.id !== binding.cellId) {
-      throw new AppError('CONFLICT', {
-        message: 'scanned cell is not the bound route cell',
-        publicMessage: 'Отсканирована не та ячейка: у этого листа другая маршрутная ячейка.',
-        conflict: { kind: 'ROUTE_CELL_MISMATCH', routeNumber: route.number },
+    const bound = cell === null ? undefined : bindings.find((item) => item.cellId === cell.id);
+    if (bound === undefined) {
+      if (input.bindIfFree === true) {
+        // Свободная маршрутная полка становится ещё одной ячейкой листа
+        // прямо здесь: следом, в этой же транзакции, в неё ляжет коробка.
+        await bindRouteCellWithin(tx, actor, route, input.cellCode, context);
+      } else {
+        const expected = bindings.map((item) => item.cell.code).join(', ');
+        throw new AppError('CONFLICT', {
+          message: 'scanned cell is not a route cell of this route',
+          publicMessage: `Отсканирована не та ячейка. У этого листа: ${expected}.`,
+          conflict: { kind: 'ROUTE_CELL_MISMATCH', routeNumber: route.number },
+        });
+      }
+    }
+    if (cell === null) {
+      throw new AppError('NOT_FOUND', {
+        message: 'storage cell not found',
+        publicMessage: 'Ячейка с таким кодом не найдена.',
       });
     }
     if (!cell.isActive) {
@@ -299,7 +365,7 @@ export async function pickOrderToRouteCell(
     }
 
     if (current.cellId === cell.id) {
-      const progress = await pickProgress(tx, routeId, cell.id);
+      const progress = await pickProgress(tx, routeId);
       return {
         routeId,
         orderId: order.id,
@@ -354,7 +420,7 @@ export async function pickOrderToRouteCell(
       audienceRoles: [...FLOW_AUDIENCE],
     });
 
-    const progress = await pickProgress(tx, routeId, cell.id);
+    const progress = await pickProgress(tx, routeId);
     return {
       routeId,
       orderId: order.id,
@@ -367,10 +433,16 @@ export async function pickOrderToRouteCell(
   });
 }
 
+/**
+ * Сколько заказов листа уже стоит в ЕГО маршрутных ячейках.
+ *
+ * Считается по всем действующим ячейкам листа сразу: коробки одного листа
+ * могут лежать на двух полках, и прогресс «по одной полке» показывал бы
+ * половину собранного как несобранное.
+ */
 async function pickProgress(
   tx: TransactionClient,
   routeId: string,
-  cellId: string,
 ): Promise<{ picked: number; total: number }> {
   const participations = await tx.routeOrder.findMany({
     where: { routeId, removedAt: null },
@@ -378,11 +450,17 @@ async function pickProgress(
   });
   const orderIds = participations.map((row) => row.orderId);
 
+  const bindings = await tx.routeCellBinding.findMany({
+    where: { routeId, releasedAt: null },
+    select: { cellId: true },
+  });
+  const cellIds = bindings.map((row) => row.cellId);
+
   const picked =
-    orderIds.length === 0
+    orderIds.length === 0 || cellIds.length === 0
       ? 0
       : await tx.orderPlacement.count({
-          where: { orderId: { in: orderIds }, cellId, releasedAt: null },
+          where: { orderId: { in: orderIds }, cellId: { in: cellIds }, releasedAt: null },
         });
 
   return { picked, total: orderIds.length };
@@ -975,11 +1053,11 @@ export async function markRoutePlacementsForRelocation(
   tx: TransactionClient,
   routeId: string,
 ): Promise<number> {
-  const binding = await tx.routeCellBinding.findFirst({
+  const bindings = await tx.routeCellBinding.findMany({
     where: { routeId, releasedAt: null },
     select: { cellId: true },
   });
-  if (binding === null) {
+  if (bindings.length === 0) {
     return 0;
   }
 
@@ -992,8 +1070,15 @@ export async function markRoutePlacementsForRelocation(
     return 0;
   }
 
+  // Пометку получают коробки во ВСЕХ маршрутных ячейках листа: полок может
+  // быть несколько, и оставленная без пометки вторая полка уехала бы
+  // с курьером как собранная.
   const marked = await tx.orderPlacement.updateMany({
-    where: { orderId: { in: orderIds }, cellId: binding.cellId, releasedAt: null },
+    where: {
+      orderId: { in: orderIds },
+      cellId: { in: bindings.map((row) => row.cellId) },
+      releasedAt: null,
+    },
     data: { requiresRelocation: true },
   });
 
