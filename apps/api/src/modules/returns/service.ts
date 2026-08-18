@@ -21,6 +21,7 @@
 import type { $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { effectiveAddress } from '../orders/address.js';
+import { assemblyRoundOf } from '../warehouse/placement.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
@@ -56,6 +57,16 @@ function clockOf(deps: ReturnDeps): () => Date {
  * выше, — но `attemptId` всё равно уникален: одна попытка порождает ровно
  * одну задачу и ровно один возврат.
  */
+/**
+ * Номер карточки возврата по номеру заказа и порядковому номеру.
+ *
+ * Первый возврат — просто «-otm»: приписка «-otm-1» к единственной карточке
+ * выглядела бы как обещание второй.
+ */
+export function returnDisplayNumber(orderNumber: string, sequence: number): string {
+  return sequence <= 1 ? `${orderNumber}-otm` : `${orderNumber}-otm-${sequence}`;
+}
+
 export async function openAfterFailedDelivery(
   tx: TransactionClient,
   input: {
@@ -81,12 +92,29 @@ export async function openAfterFailedDelivery(
     select: { id: true },
   });
 
+  /*
+   * Номер карточки возврата.
+   *
+   * Заказ при этом не дублируется и номера не меняет: карточка — отдельная
+   * внутренняя сущность, у неё свой номер «номер-otm». Второй возврат того
+   * же заказа получает «-otm-2»: без порядкового номера две карточки были бы
+   * неотличимы, а кладовщик не смог бы сказать, какую именно он принял.
+   */
+  const order = await tx.deliveryOrder.findUniqueOrThrow({
+    where: { id: input.orderId },
+    select: { externalName: true },
+  });
+  const previous = await tx.orderReturn.count({ where: { orderId: input.orderId } });
+  const sequence = previous + 1;
+
   const created = await tx.orderReturn.create({
     data: {
       orderId: input.orderId,
       routeOrderId: input.routeOrderId,
       attemptId: input.attemptId,
       courierUserId: input.courierUserId,
+      sequence,
+      displayNumber: returnDisplayNumber(order.externalName, sequence),
       state: 'WITH_COURIER',
       createdAt: input.now,
       activeKey: input.orderId,
@@ -386,14 +414,47 @@ export async function decideCancel(
 }
 
 /**
- * «Повторно доставить».
+ * Закрывает действующее участие заказа в маршруте.
  *
- * Заказ возвращается в «Сделки», но выбрать его нельзя, пока склад не принял
- * букет: маршрут из товара, лежащего в чужой машине, — это обещание, которое
- * некому выполнить. Прежние курьер, флорист и маршрут не восстанавливаются:
- * их выбирают заново.
+ * Недоставка сама по себе участие не закрывает: маршрут завершён, но заказ
+ * в нём остаётся — это история попытки. Перед новым маршрутом участие
+ * обязано закрыться, иначе один букет оказался бы обещан двум курьерам.
+ * База это же требование держит частичным уникальным индексом.
  */
-export async function decideRedeliver(
+async function closeActiveParticipation(
+  tx: TransactionClient,
+  orderId: string,
+  actorUserId: string,
+): Promise<void> {
+  const active = await tx.routeOrder.findMany({
+    where: { orderId, removedAt: null },
+    select: { id: true },
+  });
+
+  for (const participation of active) {
+    await tx.routeOrder.update({
+      where: { id: participation.id },
+      data: {
+        removedAt: new Date(),
+        removedById: actorUserId,
+        removalReason: 'RETURNED_TO_UNASSIGNED',
+      },
+    });
+  }
+}
+
+/**
+ * «Отправить тот же букет».
+ *
+ * Доступно только после подтверждённой приёмки возврата складом: пока букет
+ * в машине курьера, обещать его новому маршруту нечем. Сборка, печать и
+ * размещение остаются как есть — букет тот же самый, и заставлять флориста
+ * собирать его заново значило бы выбросить готовую работу.
+ *
+ * Заказ при этом НЕ дублируется: тот же внутренний идентификатор, тот же
+ * внешний UUID и тот же номер МоегоСклада возвращаются в «Сделки».
+ */
+export async function decideRedeliverSameBouquet(
   deps: ReturnDeps,
   actor: AuthenticatedActor,
   resolutionId: string,
@@ -405,19 +466,35 @@ export async function decideRedeliver(
     const task = await lockPending(tx, resolutionId);
     const order = await tx.deliveryOrder.findUniqueOrThrow({
       where: { id: task.orderId },
-      select: { externalName: true },
+      select: { externalName: true, assemblyRound: true },
     });
+
+    const accepted = await tx.orderReturn.findFirst({
+      where: { orderId: task.orderId, state: 'ACCEPTED' },
+      orderBy: { acceptedAt: 'desc' },
+      select: { id: true },
+    });
+    if (accepted === null) {
+      throw new AppError('CONFLICT', {
+        message: 'return is not accepted yet',
+        publicMessage:
+          'Букет ещё не принят складом. Отправить тот же букет можно только после приёмки.',
+        conflict: { kind: 'RETURN_NOT_ACCEPTED' },
+      });
+    }
 
     await tx.orderResolution.update({
       where: { id: task.id },
       data: {
-        decision: 'REDELIVER',
+        decision: 'REDELIVER_SAME_BOUQUET',
         decidedAt: now,
         decidedById: actor.userId,
         activeKey: null,
         closedAt: now,
       },
     });
+
+    await closeActiveParticipation(tx, task.orderId, actor.userId);
 
     await writeAudit(tx, {
       action: 'ORDER_REDELIVERY_REQUESTED',
@@ -426,7 +503,11 @@ export async function decideRedeliver(
       actorUserId: actor.userId,
       actorRoles: actor.roles,
       source: 'api',
-      newValue: { resolutionId: task.id, decision: 'REDELIVER' },
+      newValue: {
+        resolutionId: task.id,
+        decision: 'REDELIVER_SAME_BOUQUET',
+        assemblyRound: order.assemblyRound,
+      },
       ip: context.ip,
       userAgent: context.userAgent,
     });
@@ -436,7 +517,96 @@ export async function decideRedeliver(
     return {
       orderId: task.orderId,
       orderNumber: order.externalName,
-      decision: 'REDELIVER' as const,
+      decision: 'REDELIVER_SAME_BOUQUET' as const,
+    };
+  });
+}
+
+/**
+ * «Передать на пересборку».
+ *
+ * Заказ возвращается флористам и в «Сделки» — с тем же идентификатором,
+ * тем же внешним UUID и тем же номером. Начинается новый КРУГ сборки:
+ * прежнее «Собран», прежняя печать и лежащий на полке старый букет
+ * относятся к прошлому кругу и новую сборку готовой не делают.
+ *
+ * Приёмки возврата здесь не требуется: пересобрать заказ можно и пока
+ * старый букет едет обратно — новый собирают из свежих цветов.
+ */
+export async function decideReassemble(
+  deps: ReturnDeps,
+  actor: AuthenticatedActor,
+  resolutionId: string,
+  context: { ip: string | null; userAgent: string | null },
+): Promise<DecisionResult> {
+  const now = clockOf(deps)();
+
+  return deps.db.$transaction(async (tx) => {
+    const task = await lockPending(tx, resolutionId);
+
+    await tx.orderResolution.update({
+      where: { id: task.id },
+      data: {
+        decision: 'REDELIVER_REASSEMBLE',
+        decidedAt: now,
+        decidedById: actor.userId,
+        activeKey: null,
+        closedAt: now,
+      },
+    });
+
+    await closeActiveParticipation(tx, task.orderId, actor.userId);
+
+    /*
+     * Новый круг сборки.
+     *
+     * Заказ возвращается в общую очередь флористов: прежний исполнитель за
+     * это время занялся другим, и записывать работу на человека, который
+     * о ней не знает, нельзя. Версия процесса растёт — открытые у кого-то
+     * экраны увидят расхождение и перечитают состояние.
+     */
+    const order = await tx.deliveryOrder.update({
+      where: { id: task.orderId },
+      data: {
+        assemblyRound: { increment: 1 },
+        fulfillmentProcessState: 'NEW',
+        fulfillmentAssigneeId: null,
+        fulfillmentAssignedAt: null,
+        fulfillmentShiftId: null,
+        fulfillmentProcessVersion: { increment: 1 },
+      },
+      select: { externalName: true, assemblyRound: true },
+    });
+
+    await writeAudit(tx, {
+      action: 'ORDER_REASSEMBLY_REQUESTED',
+      entityType: 'DeliveryOrder',
+      entityId: task.orderId,
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      source: 'api',
+      newValue: { resolutionId: task.id, assemblyRound: order.assemblyRound },
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+
+    await publishReturnEvent(tx, 'order.resolution_changed', task.orderId);
+    /*
+     * Событие производственного процесса — отдельно.
+     *
+     * Его слушают экраны флориста и печати: без него пересобранный заказ
+     * появился бы в очереди только после F5.
+     */
+    await publishRealtimeEvent(tx, {
+      topic: 'order.fulfillment_process_changed',
+      payload: { orderId: task.orderId },
+      audienceRoles: ['ADMIN', 'FLORIST', 'LOGISTICIAN', 'WAREHOUSE'],
+    });
+
+    return {
+      orderId: task.orderId,
+      orderNumber: order.externalName,
+      decision: 'REDELIVER_REASSEMBLE' as const,
     };
   });
 }
@@ -581,8 +751,20 @@ export async function acceptReturn(
   const code = input.cellCode.trim().toUpperCase();
 
   return deps.db.$transaction(async (tx) => {
+    /*
+     * Сканировать можно и заказ, и карточку возврата.
+     *
+     * Кладовщик держит в руках коробку с номером заказа, а в списке видит
+     * «номер-otm». Требовать угадывать, что именно сканировать, значило бы
+     * придумывать человеку работу: принимается и то и другое.
+     */
+    const byReturn = await tx.orderReturn.findFirst({
+      where: { displayNumber: number },
+      select: { orderId: true },
+    });
+
     const order = await tx.deliveryOrder.findFirst({
-      where: { externalName: number },
+      where: byReturn === null ? { externalName: number } : { id: byReturn.orderId },
       select: {
         id: true,
         externalName: true,
@@ -693,6 +875,7 @@ export async function acceptReturn(
       });
     }
 
+    const round = await assemblyRoundOf(tx, order.id);
     const placement = await tx.orderPlacement.create({
       data: {
         orderId: order.id,
@@ -700,6 +883,7 @@ export async function acceptReturn(
         source: 'COURIER_RETURN',
         placedAt: now,
         placedById: actor.userId,
+        assemblyRound: round,
       },
       select: { id: true },
     });
@@ -760,6 +944,8 @@ export async function acceptReturn(
 export interface WarehouseReturnView {
   orderId: string;
   orderNumber: string;
+  /** Номер карточки возврата: его же видит курьер. */
+  displayNumber: string;
   state: $Enums.OrderReturnState;
   courier: string | null;
   reasonName: string;
@@ -774,6 +960,7 @@ export interface WarehouseReturnView {
 const WAREHOUSE_RETURN_SELECT = {
   orderId: true,
   state: true,
+  displayNumber: true,
   acceptedAt: true,
   courier: { select: { fullName: true } },
   attempt: { select: { reasonNameSnapshot: true } },
@@ -795,6 +982,7 @@ const WAREHOUSE_RETURN_SELECT = {
 interface WarehouseReturnRow {
   orderId: string;
   state: $Enums.OrderReturnState;
+  displayNumber: string;
   acceptedAt: Date | null;
   courier: { fullName: string } | null;
   attempt: { reasonNameSnapshot: string | null };
@@ -811,6 +999,7 @@ function warehouseReturnView(row: WarehouseReturnRow): WarehouseReturnView {
   return {
     orderId: row.orderId,
     orderNumber: row.order.externalName,
+    displayNumber: row.displayNumber,
     state: row.state,
     courier: row.courier?.fullName ?? null,
     reasonName: row.attempt.reasonNameSnapshot ?? 'Причина не указана',

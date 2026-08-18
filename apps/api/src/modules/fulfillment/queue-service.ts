@@ -191,7 +191,15 @@ function orderSelect(date: string | null) {
     cancelledInSource: true,
     cancelledByLogistAt: true,
     fulfillmentAssignee: { select: { id: true, fullName: true } },
-    printForms: { select: { id: true }, take: 1 },
+    assemblyRound: true,
+    /*
+     * Бланк ТЕКУЩЕГО круга сборки.
+     *
+     * После пересборки прежняя печать остаётся в истории, но закрытой новую
+     * сборку не делает: флорист обязан напечатать бланк заново, иначе на
+     * коробке окажется состав прошлого букета.
+     */
+    printForms: { select: { id: true, assemblyRound: true } },
     // Последняя производственная ревизия: по ней видно, менялся ли заказ после
     // того, как его взяли в работу. Отдельной колонки для этого не заводится —
     // ревизии неизменяемы, и их отметка времени достовернее любого флага.
@@ -474,7 +482,8 @@ function toQueueItem(
     fulfillmentProcessState: string;
     fulfillmentAssignedAt: Date | null;
     fulfillmentAssignee: { id: string; fullName: string } | null;
-    printForms: { id: string }[];
+    assemblyRound: number;
+    printForms: { id: string; assemblyRound: number }[];
     fulfillmentRevisions: { receivedAt: Date }[];
     routeOrders: { position: number | null; route: { id: string; number: string } }[];
     cancelledInSource: boolean;
@@ -506,7 +515,7 @@ function toQueueItem(
             number: participation.route.number,
             position: participation.position,
           },
-    hasPrintForm: row.printForms.length > 0,
+    hasPrintForm: row.printForms.some((form) => form.assemblyRound === row.assemblyRound),
     changedSinceClaim: hasChangedSinceClaim(row),
     // Отменённый заказ остаётся в списке, но собирать его нельзя: исчезнувший
     // из очереди заказ выглядит как потерянный, а не как отменённый.

@@ -527,6 +527,7 @@ export async function assembleOrder(
         fulfillmentInScope: true,
         sourceArchived: true,
         sourceMissing: true,
+        assemblyRound: true,
       },
     });
 
@@ -596,6 +597,8 @@ export async function assembleOrder(
       data: {
         orderId: order.id,
         revisionId: revision.id,
+        // Бланк принадлежит кругу сборки: после пересборки нужен новый.
+        assemblyRound: order.assemblyRound,
         templateVersion: PRINT_TEMPLATE_VERSION,
         snapshot: snapshot as unknown as Prisma.InputJsonValue,
         snapshotHash: snapshotHash(snapshot),

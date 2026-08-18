@@ -360,9 +360,10 @@ async function dealCards(db: Database, ids: string[]) {
        * с пустым `releasedAt`; второго такого места не существует физически.
        */
       fulfillmentProcessState: true,
+      assemblyRound: true,
       placements: {
         where: { releasedAt: null },
-        select: { id: true },
+        select: { id: true, assemblyRound: true },
         take: 1,
       },
       routeOrders: {
@@ -438,12 +439,40 @@ async function dealCards(db: Database, ids: string[]) {
         awaitingReturn: awaitingReturn.get(row.id) ?? null,
         /** Отменён — у нас решением логиста либо в МоемСкладе. */
         cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
-        // Готов к отправке: собран флористом ЛИБО уже размещён на складе.
-        // Логисту важен факт готовности, а не путь, которым он наступил.
-        assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
+        /*
+         * Готов к отправке: собран флористом ЛИБО уже размещён на складе.
+         *
+         * Логисту важен факт готовности, а не путь, которым он наступил.
+         * Но считается он по ТЕКУЩЕМУ кругу сборки: после пересборки старый
+         * букет остаётся на полке, и засчитывать его готовностью значило бы
+         * отправить курьера за тем, что уже признано негодным.
+         */
+        assembled: isAssembled(row),
       },
     ];
   });
+}
+
+/**
+ * Готов ли заказ к отправке ПРЯМО СЕЙЧАС.
+ *
+ * Два равноправных признака: флорист отметил «Собран» либо букет физически
+ * лежит в ячейке. Оба считаются по текущему кругу сборки — после пересборки
+ * старый букет и старая отметка относятся к прошлому кругу, и выдавать их
+ * за готовность нельзя.
+ *
+ * Функция одна на список и на карту: разойдясь, они показывали бы разный
+ * цвет одной и той же точке.
+ */
+export function isAssembled(order: {
+  fulfillmentProcessState: string;
+  assemblyRound: number;
+  placements: { assemblyRound: number }[];
+}): boolean {
+  if (order.fulfillmentProcessState === 'ASSEMBLED') {
+    return true;
+  }
+  return order.placements.some((placement) => placement.assemblyRound === order.assemblyRound);
 }
 
 export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Promise<void> {
@@ -1002,7 +1031,12 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         manualIntervalStartMinute: true,
         manualIntervalEndMinute: true,
         fulfillmentProcessState: true,
-        placements: { where: { releasedAt: null }, select: { id: true }, take: 1 },
+        assemblyRound: true,
+        placements: {
+          where: { releasedAt: null },
+          select: { id: true, assemblyRound: true },
+          take: 1,
+        },
         routeOrders: { where: { removedAt: null }, select: { routeId: true }, take: 1 },
       },
     });
@@ -1017,7 +1051,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         lon: fromMicro(row.geoLonMicro ?? 0),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,
         endMinute: row.manualIntervalEndMinute ?? row.intervalEndMinute,
-        assembled: row.fulfillmentProcessState === 'ASSEMBLED' || row.placements.length > 0,
+        assembled: isAssembled(row),
         /*
          * Пригодность решает сервер и отдаёт её вместе с точкой.
          *

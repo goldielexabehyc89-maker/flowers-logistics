@@ -159,6 +159,20 @@ export async function countActivePlacements(
 
 // --- Приёмка -----------------------------------------------------------------
 
+/**
+ * Текущий круг сборки заказа.
+ *
+ * Размещение всегда принадлежит кругу, который идёт сейчас: букет, принятый
+ * после пересборки, — это уже другой букет, и путать его с прошлым нельзя.
+ */
+export async function assemblyRoundOf(tx: TransactionClient, orderId: string): Promise<number> {
+  const order = await tx.deliveryOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { assemblyRound: true },
+  });
+  return order.assemblyRound;
+}
+
 export interface ReceiveInput {
   /** Отсканированный номер заказа. */
   orderNumber: string;
@@ -203,6 +217,7 @@ export async function receiveOrder(
   return deps.db
     .$transaction(async (tx: TransactionClient) => {
       const order = await resolveOrderByNumber(tx, input.orderNumber);
+      const round = await assemblyRoundOf(tx, order.id);
       await lockOrder(tx, order.id);
 
       const cell = await resolveCell(tx, input.cellCode, { requireActive: true });
@@ -247,6 +262,8 @@ export async function receiveOrder(
           source: current === null ? 'RECEIVED' : 'MOVED',
           placedAt: now,
           placedById: actor.userId,
+          // Букет принадлежит тому кругу сборки, который идёт сейчас.
+          assemblyRound: round,
         },
         select: { id: true },
       });

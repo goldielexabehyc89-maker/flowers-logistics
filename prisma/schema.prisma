@@ -527,6 +527,15 @@ model DeliveryOrder {
   cancelledInSource   Boolean   @default(false)
   cancelledInSourceAt DateTime?
 
+  /// Круг сборки заказа.
+  ///
+  /// Заказ при повторной доставке НЕ дублируется: тот же внутренний
+  /// идентификатор, тот же внешний UUID и тот же номер МоегоСклада. Но
+  /// пересборка обязана начинаться с чистого листа, поэтому у сборки есть
+  /// номер круга, и прежние печать с размещением к новому кругу
+  /// не относятся.
+  assemblyRound Int @default(1)
+
   /// Отмена решением логиста после недоставки. Внешняя отмена этого поля
   /// не касается: у них разные авторы и разная ответственность.
   cancelledByLogistAt   DateTime?
@@ -1069,6 +1078,10 @@ model OrderPrintForm {
 
   /// Версия шаблона бланка. Меняется вместе с формой, чтобы старый бланк
   /// оставался воспроизводимым ровно таким, каким его печатали.
+  /// Круг сборки, для которого напечатан бланк: печать прошлого круга
+  /// новую сборку закрытой не делает.
+  assemblyRound Int @default(1)
+
   templateVersion Int
 
   /// Данные бланка: номер, московские дата и интервал, состав, текст открытки
@@ -1333,6 +1346,8 @@ model RouteOrder {
   resolutions OrderResolution[]
   returns     OrderReturn[]
 
+  /// Одно активное участие на заказ. Частичный индекс объявлен миграцией:
+  /// Prisma не умеет выражать условие `WHERE "removedAt" IS NULL`.
   @@index([routeId, position])
   @@index([orderId])
 }
@@ -2140,6 +2155,15 @@ model OrderPlacement {
   /// только человек штатным сканированием.
   requiresRelocation Boolean @default(false)
 
+  /// Круг сборки, которому принадлежит лежащий в ячейке букет.
+  ///
+  /// Букет прошлого круга остаётся на полке до решения человека, но готовым
+  /// к отправке он больше не считается: заказ ушёл на пересборку.
+  assemblyRound Int @default(1)
+
+  /// Почему размещение освобождено изъятием. Только для `WITHDRAWN`.
+  withdrawReason PlacementWithdrawReason?
+
   /// Возврат от курьера, породивший это размещение.
   courierReturn OrderReturn?
 
@@ -2677,10 +2701,23 @@ model LogistCashEntry {
 enum OrderResolutionDecision {
   /// Заказ отменяется: повторной доставки не будет.
   CANCELLED
-  /// Заказ повезут снова: он возвращается в «Сделки».
+  /// Заказ повезут снова. Значение прежних решений: вариант тогда не
+  /// выбирался. Новые решения всегда называют способ явно.
   REDELIVER
   /// Задача разобрана: система ничего не меняла, человек решил вопрос сам.
   ACKNOWLEDGED
+  /// Повезут ТОТ ЖЕ букет: он вернулся на склад целым, пересобирать нечего.
+  REDELIVER_SAME_BOUQUET
+  /// Заказ уходит на пересборку: нужны новая сборка и новая печать.
+  REDELIVER_REASSEMBLE
+}
+
+/// Почему размещение освобождено изъятием.
+enum PlacementWithdrawReason {
+  /// Букет уходит флористам на пересборку.
+  REASSEMBLY
+  /// Букет списывается: везти или пересобирать нечего.
+  WRITE_OFF
 }
 
 /// Из-за чего у логиста появилась задача.
@@ -2772,6 +2809,16 @@ model OrderReturn {
   courierUserId String @db.Uuid
   courier       User   @relation("ReturnCourier", fields: [courierUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Порядковый номер возврата этого заказа: первый, второй, третий.
+  sequence Int @default(1)
+
+  /// Отображаемый номер карточки возврата: «номер-otm», «номер-otm-2».
+  ///
+  /// Собственный номер, а не номер заказа: карточка возврата — отдельная
+  /// внутренняя сущность без внешнего UUID и без связи с заказом
+  /// МоегоСклада. Курьер подтверждает возврат именно по ней.
+  displayNumber String @unique
+
   state OrderReturnState @default(WITH_COURIER)
 
   createdAt    DateTime  @default(now())
@@ -2788,6 +2835,7 @@ model OrderReturn {
 
   transitions OrderReturnTransition[]
 
+  @@unique([orderId, sequence])
   @@index([orderId])
   @@index([courierUserId, state])
 }

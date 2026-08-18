@@ -53,6 +53,7 @@ interface CourierReturnView {
   returnId: string;
   orderId: string;
   orderNumber: string;
+  displayNumber: string;
   routeNumber: string;
   reasonName: string;
   state: 'WITH_COURIER' | 'RETURNING' | 'ACCEPTED' | 'CANCELLED';
@@ -93,7 +94,11 @@ function ReturnsBlock({
         {items.map((item) => (
           <li key={item.returnId} className="delivery__return" data-order-number={item.orderNumber}>
             <div className="delivery__return-head">
-              <strong>{item.orderNumber}</strong>
+              {/*
+                Номер карточки возврата, а не номер заказа: кладовщик примет
+                именно её, и разные попытки одного заказа должны различаться.
+              */}
+              <strong>{item.displayNumber}</strong>
               <span className="delivery__return-state">
                 {RETURN_STATE_LABELS[item.state] ?? item.state}
               </span>

@@ -31,7 +31,8 @@ import {
   acceptReturn,
   countUnresolved,
   decideCancel,
-  decideRedeliver,
+  decideReassemble,
+  decideRedeliverSameBouquet,
   listPendingReturns,
   listResolutions,
   markReturning,
@@ -291,7 +292,7 @@ describe('решение логиста', () => {
 
     const [cancelled, redelivered] = await Promise.allSettled([
       decideCancel({ db: ctx.db }, first, task.id, CONTEXT),
-      decideRedeliver({ db: ctx.db }, second, task.id, CONTEXT),
+      decideReassemble({ db: ctx.db }, second, task.id, CONTEXT),
     ]);
 
     // Ровно одно решение принято, второму назван конфликт.
@@ -328,7 +329,7 @@ describe('решение логиста', () => {
       where: { activeKey: delivery.orderId },
       select: { id: true },
     });
-    await decideRedeliver({ db: ctx.db }, logist, task.id, CONTEXT);
+    await decideReassemble({ db: ctx.db }, logist, task.id, CONTEXT);
 
     expect(await countUnresolved(ctx.db)).toBe(before - 1);
   });
@@ -474,7 +475,7 @@ describe('приёмка возврата складом', () => {
 // --- 5. Повторная доставка ---------------------------------------------------
 
 describe('повторная доставка', () => {
-  it('заказ недоступен для маршрута, пока букет у курьера, и доступен после приёмки', async () => {
+  it('тот же букет нельзя отправить, пока он у курьера, и можно после приёмки', async () => {
     const courier = await actorFor(['COURIER']);
     const keeper = await actorFor(['WAREHOUSE']);
     const logist = await actorFor(['LOGISTICIAN']);
@@ -485,12 +486,24 @@ describe('повторная доставка', () => {
       where: { activeKey: delivery.orderId },
       select: { id: true },
     });
-    await decideRedeliver({ db: ctx.db }, logist, task.id, CONTEXT);
 
-    const { activeReturnsOf } = await import('./service.js');
-    // Решение принято, но товар всё ещё в машине: выбирать заказ рано.
-    const blocked = await activeReturnsOf(ctx.db, [delivery.orderId]);
-    expect(blocked.get(delivery.orderId)).toBe('WITH_COURIER');
+    /*
+     * Пока букет в машине, «тот же букет» отправлять нечем.
+     *
+     * Это не придирка к порядку: маршрут из товара, лежащего в чужой машине,
+     * — обещание, которое некому выполнить.
+     */
+    await expect(
+      decideRedeliverSameBouquet({ db: ctx.db }, logist, task.id, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'RETURN_NOT_ACCEPTED' } });
+
+    // Задача осталась нерешённой: отказ ничего не записал.
+    const still = await ctx.db.orderResolution.findUniqueOrThrow({
+      where: { id: task.id },
+      select: { decision: true, activeKey: true },
+    });
+    expect(still.decision).toBeNull();
+    expect(still.activeKey).toBe(delivery.orderId);
 
     const cell = await seedCell('STORAGE');
     await acceptReturn(
@@ -500,8 +513,17 @@ describe('повторная доставка', () => {
       CONTEXT,
     );
 
+    const result = await decideRedeliverSameBouquet({ db: ctx.db }, logist, task.id, CONTEXT);
+    expect(result.decision).toBe('REDELIVER_SAME_BOUQUET');
+
+    const { activeReturnsOf } = await import('./service.js');
     const free = await activeReturnsOf(ctx.db, [delivery.orderId]);
     expect(free.has(delivery.orderId)).toBe(false);
+
+    // Прежнее участие в маршруте закрыто: двух активных не бывает.
+    expect(
+      await ctx.db.routeOrder.count({ where: { orderId: delivery.orderId, removedAt: null } }),
+    ).toBe(0);
   });
 });
 

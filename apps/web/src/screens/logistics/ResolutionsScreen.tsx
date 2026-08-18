@@ -17,11 +17,19 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
 import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
-import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  Modal,
+  StatusBadge,
+} from '../../ui/components';
 import './resolutions.css';
 
 export interface ResolutionRow {
@@ -35,7 +43,13 @@ export interface ResolutionRow {
   reasonName: string;
   failedAt: string;
   returnState: 'WITH_COURIER' | 'RETURNING' | 'ACCEPTED' | 'CANCELLED' | null;
-  decision: 'CANCELLED' | 'REDELIVER' | 'ACKNOWLEDGED' | null;
+  decision:
+    | 'CANCELLED'
+    | 'REDELIVER'
+    | 'ACKNOWLEDGED'
+    | 'REDELIVER_SAME_BOUQUET'
+    | 'REDELIVER_REASSEMBLE'
+    | null;
   decidedAt: string | null;
   decidedBy: string | null;
 }
@@ -55,14 +69,24 @@ export const RETURN_STATE_LABELS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Можно ли ставить заказ в новый маршрут.
+ * Можно ли отправить ТОТ ЖЕ букет.
  *
- * Ровно одно условие: букет физически на складе. Решение логиста этого
- * не заменяет — оно лишь называет намерение.
+ * Ровно одно условие: букет физически принят складом. Решение логиста этого
+ * не заменяет — оно лишь называет намерение. Пересборке приёмка не нужна:
+ * новый букет собирают из свежих цветов, пока старый едет обратно.
  */
-export function readyForRedelivery(returnState: string | null): boolean {
+export function readyForSameBouquet(returnState: string | null): boolean {
   return returnState === 'ACCEPTED' || returnState === null;
 }
+
+/** Подпись принятого решения. */
+export const DECISION_LABELS: Readonly<Record<string, string>> = {
+  CANCELLED: 'Отменён',
+  ACKNOWLEDGED: 'Разобрано',
+  REDELIVER: 'Повторная доставка',
+  REDELIVER_SAME_BOUQUET: 'Повезут тот же букет',
+  REDELIVER_REASSEMBLE: 'Передан на пересборку',
+};
 
 export function ResolutionsScreen(): React.JSX.Element {
   const { client } = useAuth();
@@ -74,15 +98,24 @@ export function ResolutionsScreen(): React.JSX.Element {
     queryFn: () => client.get<ResolutionsPage>('/api/logistics/resolutions?limit=100'),
   });
 
+  /** Задача, для которой открыт выбор способа повторной доставки. */
+  const [choosing, setChoosing] = useState<ResolutionRow | null>(null);
+
   const decide = useMutation({
-    mutationFn: (input: { id: string; action: 'cancel-order' | 'redeliver' | 'acknowledge' }) =>
+    mutationFn: (input: {
+      id: string;
+      action: 'cancel-order' | 'redeliver-same' | 'reassemble' | 'acknowledge';
+    }) =>
       client.post<{ orderNumber: string; decision: string }>(
         `/api/logistics/resolutions/${input.id}/${input.action}`,
         {},
       ),
     onSuccess: async (result) => {
+      setChoosing(null);
       await queryClient.invalidateQueries({ queryKey: ['logistics-resolutions'] });
       await queryClient.invalidateQueries({ queryKey: ['deal-cards'] });
+      await queryClient.invalidateQueries({ queryKey: ['deals'] });
+      await queryClient.invalidateQueries({ queryKey: ['florist-queue'] });
       /*
        * Формулировка ровно по тому, что произошло.
        *
@@ -95,11 +128,14 @@ export function ResolutionsScreen(): React.JSX.Element {
           ? `Заказ ${result.orderNumber} отменён`
           : result.decision === 'ACKNOWLEDGED'
             ? `Задача по заказу ${result.orderNumber} закрыта`
-            : `Заказ ${result.orderNumber} вернулся в «Сделки»`,
+            : result.decision === 'REDELIVER_REASSEMBLE'
+              ? `Заказ ${result.orderNumber} передан на пересборку`
+              : `Заказ ${result.orderNumber} вернулся в «Сделки» с тем же букетом`,
         'success',
       );
     },
     onError: async (error: unknown) => {
+      setChoosing(null);
       /*
        * Конфликт двух логистов: решение уже принято другим человеком.
        *
@@ -123,6 +159,7 @@ export function ResolutionsScreen(): React.JSX.Element {
   }
 
   const rows = list.data.items;
+  const sameBouquetReady = choosing === null ? false : readyForSameBouquet(choosing.returnState);
 
   return (
     <section className="stack">
@@ -155,7 +192,7 @@ export function ResolutionsScreen(): React.JSX.Element {
               </thead>
               <tbody>
                 {rows.map((row) => {
-                  const ready = readyForRedelivery(row.returnState);
+                  const ready = readyForSameBouquet(row.returnState);
                   const busy = decide.isPending && decide.variables?.id === row.id;
 
                   return (
@@ -213,25 +250,16 @@ export function ResolutionsScreen(): React.JSX.Element {
                             </Button>
                             <Button
                               variant="primary"
-                              disabled={busy || !ready}
+                              disabled={busy}
                               data-testid="resolution-redeliver"
-                              title={
-                                ready
-                                  ? undefined
-                                  : 'Заказ ещё не принят складом: везти пока нечего.'
-                              }
-                              onClick={() => decide.mutate({ id: row.id, action: 'redeliver' })}
+                              onClick={() => setChoosing(row)}
                             >
                               Повторно доставить
                             </Button>
                           </div>
                         ) : (
                           <span className="muted text-sm">
-                            {row.decision === 'CANCELLED'
-                              ? 'Отменён'
-                              : row.decision === 'ACKNOWLEDGED'
-                                ? 'Разобрано'
-                                : 'Повторная доставка'}
+                            {DECISION_LABELS[row.decision] ?? row.decision}
                             {row.decidedBy === null ? '' : ` · ${row.decidedBy}`}
                           </span>
                         )}
@@ -244,6 +272,54 @@ export function ResolutionsScreen(): React.JSX.Element {
           </div>
         )}
       </div>
+
+      {/*
+        Способ повторной доставки — отдельный выбор, а не вторая кнопка в ряду.
+        Различие между вариантами не косметическое: один требует принятого
+        складом букета и ничего не пересобирает, другой начинает сборку
+        заново. Показать их рядом с одинаковым весом значило бы предложить
+        человеку угадать.
+      */}
+      {choosing !== null && (
+        <Modal
+          open
+          title={`Повторная доставка заказа ${choosing.orderNumber}`}
+          onClose={() => setChoosing(null)}
+        >
+          <div className="stack" data-testid="redelivery-choice">
+            <div className="stack resolutions__choice">
+              <Button
+                variant="primary"
+                disabled={decide.isPending || !sameBouquetReady}
+                data-testid="redelivery-same"
+                onClick={() => decide.mutate({ id: choosing.id, action: 'redeliver-same' })}
+              >
+                Отправить тот же букет
+              </Button>
+              <p className="muted text-sm">
+                {sameBouquetReady
+                  ? 'Букет принят складом. Сборка и печать остаются прежними, заказ вернётся в «Сделки».'
+                  : 'Недоступно: букет ещё не принят складом. Пока он у курьера, отправлять нечего.'}
+              </p>
+            </div>
+
+            <div className="stack resolutions__choice">
+              <Button
+                variant="secondary"
+                disabled={decide.isPending}
+                data-testid="redelivery-reassemble"
+                onClick={() => decide.mutate({ id: choosing.id, action: 'reassemble' })}
+              >
+                Передать на пересборку
+              </Button>
+              <p className="muted text-sm">
+                Заказ вернётся флористам с тем же номером. Понадобятся новая сборка и новая печать;
+                прежние сборка, печать и доставка останутся в истории.
+              </p>
+            </div>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }

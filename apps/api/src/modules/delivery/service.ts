@@ -237,6 +237,8 @@ export interface CourierReturnView {
   returnId: string;
   orderId: string;
   orderNumber: string;
+  /** Собственный номер карточки возврата: «номер-otm», «номер-otm-2». */
+  displayNumber: string;
   routeNumber: string;
   reasonName: string;
   state: $Enums.OrderReturnState;
@@ -337,6 +339,7 @@ export async function listCourierReturns(
       id: true,
       orderId: true,
       state: true,
+      displayNumber: true,
       order: { select: { externalName: true } },
       attempt: { select: { reasonNameSnapshot: true, occurredAt: true } },
       routeOrder: { select: { route: { select: { number: true } } } },
@@ -347,6 +350,7 @@ export async function listCourierReturns(
     returnId: row.id,
     orderId: row.orderId,
     orderNumber: row.order.externalName,
+    displayNumber: row.displayNumber,
     routeNumber: row.routeOrder.route.number,
     reasonName: row.attempt.reasonNameSnapshot ?? 'Причина не указана',
     state: row.state,

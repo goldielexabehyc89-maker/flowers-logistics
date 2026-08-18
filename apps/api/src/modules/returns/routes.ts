@@ -16,7 +16,8 @@ import {
   countUnresolved,
   decideAcknowledge,
   decideCancel,
-  decideRedeliver,
+  decideReassemble,
+  decideRedeliverSameBouquet,
   listAcceptedReturns,
   listPendingReturns,
   listResolutions,
@@ -85,10 +86,23 @@ export function registerReturnRoutes(app: AppServer, deps: ReturnsDeps): void {
     return decideAcknowledge({ db: deps.db }, actor, id, contextOf(request));
   });
 
-  app.post('/api/logistics/resolutions/:id/redeliver', async (request) => {
+  /*
+   * Два варианта повторной доставки — два пути.
+   *
+   * Один общий «повторно доставить» с параметром выглядел бы проще, но
+   * скрывал бы главное различие: один вариант требует принятого складом
+   * букета и ничего не пересобирает, другой начинает сборку заново.
+   */
+  app.post('/api/logistics/resolutions/:id/redeliver-same', async (request) => {
     const actor = await authenticateWithRoles(request, deps, RESOLUTION_ROLES);
     const { id } = idParamSchema.parse(request.params);
-    return decideRedeliver({ db: deps.db }, actor, id, contextOf(request));
+    return decideRedeliverSameBouquet({ db: deps.db }, actor, id, contextOf(request));
+  });
+
+  app.post('/api/logistics/resolutions/:id/reassemble', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, RESOLUTION_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return decideReassemble({ db: deps.db }, actor, id, contextOf(request));
   });
 
   /** Курьер объявляет, что везёт заказ на склад. */

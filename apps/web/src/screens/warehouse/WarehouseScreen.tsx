@@ -65,6 +65,7 @@ const RETURN_STATE_LABELS: Readonly<Record<string, string>> = {
 interface WarehouseReturnView {
   orderId: string;
   orderNumber: string;
+  displayNumber: string;
   state: keyof typeof RETURN_STATE_LABELS;
   courier: string | null;
   reasonName: string;
@@ -273,7 +274,7 @@ function ReturnsTable({
       <table className="table">
         <thead>
           <tr>
-            <th>Заказ</th>
+            <th>Возврат</th>
             <th>Курьер</th>
             <th>Причина</th>
             <th>Состояние</th>
@@ -282,9 +283,14 @@ function ReturnsTable({
         </thead>
         <tbody>
           {items.map((item) => (
-            <tr key={item.orderId} data-order-number={item.orderNumber}>
+            <tr
+              key={item.orderId}
+              data-order-number={item.orderNumber}
+              data-return-number={item.displayNumber}
+            >
               <td>
-                <strong>{item.orderNumber}</strong>
+                <strong>{item.displayNumber}</strong>
+                <div className="muted text-sm">заказ {item.orderNumber}</div>
                 {item.cancelled && (
                   <div data-testid="wh-return-cancelled">
                     <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>
