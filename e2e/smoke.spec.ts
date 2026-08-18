@@ -6190,3 +6190,67 @@ test('телефон: четыре вкладки склада без выезд
     await context.close();
   }
 });
+
+/*
+ * Окно последовательной проверки листа.
+ *
+ * Прогресс здесь не хранится в окне: «проверено» — это коробки, которые
+ * физически стоят в маршрутных ячейках листа. Поэтому он переживает
+ * закрытие окна, а «Готово» ничего не завершает.
+ */
+test('сборка: последовательная проверка, пауза и «Готово» не завершает лист', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+
+  const partial = stand['мл частично'] ?? '';
+  const missing = stand['заказ требует перемещения'] ?? '';
+  const routeCellB = stand['маршрутная ячейка B'] ?? '';
+
+  await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('wh-tab-picking').click();
+
+  const card = page.locator(`[data-testid="assembly-route"][data-route-number="${partial}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('assembly-route-number').click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
+
+  /*
+   * «Готово» закрывает окно и ничего не завершает: третья коробка лежит
+   * в обычном хранении, и лист остаётся среди активных.
+   */
+  await page.getByTestId('assembly-check-done').click();
+  await expect(page.getByTestId('assembly-check')).toHaveCount(0);
+  await expect(
+    page.getByTestId('assembly-active').locator(`[data-route-number="${partial}"]`),
+  ).toBeVisible();
+
+  // Пауза: уходим на другую вкладку и возвращаемся — прогресс не потерян.
+  await page.getByTestId('wh-tab-storage').click();
+  await expect(page.getByTestId('wh-scan-order')).toBeVisible();
+  await page.getByTestId('wh-tab-picking').click();
+  await card.getByTestId('assembly-route-number').click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
+
+  // Последняя коробка переносится парой «заказ + ячейка».
+  await page.getByTestId('assembly-check-manual-order').fill(missing);
+  await page.getByTestId('assembly-check-manual-cell').fill(routeCellB);
+  await page.getByTestId('assembly-check').getByRole('button', { name: 'Внести' }).click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 3 из 3');
+
+  // Собранный целиком лист ушёл в свёрнутую группу «Собранные».
+  await page.getByTestId('assembly-check-done').click();
+  await expect(
+    page.getByTestId('assembly-active').locator(`[data-route-number="${partial}"]`),
+  ).toHaveCount(0);
+  await page.getByTestId('assembly-assembled-toggle').click();
+  await expect(
+    page.getByTestId('assembly-assembled').locator(`[data-route-number="${partial}"]`),
+  ).toBeVisible();
+});
