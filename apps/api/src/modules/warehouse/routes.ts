@@ -268,7 +268,12 @@ const receiveSchema = z.object({
   allowRouteCell: z.boolean().optional(),
 });
 
-const withdrawSchema = z.object({ orderNumber: orderNumberSchema, reason: reasonSchema });
+const withdrawSchema = z.object({
+  orderNumber: orderNumberSchema,
+  // Ровно два значения: пересборка или списание. Третьего смысла у изъятия
+  // отменённого букета нет, а свободный текст нельзя посчитать.
+  reason: z.enum(['REASSEMBLY', 'WRITE_OFF']),
+});
 const bindSchema = z.object({ cellCode: cellCodeSchema });
 const pickSchema = z.object({ orderNumber: orderNumberSchema, cellCode: cellCodeSchema });
 const confirmCourierSchema = z.object({ courierUserId: uuid });

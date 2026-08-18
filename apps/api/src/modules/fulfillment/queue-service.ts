@@ -248,9 +248,26 @@ function orderSelect(date: string | null) {
  * обязаны отбирать заказы по одинаковым правилам. Разойдись они хоть в одном
  * условии — счётчик показал бы одно число, а раскрытая группа другое.
  */
+/**
+ * Состояния незакрытой работы прошлых дней.
+ *
+ * Собранный прошлый заказ в «Сегодня» не нужен: работа по нему закончена.
+ * Незавершённый — нужен обязательно, иначе вчерашний недособранный букет
+ * исчезает с экрана вместе с датой. `NEEDS_REVIEW` сюда не входит: заказ
+ * СОБРАН, а изменившийся состав — отдельный разговор своей вкладки.
+ */
+const PAST_UNFINISHED_STATES = ['NEW', 'IN_ASSEMBLY'] as const;
+
 function buildScopeWhere(input: {
   /** `null` — все дни сразу: так считается счётчик активных заказов. */
   date: string | null;
+  /**
+   * Тянуть ли в выборку прошлые несобранные заказы.
+   *
+   * Только для «Сегодня». Будущие заказы не добавляются никогда: они
+   * относятся к другому дню и своей очереди дождутся сами.
+   */
+  includePast?: boolean;
   assigneeId: string | null;
   search: string | null;
 }) {
@@ -261,7 +278,7 @@ function buildScopeWhere(input: {
     // Пустой состав при `PENDING` неотличим от настоящего пустого состава,
     // поэтому в очередь попадает только подтверждённый.
     fulfillmentCompositionState: 'READY' as const,
-    ...(input.date === null ? {} : { deliveryDate: toDateColumn(input.date) }),
+    ...dateCondition(input.date, input.includePast === true),
     ...(input.assigneeId === null ? {} : { fulfillmentAssigneeId: input.assigneeId }),
     // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
     // условия: день, область видимости и состояния остаются в силе.
@@ -269,6 +286,32 @@ function buildScopeWhere(input: {
     ...(input.search === null
       ? {}
       : { externalName: { contains: input.search, mode: 'insensitive' as const } }),
+  };
+}
+
+/**
+ * Условие дня.
+ *
+ * «Сегодня» — это сегодняшние заказы ПЛЮС всё несобранное из прошлого:
+ * вчерашний букет, который никто не доделал, обязан остаться на глазах,
+ * а не пропасть вместе с датой.
+ */
+function dateCondition(date: string | null, includePast: boolean) {
+  if (date === null) {
+    return {};
+  }
+  const column = toDateColumn(date);
+  if (!includePast) {
+    return { deliveryDate: column };
+  }
+  return {
+    OR: [
+      { deliveryDate: column },
+      {
+        deliveryDate: { lt: column },
+        fulfillmentProcessState: { in: [...PAST_UNFINISHED_STATES] },
+      },
+    ],
   };
 }
 
@@ -336,6 +379,8 @@ export async function readQueue(
    */
   const scopeWhere = buildScopeWhere({
     date: mine ? null : date,
+    // Прошлое подтягивается только в «Сегодня»: «Завтра» — это ровно завтра.
+    includePast: !mine && query.day === 'today',
     assigneeId: mine ? viewer.userId : null,
     search,
   });
@@ -499,7 +544,13 @@ function toQueueItem(
     deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
     startMinute: minutes.startMinute,
     endMinute: minutes.endMinute,
-    overdue: isOverdue(minutes, context),
+    overdue: isOverdue(
+      {
+        ...minutes,
+        deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
+      },
+      context,
+    ),
     processState: row.fulfillmentProcessState,
     // Имя показывается только там, где оно нужно для решения: занятый заказ
     // должен объяснять, кем именно он занят.

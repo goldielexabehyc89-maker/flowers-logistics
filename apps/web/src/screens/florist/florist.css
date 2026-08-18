@@ -343,9 +343,14 @@
   line-height: 1.2;
 }
 
-.florist__shift-reason {
+/*
+ * Свободное место между фактами смены и кнопкой.
+ *
+ * Раньше его занимало поле причины. Без распорки кнопка прилипала бы
+ * к карточкам, и строка читалась бы как одно слипшееся целое.
+ */
+.florist__shift-spacer {
   flex: 1 1 auto;
-  min-width: 0;
 }
 
 /*
@@ -370,7 +375,7 @@
     min-width: 0;
   }
 
-  .florist__shift-reason {
-    flex: 1 1 140px;
+  .florist__shift-spacer {
+    display: none;
   }
 }

@@ -36,6 +36,7 @@ import {
   SCAN_HINTS,
   blockLabel,
   cellLabel,
+  groupPlacements,
   issueBlocker,
   issueProgress,
   pickProgress,
@@ -718,14 +719,100 @@ function StorageTab(): React.JSX.Element {
           />
         )}
         {placements.isSuccess && placements.data.items.length > 0 && (
-          <PlacementTable items={placements.data.items} />
+          <PlacementGroups items={placements.data.items} />
         )}
       </div>
     </>
   );
 }
 
-function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Element {
+/**
+ * Складской список группами.
+ *
+ * Порядок задан правилом в `warehouse-flow.ts`: сначала то, что мешает
+ * работе прямо сейчас, потом мёртвый груз, потом обычное хранение.
+ */
+function PlacementGroups({ items }: { items: PlacedOrderView[] }): React.JSX.Element {
+  const groups = groupPlacements(items);
+  const { showToast } = useToast();
+  const reportError = useApiError();
+  const queryClient = useQueryClient();
+  const { client } = useAuth();
+  // Отменённые свёрнуты по умолчанию: их бывает много, и разворачивать ими
+  // весь экран при каждом открытии склада незачем.
+  const [cancelledOpen, setCancelledOpen] = useState(false);
+
+  const withdraw = useMutation({
+    mutationFn: (input: { orderNumber: string; reason: 'REASSEMBLY' | 'WRITE_OFF' }) =>
+      client.post<{ orderNumber: string; withdrawn: boolean }>(
+        '/api/warehouse/placements/withdraw',
+        input,
+      ),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+      showToast(
+        result.withdrawn
+          ? `Заказ ${result.orderNumber} снят с хранения`
+          : `Заказ ${result.orderNumber} на складе уже не числится`,
+        'success',
+      );
+    },
+    onError: (error: unknown) => reportError(error, 'Не удалось снять заказ с хранения.'),
+  });
+
+  return (
+    <div className="stack">
+      {groups.relocation.length > 0 && (
+        <div className="stack" data-testid="wh-group-relocation">
+          <h4 className="wh-group__title">Требуется перемещение · {groups.relocation.length}</h4>
+          <PlacementTable items={groups.relocation} />
+        </div>
+      )}
+
+      {groups.cancelled.length > 0 && (
+        <div className="stack" data-testid="wh-group-cancelled">
+          {/*
+            Одна строка высотой с обычную: свёрнутая группа не должна
+            выглядеть весомее самих заказов.
+          */}
+          <button
+            type="button"
+            className="wh-group__toggle"
+            data-testid="wh-group-cancelled-toggle"
+            aria-expanded={cancelledOpen}
+            onClick={() => setCancelledOpen((open) => !open)}
+          >
+            <span>Отменённые</span>
+            <span className="wh-group__count" data-testid="wh-group-cancelled-count">
+              {groups.cancelled.length}
+            </span>
+            <span aria-hidden="true">{cancelledOpen ? '▾' : '▸'}</span>
+          </button>
+
+          {cancelledOpen && (
+            <PlacementTable
+              items={groups.cancelled}
+              onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
+              busy={withdraw.isPending}
+            />
+          )}
+        </div>
+      )}
+
+      {groups.rest.length > 0 && <PlacementTable items={groups.rest} />}
+    </div>
+  );
+}
+
+function PlacementTable({
+  items,
+  onWithdraw,
+  busy,
+}: {
+  items: PlacedOrderView[];
+  onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
+  busy?: boolean;
+}): React.JSX.Element {
   return (
     <div className="table-wrap">
       <table className="table">
@@ -736,6 +823,7 @@ function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Elem
             <th>Тип</th>
             <th>Маршрут</th>
             <th>Пометки</th>
+            {onWithdraw !== undefined && <th>Снять с хранения</th>}
           </tr>
         </thead>
         <tbody>
@@ -757,6 +845,33 @@ function PlacementTable({ items }: { items: PlacedOrderView[] }): React.JSX.Elem
                   </StatusBadge>
                 ))}
               </td>
+              {onWithdraw !== undefined && (
+                <td>
+                  {/*
+                    Ровно два выхода у отменённого букета: обратно к флористам
+                    или в списание. Третьего смысла нет, а свободный текст
+                    потом нельзя посчитать.
+                  */}
+                  <div className="row resolutions__actions">
+                    <Button
+                      variant="ghost"
+                      disabled={busy === true}
+                      data-testid="wh-withdraw-reassembly"
+                      onClick={() => onWithdraw(item.orderNumber, 'REASSEMBLY')}
+                    >
+                      Передать на пересборку
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={busy === true}
+                      data-testid="wh-withdraw-write-off"
+                      onClick={() => onWithdraw(item.orderNumber, 'WRITE_OFF')}
+                    >
+                      Списать
+                    </Button>
+                  </div>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

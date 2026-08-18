@@ -302,17 +302,17 @@ export async function closeOwnShift(
 export async function forceCloseShift(
   db: Database,
   actor: ShiftActor,
-  input: { shiftId: string; reason: string },
+  input: { shiftId: string },
   context: RequestContext,
 ): Promise<{ shift: ShiftView; orphanedOrderIds: string[] }> {
-  const reason = input.reason.trim();
-  if (reason.length < MIN_REASON_LENGTH) {
-    throw new AppError('VALIDATION_FAILED', {
-      message: 'reason required',
-      publicMessage: 'Укажите причину завершения смены.',
-    });
-  }
-
+  /*
+   * Причина больше не спрашивается.
+   *
+   * Обязательное поле здесь не давало ничего, кроме заполненной строки:
+   * администратор закрывает смену ушедшего человека, и «ушёл домой»
+   * в журнале не объясняет ничего сверх самого факта. Кто и когда закрыл
+   * смену — остаётся в аудите, а это и есть ответственность.
+   */
   const shift = await db.floristShift.findUnique({
     where: { id: input.shiftId },
     select: { id: true, userId: true, closedAt: true },
@@ -336,7 +336,6 @@ export async function forceCloseShift(
         activeKey: null,
         closeKind: 'ADMIN_FORCED',
         closedById: actor.userId,
-        closeReason: reason,
       },
     });
 
@@ -363,7 +362,6 @@ export async function forceCloseShift(
 
     await writeShiftAudit(tx, 'FLORIST_SHIFT_FORCE_CLOSED', shift.id, actor, context, {
       userId: shift.userId,
-      reason,
       orphanedOrders: orphanedOrderIds.length,
     });
 

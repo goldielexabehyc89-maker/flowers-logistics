@@ -143,3 +143,41 @@ export const SCAN_HINTS: Record<ScanStep, string> = {
   ORDER: 'Отсканируйте QR заказа',
   CELL: 'Теперь отсканируйте QR ячейки',
 };
+
+/**
+ * Порядок групп складского списка.
+ *
+ * Смысл порядка — срочность, а не аккуратность. Заказ, требующий
+ * перемещения, держит маршрутную ячейку и мешает комплектованию соседнего
+ * листа: он обязан быть сверху. Отменённые лежат мёртвым грузом и ждут
+ * решения, поэтому идут следом, но свёрнутыми — их бывает много, и
+ * разворачивать ими весь экран незачем.
+ *
+ * Заказ попадает РОВНО В ОДНУ группу. Дубль в двух группах читался бы как
+ * две разные коробки: кладовщик пошёл бы искать вторую.
+ */
+export interface PlacementGroups<T> {
+  relocation: T[];
+  cancelled: T[];
+  rest: T[];
+}
+
+export function groupPlacements<T extends { requiresRelocation: boolean; blockedBy: string[] }>(
+  items: readonly T[],
+): PlacementGroups<T> {
+  const relocation: T[] = [];
+  const cancelled: T[] = [];
+  const rest: T[] = [];
+
+  for (const item of items) {
+    if (item.requiresRelocation) {
+      relocation.push(item);
+    } else if (item.blockedBy.includes('CANCELLED')) {
+      cancelled.push(item);
+    } else {
+      rest.push(item);
+    }
+  }
+
+  return { relocation, cancelled, rest };
+}

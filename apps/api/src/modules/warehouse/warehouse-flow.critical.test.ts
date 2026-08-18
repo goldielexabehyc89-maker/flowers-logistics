@@ -415,7 +415,7 @@ describe('приёмка', () => {
     const withdrawn = await withdrawOrder(
       flow,
       actor,
-      { orderNumber: order.number, reason: 'возврат флористу' },
+      { orderNumber: order.number, reason: 'REASSEMBLY' },
       CONTEXT,
     );
     expect(withdrawn.withdrawn).toBe(true);
@@ -506,7 +506,7 @@ describe('инварианты базы', () => {
       { orderNumber: order.number, cellCode: cell.code },
       CONTEXT,
     );
-    await withdrawOrder(flow, actor, { orderNumber: order.number, reason: 'проверка' }, CONTEXT);
+    await withdrawOrder(flow, actor, { orderNumber: order.number, reason: 'WRITE_OFF' }, CONTEXT);
 
     await expect(
       ctx.db.orderPlacement.delete({ where: { id: placed.placementId } }),
@@ -558,7 +558,7 @@ describe('инварианты базы', () => {
     await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
     expect(await countActivePlacements(ctx.db, cell.id)).toBe(1);
 
-    await withdrawOrder(flow, actor, { orderNumber: order.number, reason: 'освобождаем' }, CONTEXT);
+    await withdrawOrder(flow, actor, { orderNumber: order.number, reason: 'REASSEMBLY' }, CONTEXT);
     expect(await countActivePlacements(ctx.db, cell.id)).toBe(0);
   });
 });

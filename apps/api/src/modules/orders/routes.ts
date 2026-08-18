@@ -675,6 +675,15 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         manualIntervalEndMinute: true,
         address: true,
         localAddress: true,
+        // Готовность считается ТЕМ ЖЕ правилом, что и в «Сделках»: разойдясь,
+        // две карты красили бы одну точку по-разному.
+        fulfillmentProcessState: true,
+        assemblyRound: true,
+        placements: {
+          where: { releasedAt: null },
+          select: { id: true, assemblyRound: true },
+          take: 1,
+        },
         routeOrders: {
           where: { removedAt: null },
           select: { position: true, route: { select: { id: true, number: true, state: true } } },
@@ -697,6 +706,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
           // Рабочий адрес: по нему поедет курьер.
           address: effectiveAddress(order),
+          assembled: isAssembled(order),
           // Разные визуальные состояния берутся из факта участия, а не угадываются.
           assigned: participation !== undefined,
           routeId: participation?.route.id ?? null,

@@ -122,8 +122,15 @@ export function FloristScreen(): React.JSX.Element {
    */
   const [assembledOpen, setAssembledOpen] = useState(false);
   const [printFilter, setPrintFilter] = useState<'attention' | 'printed'>('attention');
+  /**
+   * «Общие»: задания всех флористов за последние двое суток.
+   *
+   * Выключено — свои: разбирать чужую печать вместо своей флорист не должен.
+   * Окно и отбор считает сервер, поэтому счётчик и продолжение списка
+   * говорят об одном и том же множестве.
+   */
+  const [printGeneral, setPrintGeneral] = useState(false);
   /** Причина принудительного завершения — своя у каждой смены в списке. */
-  const [forceReason, setForceReason] = useState<Record<string, string>>({});
   /** Что человек набрал, и что из этого уже ушло на сервер. */
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
@@ -175,10 +182,11 @@ export function FloristScreen(): React.JSX.Element {
   });
 
   const printQuery = useInfiniteQuery({
-    queryKey: ['florist-print-jobs', printFilter],
+    queryKey: ['florist-print-jobs', printFilter, printGeneral],
     queryFn: ({ pageParam }) =>
       client.get<PrintJobsResponse>(
-        `/api/florist/print-jobs?filter=${printFilter}&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}`,
+        `/api/florist/print-jobs?filter=${printFilter}&general=${String(printGeneral)}` +
+          `&limit=${QUEUE_PAGE_SIZE}&offset=${pageParam}`,
       ),
     initialPageParam: 0,
     getNextPageParam: (last: PrintJobsResponse) => nextPageOffset(last) ?? undefined,
@@ -211,7 +219,7 @@ export function FloristScreen(): React.JSX.Element {
 
   useEffect(() => {
     queryClient.setQueriesData<unknown>({ queryKey: ['florist-print-jobs'] }, collapseToFirstPage);
-  }, [printFilter, queryClient]);
+  }, [printFilter, printGeneral, queryClient]);
 
   const queuePages = queueQuery.data?.pages ?? [];
   const queueItems = mergePages(queuePages);
@@ -512,23 +520,15 @@ export function FloristScreen(): React.JSX.Element {
                   <span className="florist__shift-fact-label">В сборке</span>
                   <span className="florist__shift-fact-value">{item.openAssignments}</span>
                 </span>
-                <input
-                  className="input florist__shift-reason"
-                  aria-label={`Причина завершения смены ${item.userFullName}`}
-                  placeholder="Причина завершения"
-                  value={forceReason[item.id] ?? ''}
-                  onChange={(event) =>
-                    setForceReason((current) => ({ ...current, [item.id]: event.target.value }))
-                  }
-                />
+                <span className="florist__shift-spacer" />
                 <Button
                   variant="secondary"
                   data-testid="shift-force-close"
-                  disabled={action.isPending || (forceReason[item.id] ?? '').trim().length < 3}
+                  disabled={action.isPending}
                   onClick={() =>
                     action.mutate({
                       path: `/api/florist/shifts/${item.id}/force-close`,
-                      body: { reason: (forceReason[item.id] ?? '').trim() },
+                      body: {},
                       success: 'Смена завершена принудительно',
                     })
                   }
@@ -780,6 +780,20 @@ export function FloristScreen(): React.JSX.Element {
               { value: 'printed', label: 'Напечатанные', testId: 'print-filter-printed' },
             ]}
           />
+
+          {/*
+            «Общие» — не фильтр, а расширение: свои задания сменяются
+            заданиями всей мастерской за последние двое суток. Поэтому
+            переключатель стоит рядом, а не среди разделов.
+          */}
+          <label className="toggle" data-testid="print-general">
+            <input
+              type="checkbox"
+              checked={printGeneral}
+              onChange={(event) => setPrintGeneral(event.target.checked)}
+            />
+            Общие (48 часов)
+          </label>
         </div>
       )}
 
@@ -796,9 +810,11 @@ export function FloristScreen(): React.JSX.Element {
         <EmptyState
           title="Заданий нет"
           description={
-            printFilter === 'attention'
-              ? 'Все бланки напечатаны.'
-              : 'Напечатанных бланков пока нет.'
+            printGeneral
+              ? 'За последние двое суток в этом разделе заданий нет.'
+              : printFilter === 'attention'
+                ? 'Все ваши бланки напечатаны.'
+                : 'Ваших напечатанных бланков пока нет.'
           }
         />
       )}

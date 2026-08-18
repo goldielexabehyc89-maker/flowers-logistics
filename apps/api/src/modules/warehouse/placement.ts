@@ -313,9 +313,18 @@ function toResult(
 
 // --- Изъятие -----------------------------------------------------------------
 
+/**
+ * Почему букет уходит из ячейки.
+ *
+ * Список закрытый и короткий. Свободный текст не отвечал на единственный
+ * важный вопрос — поехал букет на пересборку или списан, — и посчитать
+ * такие изъятия потом было нельзя.
+ */
+export type WithdrawReason = 'REASSEMBLY' | 'WRITE_OFF';
+
 export interface WithdrawInput {
   orderNumber: string;
-  reason: string;
+  reason: WithdrawReason;
 }
 
 /**
@@ -331,13 +340,7 @@ export async function withdrawOrder(
   input: WithdrawInput,
   context: RequestContext,
 ): Promise<{ orderId: string; orderNumber: string; withdrawn: boolean }> {
-  const reason = input.reason.trim();
-  if (reason.length < 3 || reason.length > 500) {
-    throw new AppError('VALIDATION_FAILED', {
-      message: 'withdraw reason is required',
-      publicMessage: 'Укажите причину изъятия: от 3 до 500 символов.',
-    });
-  }
+  const reason = input.reason;
 
   return deps.db.$transaction(async (tx: TransactionClient) => {
     const order = await resolveOrderByNumber(tx, input.orderNumber);
@@ -355,6 +358,7 @@ export async function withdrawOrder(
         releasedAt: new Date(),
         releasedById: actor.userId,
         releaseReason: 'WITHDRAWN',
+        withdrawReason: reason,
       },
     });
 

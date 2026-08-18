@@ -133,17 +133,25 @@
   border-style: dashed;
 }
 
-/* Собран: галочка видна и без выбора, и вместе с номером порядка. */
+/*
+ * Собран: цвет владельца, один на обе карты.
+ *
+ * Оттенок светлый, поэтому знак внутри кружка — тёмный: белая цифра на нём
+ * не читается, а номер остановки обязан оставаться разборчивым.
+ */
 .map-point--assembled .map-point__dot {
-  background: hsl(150 55% 32%);
+  background: #b0c965;
+  border-color: #7f9440;
+  color: #1f2a10;
 }
 
+/* Выбранной точке галочка ставится рядом: цифра порядка остаётся видна. */
 .map-point--picked.map-point--assembled .map-point__dot::after {
   content: '✓';
   position: absolute;
   transform: translate(15px, -13px);
   font-size: 11px;
-  color: hsl(150 55% 26%);
+  color: #5f7030;
 }
 
 .map-point--cluster .map-point__dot {

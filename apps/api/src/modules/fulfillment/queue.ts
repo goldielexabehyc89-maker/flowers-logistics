@@ -103,9 +103,23 @@ export function effectiveMinutes(order: {
  * результат не зависит от `TZ` сервера.
  */
 export function isOverdue(
-  order: { endMinute: number | null },
+  order: { endMinute: number | null; deliveryDate?: string | null },
   context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number },
 ): boolean {
+  /*
+   * Заказ прошлого дня просрочен целиком.
+   *
+   * Время внутри дня здесь уже не при чём: день кончился, а заказ остался
+   * несобранным. Он попадает в «Сегодня» именно поэтому и обязан быть
+   * помечен — иначе неотличим от сегодняшней работы.
+   */
+  if (
+    order.deliveryDate !== undefined &&
+    order.deliveryDate !== null &&
+    order.deliveryDate < context.todayMoscow
+  ) {
+    return true;
+  }
   if (context.viewDate !== context.todayMoscow) {
     return false;
   }

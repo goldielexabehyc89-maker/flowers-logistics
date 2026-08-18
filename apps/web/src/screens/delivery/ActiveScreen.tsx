@@ -28,7 +28,7 @@ import {
 } from '../../ui/components';
 import {
   cancelWindowLeftMs,
-  formatCash,
+  formatCashToCollect,
   groupRoutes,
   intervalPosition,
   moscowMinutesOfDay,
@@ -534,6 +534,18 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         </span>
       </div>
 
+      {/*
+        Деньги — сразу под номером и крупно.
+        Курьер узнаёт о наличных у двери, а не в конце карточки после адреса,
+        комментария и предупреждений: пропущенная строка означает поездку
+        обратно за деньгами.
+      */}
+      {order.cashCollectable && (
+        <div className="delivery__cash" data-testid="delivery-cash">
+          Получить наличными: {formatCashToCollect(order.cashToCollectMinor)}
+        </div>
+      )}
+
       {order.address === null ? null : (
         <div className="delivery__order-line">
           {/*
@@ -564,11 +576,6 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         <div className="delivery__order-muted">{order.recipient}</div>
       )}
       {order.comment === null ? null : <div className="delivery__order-muted">{order.comment}</div>}
-      {order.cashCollectable ? (
-        <div className="delivery__order-line">
-          К получению: <strong>{formatCash(order.cashToCollectMinor)}</strong>
-        </div>
-      ) : null}
 
       {/*
         Отмена заказа, случившаяся уже в пути.

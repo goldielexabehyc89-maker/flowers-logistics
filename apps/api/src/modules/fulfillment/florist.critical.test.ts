@@ -325,7 +325,7 @@ describe('смена флориста', () => {
     expect(next.shift.id).not.toBe(started.shift.id);
   });
 
-  it('принудительное завершение требует причины и не теряет назначения', async () => {
+  it('принудительное завершение обходится без причины и не теряет назначения', async () => {
     const admin = await actorFor(['ADMIN']);
     const florist = await floristOnShift();
     const order = await seedOrder();
@@ -336,16 +336,13 @@ describe('смена флориста', () => {
       select: { id: true },
     });
 
-    await expect(
-      forceCloseShift(ctx.db, admin, { shiftId: shift.id, reason: ' ' }, CONTEXT),
-    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
-
-    const result = await forceCloseShift(
-      ctx.db,
-      admin,
-      { shiftId: shift.id, reason: 'Сотрудник ушёл, смена не закрыта' },
-      CONTEXT,
-    );
+    /*
+     * Причина больше не спрашивается — решение владельца.
+     *
+     * Обязательное поле давало заполненную строку, а не объяснение. Кто и
+     * когда закрыл смену, по-прежнему видно: это и есть ответственность.
+     */
+    const result = await forceCloseShift(ctx.db, admin, { shiftId: shift.id }, CONTEXT);
 
     // Заказ остался за флористом и назван явно: администратор обязан решить,
     // что с ним делать, а не обнаружить его пропажу.
@@ -357,28 +354,41 @@ describe('смена флориста', () => {
     expect(stored.fulfillmentProcessState).toBe('IN_ASSEMBLY');
     expect(stored.fulfillmentAssigneeId).toBe(florist.userId);
 
-    // Причина сохранена: это единственное объяснение для флориста.
+    // Способ закрытия назван, причины нет, смена перестала быть активной.
     const closed = await ctx.db.floristShift.findUniqueOrThrow({
       where: { id: shift.id },
       select: { closeKind: true, closeReason: true, activeKey: true },
     });
     expect(closed.closeKind).toBe('ADMIN_FORCED');
-    expect(closed.closeReason).toContain('Сотрудник ушёл');
+    expect(closed.closeReason).toBeNull();
     expect(closed.activeKey).toBeNull();
   });
 
-  it('база не принимает принудительное закрытие без причины', async () => {
+  it('принудительное закрытие остаётся именным и без причины', async () => {
+    const admin = await actorFor(['ADMIN']);
     const actor = await actorFor(['FLORIST']);
     const started = await startShift(ctx.db, actor, CONTEXT);
 
+    await forceCloseShift(ctx.db, admin, { shiftId: started.shift.id }, CONTEXT);
+
+    const closed = await ctx.db.floristShift.findUniqueOrThrow({
+      where: { id: started.shift.id },
+      select: { closeKind: true, closedById: true, closeReason: true },
+    });
+    // Автор и способ обязательны и дальше: без них закрытие безымянно.
+    expect(closed.closeKind).toBe('ADMIN_FORCED');
+    expect(closed.closedById).toBe(admin.userId);
+    expect(closed.closeReason).toBeNull();
+
+    // База по-прежнему требует автора: снять и это правило никто не просил.
+    const second = await startShift(ctx.db, actor, CONTEXT);
     await expect(
       ctx.db.$executeRawUnsafe(
         `UPDATE "FloristShift"
             SET "closedAt" = now(), "activeKey" = NULL,
-                "closeKind" = 'ADMIN_FORCED', "closedById" = $1, "closeReason" = '   '
-          WHERE "id" = $2::uuid`,
-        actor.userId,
-        started.shift.id,
+                "closeKind" = 'ADMIN_FORCED', "closedById" = NULL
+          WHERE "id" = $1::uuid`,
+        second.shift.id,
       ),
     ).rejects.toThrow();
   });
