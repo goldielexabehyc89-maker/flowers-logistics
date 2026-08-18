@@ -1147,12 +1147,23 @@ test('Сделки: точный выбор → расчёт → превью �
   const suggestions = settings.getByTestId('depot-suggestions');
   await expect(suggestions).toBeVisible();
 
-  // Улица без дома не принимается: точка нужна конкретному адресу.
-  const street = suggestions.getByRole('button', { name: /без точной привязки/ });
-  await expect(street).toBeDisabled();
+  /*
+   * Улица без дома текст заполняет, а точку — нет.
+   *
+   * Погашенная строка внутри списка вела бы себя как ловушка: клавиатура
+   * на неё встаёт, а нажатие ничего не делает. Поэтому выбирается любая
+   * подсказка, но складом становится только та, у которой есть дом
+   * и координаты, — сохранение остаётся закрытым.
+   */
+  const street = suggestions.getByRole('option', { name: /без точной привязки/ });
+  await street.click();
+  await expect(settings.getByTestId('depot-point')).toHaveCount(0);
+  await expect(settings.getByTestId('depot-save')).toBeDisabled();
 
-  // Дом с точкой принимается, и координаты появляются сами.
-  await suggestions.getByRole('button', { name: /точка найдена/ }).click();
+  // Возвращаемся к подбору и берём дом с точкой: координаты появляются сами.
+  await settings.getByTestId('depot-address').fill('Москва, ул Цветочная');
+  await expect(suggestions).toBeVisible();
+  await suggestions.getByRole('option', { name: /точка найдена/ }).click();
   await expect(settings.getByTestId('depot-point')).toContainText('55.751244');
   await expect(settings.getByTestId('depot-save')).toBeEnabled();
 
@@ -1162,7 +1173,7 @@ test('Сделки: точный выбор → расчёт → превью �
   await expect(settings.getByTestId('depot-save')).toBeDisabled();
 
   // Повторный выбор возвращает точку — это же путь исправления старой записи.
-  await suggestions.getByRole('button', { name: /точка найдена/ }).click();
+  await suggestions.getByRole('option', { name: /точка найдена/ }).click();
   await expect(settings.getByTestId('depot-save')).toBeEnabled();
 
   await settings.getByTestId('depot-save').click();
@@ -2230,10 +2241,19 @@ test('возврат: логист ждёт склад, склад приним�
   await expect(row).toContainText('Возвращается на склад');
   await expect(row).toContainText('Нет ответа');
 
-  // 2. Пока букет не принят, повторная доставка недоступна — с объяснением.
-  const redeliver = row.getByTestId('resolution-redeliver');
-  await expect(redeliver).toBeDisabled();
-  await expect(redeliver).toHaveAttribute('title', /не принят складом/);
+  /*
+   * 2. Пока букет не принят, «тот же букет» отправить нельзя.
+   *
+   * Выбор способа открывается всегда — пересобрать заказ можно и пока
+   * старый букет едет обратно. Недоступен ровно один вариант, и рядом
+   * написано почему.
+   */
+  await row.getByTestId('resolution-redeliver').click();
+  await expect(page.getByTestId('redelivery-choice')).toBeVisible();
+  await expect(page.getByTestId('redelivery-same')).toBeDisabled();
+  await expect(page.getByTestId('redelivery-choice')).toContainText('ещё не принят складом');
+  await expect(page.getByTestId('redelivery-reassemble')).toBeEnabled();
+  await page.getByRole('button', { name: 'Закрыть' }).first().click();
 
   // 3. Склад принимает возврат: скан заказа и скан обычной ячейки хранения.
   await page.getByRole('link', { name: 'Склад' }).first().click();
@@ -2260,10 +2280,11 @@ test('возврат: логист ждёт склад, склад приним�
     `[data-testid="resolution-row"][data-order-number="${orderNumber}"]`,
   );
   await expect(afterRow).toContainText('Принят складом');
-  await expect(afterRow.getByTestId('resolution-redeliver')).toBeEnabled();
 
   await afterRow.getByTestId('resolution-redeliver').click();
-  await expect(page.locator('.toast-region')).toContainText('вернулся в «Сделки»');
+  await expect(page.getByTestId('redelivery-same')).toBeEnabled();
+  await page.getByTestId('redelivery-same').click();
+  await expect(page.locator('.toast-region')).toContainText('с тем же букетом');
   // Решённая задача уходит из списка: вкладка называется «Требуют решения»,
   // и разобранному в ней места нет.
   await expect(afterRow).toHaveCount(0);

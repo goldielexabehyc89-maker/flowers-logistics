@@ -46,6 +46,7 @@ import {
   type SuggestBox,
   type SuggestResponse,
 } from '../logistics/address-suggestions';
+import { AddressSuggestField } from '../../ui/AddressSuggestField';
 
 /** Микроградусы в градусы: та же единица хранения, что у заказов и складов. */
 const MICRO = 1_000_000;
@@ -473,54 +474,45 @@ export function PlanningSettings(): React.JSX.Element {
             руками координаты ничем не связаны с адресом, и именно так склад
             оказывался не на карте, а расчёт отказывал без внятной причины.
           */}
-          <Field label="Адрес" hint={depotSuggestHint(suggestionsAvailable)}>
-            {(fieldProps) => (
-              <TextInput
-                {...fieldProps}
-                data-testid="depot-address"
-                value={depot.address}
-                autoComplete="off"
-                onChange={(event) => {
-                  // Правка текста немедленно снимает прежнюю точку: она
-                  // относилась к другому адресу.
-                  setDepot((current) => ({ ...current, address: event.target.value }));
-                  setSuggestBox((current) => typeInSuggestBox(current, event.target.value));
-                }}
-              />
-            )}
-          </Field>
-
-          {suggestListOpen && suggestions.data !== undefined && (
-            <ul className="stack" data-testid="depot-suggestions">
-              {suggestions.data.suggestions.map((item) => (
-                <li key={`${item.value}-${item.qcGeo ?? 'нет'}`}>
-                  <Button
-                    variant="ghost"
-                    data-testid="depot-suggestion"
-                    // Принять можно только подсказку с домом и координатами:
-                    // улица без дома не годится складу так же, как заказу.
-                    disabled={!isUsablePoint(item)}
-                    onClick={() => {
-                      const latMicro = item.latMicro;
-                      const lonMicro = item.lonMicro;
-                      if (!isUsablePoint(item) || latMicro === null || lonMicro === null) {
-                        return;
-                      }
-                      setDepot((current) => ({
-                        ...current,
-                        address: item.value,
-                        point: { value: item.value, lat: latMicro / MICRO, lon: lonMicro / MICRO },
-                      }));
-                      setSuggestBox(acceptSuggestion(item.value));
-                    }}
-                  >
-                    {item.value}
-                    {item.exact ? ' · точка найдена' : ' · без точной привязки'}
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
+          {/*
+            Тот же компонент, что и в правке адреса заказа: поведение списка
+            обязано совпадать везде, где адрес подбирают подсказкой.
+          */}
+          <AddressSuggestField
+            label="Адрес"
+            hint={depotSuggestHint(suggestionsAvailable)}
+            value={depot.address}
+            inputTestId="depot-address"
+            listTestId="depot-suggestions"
+            suggestions={suggestions.data?.suggestions ?? []}
+            open={suggestListOpen}
+            onChange={(text) => {
+              // Правка текста немедленно снимает прежнюю точку: она
+              // относилась к другому адресу.
+              setDepot((current) => ({ ...current, address: text }));
+              setSuggestBox((current) => typeInSuggestBox(current, text));
+            }}
+            onPick={(item) => {
+              const latMicro = item.latMicro;
+              const lonMicro = item.lonMicro;
+              /*
+               * Складу годится только подсказка с домом и координатами.
+               *
+               * Улица без дома отправила бы курьеров от середины улицы,
+               * а расчёт выдал бы это за настоящее время в пути. Текст
+               * принимается, точка — нет.
+               */
+              const usable = isUsablePoint(item) && latMicro !== null && lonMicro !== null;
+              setDepot((current) => ({
+                ...current,
+                address: item.value,
+                point: usable
+                  ? { value: item.value, lat: latMicro / MICRO, lon: lonMicro / MICRO }
+                  : null,
+              }));
+              setSuggestBox(acceptSuggestion(item.value));
+            }}
+          />
 
           {chosenPoint !== null && (
             <p className="muted text-sm" data-testid="depot-point">
