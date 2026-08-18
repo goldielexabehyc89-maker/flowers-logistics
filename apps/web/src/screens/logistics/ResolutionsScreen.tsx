@@ -76,7 +76,7 @@ export function ResolutionsScreen(): React.JSX.Element {
 
   const decide = useMutation({
     mutationFn: (input: { id: string; action: 'cancel-order' | 'redeliver' | 'acknowledge' }) =>
-      client.post<{ orderNumber: string; decision: string; sourceCancel?: string }>(
+      client.post<{ orderNumber: string; decision: string }>(
         `/api/logistics/resolutions/${input.id}/${input.action}`,
         {},
       ),
@@ -86,13 +86,13 @@ export function ResolutionsScreen(): React.JSX.Element {
       /*
        * Формулировка ровно по тому, что произошло.
        *
-       * Отмена действует у нас немедленно, а отметка в МоемСкладе только
-       * поставлена в очередь. Сказать «отменён в МоемСкладе» значило бы
-       * пообещать то, чего никто не проверял.
+       * Отмена действует ВНУТРИ системы. Сказать «отменён в МоемСкладе»
+       * значило бы пообещать то, чего никто не делал: исходящей записи
+       * у системы нет.
        */
       showToast(
         result.decision === 'CANCELLED'
-          ? `Заказ ${result.orderNumber} отменён. Отметка для МоегоСклада поставлена в очередь`
+          ? `Заказ ${result.orderNumber} отменён`
           : result.decision === 'ACKNOWLEDGED'
             ? `Задача по заказу ${result.orderNumber} закрыта`
             : `Заказ ${result.orderNumber} вернулся в «Сделки»`,

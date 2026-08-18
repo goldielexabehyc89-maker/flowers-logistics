@@ -533,18 +533,6 @@ model DeliveryOrder {
   cancelledByLogistById String?   @db.Uuid
   cancelledByLogist     User?     @relation("OrderCancelledByLogist", fields: [cancelledByLogistById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  /// Что на самом деле произошло с отменой НА СТОРОНЕ МоегоСклада.
-  ///
-  /// Отдельно от решения логиста намеренно. Решение записано у нас и уже
-  /// действует; отправка наружу — другая операция, у которой своя судьба:
-  /// она может быть запрещена настройкой контура, может не дойти и может
-  /// потребовать повторов. Интерфейс обязан показывать это состояние честно,
-  /// а не выдавать наше решение за отметку в источнике.
-  sourceCancelState       SourceCancelState @default(NOT_REQUESTED)
-  sourceCancelRequestedAt DateTime?
-  sourceCancelSentAt      DateTime?
-  /// Последняя ошибка отправки. Только текст диагностики, без секретов.
-  sourceCancelError       String?
 
   /// Склад и способ доставки — два условия принадлежности к нашей области.
   ///
@@ -1204,20 +1192,6 @@ enum DeliveryAttemptCancelKind {
 }
 
 /// Почему заказ покинул состав маршрута.
-/// Судьба исходящей отметки об отмене в МоемСкладе.
-enum SourceCancelState {
-  /// Наружу ничего не требовалось.
-  NOT_REQUESTED
-  /// Поставлено в очередь и ждёт отправки.
-  QUEUED
-  /// Отправка запрещена настройкой контура: наружу не ушло ничего.
-  BLOCKED
-  /// Отметка принята МоимСкладом.
-  SENT
-  /// Отправка не удалась; причина сохранена и попытки продолжаются.
-  FAILED
-}
-
 enum RouteOrderRemovalReason {
   /// Возвращён в нераспределённые.
   RETURNED_TO_UNASSIGNED

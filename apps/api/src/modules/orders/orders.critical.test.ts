@@ -394,11 +394,10 @@ describe('конфигурация fail closed', () => {
     // Без него токен на staging не принимается.
     expect(() => loadConfig(staging as NodeJS.ProcessEnv)).toThrow(/MOYSKLAD_TOKEN/);
 
-    // Снять режим чтения на staging нельзя: он смотрит в рабочий аккаунт,
-    // и разрешённая там запись меняла бы настоящие заказы магазина.
+    // Объявленный режим записи останавливает запуск отдельной причиной.
     expect(() =>
       loadConfig({ ...staging, MOYSKLAD_READ_ONLY: 'false' } as NodeJS.ProcessEnv),
-    ).toThrow(/MOYSKLAD_READ_ONLY=false допустим только/);
+    ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
   });
 
   it('токен в local и CI останавливает запуск даже с явным режимом чтения', () => {
@@ -487,44 +486,20 @@ describe('конфигурация fail closed', () => {
     expect(checkSyncOnceEnvironment(config)?.reason).toContain('MOYSKLAD_TOKEN');
   });
 
-  it('режим записи допускается только там, где он осмыслен', () => {
-    /*
-     * Разрешение открывает РОВНО ОДНУ названную операцию — отмену заказа.
-     * Универсальной записи у клиента нет и с этим значением, но и это
-     * разрешение нельзя выдавать где попало.
-     */
-    const allowed = [
+  it('объявленный режим записи останавливает запуск в любом окружении', () => {
+    for (const [env, marker] of [
       ['local', 'local'],
-      ['production', 'production'],
-    ] as const;
-    for (const [env, marker] of allowed) {
-      const config = loadConfig({
-        ...base,
-        APP_ENV: env,
-        APP_ENVIRONMENT_MARKER: marker,
-        MOYSKLAD_READ_ONLY: 'false',
-      } as NodeJS.ProcessEnv);
-      expect(config.MOYSKLAD_READ_ONLY, `${env}/${marker}`).toBe('false');
-    }
-
-    // Staging и любые смешанные маркеры — отказ запуска.
-    const forbidden = [
       ['staging', 'staging'],
-      ['staging', 'production'],
-      ['production', 'staging'],
-      ['local', 'staging'],
-    ] as const;
-    for (const [env, marker] of forbidden) {
-      expect(
-        () =>
-          loadConfig({
-            ...base,
-            APP_ENV: env,
-            APP_ENVIRONMENT_MARKER: marker,
-            MOYSKLAD_READ_ONLY: 'false',
-          } as NodeJS.ProcessEnv),
-        `${env}/${marker}`,
-      ).toThrow();
+      ['production', 'production'],
+    ] as const) {
+      expect(() =>
+        loadConfig({
+          ...base,
+          APP_ENV: env,
+          APP_ENVIRONMENT_MARKER: marker,
+          MOYSKLAD_READ_ONLY: 'false',
+        } as NodeJS.ProcessEnv),
+      ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
     }
   });
 

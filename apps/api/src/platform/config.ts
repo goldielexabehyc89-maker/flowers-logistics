@@ -87,6 +87,20 @@ const configSchema = z.object({
    *                  настройкой, которой код не поддерживает, нельзя.
    */
   MOYSKLAD_READ_ONLY: z.enum(['true', 'false']).optional(),
+
+  /**
+   * Идентификатор статуса «Отменен» в МоемСкладе.
+   *
+   * Значение принадлежит конкретному аккаунту и в репозитории не хранится:
+   * в другом аккаунте у того же статуса другой идентификатор, а название
+   * администратор переименовывает в любой момент.
+   *
+   * Пустое значение — это НЕ «отмен не бывает», а «распознавание отмен
+   * выключено». В local и staging это допустимо: контур настраивают
+   * постепенно. В production пустое значение недопустимо — отменённые
+   * заказы молча уезжали бы клиентам.
+   */
+  MOYSKLAD_CANCELLED_STATE_ID: z.string().trim().optional(),
   /** Автоматический фоновый опрос. По умолчанию выключен во всех окружениях. */
   MOYSKLAD_SYNC_ENABLED: z
     .enum(['true', 'false'])
@@ -415,6 +429,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   assertMoyskladEnvironment(parsed.data);
+  assertCancelledStateEnvironment(parsed.data);
   assertDadataEnvironment(parsed.data);
   assertTestSolverEnvironment(parsed.data);
   assertTestSuggestionsEnvironment(parsed.data);
@@ -464,33 +479,49 @@ export function moyskladAccess(data: {
   return 'denied';
 }
 
+/** Идентификаторы МоегоСклада приходят и уходят только в этом виде. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Признак отмены обязан быть настроен там, где отменённый заказ дорог.
+ *
+ * В production молчание недопустимо: без идентификатора статус «Отменен»
+ * ничем не отличается от обычного, и отменённый заказ поехал бы к клиенту.
+ * В local и staging пустое значение — обычное состояние настраиваемого
+ * контура, и запуск оно не останавливает.
+ *
+ * Мусор вместо идентификатора отвергается везде: молча не распознавать
+ * отмену из-за опечатки в переменной хуже, чем не стартовать.
+ */
+function assertCancelledStateEnvironment(data: z.infer<typeof configSchema>): void {
+  const raw = data.MOYSKLAD_CANCELLED_STATE_ID;
+  const value = raw === undefined || raw === '' ? null : raw;
+
+  if (value !== null && !UUID_PATTERN.test(value)) {
+    throw new Error(
+      'MOYSKLAD_CANCELLED_STATE_ID должен быть UUID статуса «Отменен» из МоегоСклада: ' +
+        'по значению другого вида отмена не распознаётся вовсе',
+    );
+  }
+
+  if (value === null && data.APP_ENV === 'production') {
+    throw new Error(
+      'MOYSKLAD_CANCELLED_STATE_ID обязателен при APP_ENV=production: без него ' +
+        'отменённые заказы неотличимы от обычных и уезжают клиенту',
+    );
+  }
+}
+
 function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
-  /*
-   * Где вообще допустимо разрешать запись.
-   *
-   * Универсальной записи у клиента нет и с этим значением: открывается ровно
-   * одна названная операция — отмена заказа. Но и её нельзя включать где
-   * попало:
-   *
-   * - production с совпавшим маркером — рабочий контур, ради него операция
-   *   и вводилась;
-   * - local — поддельный HTTP в проверках и на стенде, живого аккаунта там нет;
-   * - staging остаётся ТОЛЬКО НА ЧТЕНИЕ по решению владельца: он смотрит
-   *   в рабочий аккаунт, и запись оттуда меняла бы настоящие заказы.
-   */
+  // Режима записи не существует ни в одном окружении: клиент отвергает всё,
+  // кроме GET и HEAD, безусловно. Настройка, обещающая обратное, — это ошибка
+  // развёртывания, а не выбор режима, поэтому запуск останавливается.
   if (data.MOYSKLAD_READ_ONLY === 'false') {
-    // Маркер обязан совпасть: смешанная пара — это ошибка развёртывания,
-    // и разрешать по ней запись в чужую систему нельзя.
-    const writable =
-      (data.APP_ENV === 'production' && data.APP_ENVIRONMENT_MARKER === 'production') ||
-      (data.APP_ENV === 'local' && data.APP_ENVIRONMENT_MARKER === 'local');
-    if (!writable) {
-      throw new Error(
-        'MOYSKLAD_READ_ONLY=false допустим только при APP_ENV=production ' +
-          'с APP_ENVIRONMENT_MARKER=production либо при APP_ENV=local: ' +
-          'staging работает с рабочим аккаунтом только на чтение',
-      );
-    }
+    throw new Error(
+      'MOYSKLAD_READ_ONLY=false не поддерживается: серверный контур МоегоСклада ' +
+        'работает только на чтение во всех окружениях, включая production. ' +
+        'Операции записи вводятся отдельным заданием с идемпотентностью и аудитом',
+    );
   }
 
   const access = moyskladAccess(data);

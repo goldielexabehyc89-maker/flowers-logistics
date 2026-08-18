@@ -14,16 +14,21 @@ import { writeAudit } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
 
 /**
- * Статус «Отменен» в МоемСкладе.
+ * Отменён ли заказ в источнике по этому снимку.
  *
- * Значение выдано владельцем и проверяется по идентификатору: название
- * администратор может переименовать в любой момент, а идентификатор — нет.
+ * Идентификатор статуса приходит ЗНАЧЕНИЕМ из настройки окружения и в коде
+ * не хранится: он принадлежит конкретному аккаунту МоегоСклада. Пустое
+ * значение означает «распознавание отмен выключено» — и тогда отменённым
+ * не считается ни один заказ, а не «считаются все».
  */
-export const CANCELLED_STATE_ID = '45533b00-2ea3-11ed-0a80-09c5000d6027';
-
-/** Отменён ли заказ в источнике по этому снимку. */
-export function isCancelledInSource(snapshot: { externalStateId: string | null }): boolean {
-  return snapshot.externalStateId === CANCELLED_STATE_ID;
+export function isCancelledInSource(
+  snapshot: { externalStateId: string | null },
+  cancelledStateId: string | null,
+): boolean {
+  if (cancelledStateId === null || snapshot.externalStateId === null) {
+    return false;
+  }
+  return snapshot.externalStateId === cancelledStateId;
 }
 
 /**
@@ -33,12 +38,16 @@ export function isCancelledInSource(snapshot: { externalStateId: string | null }
  * чем решать, как с ними обращаться. Функция отвечает на вопрос «это тот
  * случай, о котором стоит доложить», и ничего не меняет.
  */
-export function isOtherUnsuccessful(snapshot: {
-  externalStateId: string | null;
-  externalStateType: string | null;
-}): boolean {
+export function isOtherUnsuccessful(
+  snapshot: {
+    externalStateId: string | null;
+    externalStateType: string | null;
+  },
+  cancelledStateId: string | null,
+): boolean {
   return (
-    snapshot.externalStateType === 'Unsuccessful' && snapshot.externalStateId !== CANCELLED_STATE_ID
+    snapshot.externalStateType === 'Unsuccessful' &&
+    !isCancelledInSource(snapshot, cancelledStateId)
   );
 }
 
@@ -85,7 +94,9 @@ export async function applyCancellation(
     actorUserId: null,
     actorRoles: [],
     source: 'worker',
-    newValue: { cancelledInSource: input.cancelled, stateId: CANCELLED_STATE_ID },
+    // Идентификатор статуса в аудит не пишется: он одинаков для всех записей
+    // и принадлежит настройке окружения, а не событию.
+    newValue: { cancelledInSource: input.cancelled },
   });
 
   /*

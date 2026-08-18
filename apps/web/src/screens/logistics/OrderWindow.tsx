@@ -33,32 +33,22 @@ import './order-window.css';
 /**
  * Что показывать про отмену заказа.
  *
- * Правило одно и оно жёсткое: интерфейс не имеет права сказать «отменён
- * в МоемСкладе», пока отметка туда действительно не ушла. Пока контур
- * работает только на чтение, честная формулировка — «внутри системы
- * отменён, отправка заблокирована».
+ * Автор отмены назван прямо: пришла ли она из МоегоСклада или её принял
+ * логист после недоставки. Обещаний о том, что происходит на стороне
+ * МоегоСклада, здесь нет — исходящей записи у системы пока не существует.
  */
 export function cancellationLine(cancellation: {
   cancelled: boolean;
-  sourceCancelState: string;
+  cancelledInSource: boolean;
+  byLogist: boolean;
 }): string | null {
   if (!cancellation.cancelled) {
     return null;
   }
-  if (cancellation.sourceCancelState === 'SENT') {
+  if (cancellation.cancelledInSource) {
     return 'Отменён в МоемСкладе';
   }
-  if (cancellation.sourceCancelState === 'BLOCKED') {
-    return 'Внутри системы отменён. Отправка в МойСклад заблокирована режимом только чтение';
-  }
-  if (cancellation.sourceCancelState === 'FAILED') {
-    return 'Внутри системы отменён. Отправку в МойСклад выполнить не удалось';
-  }
-  if (cancellation.sourceCancelState === 'QUEUED') {
-    return 'Внутри системы отменён. Отметка для МоегоСклада поставлена в очередь';
-  }
-  // NOT_REQUESTED: отмена пришла ИЗ МоегоСклада, отправлять туда нечего.
-  return 'Отменён в МоемСкладе';
+  return 'Отменён логистом после недоставки';
 }
 
 export interface OrderWindowView {
@@ -68,7 +58,6 @@ export interface OrderWindowView {
       cancelled: boolean;
       cancelledInSource: boolean;
       byLogist: boolean;
-      sourceCancelState: string;
     };
     addressCorrected: boolean;
     addressConflict: boolean;

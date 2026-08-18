@@ -25,7 +25,6 @@ import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
-import { enqueueOrderCancel } from '../integrations/moysklad/cancel-outbox.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 
 /**
@@ -327,13 +326,6 @@ export interface DecisionResult {
   orderId: string;
   orderNumber: string;
   decision: $Enums.OrderResolutionDecision;
-  /**
-   * Что произошло с отметкой в МоемСкладе.
-   *
-   * Отдельно от самого решения: наше решение уже действует, а сообщение
-   * наружу только поставлено в очередь. Интерфейс обязан говорить именно это.
-   */
-  sourceCancel?: $Enums.SourceCancelState;
 }
 
 /**
@@ -368,20 +360,7 @@ export async function decideCancel(
     const order = await tx.deliveryOrder.update({
       where: { id: task.orderId },
       data: { cancelledByLogistAt: now, cancelledByLogistById: actor.userId },
-      select: { externalId: true, externalName: true },
-    });
-
-    /*
-     * Сообщение наружу ставится в очередь В ЭТОЙ ЖЕ транзакции.
-     *
-     * Иначе возможны обе беды сразу: отменённый у нас заказ, о котором
-     * МойСклад никогда не узнает, и отправленная отметка об отмене, которой
-     * у нас не случилось.
-     */
-    await enqueueOrderCancel(tx, {
-      orderId: task.orderId,
-      externalId: order.externalId,
-      now,
+      select: { externalName: true },
     });
 
     await writeAudit(tx, {
@@ -402,7 +381,6 @@ export async function decideCancel(
       orderId: task.orderId,
       orderNumber: order.externalName,
       decision: 'CANCELLED' as const,
-      sourceCancel: 'QUEUED' as const,
     };
   });
 }

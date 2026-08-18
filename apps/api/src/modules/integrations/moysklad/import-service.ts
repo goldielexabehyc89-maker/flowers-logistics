@@ -51,6 +51,15 @@ export interface ApplyResult {
 
 export interface ApplyOptions {
   /**
+   * Идентификатор статуса «Отменен» этого аккаунта МоегоСклада.
+   *
+   * `null` или отсутствие значения означает «распознавание отмен выключено»:
+   * ни один заказ отменённым не считается. Значение приходит из настройки
+   * окружения и в коде не хранится.
+   */
+  cancelledStateId?: string | null;
+
+  /**
    * Ставить ли адрес в очередь геокодирования.
    *
    * По умолчанию — нет. Очередь имеет смысл только там, где её кто-то
@@ -258,7 +267,7 @@ async function createOrder(
     );
   }
 
-  if (isCancelledInSource(snapshot)) {
+  if (isCancelledInSource(snapshot, options.cancelledStateId ?? null)) {
     // Заказ приехал уже отменённым: в работу он не попадает вовсе.
     await applyCancellation(tx, {
       orderId: created.id,
@@ -370,7 +379,7 @@ async function updateOrder(
    */
   await applyCancellation(tx, {
     orderId: existing.id,
-    cancelled: isCancelledInSource(snapshot),
+    cancelled: isCancelledInSource(snapshot, options.cancelledStateId ?? null),
     previous: existing.cancelledInSource,
     now,
   });

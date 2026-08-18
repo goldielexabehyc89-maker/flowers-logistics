@@ -15,7 +15,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   closeTestContext,
@@ -27,21 +26,11 @@ import type { AuthenticatedActor } from '../../auth/guards.js';
 import type { Role } from '@fl/shared';
 import { toDateColumn } from './delivery-date.js';
 import { applyCancellation, isCancelledInSource, isOtherUnsuccessful } from './cancellation.js';
-import {
-  createMoyskladCancelTransport,
-  createOrderCancelHandler,
-  enqueueOrderCancel,
-  isTemporaryFailure,
-} from './cancel-outbox.js';
-import { MoyskladClient, MoyskladError } from './client.js';
-import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
 import { claimOrder } from '../../fulfillment/assembly.js';
 import { blockingFlags, resolveOrderByNumber } from '../../warehouse/order-lookup.js';
-import { decideCancel } from '../../returns/service.js';
 import { recordDeliveryResult } from '../../delivery/service.js';
 
 let ctx: TestContext;
-const logger = pino({ level: 'silent' });
 const CONTEXT = { ip: null, userAgent: null };
 
 /** День вне диапазонов остальных файлов набора. */
@@ -112,18 +101,99 @@ async function seedCell(kind: 'STORAGE' | 'ROUTE'): Promise<{ id: string; code: 
 // --- Распознавание ------------------------------------------------------------
 
 describe('распознавание отмены', () => {
-  it('отменой считается ровно согласованный статус, а не тип «неуспех»', () => {
-    const cancelled = { externalStateId: '45533b00-2ea3-11ed-0a80-09c5000d6027' };
+  /*
+   * Значение синтетическое.
+   *
+   * Настоящий идентификатор принадлежит аккаунту владельца и в репозитории
+   * не хранится: он приходит из `MOYSKLAD_CANCELLED_STATE_ID`. Проверять
+   * можно ЛЮБОЕ значение — важно поведение, а не конкретный UUID.
+   */
+  const CONFIGURED = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  it('отменой считается ровно настроенный статус, а не тип «неуспех»', () => {
+    const cancelled = { externalStateId: CONFIGURED };
     const other = {
       externalStateId: '11111111-2222-3333-4444-555555555555',
       externalStateType: 'Unsuccessful',
     };
 
-    expect(isCancelledInSource(cancelled)).toBe(true);
-    expect(isCancelledInSource(other)).toBe(false);
+    expect(isCancelledInSource(cancelled, CONFIGURED)).toBe(true);
+    expect(isCancelledInSource(other, CONFIGURED)).toBe(false);
     // Прочий «неуспех» виден отдельно и отменой не притворяется.
-    expect(isOtherUnsuccessful(other)).toBe(true);
-    expect(isOtherUnsuccessful({ ...cancelled, externalStateType: 'Unsuccessful' })).toBe(false);
+    expect(isOtherUnsuccessful(other, CONFIGURED)).toBe(true);
+    expect(
+      isOtherUnsuccessful({ ...cancelled, externalStateType: 'Unsuccessful' }, CONFIGURED),
+    ).toBe(false);
+  });
+
+  it('пустая настройка выключает распознавание, а не включает его для всех', () => {
+    /*
+     * Ровно наоборот было бы катастрофой: «идентификатор не задан» превратилось
+     * бы в «любой статус — отмена», и весь день ушёл бы в отменённые.
+     */
+    expect(isCancelledInSource({ externalStateId: CONFIGURED }, null)).toBe(false);
+    expect(isCancelledInSource({ externalStateId: null }, null)).toBe(false);
+    expect(isCancelledInSource({ externalStateId: null }, CONFIGURED)).toBe(false);
+  });
+
+  it('production не стартует без идентификатора, а local и staging стартуют', async () => {
+    const { loadConfig } = await import('../../../platform/config.js');
+    const { TEST_SECRETS } = await import('../../../platform/testing/secrets.js');
+    // Из общего набора значение убирается намеренно: проверяется именно
+    // НЕнастроенный контур.
+    const { MOYSKLAD_CANCELLED_STATE_ID: _configured, ...secrets } = TEST_SECRETS;
+    const base = {
+      DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      ...secrets,
+    } as NodeJS.ProcessEnv;
+
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'production',
+        APP_ENVIRONMENT_MARKER: 'production',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_CANCELLED_STATE_ID обязателен/);
+
+    // Пустая строка и пропуск значат одно и то же — «не настроено».
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'production',
+        APP_ENVIRONMENT_MARKER: 'production',
+        MOYSKLAD_CANCELLED_STATE_ID: '',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_CANCELLED_STATE_ID обязателен/);
+
+    expect(
+      loadConfig({
+        ...base,
+        APP_ENV: 'production',
+        APP_ENVIRONMENT_MARKER: 'production',
+        MOYSKLAD_CANCELLED_STATE_ID: CONFIGURED,
+      } as NodeJS.ProcessEnv).MOYSKLAD_CANCELLED_STATE_ID,
+    ).toBe(CONFIGURED);
+
+    for (const env of ['local', 'staging'] as const) {
+      const config = loadConfig({
+        ...base,
+        APP_ENV: env,
+        APP_ENVIRONMENT_MARKER: env,
+        ...(env === 'staging' ? { MOYSKLAD_READ_ONLY: 'true' } : {}),
+      } as NodeJS.ProcessEnv);
+      expect(config.MOYSKLAD_CANCELLED_STATE_ID, env).toBeUndefined();
+    }
+
+    // Мусор вместо идентификатора отвергается везде: молчаливое «не узнали
+    // отмену из-за опечатки» хуже отказа запуска.
+    expect(() =>
+      loadConfig({
+        ...base,
+        APP_ENV: 'local',
+        APP_ENVIRONMENT_MARKER: 'local',
+        MOYSKLAD_CANCELLED_STATE_ID: 'Отменен',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/MOYSKLAD_CANCELLED_STATE_ID должен быть UUID/);
   });
 });
 
@@ -356,366 +426,5 @@ describe('снятие отмены', () => {
     });
     // История доставки неприкосновенна.
     expect(after.removedAt).toBeNull();
-  });
-});
-
-// --- Исходящая отметка --------------------------------------------------------
-
-describe('исходящая отметка об отмене', () => {
-  async function taskFor(orderId: string): Promise<string> {
-    const courier = await actorFor(['COURIER']);
-    const creator = await actorFor(['ADMIN']);
-    const route = await ctx.db.deliveryRoute.create({
-      data: {
-        number: unique('COR'),
-        deliveryDate: toDateColumn(DAY),
-        state: 'ACTIVE',
-        vehicleType: 'CAR',
-        createdById: creator.userId,
-        courierUserId: courier.userId,
-      },
-      select: { id: true },
-    });
-    const participation = await ctx.db.routeOrder.create({
-      data: { routeId: route.id, orderId, position: 1, addedById: creator.userId },
-      select: { id: true },
-    });
-    const reason = await ctx.db.deliveryFailureReason.findFirstOrThrow({
-      where: { code: 'NO_ANSWER' },
-      select: { id: true },
-    });
-    await recordDeliveryResult(
-      { db: ctx.db },
-      courier,
-      participation.id,
-      { outcome: 'NOT_DELIVERED', reasonId: reason.id },
-      CONTEXT,
-    );
-    const resolution = await ctx.db.orderResolution.findUniqueOrThrow({
-      where: { activeKey: orderId },
-      select: { id: true },
-    });
-    return resolution.id;
-  }
-
-  it('решение логиста ставит ровно одно сообщение и не обещает отметку в источнике', async () => {
-    const logist = await actorFor(['LOGISTICIAN']);
-    const order = await seedOrder();
-    const taskId = await taskFor(order.id);
-
-    const result = await decideCancel({ db: ctx.db }, logist, taskId, CONTEXT);
-    expect(result.sourceCancel).toBe('QUEUED');
-
-    const messages = await ctx.db.outboxMessage.findMany({
-      where: { idempotencyKey: `moysklad-cancel:${order.id}` },
-      select: { id: true, topic: true, payload: true },
-    });
-    expect(messages).toHaveLength(1);
-    expect(messages[0]?.topic).toBe('moysklad.order_cancel');
-    // В сообщении только идентификаторы: ни адреса, ни получателя, ни телефона.
-    expect(JSON.stringify(messages[0]?.payload)).not.toContain('синтетический адрес отмены');
-
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelSentAt: true },
-    });
-    expect(stored.sourceCancelState).toBe('QUEUED');
-    expect(stored.sourceCancelSentAt).toBeNull();
-
-    // Повторная постановка того же события дубликата не создаёт.
-    await ctx.db.$transaction(async (tx) => {
-      await enqueueOrderCancel(tx, {
-        orderId: order.id,
-        externalId: randomUUID(),
-        now: new Date(),
-      });
-    });
-    expect(
-      await ctx.db.outboxMessage.count({
-        where: { idempotencyKey: `moysklad-cancel:${order.id}` },
-      }),
-    ).toBe(1);
-  });
-
-  it('при запрещённой записи наружу ничего не уходит, а состояние честное', async () => {
-    const order = await seedOrder();
-    await ctx.db.$transaction(async (tx) => {
-      await enqueueOrderCancel(tx, {
-        orderId: order.id,
-        externalId: randomUUID(),
-        now: new Date(),
-      });
-    });
-
-    const handler = createOrderCancelHandler({ db: ctx.db, logger, transport: null });
-    await handler({
-      id: randomUUID(),
-      topic: 'moysklad.order_cancel',
-      idempotencyKey: `moysklad-cancel:${order.id}`,
-      payload: { orderId: order.id, externalId: randomUUID() },
-      attempts: 1,
-      maxAttempts: 5,
-    });
-
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelSentAt: true, sourceCancelError: true },
-    });
-    // Ключевое: НЕ «SENT». Интерфейс не вправе говорить «отменён в МоемСкладе».
-    expect(stored.sourceCancelState).toBe('BLOCKED');
-    expect(stored.sourceCancelSentAt).toBeNull();
-    expect(stored.sourceCancelError).toContain('запрещена');
-
-    const audit = await ctx.db.auditLog.findFirst({
-      where: { entityId: order.id, action: 'ORDER_CANCEL_NOT_SENT' },
-      select: { id: true },
-    });
-    expect(audit).not.toBeNull();
-  });
-
-  it('удачная отправка отмечается временем, неудачная — причиной и повтором', async () => {
-    const order = await seedOrder();
-    const calls: string[] = [];
-    await ctx.db.$transaction(async (tx) => {
-      await enqueueOrderCancel(tx, {
-        orderId: order.id,
-        externalId: randomUUID(),
-        now: new Date(),
-      });
-    });
-
-    const failing = createOrderCancelHandler({
-      db: ctx.db,
-      logger,
-      transport: async () => {
-        calls.push('fail');
-        throw new Error('поддельный МойСклад ответил 503');
-      },
-    });
-
-    const message = {
-      id: randomUUID(),
-      topic: 'moysklad.order_cancel',
-      idempotencyKey: `moysklad-cancel:${order.id}`,
-      payload: { orderId: order.id, externalId: randomUUID() },
-      attempts: 1,
-      maxAttempts: 5,
-    };
-
-    // Ошибка перебрасывается: без исключения очередь считала бы дело сделанным.
-    await expect(failing(message)).rejects.toThrow('503');
-    const failed = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelError: true },
-    });
-    expect(failed.sourceCancelState).toBe('FAILED');
-    /*
-     * Текст НАШ, а не чужой.
-     *
-     * Сообщение внешней системы может содержать и адрес запроса, и данные
-     * заказа, поэтому в базу кладётся постоянная формулировка, а подробности
-     * остаются в журнале очереди.
-     */
-    expect(failed.sourceCancelError).toBe('Временная ошибка отправки');
-
-    const succeeding = createOrderCancelHandler({
-      db: ctx.db,
-      logger,
-      transport: async () => {
-        calls.push('ok');
-        return { alreadyCancelled: false };
-      },
-    });
-    await succeeding(message);
-
-    const sent = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelSentAt: true, sourceCancelError: true },
-    });
-    expect(sent.sourceCancelState).toBe('SENT');
-    expect(sent.sourceCancelSentAt).not.toBeNull();
-    expect(sent.sourceCancelError).toBeNull();
-    expect(calls).toEqual(['fail', 'ok']);
-  });
-});
-
-// --- Настоящий транспорт ------------------------------------------------------
-
-describe('транспорт очереди поверх клиента МоегоСклада', () => {
-  const STATE = '45533b00-2ea3-11ed-0a80-09c5000d6027';
-
-  async function queued(): Promise<{ id: string; externalId: string; number: string }> {
-    const order = await seedOrder();
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { externalId: true },
-    });
-    await ctx.db.$transaction(async (tx) => {
-      await enqueueOrderCancel(tx, {
-        orderId: order.id,
-        externalId: stored.externalId,
-        now: new Date(),
-      });
-    });
-    return { id: order.id, externalId: stored.externalId, number: order.number };
-  }
-
-  function messageFor(order: { id: string; externalId: string }) {
-    return {
-      id: randomUUID(),
-      topic: 'moysklad.order_cancel',
-      idempotencyKey: `moysklad-cancel:${order.id}`,
-      payload: { orderId: order.id, externalId: order.externalId },
-      attempts: 1,
-      maxAttempts: 5,
-    };
-  }
-
-  /** Поддельный HTTP. Настоящих запросов в проверках нет ни одного. */
-  function fakeClient(
-    respond: (method: string | undefined) => Response,
-    writesAllowed = true,
-  ): { client: MoyskladClient; methods: (string | undefined)[] } {
-    const methods: (string | undefined)[] = [];
-    const client = new MoyskladClient({
-      config: {
-        baseUrl: MOYSKLAD_BASE_URL,
-        token: 'fake-token',
-        ids: MOYSKLAD_IDS,
-        writesAllowed,
-      },
-      fetch: (async (_url: string, init?: RequestInit) => {
-        methods.push(init?.method);
-        return respond(init?.method);
-      }) as unknown as typeof globalThis.fetch,
-      minIntervalMs: 0,
-    });
-    return { client, methods };
-  }
-
-  function json(body: unknown, status = 200): Response {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    });
-  }
-
-  it('удачная отправка ставит статус и отмечается временем', async () => {
-    const order = await queued();
-    const { client, methods } = fakeClient((method) =>
-      method === 'GET' ? json({ id: order.externalId }) : json({ id: order.externalId }),
-    );
-
-    const handler = createOrderCancelHandler({
-      db: ctx.db,
-      logger,
-      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
-    });
-    await handler(messageFor(order));
-
-    expect(methods).toEqual(['GET', 'PUT']);
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelSentAt: true, sourceCancelError: true },
-    });
-    expect(stored.sourceCancelState).toBe('SENT');
-    expect(stored.sourceCancelSentAt).not.toBeNull();
-    expect(stored.sourceCancelError).toBeNull();
-  });
-
-  it('временная ошибка перебрасывается ради повтора очередью', async () => {
-    const order = await queued();
-    const { client } = fakeClient((method) =>
-      method === 'GET' ? json({ id: order.externalId }) : json({ errors: [] }, 503),
-    );
-
-    const handler = createOrderCancelHandler({
-      db: ctx.db,
-      logger,
-      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
-    });
-
-    // Исключение обязательно: без него очередь сочла бы дело сделанным.
-    await expect(handler(messageFor(order))).rejects.toBeInstanceOf(MoyskladError);
-
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelError: true },
-    });
-    expect(stored.sourceCancelState).toBe('FAILED');
-    expect(stored.sourceCancelError).not.toBeNull();
-  });
-
-  it('окончательная ошибка сохраняется и повторов не вызывает', async () => {
-    const order = await queued();
-    const { client } = fakeClient((method) =>
-      method === 'GET' ? json({ id: order.externalId }) : json({ errors: [] }, 404),
-    );
-
-    const handler = createOrderCancelHandler({
-      db: ctx.db,
-      logger,
-      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
-    });
-
-    /*
-     * Исключения нет намеренно: «нет такого заказа» через пять минут само
-     * не исправится, и вечные повторы прятали бы проблему вместо показа.
-     */
-    await expect(handler(messageFor(order))).resolves.toBeUndefined();
-
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelState: true, sourceCancelError: true },
-    });
-    expect(stored.sourceCancelState).toBe('FAILED');
-    expect(stored.sourceCancelError).toBe('Запрошенный объект в МоемСкладе не найден');
-
-    const audit = await ctx.db.auditLog.findFirst({
-      where: { entityId: order.id, action: 'ORDER_CANCEL_NOT_SENT' },
-      select: { newValue: true },
-    });
-    expect(audit).not.toBeNull();
-  });
-
-  it('классификация неудач названа явно', () => {
-    expect(isTemporaryFailure(new MoyskladError('SERVER_ERROR', 500))).toBe(true);
-    expect(isTemporaryFailure(new MoyskladError('RATE_LIMITED', 429))).toBe(true);
-    expect(isTemporaryFailure(new MoyskladError('TRANSPORT_ERROR'))).toBe(true);
-    expect(isTemporaryFailure(new MoyskladError('NOT_FOUND', 404))).toBe(false);
-    expect(isTemporaryFailure(new MoyskladError('FORBIDDEN', 403))).toBe(false);
-    expect(isTemporaryFailure(new MoyskladError('UNAUTHORIZED', 401))).toBe(false);
-    expect(isTemporaryFailure(new MoyskladError('WRITE_FORBIDDEN'))).toBe(false);
-  });
-
-  it('ни токен, ни данные заказа не попадают в аудит и в заказ', async () => {
-    const order = await queued();
-    const { client } = fakeClient((method) =>
-      method === 'GET'
-        ? json({ id: order.externalId })
-        : json({ errors: [{ error: `нельзя отменить ${order.number}` }] }, 403),
-    );
-
-    const handler = createOrderCancelHandler({
-      db: ctx.db,
-      logger,
-      transport: createMoyskladCancelTransport({ client, stateId: STATE }),
-    });
-    await handler(messageFor(order));
-
-    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { sourceCancelError: true },
-    });
-    const audit = await ctx.db.auditLog.findMany({
-      where: { entityId: order.id },
-      select: { newValue: true, oldValue: true },
-    });
-    const events = await ctx.db.realtimeEvent.findMany({ select: { payload: true } });
-
-    const serialized = JSON.stringify({ error: stored.sourceCancelError, audit, events });
-    expect(serialized).not.toContain('fake-token');
-    expect(serialized).not.toContain(order.number);
-    expect(serialized).not.toContain('синтетический адрес отмены');
   });
 });

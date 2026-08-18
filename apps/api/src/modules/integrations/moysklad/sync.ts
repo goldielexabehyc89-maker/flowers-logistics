@@ -60,6 +60,13 @@ export interface SyncDeps {
   ids: typeof MOYSKLAD_IDS;
   /** Откуда собирать запрос к геокодеру. Умолчание — отдельного запроса нет. */
   addressSource?: AddressSource;
+  /**
+   * Идентификатор статуса «Отменен» этого аккаунта.
+   *
+   * Отсутствие значения означает выключенное распознавание отмен, а не
+   * «отмен не бывает»: молча считать отменённым что-либо по догадке нельзя.
+   */
+  cancelledStateId?: string | null;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   /** Перекрытие окна delta. Стартовое значение — пять минут. */
@@ -326,6 +333,7 @@ async function applyRows(
     const applied = await deps.db.$transaction(async (tx: TransactionClient) => {
       const orderResult = await applyOrderSnapshot(tx, snapshot, now, {
         geocoding: deps.enqueueOnImport === true,
+        cancelledStateId: deps.cancelledStateId ?? null,
       });
 
       if (composition === null) {
