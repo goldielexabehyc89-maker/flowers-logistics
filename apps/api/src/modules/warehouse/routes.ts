@@ -29,14 +29,13 @@ import {
   bindRouteCell,
   cancelIssueSession,
   confirmCourier,
-  issueOrder,
   checkOrderForIssue,
   pickOrderToRouteCell,
   resetIssueChecks,
   shipRoute,
 } from './route-flow.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
-import { readAssemblyBoard } from './assembly-board.js';
+import { readAssemblyBoard, readIssueBoard } from './assembly-board.js';
 import { readWarehouseManualEntry } from '../settings/service.js';
 import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import {
@@ -287,7 +286,6 @@ const pickSchema = z.object({
   bindIfFree: z.boolean().optional(),
 });
 const confirmCourierSchema = z.object({ courierUserId: uuid });
-const issueSchema = z.object({ orderNumber: orderNumberSchema });
 const cancelIssueSchema = z.object({
   reason: reasonSchema,
   /** Кому передать остаток. Без значения назначение маршрута не меняется. */
@@ -440,6 +438,12 @@ export async function registerWarehouseFlowRoutes(
     return readAssemblyBoard(deps.db);
   });
 
+  /** Доска выдачи: курьеры, их листы и заказы. */
+  app.get('/api/warehouse/issue-board', async (request) => {
+    await authenticateWithRoles(request, deps, FLOW_ROLES);
+    return { couriers: await readIssueBoard(deps.db) };
+  });
+
   app.get('/api/warehouse/routes/:id', async (request) => {
     await authenticateWithRoles(request, deps, FLOW_ROLES);
     const { id } = idParamSchema.parse(request.params);
@@ -475,16 +479,6 @@ export async function registerWarehouseFlowRoutes(
     return confirmCourier(flowDeps, actor, id, body, contextOf(request));
   });
 
-  app.post('/api/warehouse/routes/:id/issue', async (request) => {
-    const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
-    const { id } = idParamSchema.parse(request.params);
-    const body = issueSchema.parse(request.body);
-
-    return issueOrder(flowDeps, actor, id, body, contextOf(request));
-  });
-
-  /** Отмена выдачи. Только администратор: уже выданное остаётся в истории. */
-  /** Внесение одного заказа в лист перед отгрузкой. Ничего не выдаёт. */
   app.post('/api/warehouse/routes/:id/issue/check', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLOW_ROLES);
     const { id } = idParamSchema.parse(request.params);

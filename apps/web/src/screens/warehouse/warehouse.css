@@ -159,3 +159,28 @@
   height: 100%;
   background: var(--color-success);
 }
+
+/*
+ * Лист внутри карточки курьера.
+ *
+ * У курьера листов бывает несколько, и без собственной рамки они читаются
+ * как один длинный список заказов. Рамка отвечает на вопрос «что именно
+ * уедет по кнопке „Отгрузить“».
+ */
+.wh-issue__route {
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.wh-check__close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}

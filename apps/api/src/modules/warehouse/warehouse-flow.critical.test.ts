@@ -29,8 +29,8 @@ import { countActivePlacements, receiveOrder, withdrawOrder, type FlowDeps } fro
 import {
   bindRouteCell,
   cancelIssueSession,
+  checkOrderForIssue,
   confirmCourier,
-  issueOrder,
   pickOrderToRouteCell,
 } from './route-flow.js';
 import { resolveOrderByNumber } from './order-lookup.js';
@@ -256,7 +256,13 @@ describe('независимость от FLORIST', () => {
     const withoutComments = (source: string): string =>
       source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 
-    for (const file of ['placement.ts', 'route-flow.ts', 'order-lookup.ts', 'views.ts']) {
+    for (const file of [
+      'placement.ts',
+      'route-flow.ts',
+      'route-cells.ts',
+      'order-lookup.ts',
+      'views.ts',
+    ]) {
       const code = withoutComments(readFileSync(new URL(file, import.meta.url), 'utf8'));
 
       // Ни полей производственного снимка, ни импорта из чужого модуля.
@@ -638,7 +644,39 @@ describe('комплектование', () => {
     expect(done.picked).toBe(2);
   });
 
-  it('чужой заказ, чужая ячейка и непринятый заказ отказывают', async () => {
+  it('коробка, которой на складе ещё не было, кладётся в ячейку листа сразу', async () => {
+    /*
+     * Кладовщик держит её в руках: заказ приехал от флориста и идёт на
+     * полку своего листа. Промежуточная приёмка в хранение означала бы
+     * «положите на случайную полку, чтобы через секунду забрать».
+     */
+    const order = await seedOrder();
+    const routeCell = await seedCell('ROUTE');
+    const actor = await actorFor(['WAREHOUSE']);
+    const route = await seedRoute([order.id]);
+    await bindRouteCell(flow, actor, route.id, { cellCode: routeCell.code }, CONTEXT);
+
+    const result = await pickOrderToRouteCell(
+      flow,
+      actor,
+      route.id,
+      { orderNumber: order.number, cellCode: routeCell.code },
+      CONTEXT,
+    );
+
+    expect(result.picked).toBe(1);
+    expect(await activeCellOf(order.id)).toBe(routeCell.id);
+
+    // История честная: это приёмка, а не перемещение из ниоткуда.
+    const placement = await ctx.db.orderPlacement.findFirstOrThrow({
+      where: { orderId: order.id, releasedAt: null },
+      select: { source: true, fromCellId: true },
+    });
+    expect(placement.source).toBe('RECEIVED');
+    expect(placement.fromCellId).toBeNull();
+  });
+
+  it('чужой заказ и чужая ячейка отказывают', async () => {
     const mine = await seedOrder();
     const foreign = await seedOrder();
     const storage = await seedCell('STORAGE');
@@ -648,17 +686,6 @@ describe('комплектование', () => {
     const route = await seedRoute([mine.id]);
 
     await bindRouteCell(flow, actor, route.id, { cellCode: routeCell.code }, CONTEXT);
-
-    // Заказ не принят на склад.
-    await expect(
-      pickOrderToRouteCell(
-        flow,
-        actor,
-        route.id,
-        { orderNumber: mine.number, cellCode: routeCell.code },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
 
     await receiveOrder(flow, actor, { orderNumber: mine.number, cellCode: storage.code }, CONTEXT);
     await receiveOrder(
@@ -789,132 +816,78 @@ async function readyRoute(orderCount: number): Promise<{
 }
 
 describe('выдача', () => {
-  it('без подтверждения курьера выдать нельзя', async () => {
+  it('без подтверждения курьера внести заказ в лист нельзя', async () => {
     const { route, orders, actor } = await readyRoute(1);
 
     await expect(
-      issueOrder(flow, actor, route.id, { orderNumber: orders[0]?.number ?? '' }, CONTEXT),
+      checkOrderForIssue(flow, actor, route.id, { orderNumber: orders[0]?.number ?? '' }, CONTEXT),
     ).rejects.toMatchObject({ conflict: { kind: 'ISSUE_SESSION_REQUIRED' } });
   });
 
-  it('частичная выдача возобновляема, повтор идемпотентен', async () => {
+  it('поштучной выдачи из HTTP больше нет', async () => {
+    /*
+     * Отрицательная проверка, и она существенна.
+     *
+     * Пока публичный путь «выдать один заказ» существовал, лист можно было
+     * отдать курьеру по частям, обойдя повторную проверку состава: половина
+     * коробок уезжала, половина оставалась на полке. Теперь физическая
+     * передача происходит только целиком, и старого пути нет вовсе —
+     * не «закрыт правами», а не зарегистрирован.
+     */
     const { route, orders, courierId, actor } = await readyRoute(2);
+    const token = await tokenFor(['WAREHOUSE']);
     await confirmCourier(flow, actor, route.id, { courierUserId: courierId }, CONTEXT);
 
-    const first = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[0]?.number ?? '' },
-      CONTEXT,
-    );
-    expect(first).toMatchObject({ issued: 1, total: 2, routeActivated: false });
-
-    // Маршрут остаётся подтверждённым: выдан не весь лист.
-    const midway = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
-    expect(midway.state).toBe('CONFIRMED');
-
-    const repeat = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[0]?.number ?? '' },
-      CONTEXT,
-    );
-    expect(repeat).toMatchObject({ unchanged: true, issued: 1 });
-  });
-
-  it('последний заказ одной транзакцией переводит маршрут в ACTIVE', async () => {
-    const { route, orders, courierId, routeCellId, actor } = await readyRoute(2);
-    await confirmCourier(flow, actor, route.id, { courierUserId: courierId }, CONTEXT);
-
-    await issueOrder(flow, actor, route.id, { orderNumber: orders[0]?.number ?? '' }, CONTEXT);
-    const last = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[1]?.number ?? '' },
-      CONTEXT,
-    );
-
-    expect(last).toMatchObject({ issued: 2, total: 2, routeActivated: true });
-
-    const updated = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
-    expect(updated.state).toBe('ACTIVE');
-
-    // Переход записан в неизменяемую историю без причины.
-    const transition = await ctx.db.routeStateTransition.findFirstOrThrow({
-      where: { routeId: route.id, toState: 'ACTIVE' },
-      select: { fromState: true, reason: true },
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/warehouse/routes/${route.id}/issue`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { orderNumber: orders[0]?.number ?? '' },
     });
-    expect(transition).toMatchObject({ fromState: 'CONFIRMED', reason: null });
+    expect(response.statusCode).toBe(404);
 
-    // Маршрутная ячейка освобождена и доступна другому листу.
-    const binding = await ctx.db.routeCellBinding.findFirstOrThrow({
-      where: { routeId: route.id },
-      select: { releasedAt: true },
-    });
-    expect(binding.releasedAt).not.toBeNull();
-
-    const another = await seedRoute([]);
-    const cell = await ctx.db.storageCell.findUniqueOrThrow({ where: { id: routeCellId } });
-    await expect(
-      bindRouteCell(flow, actor, another.id, { cellCode: cell.normalizedCode }, CONTEXT),
-    ).resolves.toMatchObject({ cellId: routeCellId });
-
-    // Сессия закрыта, повторная выдача по активному маршруту невозможна.
-    await expect(
-      issueOrder(flow, actor, route.id, { orderNumber: orders[0]?.number ?? '' }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ROUTE_NOT_CONFIRMED' } });
+    // И ни одна коробка не уехала.
+    for (const order of orders) {
+      expect(await activeCellOf(order.id)).not.toBeNull();
+    }
   });
 
-  it('отмену сессии выполняет только администратор, выданное остаётся в истории', async () => {
-    const { route, orders, courierId, actor } = await readyRoute(2);
-    const admin = await actorFor(['ADMIN']);
-    await confirmCourier(flow, actor, route.id, { courierUserId: courierId }, CONTEXT);
-    await issueOrder(flow, actor, route.id, { orderNumber: orders[0]?.number ?? '' }, CONTEXT);
-
-    const cancelled = await cancelIssueSession(
-      flow,
-      admin,
-      route.id,
-      { reason: 'курьер заболел' },
-      CONTEXT,
-    );
-    expect(cancelled).toMatchObject({ cancelled: true, issued: 1 });
-
-    // Выданный заказ остаётся выданным, невыданный — физически размещённым.
-    expect(await activeCellOf(orders[0]?.id ?? '')).toBeNull();
-    expect(await activeCellOf(orders[1]?.id ?? '')).not.toBeNull();
-
-    // Новая выдача снова требует подтверждения курьера.
-    await expect(
-      issueOrder(flow, actor, route.id, { orderNumber: orders[1]?.number ?? '' }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ISSUE_SESSION_REQUIRED' } });
-  });
-
-  it('заказ вне маршрута и не принятый на склад выдать нельзя', async () => {
+  it('заказ вне маршрута и не принятый на склад в лист не вносятся', async () => {
     const { route, courierId, actor } = await readyRoute(1);
     await confirmCourier(flow, actor, route.id, { courierUserId: courierId }, CONTEXT);
 
     const foreign = await seedOrder();
     await expect(
-      issueOrder(flow, actor, route.id, { orderNumber: foreign.number }, CONTEXT),
+      checkOrderForIssue(flow, actor, route.id, { orderNumber: foreign.number }, CONTEXT),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_IN_ROUTE' } });
   });
 
-  it('курьер должен быть активным пользователем роли COURIER', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const notCourier = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
-    const route = await seedRoute([], { courierId: notCourier.id });
+  it('отмену сессии выполняет только администратор', async () => {
+    const { route, courierId, actor } = await readyRoute(1);
+    await confirmCourier(flow, actor, route.id, { courierUserId: courierId }, CONTEXT);
 
-    await expect(
-      confirmCourier(flow, actor, route.id, { courierUserId: notCourier.id }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ROUTE_COURIER_UNAVAILABLE' } });
+    // Право проверяется на границе HTTP: сама операция вызывается уже
+    // после проверки роли, и обратное означало бы две разные политики.
+    const keeperToken = await tokenFor(['WAREHOUSE']);
+    const forbidden = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/warehouse/routes/${route.id}/issue/cancel`,
+      headers: { authorization: `Bearer ${keeperToken}` },
+      payload: { reason: 'проверка' },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const admin = await actorFor(['ADMIN']);
+    const cancelled = await cancelIssueSession(
+      flow,
+      admin,
+      route.id,
+      { reason: 'курьер не приехал' },
+      CONTEXT,
+    );
+    expect(cancelled.cancelled).toBe(true);
   });
 });
-
-// --- 7. Права и состав ответа ------------------------------------------------
 
 describe('права и состав ответа', () => {
   it('ADMIN и WAREHOUSE работают, остальные 403, аноним 401', async () => {
@@ -1032,421 +1005,11 @@ describe('московский день', () => {
 
 // --- 9. Восстановление после частичной выдачи --------------------------------
 
-describe('частичная выдача и смена курьера', () => {
-  it('сквозной сценарий: A выдал один из трёх, ADMIN передал остаток B, третий даёт ACTIVE', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const admin = await actorFor(['ADMIN']);
-    const storage = await seedCell('STORAGE');
-    const routeCell = await seedCell('ROUTE');
-    const courierA = await seedUser(ctx.db, { roles: ['COURIER'] });
-    const courierB = await seedUser(ctx.db, { roles: ['COURIER'] });
-
-    const orders = [await seedOrder(), await seedOrder(), await seedOrder()];
-    const route = await seedRoute(
-      orders.map((order) => order.id),
-      { courierId: courierA.id },
-    );
-
-    for (const order of orders) {
-      await receiveOrder(
-        flow,
-        actor,
-        { orderNumber: order.number, cellCode: storage.code },
-        CONTEXT,
-      );
-    }
-    await bindRouteCell(flow, actor, route.id, { cellCode: routeCell.code }, CONTEXT);
-    for (const order of orders) {
-      await pickOrderToRouteCell(
-        flow,
-        actor,
-        route.id,
-        { orderNumber: order.number, cellCode: routeCell.code },
-        CONTEXT,
-      );
-    }
-
-    // 2. Курьер A подтверждён, выдан первый заказ: общий прогресс 1/3.
-    await confirmCourier(flow, actor, route.id, { courierUserId: courierA.id }, CONTEXT);
-    const first = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[0]?.number ?? '' },
-      CONTEXT,
-    );
-    expect(first).toMatchObject({ issued: 1, total: 3, routeActivated: false });
-
-    // 3. Обычные операции над маршрутом закрыты: выдача уже началась.
-    const { returnToDraft, cancelRoute } = await import('../routing/lifecycle.js');
-    const { setCourier } = await import('../routing/service.js');
-    const current = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
-
-    await expect(
-      returnToDraft(
-        { db: ctx.db },
-        admin,
-        route.id,
-        { reason: 'попытка обойти выдачу', expectedVersion: current.version },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-
-    await expect(
-      cancelRoute(
-        { db: ctx.db },
-        admin,
-        route.id,
-        { reason: 'попытка обойти выдачу', expectedVersion: current.version },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-
-    await expect(
-      setCourier(
-        { db: ctx.db },
-        admin,
-        route.id,
-        { courierUserId: courierB.id, expectedVersion: current.version },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-
-    // Маршрут не сдвинулся ни на версию: ни одна попытка не прошла частично.
-    const afterAttempts = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
-    expect(afterAttempts).toMatchObject({
-      state: 'CONFIRMED',
-      version: current.version,
-      courierUserId: courierA.id,
-    });
-
-    // 4. Кладовщик отменить выдачу не может; администратор — может, с курьером B.
-    const warehouseToken = await tokenFor(['WAREHOUSE']);
-    expect(
-      (
-        await call('POST', `/api/warehouse/routes/${route.id}/issue/cancel`, warehouseToken, {
-          reason: 'без прав',
-        })
-      ).statusCode,
-    ).toBe(403);
-
-    const cancelled = await cancelIssueSession(
-      flow,
-      admin,
-      route.id,
-      { reason: 'курьер A заболел', nextCourierUserId: courierB.id },
-      CONTEXT,
-    );
-    expect(cancelled).toMatchObject({ cancelled: true, issued: 1, courierUserId: courierB.id });
-
-    // 5. Выдача первого заказа осталась в истории A, активного размещения нет.
-    const issuedPlacement = await ctx.db.orderPlacement.findFirstOrThrow({
-      where: { orderId: orders[0]?.id ?? '', releaseReason: 'ISSUED_TO_COURIER' },
-      select: { issueSession: { select: { courierUserId: true, state: true } } },
-    });
-    expect(issuedPlacement.issueSession).toMatchObject({
-      courierUserId: courierA.id,
-      state: 'CANCELLED',
-    });
-    expect(await activeCellOf(orders[0]?.id ?? '')).toBeNull();
-
-    // Карточка между сессиями обязана помнить выданное: открытой сессии нет,
-    // но заказ у курьера, и экран не имеет права звать его к выдаче заново.
-    const between = await getRouteFlow(ctx.db, route.id);
-    expect(between?.issueSession).toBeNull();
-    expect(between?.orders.filter((row) => row.issued).map((row) => row.orderId)).toEqual([
-      orders[0]?.id,
-    ]);
-
-    // 6. Курьер B подтверждён; повтор первого QR идемпотентен и даёт 1/3.
-    await confirmCourier(flow, actor, route.id, { courierUserId: courierB.id }, CONTEXT);
-    const repeat = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[0]?.number ?? '' },
-      CONTEXT,
-    );
-    expect(repeat).toMatchObject({ unchanged: true, issued: 1, total: 3, routeActivated: false });
-
-    const second = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[1]?.number ?? '' },
-      CONTEXT,
-    );
-    expect(second).toMatchObject({ issued: 2, total: 3, routeActivated: false });
-    expect((await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } })).state).toBe(
-      'CONFIRMED',
-    );
-
-    // 7. Только третий переводит маршрут в ACTIVE и освобождает ячейку.
-    const third = await issueOrder(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: orders[2]?.number ?? '' },
-      CONTEXT,
-    );
-    expect(third).toMatchObject({ issued: 3, total: 3, routeActivated: true });
-
-    const finished = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
-    expect(finished.state).toBe('ACTIVE');
-
-    // Уехавший маршрут не редактируется ни одним обычным путём, и отказ
-    // называет причину честно: «переданы курьеру», а не «уже отменён».
-    await expect(
-      returnToDraft(
-        { db: ctx.db },
-        admin,
-        route.id,
-        { reason: 'передумали', expectedVersion: finished.version },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-    await expect(
-      cancelRoute(
-        { db: ctx.db },
-        admin,
-        route.id,
-        { reason: 'передумали', expectedVersion: finished.version },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({
-      code: 'CONFLICT',
-      publicMessage: 'Заказы переданы курьеру: маршрут больше не отменяется.',
-    });
-    await expect(
-      setCourier(
-        { db: ctx.db },
-        admin,
-        route.id,
-        { courierUserId: courierA.id, expectedVersion: finished.version },
-        CONTEXT,
-      ),
-    ).rejects.toMatchObject({ code: 'CONFLICT' });
-
-    const session = await ctx.db.routeIssueSession.findFirstOrThrow({
-      where: { routeId: route.id, courierUserId: courierB.id },
-      select: { state: true },
-    });
-    expect(session.state).toBe('COMPLETED');
-
-    const binding = await ctx.db.routeCellBinding.findFirstOrThrow({
-      where: { routeId: route.id },
-      select: { releasedAt: true },
-    });
-    expect(binding.releasedAt).not.toBeNull();
-
-    // Переход записан ровно один раз.
-    expect(
-      await ctx.db.routeStateTransition.count({ where: { routeId: route.id, toState: 'ACTIVE' } }),
-    ).toBe(1);
-
-    // Карточка завершённого маршрута считает выданными все три заказа, хотя
-    // открытой сессии больше нет: клиентский прогресс строится на этом поле.
-    const done = await getRouteFlow(ctx.db, route.id);
-    expect(done?.state).toBe('ACTIVE');
-    expect(done?.orders.every((row) => row.issued)).toBe(true);
-
-    // 8. Логистическое чтение показывает ACTIVE и не теряет лист.
-    const token = await tokenFor(['LOGISTICIAN']);
-    const listed = await call(
-      'GET',
-      `/api/routes?deliveryDate=${DAY}&state=ACTIVE&limit=100`,
-      token,
-    );
-    expect(listed.statusCode).toBe(200);
-    expect(
-      (listed.json() as { items: { id: string; state: string }[] }).items.some(
-        (item) => item.id === route.id && item.state === 'ACTIVE',
-      ),
-    ).toBe(true);
-  });
-
-  it('недопустимый следующий курьер откатывает всю отмену целиком', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const admin = await actorFor(['ADMIN']);
-    const storage = await seedCell('STORAGE');
-    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
-    const frozen = await seedUser(ctx.db, { roles: ['COURIER'], status: 'FROZEN' });
-    const notCourier = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
-
-    const order = await seedOrder();
-    const route = await seedRoute([order.id], { courierId: courier.id });
-    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
-    await confirmCourier(flow, actor, route.id, { courierUserId: courier.id }, CONTEXT);
-
-    for (const candidate of [randomUUID(), frozen.id, notCourier.id]) {
-      await expect(
-        cancelIssueSession(
-          flow,
-          admin,
-          route.id,
-          { reason: 'проверка отката', nextCourierUserId: candidate },
-          CONTEXT,
-        ),
-        candidate,
-      ).rejects.toThrow();
-
-      // Ни отмены, ни переназначения: сессия открыта, курьер прежний.
-      const session = await ctx.db.routeIssueSession.findFirstOrThrow({
-        where: { routeId: route.id },
-        select: { state: true },
-      });
-      expect(session.state, candidate).toBe('OPEN');
-      expect(
-        (await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } })).courierUserId,
-        candidate,
-      ).toBe(courier.id);
-    }
-  });
-
-  it('до первой выдачи прежний путь возврата и отмены не сломан', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const admin = await actorFor(['ADMIN']);
-    const storage = await seedCell('STORAGE');
-    const routeCell = await seedCell('ROUTE');
-    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
-
-    const order = await seedOrder();
-    const route = await seedRoute([order.id], { courierId: courier.id });
-    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
-    await bindRouteCell(flow, actor, route.id, { cellCode: routeCell.code }, CONTEXT);
-    await pickOrderToRouteCell(
-      flow,
-      actor,
-      route.id,
-      { orderNumber: order.number, cellCode: routeCell.code },
-      CONTEXT,
-    );
-
-    // Курьер подтверждён, но ни один заказ не выдан: обычный путь ещё открыт.
-    await confirmCourier(flow, actor, route.id, { courierUserId: courier.id }, CONTEXT);
-    await cancelIssueSession(flow, admin, route.id, { reason: 'передумали' }, CONTEXT);
-
-    const current = await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } });
-    const { returnToDraft } = await import('../routing/lifecycle.js');
-    const returned = await returnToDraft(
-      { db: ctx.db },
-      admin,
-      route.id,
-      { reason: 'нужно поправить состав', expectedVersion: current.version },
-      CONTEXT,
-    );
-    expect(returned.state).toBe('DRAFT');
-
-    // И прежняя пометка «требуется перемещение» по-прежнему ставится.
-    const placement = await ctx.db.orderPlacement.findFirstOrThrow({
-      where: { orderId: order.id, releasedAt: null },
-      select: { requiresRelocation: true },
-    });
-    expect(placement.requiresRelocation).toBe(true);
-  });
-
-  it('выдача в ДРУГОМ маршруте идемпотентным успехом не становится', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const admin = await actorFor(['ADMIN']);
-    const storage = await seedCell('STORAGE');
-    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
-
-    const order = await seedOrder();
-    const first = await seedRoute([order.id], { courierId: courier.id });
-    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
-    await confirmCourier(flow, actor, first.id, { courierUserId: courier.id }, CONTEXT);
-    await issueOrder(flow, actor, first.id, { orderNumber: order.number }, CONTEXT);
-
-    // Заказ выведен из состава первого маршрута и добавлен во второй: один
-    // заказ не может состоять в двух активных составах — это держит база.
-    await ctx.db.routeOrder.updateMany({
-      where: { routeId: first.id, orderId: order.id, removedAt: null },
-      data: {
-        removedAt: new Date(),
-        removedById: admin.userId,
-        removalReason: 'RETURNED_TO_UNASSIGNED',
-      },
-    });
-    const second = await seedRoute([order.id], { courierId: courier.id });
-    await confirmCourier(flow, actor, second.id, { courierUserId: courier.id }, CONTEXT);
-
-    // Факт выдачи принадлежит ПЕРВОМУ маршруту, поэтому второй его не засчитывает:
-    // молчаливое согласие здесь означало бы, что коробки нет ни у кого.
-    await expect(
-      issueOrder(flow, actor, second.id, { orderNumber: order.number }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
-
-    // И прогресс второго маршрута не увидел чужую выдачу.
-    const view = await getRouteFlow(ctx.db, second.id);
-    expect(view?.orders.filter((row) => row.issued)).toHaveLength(0);
-  });
-
-  it('параллельная выдача последнего заказа даёт один переход, а не два', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const storage = await seedCell('STORAGE');
-    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
-
-    const order = await seedOrder();
-    const route = await seedRoute([order.id], { courierId: courier.id });
-    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
-    await confirmCourier(flow, actor, route.id, { courierUserId: courier.id }, CONTEXT);
-
-    // Два одновременных скана одного и того же последнего заказа.
-    const results = await Promise.allSettled([
-      issueOrder(flow, actor, route.id, { orderNumber: order.number }, CONTEXT),
-      issueOrder(flow, actor, route.id, { orderNumber: order.number }, CONTEXT),
-    ]);
-    expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
-
-    // Независимо от исхода гонки переход ровно один, и маршрут активен.
-    expect(
-      await ctx.db.routeStateTransition.count({ where: { routeId: route.id, toState: 'ACTIVE' } }),
-    ).toBe(1);
-    expect((await ctx.db.deliveryRoute.findUniqueOrThrow({ where: { id: route.id } })).state).toBe(
-      'ACTIVE',
-    );
-  });
-
-  it('аудит и realtime отмены не несут номера заказа и кода ячейки', async () => {
-    const actor = await actorFor(['WAREHOUSE']);
-    const admin = await actorFor(['ADMIN']);
-    const storage = await seedCell('STORAGE');
-    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
-    const nextCourier = await seedUser(ctx.db, { roles: ['COURIER'] });
-
-    const order = await seedOrder();
-    const route = await seedRoute([order.id], { courierId: courier.id });
-    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
-    await confirmCourier(flow, actor, route.id, { courierUserId: courier.id }, CONTEXT);
-    await cancelIssueSession(
-      flow,
-      admin,
-      route.id,
-      { reason: 'проверка следов', nextCourierUserId: nextCourier.id },
-      CONTEXT,
-    );
-
-    const audit = await ctx.db.auditLog.findFirstOrThrow({
-      where: { action: 'WAREHOUSE_ISSUE_CANCELLED' },
-      orderBy: { id: 'desc' },
-      select: { newValue: true },
-    });
-    const auditText = JSON.stringify(audit.newValue);
-    expect(auditText).not.toContain(order.number);
-    expect(auditText).not.toContain(storage.code);
-    // Причина живёт в защищённой строке сессии, а не в общем журнале.
-    expect(auditText).not.toContain('проверка следов');
-
-    const events = await ctx.db.realtimeEvent.findMany({
-      where: { topic: 'warehouse.route_flow_changed' },
-      orderBy: { id: 'desc' },
-      take: 3,
-      select: { payload: true },
-    });
-    for (const event of events) {
-      const text = JSON.stringify(event.payload);
-      expect(text).not.toContain(order.number);
-      expect(text).not.toContain(storage.code);
-    }
-  });
-});
+/*
+ * Прежний блок «частичная выдача и смена курьера» удалён вместе с самим
+ * поштучным путём: частичной выдачи больше не существует, и проверять
+ * её возобновляемость нечего. Свойства, которые остались настоящими —
+ * общий прогресс, повторный и конкурентный скан, изменившийся состав
+ * и передача листа другому курьеру, — живут в `issue-checks.critical.test.ts`,
+ * где они относятся к действующей операции.
+ */

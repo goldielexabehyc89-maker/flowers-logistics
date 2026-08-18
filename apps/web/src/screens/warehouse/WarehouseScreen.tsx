@@ -14,7 +14,6 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { moscowToday } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
@@ -24,12 +23,13 @@ import {
   ErrorState,
   Field,
   LoadingState,
-  Select,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
 import { ScannerScreen } from '../../scan/ScannerScreen';
+import { routeCellHint } from '../../scan/scan-machine';
 import { AssemblyTab } from './AssemblyTab';
+import { IssueTab } from './IssueTab';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
   CELL_KIND_LABELS,
@@ -37,12 +37,7 @@ import {
   blockLabel,
   cellLabel,
   groupPlacements,
-  issueBlocker,
-  issueProgress,
-  pickProgress,
   type PlacedOrderView,
-  type RouteFlowView,
-  type RouteSummary,
   type ScanContext,
 } from './warehouse-flow';
 
@@ -117,7 +112,7 @@ export function WarehouseScreen(): React.JSX.Element {
 
       {tab === 'storage' && <StorageTab />}
       {tab === 'picking' && <AssemblyTab manualEntry={manualEntry} />}
-      {tab === 'issue' && <RouteTab mode="issue" />}
+      {tab === 'issue' && <IssueTab manualEntry={manualEntry} />}
       {tab === 'returns' && <ReturnsTab />}
     </section>
   );
@@ -391,17 +386,22 @@ function useApiError(): (error: unknown, fallback: string) => void {
 }
 
 /**
- * Приёмка: заказ → ячейка хранения.
+ * Приёмка: заказ → ячейка.
  *
  * Пара отправляется одним существующим запросом, поэтому прерванная цепочка
- * не оставляет «приёмки без ячейки». Маршрутная ячейка не подставляется молча:
- * сервер отвечает отдельным конфликтом, а человек отвечает согласием.
+ * не оставляет «приёмки без ячейки».
+ *
+ * Развилка одна и её выбирает человек: заказ, уже входящий в подтверждённый
+ * лист, можно отнести сразу в сборку или всё равно положить в хранение.
+ * Догадываться по коду ячейки нельзя — обе дороги законны, и решает их
+ * тот, кто держит коробку.
  */
 function receiveIntentHandler(
   client: ReturnType<typeof useAuth>['client'],
   onPlaced: () => Promise<void>,
 ): (intent: ScanIntent) => Promise<ScanEvent> {
   let consentedCell: string | null = null;
+  let routeNumber: string | null = null;
 
   return async (intent) => {
     try {
@@ -409,8 +409,48 @@ function receiveIntentHandler(
         const context = await client.get<ScanContext>(
           `/api/warehouse/scan/order?number=${encodeURIComponent(intent.code)}`,
         );
+        if (context.route !== null) {
+          routeNumber = context.route.number;
+          return {
+            type: 'routeChoiceRequired',
+            orderNumber: context.orderNumber,
+            route: {
+              routeId: context.route.id,
+              routeNumber: context.route.number,
+              cells: context.route.routeCells,
+            },
+          };
+        }
+        routeNumber = null;
         return { type: 'orderResolved', orderNumber: context.orderNumber };
       }
+
+      if (intent.kind === 'submitPair' && intent.target === 'ROUTE') {
+        /*
+         * «В сборку»: назначение полки и перенос коробки — одна транзакция.
+         *
+         * Раздельные шаги оставляли бы лист с занятой полкой, на которой
+         * ничего не стоит, если кладовщика позвали между ними.
+         */
+        const result = await client.post<{
+          orderNumber: string;
+          cellCode: string;
+          picked: number;
+          total: number;
+        }>(`/api/warehouse/routes/${intent.routeId ?? ''}/pick`, {
+          orderNumber: intent.orderNumber,
+          cellCode: intent.cellCode,
+          ...(intent.allowNewCell ? { bindIfFree: true } : {}),
+        });
+        await onPlaced();
+        return {
+          type: 'succeeded',
+          text: `Заказ ${result.orderNumber} перемещён в ячейку ${result.cellCode} для МЛ ${routeNumber ?? ''}`.trim(),
+          progress: { done: result.picked, total: result.total },
+          final: true,
+        };
+      }
+
       if (intent.kind === 'submitPair') {
         const agreed = consentedCell === intent.cellCode;
         const result = await client.post<{ orderNumber: string; cellCode: string }>(
@@ -425,13 +465,17 @@ function receiveIntentHandler(
         await onPlaced();
         return {
           type: 'succeeded',
-          text: `Заказ ${result.orderNumber} принят в ячейку ${result.cellCode}`,
+          text: `Заказ ${result.orderNumber} помещён в ячейку ${result.cellCode}`,
           final: true,
         };
       }
       return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
     } catch (error) {
-      if (intent.kind === 'submitPair' && conflictKind(error) === 'ROUTE_CELL_REQUIRES_CHOICE') {
+      if (
+        intent.kind === 'submitPair' &&
+        intent.target === 'STORAGE' &&
+        conflictKind(error) === 'ROUTE_CELL_REQUIRES_CHOICE'
+      ) {
         consentedCell = intent.cellCode;
         return { type: 'consentRequired', cellCode: intent.cellCode };
       }
@@ -440,87 +484,13 @@ function receiveIntentHandler(
   };
 }
 
-/**
- * Комплектование: для КАЖДОГО заказа своя пара «заказ → маршрутная ячейка».
- *
- * Код ячейки берётся из второго скана, а не из загруженной карточки листа:
- * подставленный код доказывал бы только то, что карточка открыта, а физический
- * QR доказывает, что кладовщик действительно принёс коробку к нужной полке.
+/*
+ * Обработчики сканирования для комплектования и выдачи живут теперь рядом
+ * со своими экранами: `AssemblyTab` — пара «заказ → маршрутная ячейка»,
+ * `IssueTab` — внесение заказа в проверку перед отгрузкой. Прежняя выдача
+ * по одному заказу через `POST /api/warehouse/routes/:id/issue` удалена
+ * вместе с эндпоинтом: лист уходит курьеру целиком или не уходит вовсе.
  */
-function pickIntentHandler(
-  client: ReturnType<typeof useAuth>['client'],
-  routeId: string,
-  onPicked: () => Promise<void>,
-): (intent: ScanIntent) => Promise<ScanEvent> {
-  return async (intent) => {
-    try {
-      if (intent.kind === 'resolveOrder') {
-        const context = await client.get<ScanContext>(
-          `/api/warehouse/scan/order?number=${encodeURIComponent(intent.code)}`,
-        );
-        if (context.route === null || context.route.id !== routeId) {
-          return { type: 'failed', text: 'Этот заказ не входит в выбранный маршрутный лист.' };
-        }
-        return { type: 'orderResolved', orderNumber: context.orderNumber };
-      }
-      if (intent.kind === 'submitPair') {
-        const result = await client.post<{ orderNumber: string; picked: number; total: number }>(
-          `/api/warehouse/routes/${routeId}/pick`,
-          { orderNumber: intent.orderNumber, cellCode: intent.cellCode },
-        );
-        await onPicked();
-        return {
-          type: 'succeeded',
-          text: `Заказ ${result.orderNumber} перенесён`,
-          progress: { done: result.picked, total: result.total },
-          final: true,
-        };
-      }
-      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
-    } catch (error) {
-      return { type: 'failed', text: failureText(error, 'Не удалось перенести заказ.') };
-    }
-  };
-}
-
-/**
- * Выдача: одна сессия на весь оставшийся лист.
- *
- * Камера не закрывается между заказами — курьер стоит рядом, и открывать
- * её заново на каждую коробку значит терять время на пустом месте. Повтор
- * уже выданного заказа называется честно и прогресс второй раз не двигает.
- */
-function issueIntentHandler(
-  client: ReturnType<typeof useAuth>['client'],
-  routeId: string,
-  onIssued: () => Promise<void>,
-): (intent: ScanIntent) => Promise<ScanEvent> {
-  return async (intent) => {
-    if (intent.kind !== 'issueOrder') {
-      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
-    }
-    try {
-      const result = await client.post<{
-        orderNumber: string;
-        issued: number;
-        total: number;
-        unchanged: boolean;
-        routeActivated: boolean;
-      }>(`/api/warehouse/routes/${routeId}/issue`, { orderNumber: intent.orderNumber });
-      await onIssued();
-      return {
-        type: 'succeeded',
-        text: result.unchanged
-          ? `Заказ ${result.orderNumber} уже был выдан: ${result.issued} из ${result.total}`
-          : `Заказ ${result.orderNumber} выдан: ${result.issued} из ${result.total}`,
-        progress: { done: result.issued, total: result.total },
-        final: result.routeActivated,
-      };
-    } catch (error) {
-      return { type: 'failed', text: failureText(error, 'Не удалось выдать заказ.') };
-    }
-  };
-}
 
 // --- Вкладка «Склад» ---------------------------------------------------------
 
@@ -534,6 +504,14 @@ function StorageTab(): React.JSX.Element {
   const [cellInput, setCellInput] = useState('');
   const [scanned, setScanned] = useState<ScanContext | null>(null);
   const [scanning, setScanning] = useState(false);
+  /*
+   * Ответ человека на вопрос «этот заказ уже в листе».
+   *
+   * До ответа поле ячейки не показывается вовсе: обе дороги законны, и
+   * подставленная по умолчанию увела бы коробку не туда молча.
+   */
+  const [choice, setChoice] = useState<'ASSEMBLY' | 'STORAGE' | null>(null);
+  const [newCell, setNewCell] = useState(false);
 
   const placements = useQuery({
     queryKey: ['warehouse-placements'],
@@ -549,6 +527,9 @@ function StorageTab(): React.JSX.Element {
     onSuccess: (context) => {
       setScanned(context);
       setOrderInput('');
+      // Заказ вне листов спрашивать не о чем: он едет в хранение.
+      setChoice(context.route === null ? 'STORAGE' : null);
+      setNewCell(false);
     },
     onError: (error: unknown) => reportError(error, 'Не удалось распознать заказ.'),
   });
@@ -563,6 +544,8 @@ function StorageTab(): React.JSX.Element {
       // Прогресс подтверждён: сбрасываем оба поля и возвращаемся к первому шагу.
       setScanned(null);
       setCellInput('');
+      setChoice(null);
+      setNewCell(false);
       await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
       showToast(
         result.unchanged
@@ -578,8 +561,58 @@ function StorageTab(): React.JSX.Element {
     },
   });
 
+  /**
+   * «В сборку»: полка листа и перенос коробки — одной транзакцией.
+   *
+   * Тот же запрос, что и у камеры: раздельные шаги оставляли бы листу
+   * занятую полку, на которой ничего не стоит.
+   */
+  const pick = useMutation({
+    mutationFn: (input: { routeId: string; orderNumber: string; cellCode: string }) =>
+      client.post<{ orderNumber: string; cellCode: string; picked: number; total: number }>(
+        `/api/warehouse/routes/${input.routeId}/pick`,
+        {
+          orderNumber: input.orderNumber,
+          cellCode: input.cellCode,
+          ...(newCell ? { bindIfFree: true } : {}),
+        },
+      ),
+    onSuccess: async (result) => {
+      const routeNumber = scanned?.route?.number ?? '';
+      setScanned(null);
+      setCellInput('');
+      setChoice(null);
+      setNewCell(false);
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-assembly'] });
+      showToast(
+        `Заказ ${result.orderNumber} перемещён в ячейку ${result.cellCode} для МЛ ${routeNumber}`,
+        'success',
+      );
+    },
+    onError: (error: unknown) => {
+      setCellInput('');
+      reportError(error, 'Не удалось перенести заказ в маршрутную ячейку.');
+    },
+  });
+
+  function resetScan(): void {
+    setScanned(null);
+    setCellInput('');
+    setChoice(null);
+    setNewCell(false);
+  }
+
   function submitCell(allowRouteCell?: boolean): void {
     if (scanned === null || cellInput.trim() === '') {
+      return;
+    }
+    if (choice === 'ASSEMBLY' && scanned.route !== null) {
+      pick.mutate({
+        routeId: scanned.route.id,
+        orderNumber: scanned.orderNumber,
+        cellCode: cellInput,
+      });
       return;
     }
     receive.mutate({
@@ -647,14 +680,7 @@ function StorageTab(): React.JSX.Element {
                   <span>{scanned.currentCell.code}</span>
                 </div>
               )}
-              <Button
-                variant="ghost"
-                data-testid="wh-scan-reset"
-                onClick={() => {
-                  setScanned(null);
-                  setCellInput('');
-                }}
-              >
+              <Button variant="ghost" data-testid="wh-scan-reset" onClick={resetScan}>
                 Отменить
               </Button>
             </div>
@@ -666,48 +692,100 @@ function StorageTab(): React.JSX.Element {
               </p>
             )}
 
-            {scanned.route !== null && (
-              <p className="muted text-sm" data-testid="wh-order-route">
-                Заказ входит в подтверждённый лист {scanned.route.number}
-                {scanned.route.routeCells.length === 0
-                  ? '. Маршрутная ячейка ещё не привязана.'
-                  : `. Маршрутные ячейки: ${scanned.route.routeCells
-                      .map((cell) => cell.code)
-                      .join(', ')}.`}
-              </p>
+            {/*
+              Заказ уже в листе — развилку выбирает человек.
+              Кладовщик видит номер листа и решает: нести сразу в сборку
+              или всё равно оставить в хранении. Догадка за него означала бы
+              коробку не на той полке.
+            */}
+            {scanned.route !== null && choice === null && (
+              <div className="stack" data-testid="wh-route-choice">
+                <p>
+                  Заказ {scanned.orderNumber} уже входит в МЛ {scanned.route.number}
+                </p>
+                <div className="row">
+                  <Button
+                    variant="primary"
+                    data-testid="wh-choice-assembly"
+                    onClick={() => {
+                      setChoice('ASSEMBLY');
+                      // Первая полка листа назначается тем же сканом.
+                      setNewCell((scanned.route?.routeCells.length ?? 0) === 0);
+                    }}
+                  >
+                    В сборку
+                  </Button>
+                  <Button data-testid="wh-choice-storage" onClick={() => setChoice('STORAGE')}>
+                    Всё равно в хранение
+                  </Button>
+                  <Button variant="ghost" data-testid="wh-choice-cancel" onClick={resetScan}>
+                    Отмена
+                  </Button>
+                </div>
+              </div>
             )}
 
-            <ScanField
-              label="Ячейка"
-              hint={SCAN_HINTS.CELL}
-              value={cellInput}
-              onChange={setCellInput}
-              onSubmit={() => submitCell()}
-              autoFocus
-              testId="wh-scan-cell"
-              disabled={receive.isPending}
-            />
+            {choice !== null && (
+              <>
+                {choice === 'ASSEMBLY' && scanned.route !== null && (
+                  <p className="muted text-sm" data-testid="wh-route-cell-hint">
+                    {/* Полок у листа нет — зовём назначить первую, а не искать
+                        «свободную»: выбора у человека всё равно нет. */}
+                    {newCell && scanned.route.routeCells.length > 0
+                      ? 'Отсканируйте свободную маршрутную ячейку'
+                      : routeCellHint(scanned.route.routeCells)}
+                  </p>
+                )}
 
-            <div className="row">
-              <Button
-                variant="primary"
-                data-testid="wh-place"
-                disabled={receive.isPending || cellInput.trim() === ''}
-                onClick={() => submitCell()}
-              >
-                {receive.isPending ? 'Сохраняем…' : 'Положить в ячейку'}
-              </Button>
-              {scanned.route !== null && (
-                <Button
-                  variant="secondary"
-                  data-testid="wh-place-route"
-                  disabled={receive.isPending || cellInput.trim() === ''}
-                  onClick={() => submitCell(true)}
-                >
-                  Это маршрутная ячейка
-                </Button>
-              )}
-            </div>
+                <ScanField
+                  label="Ячейка"
+                  hint={choice === 'ASSEMBLY' ? SCAN_HINTS.ROUTE_CELL : SCAN_HINTS.CELL}
+                  value={cellInput}
+                  onChange={setCellInput}
+                  onSubmit={() => submitCell()}
+                  autoFocus
+                  testId="wh-scan-cell"
+                  disabled={receive.isPending || pick.isPending}
+                />
+
+                <div className="row">
+                  <Button
+                    variant="primary"
+                    data-testid="wh-place"
+                    disabled={receive.isPending || pick.isPending || cellInput.trim() === ''}
+                    onClick={() => submitCell()}
+                  >
+                    {receive.isPending || pick.isPending
+                      ? 'Сохраняем…'
+                      : choice === 'ASSEMBLY'
+                        ? 'В маршрутную ячейку'
+                        : 'Положить в ячейку'}
+                  </Button>
+
+                  {choice === 'ASSEMBLY' && (scanned.route?.routeCells.length ?? 0) > 0 && (
+                    <Button
+                      variant="secondary"
+                      data-testid="wh-add-cell"
+                      disabled={newCell}
+                      onClick={() => setNewCell(true)}
+                    >
+                      + Доп. ячейка
+                    </Button>
+                  )}
+
+                  {choice === 'STORAGE' && scanned.route !== null && (
+                    <Button
+                      variant="secondary"
+                      data-testid="wh-place-route"
+                      disabled={receive.isPending || cellInput.trim() === ''}
+                      onClick={() => submitCell(true)}
+                    >
+                      Это маршрутная ячейка
+                    </Button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -889,533 +967,10 @@ function PlacementTable({
   );
 }
 
-// --- Вкладки «Сборка» и «Выдача» ---------------------------------------------
-
-interface CourierOption {
-  id: string;
-  fullName: string;
-}
-
-function RouteTab({ mode }: { mode: 'picking' | 'issue' }): React.JSX.Element {
-  const { client, user } = useAuth();
-  // Отмена выдачи — операция администратора (`FUL-003`). Кладовщик её не видит:
-  // скрытая кнопка не защита, но и предлагать заведомо запрещённое незачем.
-  const isAdmin = user?.roles.includes('ADMIN') === true;
-  const queryClient = useQueryClient();
-  const { showToast } = useToast();
-  const reportError = useApiError();
-
-  const [date, setDate] = useState(moscowToday());
-  const [routeId, setRouteId] = useState<string | null>(null);
-  const [cellInput, setCellInput] = useState('');
-  const [orderInput, setOrderInput] = useState('');
-  const [cancelReason, setCancelReason] = useState('');
-  const [nextCourier, setNextCourier] = useState('');
-  const [cancelOpen, setCancelOpen] = useState(false);
-  /**
-   * Подтверждённый заказ незавершённой пары комплектования.
-   *
-   * Ручной и аппаратный путь обязаны требовать ту же пару «заказ → ячейка»,
-   * что и камера: иначе автоподстановка кода ячейки из карточки обошла бы
-   * физическое подтверждение, ради которого пара и введена.
-   */
-  const [pickOrder, setPickOrder] = useState<string | null>(null);
-  const [pickCellInput, setPickCellInput] = useState('');
-  const [scanning, setScanning] = useState(false);
-
-  const routes = useQuery({
-    queryKey: ['warehouse-routes', date],
-    queryFn: () =>
-      client.get<{ items: RouteSummary[] }>(`/api/warehouse/routes?deliveryDate=${date}`),
-  });
-
-  const route = useQuery({
-    queryKey: ['warehouse-route', routeId],
-    queryFn: () => client.get<RouteFlowView>(`/api/warehouse/routes/${routeId ?? ''}`),
-    enabled: routeId !== null,
-  });
-
-  const refresh = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: ['warehouse-route'] });
-    await queryClient.invalidateQueries({ queryKey: ['warehouse-routes'] });
-    await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
-  };
-
-  const bindCell = useMutation({
-    mutationFn: () =>
-      client.put<{ cellCode: string }>(`/api/warehouse/routes/${routeId ?? ''}/cell`, {
-        cellCode: cellInput,
-      }),
-    onSuccess: async (result) => {
-      setCellInput('');
-      await refresh();
-      showToast(`Маршрутная ячейка ${result.cellCode} привязана`, 'success');
-    },
-    onError: (error: unknown) => reportError(error, 'Не удалось привязать ячейку.'),
-  });
-
-  /** Подтверждение первого скана: заказ обязан входить в выбранный лист. */
-  const resolvePickOrder = useMutation({
-    mutationFn: (number: string) =>
-      client.get<ScanContext>(`/api/warehouse/scan/order?number=${encodeURIComponent(number)}`),
-    onSuccess: (context) => {
-      if (context.route === null || context.route.id !== routeId) {
-        setOrderInput('');
-        showToast('Этот заказ не входит в выбранный маршрутный лист.', 'error');
-        return;
-      }
-      setPickOrder(context.orderNumber);
-      setOrderInput('');
-    },
-    onError: (error: unknown) => {
-      setOrderInput('');
-      reportError(error, 'Не удалось распознать заказ.');
-    },
-  });
-
-  const pick = useMutation({
-    mutationFn: (pair: { orderNumber: string; cellCode: string }) =>
-      client.post<{ orderNumber: string; picked: number; total: number }>(
-        `/api/warehouse/routes/${routeId ?? ''}/pick`,
-        pair,
-      ),
-    onSuccess: async (result) => {
-      setPickOrder(null);
-      setPickCellInput('');
-      await refresh();
-      showToast(`Заказ ${result.orderNumber}: ${result.picked} из ${result.total}`, 'success');
-    },
-    onError: (error: unknown) => {
-      // Подтверждённый заказ остаётся: человек повторяет только скан ячейки.
-      setPickCellInput('');
-      reportError(error, 'Не удалось перенести заказ.');
-    },
-  });
-
-  const confirmCourier = useMutation({
-    mutationFn: (courierUserId: string) =>
-      client.post(`/api/warehouse/routes/${routeId ?? ''}/courier`, { courierUserId }),
-    onSuccess: async () => {
-      await refresh();
-      showToast('Курьер подтверждён', 'success');
-    },
-    onError: (error: unknown) => reportError(error, 'Не удалось подтвердить курьера.'),
-  });
-
-  const couriers = useQuery({
-    queryKey: ['couriers-active'],
-    queryFn: () =>
-      client.get<{ items: CourierOption[] }>('/api/users?role=COURIER&status=ACTIVE&limit=100'),
-    enabled: isAdmin && mode === 'issue',
-  });
-
-  const cancelIssue = useMutation({
-    mutationFn: () =>
-      client.post(`/api/warehouse/routes/${routeId ?? ''}/issue/cancel`, {
-        reason: cancelReason,
-        ...(nextCourier === '' ? {} : { nextCourierUserId: nextCourier }),
-      }),
-    onSuccess: async () => {
-      setCancelOpen(false);
-      setCancelReason('');
-      setNextCourier('');
-      await refresh();
-      showToast('Выдача отменена', 'success');
-    },
-    onError: (error: unknown) => reportError(error, 'Не удалось отменить выдачу.'),
-  });
-
-  const issue = useMutation({
-    mutationFn: () =>
-      client.post<{ orderNumber: string; issued: number; total: number; routeActivated: boolean }>(
-        `/api/warehouse/routes/${routeId ?? ''}/issue`,
-        { orderNumber: orderInput },
-      ),
-    onSuccess: async (result) => {
-      setOrderInput('');
-      await refresh();
-      showToast(
-        result.routeActivated
-          ? `Выдан последний заказ: маршрут передан курьеру`
-          : `Заказ ${result.orderNumber} выдан: ${result.issued} из ${result.total}`,
-        'success',
-      );
-    },
-    onError: (error: unknown) => {
-      setOrderInput('');
-      reportError(error, 'Не удалось выдать заказ.');
-    },
-  });
-
-  const view = route.data ?? null;
-
-  if (scanning && routeId !== null && view !== null) {
-    return (
-      <ScannerScreen
-        chain={mode === 'picking' ? 'PICK' : 'ISSUE'}
-        operation={
-          mode === 'picking'
-            ? `Комплектование листа ${view.routeNumber}`
-            : `Выдача листа ${view.routeNumber}`
-        }
-        onIntent={
-          mode === 'picking'
-            ? pickIntentHandler(client, routeId, refresh)
-            : issueIntentHandler(client, routeId, refresh)
-        }
-        onClose={() => setScanning(false)}
-      />
-    );
-  }
-
-  return (
-    <>
-      <div className="card stack">
-        <div className="row">
-          <Field label="Дата доставки">
-            {(fieldProps) => (
-              <TextInput
-                {...fieldProps}
-                type="date"
-                value={date}
-                data-testid="wh-route-date"
-                onChange={(event) => {
-                  setDate(event.target.value);
-                  setRouteId(null);
-                }}
-              />
-            )}
-          </Field>
-        </div>
-
-        {routes.isPending && <LoadingState title="Загружаем маршрутные листы…" />}
-        {routes.isError && (
-          <ErrorState
-            description="Маршрутные листы не загрузились."
-            onRetry={() => void routes.refetch()}
-          />
-        )}
-        {routes.isSuccess && routes.data.items.length === 0 && (
-          <EmptyState
-            title="Подтверждённых листов на эту дату нет"
-            description="Комплектование начинается после подтверждения маршрута логистом."
-          />
-        )}
-        {routes.isSuccess && routes.data.items.length > 0 && (
-          <div className="row">
-            {routes.data.items.map((summary) => (
-              <Button
-                key={summary.routeId}
-                variant={routeId === summary.routeId ? 'primary' : 'ghost'}
-                data-testid="wh-route-button"
-                data-route-number={summary.routeNumber}
-                onClick={() => setRouteId(summary.routeId)}
-              >
-                {summary.routeNumber} ·{' '}
-                {mode === 'picking'
-                  ? `${summary.inRouteCell}/${summary.total}`
-                  : `${summary.issued}/${summary.total}`}
-                {summary.state === 'ACTIVE' ? ' · передан' : ''}
-              </Button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {view !== null && (
-        <div className="card stack" data-testid="wh-route-card" data-route-state={view.state}>
-          <div className="row">
-            <div>
-              <div className="field__label">Маршрутный лист</div>
-              <strong>{view.routeNumber}</strong>
-            </div>
-            <div>
-              <div className="field__label">Курьер</div>
-              <span data-testid="wh-route-courier">{view.courier?.fullName ?? 'не назначен'}</span>
-            </div>
-            <div>
-              <div className="field__label">Маршрутная ячейка</div>
-              <span data-testid="wh-route-cell">
-                {view.routeCells.length === 0
-                  ? 'не привязана'
-                  : view.routeCells.map((cell) => cell.code).join(', ')}
-              </span>
-            </div>
-            <div>
-              <div className="field__label">{mode === 'picking' ? 'Скомплектовано' : 'Выдано'}</div>
-              <span data-testid="wh-route-progress">
-                {mode === 'picking'
-                  ? `${pickProgress(view).picked} из ${pickProgress(view).total}`
-                  : `${issueProgress(view).issued} из ${issueProgress(view).total}`}
-              </span>
-            </div>
-          </div>
-
-          {mode === 'picking' && view.state === 'CONFIRMED' && (
-            <>
-              {view.routeCells.length === 0 ? (
-                <div className="stack">
-                  <ScanField
-                    label="Маршрутная ячейка"
-                    hint="Отсканируйте QR маршрутной ячейки для этого листа"
-                    value={cellInput}
-                    onChange={setCellInput}
-                    onSubmit={() => cellInput.trim() !== '' && bindCell.mutate()}
-                    autoFocus
-                    testId="wh-bind-cell"
-                    disabled={bindCell.isPending}
-                  />
-                  <Button
-                    variant="primary"
-                    data-testid="wh-bind-submit"
-                    disabled={bindCell.isPending || cellInput.trim() === ''}
-                    onClick={() => bindCell.mutate()}
-                  >
-                    Привязать ячейку
-                  </Button>
-                </div>
-              ) : (
-                <div className="stack">
-                  {/* Камера ведёт ту же пару, что и поля ниже. */}
-                  <div className="row">
-                    <Button
-                      variant="primary"
-                      data-testid="wh-pick-camera"
-                      onClick={() => {
-                        setPickOrder(null);
-                        setPickCellInput('');
-                        setScanning(true);
-                      }}
-                    >
-                      Сканировать заказ
-                    </Button>
-                  </div>
-
-                  {pickOrder === null ? (
-                    <ScanField
-                      label="Заказ"
-                      hint="Отсканируйте заказ, затем — маршрутную ячейку"
-                      value={orderInput}
-                      onChange={setOrderInput}
-                      onSubmit={() =>
-                        orderInput.trim() !== '' && resolvePickOrder.mutate(orderInput)
-                      }
-                      autoFocus
-                      testId="wh-pick-order"
-                      disabled={resolvePickOrder.isPending}
-                    />
-                  ) : (
-                    <div className="stack">
-                      <div className="row">
-                        <div>
-                          <div className="field__label">Заказ</div>
-                          <strong data-testid="wh-pick-scanned">{pickOrder}</strong>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          data-testid="wh-pick-reset"
-                          onClick={() => {
-                            setPickOrder(null);
-                            setPickCellInput('');
-                          }}
-                        >
-                          Отменить
-                        </Button>
-                      </div>
-
-                      {/* Код ячейки вводится или сканируется заново, а не
-                          подставляется из карточки листа. */}
-                      <ScanField
-                        label="Маршрутная ячейка"
-                        hint="Отсканируйте QR маршрутной ячейки этого листа"
-                        value={pickCellInput}
-                        onChange={setPickCellInput}
-                        onSubmit={() =>
-                          pickCellInput.trim() !== '' &&
-                          pick.mutate({ orderNumber: pickOrder, cellCode: pickCellInput })
-                        }
-                        autoFocus
-                        testId="wh-pick-cell"
-                        disabled={pick.isPending}
-                      />
-                      <Button
-                        variant="primary"
-                        data-testid="wh-pick-submit"
-                        disabled={pick.isPending || pickCellInput.trim() === ''}
-                        onClick={() =>
-                          pick.mutate({ orderNumber: pickOrder, cellCode: pickCellInput })
-                        }
-                      >
-                        Перенести в маршрутную ячейку
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-
-          {mode === 'issue' && view.state === 'CONFIRMED' && (
-            <>
-              {view.issueSession === null ? (
-                <div className="stack">
-                  <p className="muted text-sm">
-                    Подтвердите назначенного курьера: без подтверждения выдать заказы нельзя.
-                  </p>
-                  <Button
-                    variant="primary"
-                    data-testid="wh-confirm-courier"
-                    disabled={view.courier === null || confirmCourier.isPending}
-                    onClick={() => view.courier !== null && confirmCourier.mutate(view.courier.id)}
-                  >
-                    Курьер {view.courier?.fullName ?? '—'} подтверждён
-                  </Button>
-                </div>
-              ) : (
-                <div className="stack">
-                  {/* Одна сессия на весь оставшийся лист: камера не закрывается
-                      между заказами, курьер стоит рядом. */}
-                  <div className="row">
-                    <Button
-                      variant="primary"
-                      data-testid="wh-issue-camera"
-                      onClick={() => setScanning(true)}
-                    >
-                      Начать сканирование заказов
-                    </Button>
-                  </div>
-
-                  <ScanField
-                    label="Заказ"
-                    hint="Сканируйте заказы по одному"
-                    value={orderInput}
-                    onChange={setOrderInput}
-                    onSubmit={() => orderInput.trim() !== '' && issue.mutate()}
-                    autoFocus
-                    testId="wh-issue-order"
-                    disabled={issue.isPending}
-                  />
-                  <Button
-                    variant="primary"
-                    data-testid="wh-issue-submit"
-                    disabled={issue.isPending || orderInput.trim() === ''}
-                    onClick={() => issue.mutate()}
-                  >
-                    Выдать заказ
-                  </Button>
-
-                  {isAdmin && !cancelOpen && (
-                    <Button
-                      variant="ghost"
-                      data-testid="wh-cancel-issue"
-                      onClick={() => setCancelOpen(true)}
-                    >
-                      Отменить выдачу
-                    </Button>
-                  )}
-
-                  {isAdmin && cancelOpen && (
-                    <div className="stack">
-                      <p className="muted text-sm">
-                        Уже выданные заказы остаются в истории и у прежнего курьера. Невыданные
-                        останутся лежать там, где лежат: система не переносит их сама.
-                      </p>
-                      <Field label="Причина отмены" hint="От 3 до 500 символов">
-                        {(fieldProps) => (
-                          <TextInput
-                            {...fieldProps}
-                            data-testid="wh-cancel-reason"
-                            value={cancelReason}
-                            onChange={(event) => setCancelReason(event.target.value)}
-                          />
-                        )}
-                      </Field>
-                      <Field
-                        label="Передать остаток курьеру"
-                        hint="Необязательно: без выбора назначение маршрута не меняется"
-                      >
-                        {(fieldProps) => (
-                          <Select
-                            {...fieldProps}
-                            data-testid="wh-cancel-courier"
-                            value={nextCourier}
-                            onChange={(event) => setNextCourier(event.target.value)}
-                          >
-                            <option value="">Оставить прежнего</option>
-                            {(couriers.data?.items ?? []).map((option) => (
-                              <option key={option.id} value={option.id}>
-                                {option.fullName}
-                              </option>
-                            ))}
-                          </Select>
-                        )}
-                      </Field>
-                      <div className="row">
-                        <Button
-                          variant="primary"
-                          data-testid="wh-cancel-submit"
-                          disabled={cancelIssue.isPending || cancelReason.trim().length < 3}
-                          onClick={() => cancelIssue.mutate()}
-                        >
-                          Подтвердить отмену
-                        </Button>
-                        <Button variant="ghost" onClick={() => setCancelOpen(false)}>
-                          Не отменять
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-
-          {view.state === 'ACTIVE' && (
-            <p className="muted text-sm" data-testid="wh-route-active">
-              Маршрут передан курьеру и стал активным. Маршрутная ячейка освобождена.
-            </p>
-          )}
-
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>№</th>
-                  <th>Заказ</th>
-                  <th>Ячейка</th>
-                  <th>Состояние</th>
-                </tr>
-              </thead>
-              <tbody>
-                {view.orders.map((order) => (
-                  <tr
-                    key={order.orderId}
-                    data-testid="wh-route-order"
-                    data-order={order.orderNumber}
-                  >
-                    <td className="muted">{order.position}</td>
-                    <td>
-                      <strong>{order.orderNumber}</strong>
-                    </td>
-                    <td>{cellLabel(order)}</td>
-                    <td>
-                      {order.issued ? (
-                        <StatusBadge tone="success">Выдан</StatusBadge>
-                      ) : order.inRouteCell ? (
-                        <StatusBadge tone="info">В маршрутной ячейке</StatusBadge>
-                      ) : (
-                        <StatusBadge tone="neutral">
-                          {issueBlocker(order) ?? 'В хранении'}
-                        </StatusBadge>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
+// --- Прежний общий `RouteTab` -----------------------------------------------
+//
+// Удалён вместе с поштучной выдачей. Он обслуживал сразу комплектование и
+// выдачу одним списком листов; теперь у каждого раздела своя структура:
+// «Сборка» — доска листов с проверкой (`AssemblyTab`), «Выдача» — курьер,
+// его листы и отгрузка целиком (`IssueTab`). Общий компонент пришлось бы
+// ветвить по режиму в каждой второй строке.

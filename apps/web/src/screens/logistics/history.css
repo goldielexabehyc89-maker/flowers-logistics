@@ -70,6 +70,20 @@
   font-size: var(--log-font-md);
 }
 
+/*
+ * На телефоне список отбора возвращается к 16px.
+ *
+ * Ниже шестнадцати iOS приближает страницу при фокусе, и отчёт уезжает вбок.
+ * Общее правило задано по элементу, а здесь размер назначен классом — класс
+ * сильнее, поэтому исключение живёт рядом с самим правилом.
+ */
+@media (pointer: coarse), (max-width: 640px) {
+  .history__select,
+  .reports__select {
+    font-size: 16px;
+  }
+}
+
 .history__day {
   display: flex;
   flex-direction: column;

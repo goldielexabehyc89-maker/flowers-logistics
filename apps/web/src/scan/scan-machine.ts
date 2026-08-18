@@ -44,10 +44,27 @@ export type ScanStep =
   | 'ORDER'
   /** Ждём QR ячейки. */
   | 'CELL'
+  /** Заказ уже входит в лист: человек выбирает, сборка это или хранение. */
+  | 'ROUTE_CHOICE'
   /** Заказ уже в подтверждённом листе: нужен явный ответ человека. */
   | 'ROUTE_CELL_CONSENT'
   /** Цепочка завершена, экран закрывается. */
   | 'DONE';
+
+/**
+ * Куда кладётся собранная пара.
+ *
+ * Приёмка и сборка отличаются не окном, а назначением полки, и это
+ * решение принимает человек в диалоге, а не догадка по коду ячейки.
+ */
+export type ScanTarget = 'STORAGE' | 'ROUTE';
+
+/** Лист, в который заказ уже входит, и его маршрутные полки. */
+export interface RouteChoice {
+  routeId: string;
+  routeNumber: string;
+  cells: { id: string; code: string }[];
+}
 
 export type NoticeKind = 'success' | 'error';
 
@@ -55,6 +72,15 @@ export interface ScanNotice {
   kind: NoticeKind;
   /** Текст для человека. Ни адреса, ни получателя, ни текста исключения. */
   text: string;
+  /**
+   * Что было распознано и что ожидалось.
+   *
+   * Только у отказа. «Не подходит» без этих двух строк заставляет подносить
+   * к камере тот же самый код ещё раз: человек не знает, ошибся он предметом
+   * или предмет не годится по сути.
+   */
+  scanned?: string;
+  expected?: string;
 }
 
 export interface ScanState {
@@ -77,6 +103,17 @@ export interface ScanState {
   frameCleared: boolean;
   /** Прогресс выдачи или комплектования: «X из N». */
   progress: { done: number; total: number } | null;
+  /** Куда кладётся текущая пара. */
+  target: ScanTarget;
+  /** Лист, в который заказ уже входит; null — заказ вне листов. */
+  routeChoice: RouteChoice | null;
+  /**
+   * Человек согласился занять листом НОВУЮ полку.
+   *
+   * Без этого согласия свободная маршрутная ячейка отвергается сервером:
+   * занять полку — это решение, а не побочный итог поднесения камеры.
+   */
+  allowNewCell: boolean;
 }
 
 export type ScanEvent =
@@ -86,6 +123,12 @@ export type ScanEvent =
   | { type: 'frameEmpty' }
   /** Сервер подтвердил номер заказа. */
   | { type: 'orderResolved'; orderNumber: string }
+  /** Заказ уже входит в маршрутный лист: нужен выбор человека. */
+  | { type: 'routeChoiceRequired'; orderNumber: string; route: RouteChoice }
+  /** Человек ответил в диалоге листа. */
+  | { type: 'routeChoiceAnswered'; choice: 'ASSEMBLY' | 'STORAGE' }
+  /** Человек нажал «+ Доп. ячейка». */
+  | { type: 'allowNewCell' }
   /** Ячейка отсканирована и требует явного согласия. */
   | { type: 'consentRequired'; cellCode: string }
   /** Человек ответил на согласие. */
@@ -113,6 +156,12 @@ export function initialState(chain: ScanChain): ScanState {
     lastAccepted: null,
     frameCleared: true,
     progress: null,
+    // Сборка начинается с цепочки PICK; приёмка кладёт в хранение, пока
+    // человек не сказал иного.
+    target: chain === 'PICK' ? 'ROUTE' : 'STORAGE',
+    routeChoice: null,
+    // В сборке полка листа уже назначена: новую занимают отдельной кнопкой.
+    allowNewCell: false,
   };
 }
 
@@ -127,8 +176,27 @@ export function canAccept(state: ScanState): boolean {
     !state.busy &&
     state.notice === null &&
     state.step !== 'DONE' &&
+    state.step !== 'ROUTE_CHOICE' &&
     state.step !== 'ROUTE_CELL_CONSENT'
   );
+}
+
+/**
+ * Какую полку показывать человеку в сборке.
+ *
+ * Полок у листа может не быть, быть одна или несколько, и в каждом случае
+ * человеку нужно разное: назначить первую, поднести известную или выбрать
+ * из перечисленных. Общая формулировка «наведите на маршрутную ячейку»
+ * заставляла бы вспоминать, какую именно.
+ */
+export function routeCellHint(cells: readonly { code: string }[]): string {
+  if (cells.length === 0) {
+    return 'Назначьте ячейку маршрута';
+  }
+  if (cells.length === 1) {
+    return `Сканируйте ячейку ${cells[0]?.code ?? ''}`;
+  }
+  return `Сканируйте ячейку маршрута: ${cells.map((cell) => cell.code).join(' или ')}`;
 }
 
 /** Подсказка текущего шага. Видна постоянно, а не всплывает на секунду. */
@@ -137,14 +205,46 @@ export function stepHint(state: ScanState): string {
     return 'Наведите камеру на QR-код заказа';
   }
   if (state.step === 'CELL') {
+    if (state.target === 'ROUTE' && state.routeChoice !== null) {
+      // Полок у листа нет — подсказка зовёт назначить первую, а не «любую
+      // свободную»: человек ещё не выбирал дополнительную.
+      return state.allowNewCell && state.routeChoice.cells.length > 0
+        ? 'Наведите камеру на свободную маршрутную ячейку'
+        : routeCellHint(state.routeChoice.cells);
+    }
     return state.chain === 'RECEIVE'
       ? 'Наведите камеру на QR-код ячейки'
       : 'Наведите камеру на QR-код маршрутной ячейки';
+  }
+  if (state.step === 'ROUTE_CHOICE') {
+    return 'Выберите, что делать с заказом';
   }
   if (state.step === 'ROUTE_CELL_CONSENT') {
     return 'Подтвердите, что заказ кладётся сразу в маршрутную ячейку';
   }
   return 'Готово';
+}
+
+/**
+ * Что ожидалось на этом шаге — для честного текста ошибки.
+ *
+ * Человек с коробкой обязан узнать не только «не подходит», но и что
+ * именно от него ждали: иначе он подносит к камере то же самое ещё раз.
+ */
+export function expectedObject(state: ScanState): string {
+  if (state.step === 'ORDER') {
+    return 'QR-код заказа';
+  }
+  if (state.step === 'CELL') {
+    if (state.target === 'ROUTE' && state.routeChoice !== null) {
+      const cells = state.routeChoice.cells;
+      return cells.length === 0 || state.allowNewCell
+        ? 'QR-код свободной маршрутной ячейки'
+        : `QR-код маршрутной ячейки ${cells.map((cell) => cell.code).join(' или ')}`;
+    }
+    return state.target === 'ROUTE' ? 'QR-код маршрутной ячейки' : 'QR-код ячейки хранения';
+  }
+  return 'QR-код';
 }
 
 /**
@@ -159,8 +259,17 @@ export function scanTitle(state: ScanState, expectedCell?: string | null): strin
   if (state.step === 'ORDER') {
     return 'Сканирование заказа';
   }
+  if (state.step === 'ROUTE_CHOICE') {
+    return state.orderNumber === null
+      ? 'Сканирование заказа'
+      : `Сканирование заказа ${state.orderNumber}`;
+  }
   if (state.step === 'CELL' || state.step === 'ROUTE_CELL_CONSENT') {
-    const cell = expectedCell ?? null;
+    const single =
+      state.target === 'ROUTE' && state.routeChoice?.cells.length === 1 && !state.allowNewCell
+        ? (state.routeChoice.cells[0]?.code ?? null)
+        : null;
+    const cell = expectedCell ?? single;
     return cell === null ? 'Сканирование ячейки' : `Сканирование ячейки ${cell}`;
   }
   return 'Сканирование';
@@ -171,8 +280,20 @@ export type ScanIntent =
   | { kind: 'none' }
   /** Разрешить номер заказа. */
   | { kind: 'resolveOrder'; code: string }
-  /** Отправить готовую пару. */
-  | { kind: 'submitPair'; orderNumber: string; cellCode: string }
+  /**
+   * Отправить готовую пару.
+   *
+   * Назначение полки идёт вместе с парой: одно и то же окно кладёт коробку
+   * и в хранение, и сразу в лист, а решает это человек, а не код ячейки.
+   */
+  | {
+      kind: 'submitPair';
+      orderNumber: string;
+      cellCode: string;
+      target: ScanTarget;
+      routeId: string | null;
+      allowNewCell: boolean;
+    }
   /** Выдать заказ: пары здесь нет, достаточно номера. */
   | { kind: 'issueOrder'; orderNumber: string }
   /** Назначить маршрутную ячейку листу: заказа в этой цепочке нет. */
@@ -241,12 +362,59 @@ export function reduce(state: ScanState, event: ScanEvent): ScanTransition {
           kind: 'submitPair',
           orderNumber: state.orderNumber ?? '',
           cellCode: event.code,
+          target: state.target,
+          routeId: state.routeChoice?.routeId ?? null,
+          allowNewCell: state.allowNewCell,
         },
       };
     }
 
     case 'orderResolved':
-      return stay({ busy: false, step: 'CELL', orderNumber: event.orderNumber });
+      /*
+       * Промежуточный успех: заказ распознан, но в базе ещё ничего не
+       * произошло. Уведомление исчезает само и только потом открывает
+       * следующий шаг — иначе человек не успевает понять, что номер принят,
+       * и подносит коробку второй раз.
+       */
+      return stay({
+        busy: false,
+        step: 'CELL',
+        orderNumber: event.orderNumber,
+        notice: { kind: 'success', text: `Заказ ${event.orderNumber} отсканирован` },
+      });
+
+    case 'routeChoiceRequired':
+      // Тот же промежуточный успех: номер распознан, в базе ничего нет,
+      // и следом человека спрашивают, сборка это или хранение.
+      return stay({
+        busy: false,
+        step: 'ROUTE_CHOICE',
+        orderNumber: event.orderNumber,
+        routeChoice: event.route,
+        notice: { kind: 'success', text: `Заказ ${event.orderNumber} отсканирован` },
+      });
+
+    case 'routeChoiceAnswered':
+      return stay({
+        step: 'CELL',
+        // Человек ответил — уведомление о распознанном заказе своё отработало.
+        notice: null,
+        target: event.choice === 'ASSEMBLY' ? 'ROUTE' : 'STORAGE',
+        // Отказ от сборки снимает и лист: коробка едет в обычное хранение,
+        // и подсказывать ей полку листа больше нечем.
+        routeChoice: event.choice === 'ASSEMBLY' ? state.routeChoice : null,
+        /*
+         * У листа ещё нет ни одной полки — первая назначается тем же сканом.
+         * Просить согласия «занять новую» там, где выбора всё равно нет,
+         * значит добавить нажатие ради нажатия.
+         */
+        allowNewCell: event.choice === 'ASSEMBLY' && (state.routeChoice?.cells.length ?? 0) === 0,
+        frameCleared: true,
+        lastAccepted: null,
+      });
+
+    case 'allowNewCell':
+      return stay({ allowNewCell: true, frameCleared: true, lastAccepted: null });
 
     case 'consentRequired':
       return stay({ busy: false, step: 'ROUTE_CELL_CONSENT', pendingCellCode: event.cellCode });
@@ -267,6 +435,9 @@ export function reduce(state: ScanState, event: ScanEvent): ScanTransition {
           kind: 'submitPair',
           orderNumber: state.orderNumber ?? '',
           cellCode: state.pendingCellCode ?? '',
+          target: state.target,
+          routeId: state.routeChoice?.routeId ?? null,
+          allowNewCell: state.allowNewCell,
         },
       };
     }
@@ -281,6 +452,9 @@ export function reduce(state: ScanState, event: ScanEvent): ScanTransition {
         step: nextStep,
         orderNumber: null,
         pendingCellCode: null,
+        routeChoice: null,
+        target: state.chain === 'PICK' ? 'ROUTE' : 'STORAGE',
+        allowNewCell: false,
         progress,
       });
     }
@@ -288,7 +462,15 @@ export function reduce(state: ScanState, event: ScanEvent): ScanTransition {
     case 'failed':
       // Ошибка не откатывает подтверждённый заказ: человек повторяет только
       // неудавшийся шаг.
-      return stay({ busy: false, notice: { kind: 'error', text: event.text } });
+      return stay({
+        busy: false,
+        notice: {
+          kind: 'error',
+          text: event.text,
+          ...(state.lastAccepted === null ? {} : { scanned: state.lastAccepted }),
+          expected: expectedObject(state),
+        },
+      });
 
     case 'noticeExpired': {
       if (state.notice?.kind !== 'success') {

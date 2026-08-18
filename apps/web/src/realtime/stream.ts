@@ -136,6 +136,10 @@ const WAREHOUSE_SCREEN: string[][] = [
   // коробка обязаны появляться у кладовщика сами. Без этого ключа экран
   // показывал бы вчерашнюю картину до перезагрузки.
   ['warehouse-assembly'],
+  // Доска выдачи: общий прогресс проверки, смена курьера и отгрузка соседнего
+  // листа обязаны появляться у второго кладовщика сами. Прогресс здесь общий
+  // и серверный — расходиться двум телефонам нельзя.
+  ['warehouse-issue-board'],
   ['warehouse-returns'],
 ];
 const FLORIST_SCREEN: string[][] = [
@@ -259,7 +263,14 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * нечего. Событие `route.updated` приходит и на черновик, но перечитанный
    * ответ сервера остаётся прежним: неподтверждённого листа в производстве нет.
    */
-  'route.updated': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
+  'route.updated': [
+    ...ROUTING_SCREEN,
+    ...DEALS_SCREEN,
+    ...FLORIST_SCREEN,
+    ...WAREHOUSE_SCREEN,
+    // Отгруженный лист появляется у курьера в «Доставках» сам.
+    ...DELIVERY_SCREEN,
+  ],
   'route.conflict_detected': ROUTING_SCREEN,
   'route.confirmed': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
   'route.returned_to_draft': [
@@ -285,8 +296,30 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
 
   // Складские экраны. Размещение меняет и «Собран» в «Сделках».
   'storage_cell.changed': [['storage-cells'], ...WAREHOUSE_SCREEN],
-  'warehouse.placement_changed': [...WAREHOUSE_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN],
-  'warehouse.route_flow_changed': [...WAREHOUSE_SCREEN, ['routes'], ['route'], ['route-sheets']],
+  /*
+   * Размещение коробки видно и менеджеру самовывоза.
+   *
+   * Самовывозный заказ появляется у него в дне ровно тогда, когда склад
+   * положил букет в ячейку: до этого выдавать нечего. Без ключа `pickup-day`
+   * менеджер узнавал бы о готовом заказе только перезагрузкой.
+   */
+  'warehouse.placement_changed': [
+    ...WAREHOUSE_SCREEN,
+    ...DEALS_SCREEN,
+    ...FLORIST_SCREEN,
+    ['pickup-day'],
+  ],
+  /*
+   * Ход комплектования и отгрузки. Курьер здесь обязателен: отгруженный лист
+   * появляется у него в «Доставках» сразу, а не после перезагрузки в машине.
+   */
+  'warehouse.route_flow_changed': [
+    ...WAREHOUSE_SCREEN,
+    ...DELIVERY_SCREEN,
+    ['routes'],
+    ['route'],
+    ['route-sheets'],
+  ],
 
   /*
    * Результат доставки — это ещё и деньги: наличные и начисления попадают

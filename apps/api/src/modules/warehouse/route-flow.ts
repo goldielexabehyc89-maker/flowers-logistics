@@ -17,8 +17,9 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
-import { FLOW_AUDIENCE, type FlowDeps, type RequestContext } from './placement.js';
+import { assemblyRoundOf, FLOW_AUDIENCE, type FlowDeps, type RequestContext } from './placement.js';
 import { assertCourierAssignable } from '../routing/service.js';
+import { releaseEmptyRouteBinding } from './route-cells.js';
 
 /**
  * Смена курьера и состояние листа нужны и складу, а не одной логистике.
@@ -356,12 +357,65 @@ export async function pickOrderToRouteCell(
     `;
     const current = rows[0] ?? null;
 
+    /*
+     * Коробки на складе ещё нет — и это законный случай.
+     *
+     * Кладовщик держит её в руках прямо сейчас: заказ приехал от флориста
+     * и сразу отправляется на полку своего листа. Требовать промежуточной
+     * приёмки в хранение значило бы заставить человека положить коробку
+     * на случайную полку только затем, чтобы через секунду её оттуда взять.
+     *
+     * История при этом честная: такое размещение записывается как приёмка
+     * (`RECEIVED`), а не как перемещение из ниоткуда.
+     */
     if (current === null) {
-      throw new AppError('CONFLICT', {
-        message: 'order has no placement',
-        publicMessage: 'Заказ ещё не принят на склад: сначала положите его в ячейку.',
-        conflict: { kind: 'ORDER_NOT_PLACED', orderIds: [order.id] },
+      const round = await assemblyRoundOf(tx, order.id);
+      await tx.orderPlacement.create({
+        data: {
+          orderId: order.id,
+          cellId: cell.id,
+          source: 'RECEIVED',
+          placedAt: new Date(),
+          placedById: actor.userId,
+          assemblyRound: round,
+        },
       });
+
+      await writeAudit(tx, {
+        action: 'WAREHOUSE_ORDER_PICKED',
+        entityType: 'OrderPlacement',
+        entityId: order.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        source: 'api',
+        oldValue: null,
+        newValue: { routeId, cellId: cell.id, received: true },
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'warehouse.route_flow_changed',
+        payload: { routeId, orderId: order.id, action: 'PICKED' },
+        audienceRoles: [...FLOW_AUDIENCE],
+      });
+      // Приёмка видна и тем, кто смотрит складской список, а не лист.
+      await publishRealtimeEvent(tx, {
+        topic: 'warehouse.placement_changed',
+        payload: { orderId: order.id, cellId: cell.id, action: 'RECEIVED' },
+        audienceRoles: [...FLOW_AUDIENCE],
+      });
+
+      const progress = await pickProgress(tx, routeId);
+      return {
+        routeId,
+        orderId: order.id,
+        orderNumber: order.number,
+        cellId: cell.id,
+        cellCode: cell.code,
+        unchanged: false,
+        ...progress,
+      };
     }
 
     if (current.cellId === cell.id) {
@@ -400,6 +454,11 @@ export async function pickOrderToRouteCell(
         assemblyRound: current.assemblyRound,
       },
     });
+
+    // Полка, с которой унесли коробку, могла опустеть. Если это была
+    // маршрутная ячейка, лист её отпускает — иначе она осталась бы занятой
+    // листом, у которого на ней ничего нет.
+    await releaseEmptyRouteBinding(tx, actor, current.cellId, now);
 
     await writeAudit(tx, {
       action: 'WAREHOUSE_ORDER_PICKED',
@@ -696,11 +755,18 @@ export async function activateRouteWithinTransaction(
     payload: { routeId: route.id, orderId: input.orderId, action: 'ROUTE_ACTIVATED' },
     audienceRoles: [...FLOW_AUDIENCE],
   });
-  // Логист тоже обязан увидеть, что маршрут уехал.
+  /*
+   * Логист и КУРЬЕР обязаны увидеть, что маршрут уехал.
+   *
+   * Курьер здесь — не вежливость: до отгрузки листа у него в «Доставках»
+   * пусто, и без события он открывал бы приложение заново, уже сидя в машине.
+   * В полезной нагрузке только идентификатор и состояние — ни адресов,
+   * ни получателей, ни телефонов.
+   */
   await publishRealtimeEvent(tx, {
     topic: 'route.updated',
     payload: { routeId: route.id, state: 'ACTIVE' },
-    audienceRoles: [...ROUTE_AUDIENCE],
+    audienceRoles: [...ROUTE_AUDIENCE, 'COURIER'],
   });
 }
 
@@ -748,161 +814,16 @@ async function releasePlacementToCourier(
   });
 }
 
-export async function issueOrder(
-  deps: FlowDeps,
-  actor: AuthenticatedActor,
-  routeId: string,
-  input: IssueInput,
-  context: RequestContext,
-): Promise<IssueResult> {
-  return deps.db.$transaction(async (tx: TransactionClient) => {
-    const route = await lockRoute(tx, routeId);
-    requireConfirmed(route);
-
-    const session = await tx.routeIssueSession.findFirst({
-      where: { routeId, state: 'OPEN' },
-      select: { id: true },
-    });
-    if (session === null) {
-      throw new AppError('CONFLICT', {
-        message: 'issue session is not open',
-        publicMessage: 'Сначала подтвердите назначенного курьера.',
-        conflict: { kind: 'ISSUE_SESSION_REQUIRED', routeNumber: route.number },
-      });
-    }
-
-    const order = await resolveOrderByNumber(tx, input.orderNumber);
-    const participation = await activeRouteOrder(tx, routeId, order.id);
-    if (participation === null) {
-      throw new AppError('CONFLICT', {
-        message: 'order is not in this route',
-        publicMessage: 'Этот заказ не входит в маршрутный лист.',
-        conflict: { kind: 'ORDER_NOT_IN_ROUTE', routeNumber: route.number, orderIds: [order.id] },
-      });
-    }
-
-    const blocked = blockingFlags(order);
-    if (blocked.length > 0) {
-      throw new AppError('CONFLICT', {
-        message: `order is blocked: ${blocked.join(',')}`,
-        publicMessage: blocked.includes('CANCELLED')
-          ? 'Заказ отменён — не выдавать.'
-          : 'Заказ помечен как проблемный: выдача недоступна.',
-        conflict: { kind: 'ORDER_BLOCKED', orderIds: [order.id] },
-      });
-    }
-
-    await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${order.id}::uuid FOR UPDATE`;
-
-    const rows = await tx.$queryRaw<{ id: string; cellId: string; requiresRelocation: boolean }[]>`
-      SELECT "id", "cellId", "requiresRelocation" FROM "OrderPlacement"
-      WHERE "orderId" = ${order.id}::uuid AND "releasedAt" IS NULL FOR UPDATE
-    `;
-    const current = rows[0] ?? null;
-
-    if (current === null) {
-      // Повтор скана заказа, выданного по этому маршруту в ЛЮБОЙ его сессии,
-      // включая уже отменённую: физическая передача состоялась, и требовать
-      // от кладовщика помнить, при каком курьере это было, бессмысленно.
-      if (await issuedInRoute(tx, routeId, order.id)) {
-        const { issued, total } = await routeIssueProgress(tx, routeId);
-        return {
-          routeId,
-          orderId: order.id,
-          orderNumber: order.number,
-          unchanged: true,
-          routeActivated: false,
-          issued,
-          total,
-        };
-      }
-      throw new AppError('CONFLICT', {
-        message: 'order has no placement',
-        publicMessage: 'Заказа нет на складе: выдать его нельзя.',
-        conflict: { kind: 'ORDER_NOT_PLACED', orderIds: [order.id] },
-      });
-    }
-
-    if (current.requiresRelocation) {
-      throw new AppError('CONFLICT', {
-        message: 'placement requires relocation',
-        publicMessage: 'Заказ требует перемещения: маршрут менялся после комплектования.',
-        conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', orderIds: [order.id] },
-      });
-    }
-
-    const now = new Date();
-    await releasePlacementToCourier(tx, actor, context, {
-      placement: current,
-      routeId,
-      orderId: order.id,
-      sessionId: session.id,
-      now,
-    });
-
-    const progress = await routeIssueProgress(tx, routeId);
-    const last = progress.issued >= progress.total;
-
-    if (!last) {
-      await publishRealtimeEvent(tx, {
-        topic: 'warehouse.route_flow_changed',
-        payload: { routeId, orderId: order.id, action: 'ISSUED' },
-        audienceRoles: [...FLOW_AUDIENCE],
-      });
-      return {
-        routeId,
-        orderId: order.id,
-        orderNumber: order.number,
-        unchanged: false,
-        routeActivated: false,
-        issued: progress.issued,
-        total: progress.total,
-      };
-    }
-
-    // Последний заказ: маршрут уезжает тем же переходом, что и при ручной
-    // отгрузке логистом. Реализация одна на оба пути.
-    await activateRouteWithinTransaction(tx, route, actor, context, now, {
-      issued: progress.issued,
-      orderId: order.id,
-    });
-
-    /*
-     * Сеанс выдачи закрывается здесь, а не в общем переходе: сканирование —
-     * складская часть пути. У ручной отгрузки сеанса не бывает вовсе.
-     */
-    await tx.routeIssueSession.update({
-      where: { id: session.id },
-      data: { state: 'COMPLETED', openKey: null, completedAt: now, version: { increment: 1 } },
-    });
-
-    return {
-      routeId,
-      orderId: order.id,
-      orderNumber: order.number,
-      unchanged: false,
-      routeActivated: true,
-      issued: progress.issued,
-      total: progress.total,
-    };
-  });
-}
-
-/**
- * Общий прогресс выдачи МАРШРУТА, а не текущей сессии.
+/*
+ * Поштучной выдачи как ОПЕРАЦИИ больше нет.
  *
- * Считать выдачу внутри одной сессии нельзя: после административной отмены
- * и передачи остатка другому курьеру новая сессия видела бы только свои заказы,
- * и маршрут никогда не дошёл бы до `ACTIVE`. Физически состоявшаяся передача
- * коробки курьеру не перестаёт быть фактом оттого, что сессию отменили.
- *
- * Поэтому `issued` считается по АКТИВНОМУ составу маршрута и всем фактам
- * выдачи, принадлежащим сессиям этого маршрута. Один заказ учитывается один
- * раз: считаются различные заказы, а не строки размещений.
- *
- * Отдельного счётчика в `DeliveryRoute` нет намеренно — это был бы второй
- * источник истины, который база согласовать не может.
+ * Пока она существовала, лист можно было отдать курьеру по частям, обойдя
+ * повторную проверку состава: половина коробок уезжала, половина оставалась
+ * на полке, и лист при этом считался отгруженным. Физическая передача
+ * происходит только целиком — `shipRoute`, — а её внутренний шаг
+ * `releasePlacementToCourier` остаётся переиспользуемым и наружу не выходит.
  */
+
 async function routeIssueProgress(
   tx: TransactionClient,
   routeId: string,
@@ -929,24 +850,6 @@ async function routeIssueProgress(
 
   const issuedOrderIds = new Set(issued.map((row) => row.orderId));
   return { issued: issuedOrderIds.size, total: orderIds.length, issuedOrderIds };
-}
-
-/**
- * Был ли заказ уже выдан по ЭТОМУ маршруту в любой из его сессий.
- *
- * Выдача того же заказа в другом маршруте идемпотентным успехом не считается:
- * это другая коробка в другой машине, и молча согласиться означало бы потерять
- * заказ.
- */
-async function issuedInRoute(
-  tx: TransactionClient,
-  routeId: string,
-  orderId: string,
-): Promise<boolean> {
-  const found = await tx.orderPlacement.count({
-    where: { orderId, releaseReason: 'ISSUED_TO_COURIER', issueSession: { routeId } },
-  });
-  return found > 0;
 }
 
 export interface CancelIssueInput {

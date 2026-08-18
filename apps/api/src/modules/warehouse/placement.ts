@@ -30,6 +30,17 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber, type ResolvedOrder } from './order-lookup.js';
+import { releaseEmptyRouteBinding } from './route-cells.js';
+
+/*
+ * Кому уходят события движения коробок.
+ *
+ * Менеджер самовывоза здесь не лишний: самовывозный заказ появляется у него
+ * в дне ровно тогда, когда склад положил букет в ячейку. Без него менеджер
+ * узнавал бы о готовом заказе перезагрузкой, стоя перед покупателем.
+ *
+ * Ни номера заказа, ни кода ячейки в событии нет — только идентификаторы.
+ */
 
 /** Складские операции доступны кладовщику и администратору. */
 export const FLOW_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
@@ -37,7 +48,7 @@ export const FLOW_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
 export const FLOW_ADMIN_ROLES = ['ADMIN'] as const;
 
 /** Складские события. Логист видит их в маршрутных листах и «Сделках». */
-export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN'] as const;
+export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN', 'MANAGER'] as const;
 
 export interface RequestContext {
   ip: string | null;
@@ -254,6 +265,27 @@ export async function receiveOrder(
         });
       }
 
+      /*
+       * Коробка легла в обычное хранение, а лист её ждёт.
+       *
+       * Пометка «требуется перемещение» здесь не про ошибку, а про
+       * незаконченную работу: заказ входит в действующий маршрутный лист,
+       * и его место — маршрутная ячейка. Поэтому он поднимается в верхнюю
+       * складскую группу, а не теряется среди обычного хранения.
+       *
+       * Отменённый и уже уехавший лист сюда не попадают: переносить в них
+       * нечего.
+       */
+      const awaitingRoute =
+        cell.kind === 'STORAGE' &&
+        (await tx.routeOrder.count({
+          where: {
+            orderId: order.id,
+            removedAt: null,
+            route: { state: { in: ['DRAFT', 'CONFIRMED'] } },
+          },
+        })) > 0;
+
       const created = await tx.orderPlacement.create({
         data: {
           orderId: order.id,
@@ -262,11 +294,18 @@ export async function receiveOrder(
           source: current === null ? 'RECEIVED' : 'MOVED',
           placedAt: now,
           placedById: actor.userId,
+          requiresRelocation: awaitingRoute,
           // Букет принадлежит тому кругу сборки, который идёт сейчас.
           assemblyRound: round,
         },
         select: { id: true },
       });
+
+      if (current !== null) {
+        // Заказ ушёл со старой полки. Если она опустела и была маршрутной,
+        // держать её за листом больше не за что.
+        await releaseEmptyRouteBinding(tx, actor, current.cellId, now);
+      }
 
       await writeAudit(tx, {
         action: current === null ? 'WAREHOUSE_ORDER_RECEIVED' : 'WAREHOUSE_ORDER_MOVED',
@@ -352,15 +391,18 @@ export async function withdrawOrder(
       return { orderId: order.id, orderNumber: order.number, withdrawn: false };
     }
 
+    const withdrawnAt = new Date();
     await tx.orderPlacement.update({
       where: { id: current.id },
       data: {
-        releasedAt: new Date(),
+        releasedAt: withdrawnAt,
         releasedById: actor.userId,
         releaseReason: 'WITHDRAWN',
         withdrawReason: reason,
       },
     });
+
+    await releaseEmptyRouteBinding(tx, actor, current.cellId, withdrawnAt);
 
     await writeAudit(tx, {
       action: 'WAREHOUSE_ORDER_WITHDRAWN',

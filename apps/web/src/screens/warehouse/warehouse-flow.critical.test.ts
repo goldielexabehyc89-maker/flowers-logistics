@@ -13,15 +13,11 @@ import {
   SCAN_HINTS,
   blockLabel,
   cellLabel,
-  issueBlocker,
-  issueProgress,
   nextStep,
-  pickProgress,
-  type RouteFlowOrderView,
-  type RouteFlowView,
+  type PlacedOrderView,
 } from './warehouse-flow';
 
-function order(overrides: Partial<RouteFlowOrderView> = {}): RouteFlowOrderView {
+function order(overrides: Partial<PlacedOrderView> = {}): PlacedOrderView {
   return {
     orderId: 'id',
     orderNumber: 'W-1',
@@ -33,24 +29,7 @@ function order(overrides: Partial<RouteFlowOrderView> = {}): RouteFlowOrderView 
     blockedBy: [],
     routeNumber: 'R-1',
     routeId: 'route',
-    position: 1,
-    issued: false,
-    inRouteCell: false,
     ...overrides,
-  };
-}
-
-function view(orders: RouteFlowOrderView[]): RouteFlowView {
-  return {
-    routeId: 'route',
-    routeNumber: 'R-1',
-    state: 'CONFIRMED',
-    version: 1,
-    deliveryDate: '2027-05-04',
-    courier: { id: 'c', fullName: 'Курьер' },
-    routeCells: [{ id: 'rc', code: 'R-01' }],
-    issueSession: null,
-    orders,
   };
 }
 
@@ -69,41 +48,13 @@ describe('состояние заказа на экране', () => {
     expect(cellLabel(order({ cellCode: 'S-07' }))).toBe('S-07');
   });
 
-  it('выдача заблокирована для непринятого, проблемного и требующего перемещения', () => {
-    expect(issueBlocker(order({ cellId: null, cellCode: null }))).toBe('Не принят на склад');
-    expect(issueBlocker(order({ requiresRelocation: true }))).toBe('Требуется перемещение');
-    expect(issueBlocker(order({ blockedBy: ['OUT_OF_SCOPE'] }))).toBe(BLOCK_LABELS['OUT_OF_SCOPE']);
-    expect(issueBlocker(order())).toBeNull();
-    // Уже выданный заказ блокировок не показывает: работа по нему закончена.
-    expect(issueBlocker(order({ issued: true, cellId: null, cellCode: null }))).toBeNull();
-  });
-
-  it('неизвестный признак показывается как есть, а не теряется', () => {
+  it('известный признак называется по-человечески, неизвестный — как есть', () => {
+    expect(blockLabel('OUT_OF_SCOPE')).toBe(BLOCK_LABELS['OUT_OF_SCOPE']);
+    // Признак, которого мы ещё не знаем, теряться не должен.
     expect(blockLabel('НЕЧТО_НОВОЕ')).toBe('НЕЧТО_НОВОЕ');
   });
 
   it('оба типа ячеек названы по-человечески', () => {
     expect(Object.keys(CELL_KIND_LABELS).sort()).toEqual(['ROUTE', 'STORAGE']);
-  });
-});
-
-describe('прогресс', () => {
-  it('комплектование считает заказы в маршрутной ячейке', () => {
-    const progress = pickProgress(
-      view([order({ inRouteCell: true }), order({ orderId: 'b', inRouteCell: false })]),
-    );
-    expect(progress).toEqual({ picked: 1, total: 2 });
-  });
-
-  it('выдача считает выданные заказы', () => {
-    const progress = issueProgress(
-      view([order({ issued: true }), order({ orderId: 'b', issued: false })]),
-    );
-    expect(progress).toEqual({ issued: 1, total: 2 });
-  });
-
-  it('пустой маршрут не делит на ноль и не выглядит завершённым', () => {
-    expect(issueProgress(view([]))).toEqual({ issued: 0, total: 0 });
-    expect(pickProgress(view([]))).toEqual({ picked: 0, total: 0 });
   });
 });

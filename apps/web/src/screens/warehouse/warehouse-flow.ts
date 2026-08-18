@@ -85,48 +85,19 @@ export const CELL_KIND_LABELS: Record<StorageCellKind, string> = {
   ROUTE: 'Маршрутная',
 };
 
-/**
- * Можно ли выдавать этот заказ прямо сейчас.
- *
- * Заказ без размещения выдавать нечего, помеченный проблемным — нельзя,
- * требующий перемещения — тоже: маршрут менялся уже после комплектования.
- */
-export function issueBlocker(order: RouteFlowOrderView): string | null {
-  if (order.issued) {
-    return null;
-  }
-  if (order.blockedBy.length > 0) {
-    return blockLabel(order.blockedBy[0] ?? '');
-  }
-  if (order.requiresRelocation) {
-    return 'Требуется перемещение';
-  }
-  if (order.cellId === null) {
-    return 'Не принят на склад';
-  }
-  return null;
-}
-
 /** Что показать в колонке «Ячейка»: код либо честное «не принят». */
 export function cellLabel(order: PlacedOrderView): string {
   return order.cellCode ?? 'Не принят';
 }
 
-/** Готов ли маршрут к переводу в активный: все заказы выданы. */
-export function issueProgress(view: RouteFlowView): { issued: number; total: number } {
-  return {
-    issued: view.orders.filter((order) => order.issued).length,
-    total: view.orders.length,
-  };
-}
-
-/** Сколько заказов маршрута уже лежит в его маршрутной ячейке. */
-export function pickProgress(view: RouteFlowView): { picked: number; total: number } {
-  return {
-    picked: view.orders.filter((order) => order.inRouteCell).length,
-    total: view.orders.length,
-  };
-}
+/*
+ * Счётчики комплектования и выдачи здесь больше не считаются.
+ *
+ * Оба экрана показывают серверный прогресс: за одним листом стоят два
+ * кладовщика, и число «внесено N из M» обязано быть одним и тем же на
+ * обоих телефонах. Локальный подсчёт по загруженному списку показывал бы
+ * каждому свою правду до следующего обновления.
+ */
 
 /**
  * Следующий шаг двухсканной операции.
@@ -134,7 +105,7 @@ export function pickProgress(view: RouteFlowView): { picked: number; total: numb
  * До второго скана база не меняется, поэтому интерфейс обязан честно
  * показывать, чего он ждёт: иначе кладовщик решит, что заказ уже принят.
  */
-export type ScanStep = 'ORDER' | 'CELL';
+export type ScanStep = 'ORDER' | 'CELL' | 'ROUTE_CELL';
 
 export function nextStep(orderScanned: boolean): ScanStep {
   return orderScanned ? 'CELL' : 'ORDER';
@@ -143,6 +114,8 @@ export function nextStep(orderScanned: boolean): ScanStep {
 export const SCAN_HINTS: Record<ScanStep, string> = {
   ORDER: 'Отсканируйте QR заказа',
   CELL: 'Теперь отсканируйте QR ячейки',
+  // Сборка ждёт полку листа, а не любую свободную ячейку.
+  ROUTE_CELL: 'Теперь отсканируйте QR маршрутной ячейки',
 };
 
 /**
@@ -234,4 +207,37 @@ export interface AssemblyRouteView {
 export interface AssemblyBoard {
   active: AssemblyRouteView[];
   assembled: AssemblyRouteView[];
+}
+
+// --- Доска выдачи ------------------------------------------------------------
+
+export interface IssueOrderView {
+  orderId: string;
+  orderNumber: string;
+  position: number;
+  cellCode: string | null;
+  ready: boolean;
+  checked: boolean;
+}
+
+export interface IssueRouteView {
+  routeId: string;
+  routeNumber: string;
+  deliveryDate: string;
+  earliestMinute: number | null;
+  total: number;
+  checked: number;
+  sessionOpen: boolean;
+  shippable: boolean;
+  orders: IssueOrderView[];
+}
+
+export interface IssueBoard {
+  couriers: {
+    courierUserId: string;
+    fullName: string;
+    /** Телефон приходит обычным ответом API и в realtime не уходит. */
+    phone: string;
+    routes: IssueRouteView[];
+  }[];
 }

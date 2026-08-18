@@ -228,3 +228,166 @@ function stageOf(
    */
   return order.fulfillmentProcessState === 'ASSEMBLED' ? 'AWAITING_INTAKE' : 'NOT_ASSEMBLED';
 }
+
+// --- Доска выдачи ------------------------------------------------------------
+
+export interface IssueOrderView {
+  orderId: string;
+  orderNumber: string;
+  position: number;
+  cellCode: string | null;
+  ready: boolean;
+  /** Заказ уже внесён в лист текущей проверкой. */
+  checked: boolean;
+}
+
+export interface IssueRouteView {
+  routeId: string;
+  routeNumber: string;
+  deliveryDate: string;
+  earliestMinute: number | null;
+  total: number;
+  checked: number;
+  /** Открыта ли сессия выдачи: до неё вносить заказы нельзя. */
+  sessionOpen: boolean;
+  /** Лист готов к отгрузке: все заказы стоят в его ячейках и не отменены. */
+  shippable: boolean;
+  orders: IssueOrderView[];
+}
+
+export interface IssueCourierView {
+  courierUserId: string;
+  fullName: string;
+  /** Телефон приходит обычным авторизованным ответом и в realtime не уходит. */
+  phone: string;
+  routes: IssueRouteView[];
+}
+
+/**
+ * Курьеры с листами, ожидающими складской выдачи.
+ *
+ * Лист без курьера сюда не попадает: выдавать его некому, и он остаётся
+ * в «Сборке». Появление курьера у листа приводит его сюда само.
+ */
+export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> {
+  const routes = await db.deliveryRoute.findMany({
+    where: { state: 'CONFIRMED', courierUserId: { not: null } },
+    select: {
+      id: true,
+      number: true,
+      deliveryDate: true,
+      courier: { select: { id: true, fullName: true, phone: true, status: true } },
+      cellBindings: { where: { releasedAt: null }, select: { cellId: true } },
+      issueSessions: {
+        where: { state: 'OPEN' },
+        select: {
+          id: true,
+          checks: { where: { clearedAt: null }, select: { orderId: true } },
+        },
+      },
+      orders: {
+        where: { removedAt: null },
+        orderBy: { position: 'asc' },
+        select: {
+          position: true,
+          order: {
+            select: {
+              id: true,
+              externalName: true,
+              intervalStartMinute: true,
+              manualIntervalStartMinute: true,
+              cancelledInSource: true,
+              cancelledByLogistAt: true,
+              placements: {
+                where: { releasedAt: null },
+                select: {
+                  requiresRelocation: true,
+                  cell: { select: { id: true, code: true } },
+                },
+                take: 1,
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const byCourier = new Map<string, IssueCourierView>();
+
+  for (const route of routes) {
+    const courier = route.courier;
+    if (courier === null) {
+      continue;
+    }
+
+    const cellIds = new Set(route.cellBindings.map((binding) => binding.cellId));
+    const session = route.issueSessions[0] ?? null;
+    const checkedIds = new Set((session?.checks ?? []).map((check) => check.orderId));
+
+    const orders: IssueOrderView[] = route.orders.map((participation) => {
+      const order = participation.order;
+      const placement = order.placements[0] ?? null;
+      const cancelled = order.cancelledInSource || order.cancelledByLogistAt !== null;
+      const ready =
+        placement !== null &&
+        cellIds.has(placement.cell.id) &&
+        !placement.requiresRelocation &&
+        !cancelled;
+
+      return {
+        orderId: order.id,
+        orderNumber: order.externalName,
+        position: participation.position,
+        // Ячейки может не быть вовсе — тогда лист отгрузить нельзя.
+        cellCode: placement !== null && cellIds.has(placement.cell.id) ? placement.cell.code : null,
+        ready,
+        checked: checkedIds.has(order.id),
+      };
+    });
+
+    const minutes = route.orders
+      .map((item) => item.order.manualIntervalStartMinute ?? item.order.intervalStartMinute)
+      .filter((minute): minute is number => minute !== null);
+
+    const view: IssueRouteView = {
+      routeId: route.id,
+      routeNumber: route.number,
+      deliveryDate: fromDateColumn(route.deliveryDate),
+      earliestMinute: minutes.length === 0 ? null : Math.min(...minutes),
+      total: orders.length,
+      checked: orders.filter((order) => order.checked).length,
+      sessionOpen: session !== null,
+      /*
+       * Готовность считает СЕРВЕР и пересчитывает каждый раз.
+       *
+       * Отгрузить можно только лист, у которого все действующие заказы
+       * стоят в его маршрутных ячейках, не отменены и не требуют
+       * перемещения. Пустой лист не отгружается: везти нечего.
+       */
+      shippable: orders.length > 0 && orders.every((order) => order.ready),
+      orders,
+    };
+
+    const existing = byCourier.get(courier.id);
+    if (existing === undefined) {
+      byCourier.set(courier.id, {
+        courierUserId: courier.id,
+        fullName: courier.fullName,
+        phone: courier.phone,
+        routes: [view],
+      });
+    } else {
+      existing.routes.push(view);
+    }
+  }
+
+  const couriers = [...byCourier.values()];
+  for (const courier of couriers) {
+    courier.routes.sort(compareRoutes);
+  }
+  // Курьеры по имени: список короткий, и алфавит здесь понятнее любого
+  // другого порядка.
+  couriers.sort((left, right) => left.fullName.localeCompare(right.fullName, 'ru'));
+  return couriers;
+}

@@ -246,6 +246,16 @@ export function ScannerScreen({
               className={`scanner__notice scanner__notice--${state.notice.kind}`}
               data-testid={state.notice.kind === 'success' ? 'scan-success' : 'scan-error'}
             >
+              {state.notice.scanned !== undefined && (
+                <p className="text-sm" data-testid="scan-error-scanned">
+                  Распознано: {state.notice.scanned}
+                </p>
+              )}
+              {state.notice.expected !== undefined && (
+                <p className="text-sm" data-testid="scan-error-expected">
+                  Ожидалось: {state.notice.expected}
+                </p>
+              )}
               <p>{state.notice.text}</p>
               {state.notice.kind === 'error' && (
                 <div className="row">
@@ -268,6 +278,32 @@ export function ScannerScreen({
                   </Button>
                 </div>
               )}
+            </div>
+          )}
+
+          {state.step === 'ROUTE_CHOICE' && state.routeChoice !== null && (
+            <div className="scanner__notice" data-testid="scan-route-choice">
+              <p>
+                Заказ {state.orderNumber} уже входит в МЛ {state.routeChoice.routeNumber}
+              </p>
+              <div className="row">
+                <Button
+                  variant="primary"
+                  data-testid="scan-route-assembly"
+                  onClick={() => void dispatch({ type: 'routeChoiceAnswered', choice: 'ASSEMBLY' })}
+                >
+                  В сборку
+                </Button>
+                <Button
+                  data-testid="scan-route-storage"
+                  onClick={() => void dispatch({ type: 'routeChoiceAnswered', choice: 'STORAGE' })}
+                >
+                  Всё равно в хранение
+                </Button>
+                <Button data-testid="scan-route-cancel" onClick={close}>
+                  Отмена
+                </Button>
+              </div>
             </div>
           )}
 
@@ -296,11 +332,34 @@ export function ScannerScreen({
           )}
         </div>
 
-        {busy && state.notice === null && state.step !== 'ROUTE_CELL_CONSENT' && (
-          <p className="muted text-sm" data-testid="scan-busy">
-            Отправляем…
-          </p>
-        )}
+        {busy &&
+          state.notice === null &&
+          state.step !== 'ROUTE_CELL_CONSENT' &&
+          state.step !== 'ROUTE_CHOICE' && (
+            <p className="muted text-sm" data-testid="scan-busy">
+              Отправляем…
+            </p>
+          )}
+
+        {/*
+          «+ Доп. ячейка» — это согласие занять листом новую полку, а не
+          переключение вида. Без него свободная маршрутная ячейка отвергается
+          сервером: занятая полка меняет работу соседнего листа.
+        */}
+        {state.step === 'CELL' &&
+          state.target === 'ROUTE' &&
+          state.routeChoice !== null &&
+          state.routeChoice.cells.length > 0 && (
+            <Button
+              variant="secondary"
+              className="scanner__cancel"
+              data-testid="scan-add-cell"
+              disabled={state.allowNewCell}
+              onClick={() => void dispatch({ type: 'allowNewCell' })}
+            >
+              + Доп. ячейка
+            </Button>
+          )}
 
         <Button className="scanner__cancel" data-testid="scan-cancel" onClick={close}>
           Отмена
