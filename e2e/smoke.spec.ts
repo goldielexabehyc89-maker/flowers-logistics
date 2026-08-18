@@ -6254,3 +6254,288 @@ test('сборка: последовательная проверка, пауз�
     page.getByTestId('assembly-assembled').locator(`[data-route-number="${partial}"]`),
   ).toBeVisible();
 });
+
+/*
+ * Пять размеров экрана: от узкого телефона до настольного.
+ *
+ * Проверяется не «красиво», а работоспособно: ничего не уезжает за правый
+ * край, четыре вкладки помещаются в один ряд, окно отгрузки целиком внутри
+ * экрана, нижняя кнопка доступна, а длинные имя курьера, номер листа
+ * и номер заказа разметку не рвут.
+ */
+test('склад на пяти размерах: вкладки, окна, длинные значения и поля', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const longRoute = stand['мл длинный'] ?? '';
+
+  /*
+   * Сенсорный ввод объявляется честно.
+   *
+   * Приближение при фокусе — поведение сенсорных устройств, и проверять его
+   * на настольном профиле бессмысленно: правило размера текста написано
+   * ровно для `pointer: coarse` и узкого экрана.
+   */
+  const sizes = [
+    { width: 320, height: 568, touch: true },
+    { width: 375, height: 667, touch: true },
+    { width: 390, height: 844, touch: true },
+    { width: 768, height: 1024, touch: true },
+    { width: 1440, height: 900, touch: false },
+  ];
+
+  for (const size of sizes) {
+    const label = `${size.width}×${size.height}`;
+    const context = await browser.newContext({
+      viewport: { width: size.width, height: size.height },
+      hasTouch: size.touch,
+    });
+    const page = await context.newPage();
+    await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+    await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+    const overflow = async (): Promise<number> =>
+      page.evaluate<number>(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+      );
+
+    // 1. Четыре вкладки: один ряд, целиком в экране, ничего не уезжает.
+    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    const boxes = [];
+    for (const id of tabs) {
+      const box = await page.getByTestId(id).boundingBox();
+      expect(box, `${id} ${label}`).not.toBeNull();
+      boxes.push(box!);
+    }
+    const top = boxes[0]!.y;
+    for (const box of boxes) {
+      expect(Math.abs(box.y - top), `вкладки в один ряд ${label}`).toBeLessThan(2);
+      expect(box.x, label).toBeGreaterThanOrEqual(-1);
+      expect(box.x + box.width, label).toBeLessThanOrEqual(size.width + 1);
+    }
+
+    for (const id of tabs) {
+      await page.getByTestId(id).click();
+      expect(await overflow(), `${id} ${label}`).toBeLessThanOrEqual(1);
+    }
+
+    /*
+     * 2. Три уровня выдачи раскрываются, и страница не раздаётся вбок
+     * даже на длинном имени курьера и длинном номере листа.
+     */
+    await page.getByTestId('wh-tab-issue').click();
+    const route = await openIssueRoute(page, longRoute);
+    await expect(route).toContainText(longRoute);
+    expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
+
+    await route.getByTestId('issue-route-toggle').click();
+    await expect(route.locator('.wh-route__order')).toHaveCount(1);
+    expect(await overflow(), `раскрытые заказы ${label}`).toBeLessThanOrEqual(1);
+
+    // 3. Окно отгрузки целиком внутри экрана, нижняя кнопка доступна.
+    await route.getByTestId('issue-ship').click();
+    const dialog = page.getByTestId('issue-ship-dialog');
+    const dialogBox = await dialog.boundingBox();
+    expect(dialogBox, label).not.toBeNull();
+    expect(dialogBox!.x, `окно слева ${label}`).toBeGreaterThanOrEqual(-1);
+    expect(dialogBox!.x + dialogBox!.width, `окно справа ${label}`).toBeLessThanOrEqual(
+      size.width + 1,
+    );
+    expect(dialogBox!.y, `окно сверху ${label}`).toBeGreaterThanOrEqual(-1);
+    expect(dialogBox!.y + dialogBox!.height, `окно снизу ${label}`).toBeLessThanOrEqual(
+      size.height + 1,
+    );
+    expect(await overflow(), `окно отгрузки ${label}`).toBeLessThanOrEqual(1);
+
+    const submit = page.getByTestId('issue-ship-submit');
+    await submit.scrollIntoViewIfNeeded();
+    const submitBox = await submit.boundingBox();
+    expect(submitBox, `нижняя кнопка ${label}`).not.toBeNull();
+    expect(submitBox!.y + submitBox!.height, `нижняя кнопка видна ${label}`).toBeLessThanOrEqual(
+      size.height + 1,
+    );
+
+    // 4. Поля не вызывают приближения страницы на телефоне.
+    // Курьер подтверждается один раз на лист: на следующем размере экрана
+    // сессия уже открыта, и кнопки нет.
+    const confirmCourier = page.getByTestId('issue-confirm-courier');
+    if ((await confirmCourier.count()) > 0) {
+      await confirmCourier.click();
+    }
+    await expect(page.getByTestId('issue-manual-order')).toBeVisible();
+    if (size.touch) {
+      const fontSizes = await page.evaluate<number[]>(
+        "Array.from(document.querySelectorAll('input, select, textarea')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+      );
+      for (const font of fontSizes) {
+        expect(font, `размер шрифта поля ${label}`).toBeGreaterThanOrEqual(16);
+      }
+    }
+
+    // 5. Фокус видим: у поля в фокусе есть собственная обводка или тень.
+    await page.getByTestId('issue-manual-order').focus();
+    const focusRing = await page.evaluate<string>(
+      "(() => { const node = document.activeElement; if (node === null) { return ''; } const style = getComputedStyle(node); return [style.outlineStyle, style.outlineWidth, style.boxShadow, style.borderColor].join('|'); })()",
+    );
+    expect(focusRing, `видимый фокус ${label}`).not.toBe('');
+    expect(
+      focusRing.includes('none|0px|none') ? 'нет признака фокуса' : 'есть',
+      `видимый фокус ${label}`,
+    ).toBe('есть');
+
+    // 6. Фон под окном не прокручивается.
+    const scrollLocked = await page.evaluate<boolean>(
+      "getComputedStyle(document.body).overflow === 'hidden' || document.body.scrollHeight <= window.innerHeight",
+    );
+    expect(scrollLocked, `фон под окном ${label}`).toBe(true);
+
+    // 7. Escape закрывает ВЕРХНЕЕ окно, а не всё сразу.
+    await page.getByTestId('issue-scan').click();
+    await expect(page.getByTestId('scan-title')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('scan-title')).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+
+    await context.close();
+  }
+});
+
+/*
+ * Камера отказала — работа не останавливается.
+ *
+ * Отказ доступа, отсутствие устройства и оборванный поток не должны ни
+ * оставлять незавершённую операцию, ни блокировать аппаратный сканер:
+ * коробка стоит перед человеком, и склад обязан продолжать работать.
+ */
+test('камера: отказ, отсутствие устройства, обрыв потока и аппаратный сканер', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const order = stand['заказ без размещения'] ?? '';
+  const storage = stand['ячейка хранения A'] ?? '';
+
+  /** Подменяет `getUserMedia`: проверяется НАШЕ сопоставление причин. */
+  const denyCamera = async (page: Page, name: string): Promise<void> => {
+    await page.addInitScript(`
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: () => Promise.reject(new DOMException('нет доступа', '${name}')),
+        },
+      });
+    `);
+  };
+
+  // 1. Разрешение отклонено.
+  const denied = await browser.newContext();
+  const deniedPage = await denied.newPage();
+  await denyCamera(deniedPage, 'NotAllowedError');
+  await login(deniedPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await deniedPage.getByTestId('wh-scan-camera').click();
+  await expect(deniedPage.getByTestId('scan-camera-error')).toContainText('Доступ к камере');
+  // Подсказка называет обходные пути, а не техническую причину.
+  await expect(deniedPage.getByTestId('scan-camera-error')).toContainText('сканер');
+  await deniedPage.getByTestId('scan-cancel').click();
+
+  // Аппаратный сканер работает: пара сканов доводится до конца без камеры.
+  await deniedPage.getByTestId('wh-scan-order').fill(order);
+  await deniedPage.getByTestId('wh-scan-order').press('Enter');
+  await deniedPage.getByTestId('wh-scan-cell').fill(storage);
+  await deniedPage.getByTestId('wh-place').click();
+  await expect(deniedPage.locator('.toast-region')).toContainText(order);
+  await denied.close();
+
+  // 2. Камера отсутствует.
+  const absent = await browser.newContext();
+  const absentPage = await absent.newPage();
+  await denyCamera(absentPage, 'NotFoundError');
+  await login(absentPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await absentPage.getByTestId('wh-scan-camera').click();
+  await expect(absentPage.getByTestId('scan-camera-error')).toContainText('Камера не найдена');
+  await absentPage.getByTestId('scan-close').click();
+  await expect(absentPage.getByTestId('wh-scan-order')).toBeVisible();
+  await absent.close();
+
+  /*
+   * 3. Поток оборвался посреди пары сканов.
+   *
+   * Заказ распознан, ячейка — нет. Незавершённая пара не создаёт складских
+   * записей, поэтому после отмены заказ по-прежнему нигде не числится.
+   */
+  const broken = await browser.newContext();
+  const brokenPage = await broken.newPage();
+  await brokenPage.addInitScript(() => {
+    interface Globals {
+      __flCameraAdapter?: unknown;
+      __flScan?: (code: string) => void;
+      __flBreak?: () => void;
+    }
+    const scope = globalThis as unknown as Globals;
+    let onCode: ((code: string) => void) | null = null;
+    let alive = true;
+
+    scope.__flCameraAdapter = {
+      start: (_video: unknown, events: { onCode: (code: string) => void }) => {
+        onCode = events.onCode;
+        alive = true;
+        return Promise.resolve({
+          stop: () => {
+            alive = false;
+            onCode = null;
+          },
+        });
+      },
+    };
+    scope.__flScan = (code: string) => {
+      if (alive) {
+        onCode?.(code);
+      }
+    };
+    // Обрыв потока: кадры больше не приходят, само окно остаётся открытым.
+    scope.__flBreak = () => {
+      alive = false;
+    };
+  });
+  await login(brokenPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+
+  const second = stand['заказ не собран'] ?? '';
+  await brokenPage.getByTestId('wh-scan-camera').click();
+  await brokenPage.evaluate((code) => {
+    (globalThis as unknown as { __flScan: (value: string) => void }).__flScan(code);
+  }, second);
+  await expect(brokenPage.getByTestId('scan-success')).toContainText(second);
+
+  await brokenPage.evaluate(() => {
+    (globalThis as unknown as { __flBreak: () => void }).__flBreak();
+  });
+  // Кадры не приходят — человек закрывает окно сам.
+  await brokenPage.getByTestId('scan-cancel').click();
+  await expect(brokenPage.getByTestId('wh-scan-camera')).toBeVisible();
+
+  // Незавершённая пара следа не оставила.
+  await expect(
+    brokenPage.locator('[data-testid="wh-placement-row"]', { hasText: second }),
+  ).toHaveCount(0);
+
+  // И аппаратный сканер по-прежнему доводит ту же коробку до полки.
+  await brokenPage.getByTestId('wh-scan-order').fill(second);
+  await brokenPage.getByTestId('wh-scan-order').press('Enter');
+  // Заказ входит в лист, поэтому склад сначала спрашивает, куда его нести.
+  await brokenPage.getByTestId('wh-choice-storage').click();
+  await brokenPage.getByTestId('wh-scan-cell').fill(storage);
+  await brokenPage.getByTestId('wh-place').click();
+  await expect(brokenPage.locator('.toast-region')).toContainText(second);
+  await broken.close();
+});

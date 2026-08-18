@@ -111,6 +111,17 @@ async function main(): Promise<number> {
     const courierOne = await seedUser('Курьер стенда один', ['COURIER'], true);
     const courierTwo = await seedUser('Курьер стенда два', ['COURIER'], true);
     const manager = await seedUser('Менеджер самовывоза стенда', ['MANAGER'], false);
+    /*
+     * Курьер с длинным именем нужен разметке, а не полноте набора.
+     *
+     * Строка «курьер · телефон · счётчик» на экране 320 точек рвётся именно
+     * на длинном имени, и проверять её коротким «Курьер один» бессмысленно.
+     */
+    const courierLong = await seedUser(
+      'Александра Константиновна Первопроходцева-Синеглазова',
+      ['COURIER'],
+      true,
+    );
 
     const keeperActor = actorOf(keeper.id, ['WAREHOUSE']);
     const courierOneActor = actorOf(courierOne.id, ['COURIER']);
@@ -362,6 +373,28 @@ async function main(): Promise<number> {
     report.push(`заказ ${returning.number}: букет у курьера один, обязательство возврата открыто`);
     report.push(`заказ ${returned.number}: возврат принят складом в ${storageB}`);
 
+    // --- 6a. Длинные значения: имя курьера, номер листа и номер заказа -------
+    const routeLong = await seedRoute(
+      'ДЛИННЫЙ-НОМЕР-ДЛЯ-ПРОВЕРКИ-РАЗМЕТКИ-6',
+      'CONFIRMED',
+      courierLong.id,
+    );
+    const longOrder = await seedOrder('заказ-с-очень-длинным-номером-для-разметки', {
+      assembled: true,
+    });
+    await attach(routeLong.id, longOrder.id, 1);
+    const routeCellD = await seedCell('RD-', 'ROUTE');
+    await bindRouteCell(flow, keeperActor, routeLong.id, { cellCode: routeCellD }, context);
+    await receive(longOrder.number, storageA);
+    await pickOrderToRouteCell(
+      flow,
+      keeperActor,
+      routeLong.id,
+      { orderNumber: longOrder.number, cellCode: routeCellD },
+      context,
+    );
+    report.push(`МЛ ${routeLong.number}: длинные имя, номер листа и номер заказа`);
+
     // --- 7. Самовывоз для проверки realtime ----------------------------------
     const pickup = await seedOrder('самовывоз', { assembled: true, pickup: true });
     report.push(`заказ ${pickup.number}: самовывоз, размещения нет — появится у менеджера`);
@@ -378,6 +411,7 @@ async function main(): Promise<number> {
       ['курьер один', courierOne.phone],
       ['курьер два', courierTwo.phone],
       ['менеджер', manager.phone],
+      ['курьер длинное имя', courierLong.phone],
       ['пин', PIN],
       ['ячейка хранения A', storageA],
       ['ячейка хранения B', storageB],
@@ -389,6 +423,9 @@ async function main(): Promise<number> {
       ['мл частично', routePartial.number],
       ['мл без курьера', routeNoCourier.number],
       ['мл возвратов', routeReturns.number],
+      ['мл длинный', routeLong.number],
+      ['ячейка маршрутная D', routeCellD],
+      ['заказ длинный', longOrder.number],
       ['заказ ждёт приёмки', awaiting.number],
       ['заказ не собран', notAssembled.number],
       ['заказ готов 1', readyOne.number],
