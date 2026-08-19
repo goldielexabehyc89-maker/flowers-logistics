@@ -32,7 +32,7 @@ import { receiveOrder, withdrawOrder, type FlowDeps } from '../warehouse/placeme
 import { applyCancellation } from '../integrations/moysklad/cancellation.js';
 import { saveWarehouseManualEntry, readWarehouseManualEntry } from '../settings/service.js';
 import { issueToCustomer, type PickupDeps } from './service.js';
-import { listPickupQueue } from './views.js';
+import { findPickupByNumber, listPickupQueue } from './views.js';
 
 let ctx: TestContext;
 let pickup: PickupDeps;
@@ -256,13 +256,21 @@ describe('состав очереди', () => {
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
   });
 
-  it('выданный уходит из очереди', async () => {
-    const { order } = await placed();
+  it('выданный уходит из очереди и помнит, откуда его забрали', async () => {
+    const { order, cell } = await placed();
     const manager = await actorFor(['MANAGER']);
 
     await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
 
     expect(await queueNumbers()).not.toContain(order.number);
+
+    /*
+     * Действующего размещения у выданного заказа нет, но вопрос «откуда
+     * отдали» обязан иметь ответ: карточка показывает ячейку факта выдачи.
+     */
+    const card = await findPickupByNumber(ctx.db, order.number);
+    expect(card.cellCode).toBe(cell.code);
+    expect(card.blockers).toContain('ALREADY_ISSUED');
   });
 });
 

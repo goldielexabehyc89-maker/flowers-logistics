@@ -84,7 +84,9 @@ const ORDER_SELECT = {
     select: { cell: { select: { id: true, code: true } } },
   },
   printJobs: { select: { state: true } },
-  pickupIssue: { select: { issuedAt: true, issuedById: true } },
+  pickupIssue: {
+    select: { issuedAt: true, issuedById: true, cell: { select: { id: true, code: true } } },
+  },
 } as const;
 
 type OrderRow = {
@@ -101,7 +103,7 @@ type OrderRow = {
   fulfillmentAssembledAt: Date | null;
   placements: { cell: { id: string; code: string } }[];
   printJobs: { state: $Enums.PrintJobState }[];
-  pickupIssue: { issuedAt: Date; issuedById: string } | null;
+  pickupIssue: { issuedAt: Date; issuedById: string; cell: { id: string; code: string } } | null;
 };
 
 /**
@@ -154,8 +156,14 @@ function toCard(order: OrderRow): PickupCard {
     assembledAt: order.fulfillmentAssembledAt?.toISOString() ?? null,
     printJobs: order.printJobs.length,
     printedJobs: order.printJobs.filter((job) => job.state === 'PRINTED').length,
-    cellId: placement?.cell.id ?? null,
-    cellCode: placement?.cell.code ?? null,
+    /*
+     * Выданный заказ показывает ячейку, ИЗ КОТОРОЙ его забрали.
+     *
+     * Действующего размещения у него уже нет, и «нет ячейки» в справке
+     * о выдаче отвечало бы не на тот вопрос: спрашивают «откуда отдали».
+     */
+    cellId: placement?.cell.id ?? order.pickupIssue?.cell.id ?? null,
+    cellCode: placement?.cell.code ?? order.pickupIssue?.cell.code ?? null,
     issuedAt: order.pickupIssue?.issuedAt.toISOString() ?? null,
     issuedById: order.pickupIssue?.issuedById ?? null,
     blockers,
