@@ -17,14 +17,15 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { VEHICLE_TYPE_LABELS } from '@fl/shared';
 import { Plus } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
-import { EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
+import { Button, EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { RouteCard } from './RouteCard';
 import { PreviewPanel } from './PreviewPanel';
 import { DraftMapPanel } from './DraftMapPanel';
 import { useWorkspace } from '../logistics/useWorkspace';
-import { type RouteListResponse } from './routing';
+import { formatDate, type RouteListResponse } from './routing';
 import './routing.css';
 
 export function RoutingScreen(): React.JSX.Element {
@@ -147,6 +148,9 @@ export function RoutingScreen(): React.JSX.Element {
               списку; внизу она жила в отдельной полосе, которая повторяла дату
               и отнимала у списка последнюю строку.
             */}
+            <Button className="routes__refresh" onClick={() => void routes.refetch()}>
+              Обновить
+            </Button>
             <button
               type="button"
               className="routes__draft-add"
@@ -207,12 +211,14 @@ export function RoutingScreen(): React.JSX.Element {
                           aria-hidden="true"
                         />
                         <span className="routes__number">{draft.number}</span>
-                        <span className="routes__draft-count">
-                          {draft.orderCount} зак.
+                        <span className="routes__draft-badge">Черновик</span>
+                        <span className="routes__draft-meta">
+                          {formatDate(draft.deliveryDate)} ·{' '}
+                          {VEHICLE_TYPE_LABELS[draft.vehicleType]} · остановок {draft.orderCount}
                           {draft.conflictCount > 0 ? ` · расхождений: ${draft.conflictCount}` : ''}
                         </span>
-                        <span className="routes__draft-chevron" aria-hidden="true">
-                          {expanded ? '▲' : '▼'}
+                        <span className="routes__draft-toggle-text">
+                          {expanded ? 'Свернуть' : 'Развернуть'}
                         </span>
                       </button>
 

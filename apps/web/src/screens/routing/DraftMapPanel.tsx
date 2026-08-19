@@ -231,24 +231,25 @@ export function DraftMapPanel({
    * возвращаемой, а вернуть её больше неоткуда.
    */
   const listToggle = (
-    <div className="routes__map-actions">
-      <button
-        type="button"
-        className="routes__map-toggle"
-        aria-expanded={!draftsHidden}
-        aria-controls="routing-drafts"
-        data-testid="routing-toggle-drafts"
-        onClick={onToggleDrafts}
-      >
-        {draftsHidden ? 'Показать черновики' : 'Скрыть черновики'}
-      </button>
-    </div>
+    <button
+      type="button"
+      className="routes__map-toggle"
+      aria-expanded={!draftsHidden}
+      aria-controls="routing-drafts"
+      data-testid="routing-toggle-drafts"
+      onClick={onToggleDrafts}
+    >
+      {draftsHidden ? 'Показать черновики' : 'Скрыть черновики'}
+    </button>
   );
 
   if (!status.ready) {
     return (
       <section className="routes__map-panel" data-testid="routing-map-panel">
-        {listToggle}
+        <header className="routes__map-header">
+          <span className="routes__map-count">Карта не настроена</span>
+          {listToggle}
+        </header>
         {/*
           Панель сохраняет полную высоту: сообщение стоит там, где была бы
           карта. Сжатый блок сверху выглядел бы поломкой раскладки, тогда как
@@ -281,44 +282,46 @@ export function DraftMapPanel({
 
   return (
     <section className="routes__map-panel" data-testid="routing-map-panel">
-      {listToggle}
       {/*
-        Служебная строка лежит НАД полотном карты, а не отдельной полосой сверху.
+        Служебная строка — шапка панели, а не ярлык поверх полотна.
 
-        Отдельный ряд отнимал у карты высоту, ради которой её и открывают:
-        счётчик точек и переключатель занимают несколько десятков пикселей,
-        а карта теряла их на всей ширине.
+        Поверх карты она закрывала собой её угол и читалась как часть
+        изображения: счётчик точек и переключатель — управление, и стоять
+        им рядом с кнопкой списка, в одном ряду.
       */}
-      <div className="routes__map-surface" data-testid="routing-map-surface">
-        <div className="routes__map-overlay">
-          <span
-            className="muted text-sm"
-            data-testid="route-line-points"
-            data-points={String(geometry.data?.line.length ?? -1)}
-          >
-            {activeRouteId === null ? 'черновик не раскрыт' : `точек: ${visible.length}`}
-            {geometry.data?.unavailableReason !== undefined &&
-              geometry.data.unavailableReason !== null && (
-                <span className="routes__map-note" data-testid="route-line-missing">
-                  {' · '}
-                  {geometry.data.unavailableReason}
-                </span>
-              )}
-          </span>
-          <label className="routes__toggle">
-            <input
-              type="checkbox"
-              checked={showUnassigned}
-              data-testid="map-unassigned-toggle"
-              onChange={(event) => {
-                setShowUnassigned(event.target.checked);
-                setSelectedOrderId(null);
-              }}
-            />
-            Нераспределённые сделки дня
-          </label>
-        </div>
+      <header className="routes__map-header">
+        <span
+          className="routes__map-count"
+          data-testid="route-line-points"
+          data-points={String(geometry.data?.line.length ?? -1)}
+        >
+          {activeRouteId === null
+            ? 'Черновик не раскрыт'
+            : `Точек на карте ${String(visible.length)}`}
+          {geometry.data?.unavailableReason !== undefined &&
+            geometry.data.unavailableReason !== null && (
+              <span className="routes__map-note" data-testid="route-line-missing">
+                {' · '}
+                {geometry.data.unavailableReason}
+              </span>
+            )}
+        </span>
+        <label className="routes__toggle">
+          <input
+            type="checkbox"
+            checked={showUnassigned}
+            data-testid="map-unassigned-toggle"
+            onChange={(event) => {
+              setShowUnassigned(event.target.checked);
+              setSelectedOrderId(null);
+            }}
+          />
+          Нераспределённые сделки дня
+        </label>
+        {listToggle}
+      </header>
 
+      <div className="routes__map-surface" data-testid="routing-map-surface">
         {basemapFailed ? (
           <ErrorState
             title="Подложка карты не загрузилась"
