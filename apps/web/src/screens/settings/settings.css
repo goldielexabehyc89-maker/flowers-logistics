@@ -1,0 +1,71 @@
+/* Страница настроек: рейл разделов и содержимое. */
+
+.settings {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+/*
+ * Рейл держится на месте при прокрутке.
+ *
+ * Смысл навигации в том, чтобы перейти к разделу из любой точки страницы;
+ * уехавший вверх рейл этого не даёт. Отступ сверху учитывает закреплённую
+ * строку каркаса, иначе первый пункт прячется под ней.
+ */
+.settings__rail {
+  position: sticky;
+  top: calc(var(--topbar-height) + var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.settings__rail-link {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+}
+
+.settings__rail-link:hover {
+  color: var(--color-text);
+  box-shadow: var(--shadow-in);
+}
+
+.settings__body {
+  min-width: 0;
+}
+
+/*
+ * Ниже 900px рейл становится рядом чипов над содержимым.
+ *
+ * Колонкой он съедал бы половину узкого экрана ради навигации, которой
+ * пользуются раз за посещение.
+ */
+@media (max-width: 900px) {
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings__rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .settings__rail-link {
+    white-space: nowrap;
+  }
+}

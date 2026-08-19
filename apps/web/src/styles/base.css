@@ -144,11 +144,18 @@ time {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * Карточка выпуклая: она лежит НА полотне, а не вырезана в нём.
+ *
+ * Граница ушла вместе с белой заливкой — на общем фоне её роль выполняет
+ * крупная светотень. Радиус заметно больше прежнего: панель такого размера
+ * с малым скруглением выглядит обрезанной по краю экрана.
+ */
 .card {
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+  border: none;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-out-lg);
   padding: var(--space-4);
 }
 
