@@ -249,10 +249,55 @@ async function login(page: Page, phone: string, pin: string): Promise<void> {
   await page.getByRole('button', { name: 'Войти' }).click();
 }
 
+/**
+ * Переход в раздел верхнего уровня.
+ *
+ * Разделы живут в боковом меню, а оно с некоторых пор выезжает поверх экрана и
+ * закрыто по умолчанию: постоянная колонка отнимала у работы ширину. Ссылка
+ * при этом никуда не делась — изменился путь к ней, и он разный на разных
+ * ширинах: на телефоне разделы дублирует нижняя полоса, там меню открывать
+ * незачем. Помощник идёт тем путём, который на этом экране есть.
+ */
+async function openSection(page: Page, name: string): Promise<void> {
+  const direct = page.getByRole('link', { name, exact: true }).first();
+  if (await direct.isVisible().catch(() => false)) {
+    await direct.click();
+    return;
+  }
+  // Оболочка обязана быть отрисована: сразу после входа кнопок ещё нет,
+  // и «не видно» означало бы «не успело», а не «этого пути здесь нет».
+  await page.locator('.shell__topbar').waitFor({ state: 'visible', timeout: 15_000 });
+  // Кнопок вызова две и они взаимоисключающие: на широком экране — та, что
+  // выезжает панель, на телефоне — бургер. Берётся видимая.
+  const wide = page.locator('.shell__menu-button');
+  const button = (await wide.isVisible().catch(() => false))
+    ? wide
+    : page.locator('.shell__drawer-button');
+  const sidebar = page.locator('#shell-sidebar');
+  if (!(await sidebar.isVisible().catch(() => false))) {
+    await button.click();
+  }
+  const link = sidebar.getByRole('link', { name, exact: true }).first();
+  await link.waitFor({ state: 'visible', timeout: 15_000 });
+  await link.click();
+}
+
 async function logout(page: Page): Promise<void> {
-  // Кнопка учётной записи подписана именем пользователя, поэтому берётся
-  // последняя кнопка верхней строки, а не угадывается текст.
-  await page.locator('.shell__topbar button').last().click();
+  /*
+   * Учётная запись живёт в двух местах, и это не дублирование.
+   *
+   * На обычных экранах имя стоит кнопкой в верхней строке. В логистике верхняя
+   * строка занята вкладками раздела, и имя уехало вниз бокового меню, чтобы не
+   * отнимать у них ширину. Выход при этом никуда не делся — изменился путь
+   * к нему, поэтому помощник идёт тем путём, который на этом экране есть.
+   */
+  const topbarAccount = page.locator('.shell__topbar-account');
+  if (await topbarAccount.isVisible()) {
+    await topbarAccount.click();
+  } else {
+    await page.locator('.shell__menu-button').click();
+    await page.locator('#shell-sidebar .shell__account-name').click();
+  }
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
 }
@@ -295,7 +340,7 @@ async function ensureCourier(browser: Browser): Promise<string> {
   await login(admin, ADMIN_PHONE, ADMIN_PIN);
 
   const phone = uniquePhone();
-  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(admin, 'Сотрудники и курьеры');
   await admin.getByRole('button', { name: 'Добавить' }).click();
   await admin.getByLabel('ФИО').fill('Курьер проверки');
   await admin.getByLabel('Телефон').fill(phone);
@@ -372,12 +417,12 @@ test('сквозной сценарий этапа 1', async ({ page, browser }:
   await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
   // 3. Административная навигация: настройки доступны.
-  await page.getByRole('link', { name: 'Настройки' }).click();
+  await openSection(page, 'Настройки');
   await expect(page.getByRole('heading', { name: 'Состояние интеграций' })).toBeVisible();
 
   // 4. Создание курьера.
   courierPhone = uniquePhone();
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page.getByRole('button', { name: 'Добавить' }).click();
   await page.getByLabel('ФИО').fill('Курьер проверки');
   await page.getByLabel('Телефон').fill(courierPhone);
@@ -457,11 +502,11 @@ test('заморозка доходит до открытых сеансов б�
   const secondAdminContext = await browser.newContext();
   const secondAdminPage = await secondAdminContext.newPage();
   await login(secondAdminPage, ADMIN_PHONE, ADMIN_PIN);
-  await secondAdminPage.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(secondAdminPage, 'Сотрудники и курьеры');
   await secondAdminPage.getByLabel('Статус').selectOption('FROZEN');
 
   // Заморозка курьера в первом сеансе.
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page
     .getByRole('row', { name: /Курьер проверки/ })
     .getByRole('button', { name: 'Заморозить' })
@@ -485,7 +530,7 @@ test('Сделки: день, поиск, выбор из списка и руч
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
@@ -546,7 +591,7 @@ test('карта не настроена: интерфейс говорит че
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -592,7 +637,7 @@ test('Сделки: ручная точка выводит заказ из «Т�
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -707,7 +752,7 @@ test('собственная подложка: всё с нашего origin и 
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -836,7 +881,7 @@ test('адреса подложки: архив запрашивается из 
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
 
@@ -912,7 +957,7 @@ test('маршрут: черновик → состав → порядок → �
   expect([first, second, third].every((number) => number !== '')).toBe(true);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -1041,7 +1086,7 @@ test('маршрут: черновик → состав → порядок → �
 
   // Тот же маршрут появляется в маршрутных листах.
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   await page
@@ -1075,7 +1120,7 @@ test('перехват блокировки переводит прежнего 
 
   // Первый сеанс создаёт черновик и держит его в работе.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
   const ownDeal = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -1141,7 +1186,7 @@ test('печатная версия листа не содержит навиг�
   expect(own).toBeTruthy();
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
   const ownCard = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -1235,7 +1280,7 @@ test('Сделки: точный выбор → расчёт → превью �
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
   // 1. Настройки: обязательные условия задаются формами, а не запросами к API.
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   const settings = page.getByTestId('planning-settings');
   await expect(settings).toBeVisible();
 
@@ -1314,7 +1359,7 @@ test('Сделки: точный выбор → расчёт → превью �
    */
   // Сколько черновиков уже есть у дня: разбивка обязана добавить ровно два,
   // а не «сделать так, чтобы их стало два» — соседние сценарии оставляют свои.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   /*
    * Считать черновики можно только после загрузки списка.
@@ -1447,7 +1492,7 @@ test('Сделки: точный выбор → расчёт → превью �
 
   // 7. Третья обязательная форма: время обслуживания. Меняется после
   //    применения, поэтому условия уже применённого плана не задевает.
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   await settings.getByTestId('service-car').fill('12');
   await settings.getByTestId('service-foot').fill('15');
   await settings.getByTestId('service-save').click();
@@ -1581,7 +1626,7 @@ test('флорист: смена, захват, сборка, бланк и от
   // 1. Администратор заводит флориста.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   const floristPhone = uniquePhone();
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page.getByRole('button', { name: 'Добавить' }).click();
   await page.getByLabel('ФИО').fill('Флорист проверки');
   await page.getByLabel('Телефон').fill(floristPhone);
@@ -1946,7 +1991,7 @@ test('складские ячейки: администратор управля
 
   // 1. Администратор заводит ячейку в настройках.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
 
   const cells = page.locator('section', { hasText: 'Складские ячейки' }).first();
   await expect(cells).toBeVisible();
@@ -1976,7 +2021,7 @@ test('складские ячейки: администратор управля
 
   // 4. Администратор заводит кладовщика.
   const warehousePhone = uniquePhone();
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page.getByRole('button', { name: 'Добавить' }).click();
   await page.getByLabel('ФИО').fill('Кладовщик проверки');
   await page.getByLabel('Телефон').fill(warehousePhone);
@@ -2032,7 +2077,7 @@ test('склад: развилка «сборка или хранение», с�
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
 
   /*
@@ -2208,7 +2253,7 @@ test('склад: развилка «сборка или хранение», с�
    * 9. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
    * что именно он повёз, — но уже без изменяющих действий.
    */
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   const activeRow = page.locator('.routes__list-item', { hasText: routeNumber });
   await expect(activeRow).toContainText('Передан курьеру');
@@ -2484,7 +2529,7 @@ test('возврат: логист ждёт склад, склад приним�
   await page.getByRole('button', { name: 'Закрыть' }).first().click();
 
   // 3. Склад принимает возврат: скан заказа и скан обычной ячейки хранения.
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await page.getByTestId('wh-tab-returns').click();
   await page.getByTestId('wh-return-order').fill(orderNumber);
   await page.getByTestId('wh-return-order').press('Enter');
@@ -2502,7 +2547,7 @@ test('возврат: логист ждёт склад, склад приним�
 
   // 4. У логиста заказ стал пригодным для нового маршрута — без F5.
   // Вкладки логистики видны только внутри раздела, поэтому сначала раздел.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Требуют решения' }).first().click();
   const afterRow = page.locator(
     `[data-testid="resolution-row"][data-order-number="${orderNumber}"]`,
@@ -2625,7 +2670,7 @@ test('два сеанса: приёмка возврата складом уби
 
     // Кладовщик принимает возврат в другом сеансе.
     await login(page, ADMIN_PHONE, ADMIN_PIN);
-    await page.getByRole('link', { name: 'Склад' }).first().click();
+    await openSection(page, 'Склад');
     await page.getByTestId('wh-tab-returns').click();
     await page.getByTestId('wh-return-order').fill(orderNumber);
     await page.getByTestId('wh-return-order').press('Enter');
@@ -2902,7 +2947,7 @@ test('склад: «Требуется перемещение» и «Отмен�
   test.skip(inRouteCell === '' || cancelled === '', 'не передана фикстура возвратов (E2E_RET_*)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
 
   const relocation = page.getByTestId('wh-group-relocation');
   const cancelledGroup = page.getByTestId('wh-group-cancelled');
@@ -2949,7 +2994,7 @@ test('печать: «Общие» показывают серверный на�
    * включения «Общих», пришло с сервера, а не осталось на экране.
    */
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Флорист' }).first().click();
+  await openSection(page, 'Флорист');
   await page.getByRole('button', { name: 'Печать' }).click();
   await page.getByTestId('print-filter-printed').click();
 
@@ -2981,7 +3026,7 @@ test('карты: собранный заказ окрашен одинаков�
    * становится готовым к отправке — по второму признаку готовности,
    * «лежит в ячейке». Именно его и проверяет цвет.
    */
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await page.getByTestId('wh-tab-returns').click();
   await page.getByTestId('wh-return-order').fill(orderNumber);
   await page.getByTestId('wh-return-order').press('Enter');
@@ -2998,7 +3043,7 @@ test('карты: собранный заказ окрашен одинаков�
    */
   const expected = 'rgb(176, 201, 101)';
 
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   const dealsDot = page.locator('.map-point--assembled .map-point__dot').first();
   await expect(dealsDot).toBeVisible();
@@ -3047,7 +3092,7 @@ test('самовывоз: флорист собрал → склад приня�
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
   async function createUser(name: string, roleLabel: string): Promise<[string, string]> {
-    await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+    await openSection(page, 'Сотрудники и курьеры');
     await page.getByRole('button', { name: 'Добавить' }).click();
     await page.getByLabel('ФИО').fill(name);
     const phone = uniquePhone();
@@ -3094,7 +3139,7 @@ test('самовывоз: флорист собрал → склад приня�
   await floristContext.close();
 
   // 3. Кладовщик принимает заказ в обычную ячейку хранения: маршрут не нужен.
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await page.getByTestId('wh-scan-order').fill(orderNumber);
   await page.getByTestId('wh-scan-order').press('Enter');
   await expect(page.getByTestId('wh-scanned-order')).toHaveText(orderNumber);
@@ -3273,7 +3318,7 @@ test('склад с камеры: окно, промежуточный успе�
     );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
 
   const hint = page.getByTestId('scan-hint');
   const title = page.getByTestId('scan-title');
@@ -3472,7 +3517,7 @@ test('карта «Сделок»: подложка Москвы при нуле
   });
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
 
@@ -3664,7 +3709,7 @@ test('«Сделки» на большом экране: доли, своя пр
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -3997,7 +4042,7 @@ test('«Сделки»: правка интервала доходит до вт
 
   const openDeals = async (target: Page): Promise<void> => {
     await login(target, ADMIN_PHONE, ADMIN_PIN);
-    await target.getByRole('link', { name: 'Логистика' }).first().click();
+    await openSection(target, 'Логистика');
     await target.getByRole('link', { name: 'Сделки' }).first().click();
     await expect(target.getByTestId('deals-workspace')).toBeVisible();
     await target.getByLabel('Поиск в этом дне').fill(number ?? '');
@@ -4092,7 +4137,7 @@ test('карта «Сделок»: отметка стоит на своей к�
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
 
@@ -4230,7 +4275,7 @@ test('маршрутизация: линия идёт от склада и ме�
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
 
   for (const number of [first, second]) {
@@ -4364,7 +4409,7 @@ test('маршрутные листы: разделы, курьер, ручна�
   await ensureCourier(page.context().browser() as Browser);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
 
   // 1. Сделки → диалог → сразу маршрутный лист (сквозной сценарий 2).
@@ -4502,7 +4547,7 @@ test('выбор курьера: открытие полем, фильтраци
   await ensureCourier(page.context().browser() as Browser);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -4661,7 +4706,7 @@ test('история и отчёты: тариф, доставка, расчёт
    * Тариф, включение учёта и геометрия МКАД заводятся ЭКРАНОМ настроек:
    * проверяется тот путь, которым пользуется администратор, а не только API.
    */
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   await expect(page.getByTestId('finance-settings')).toBeVisible();
 
   await page.getByTestId('tariff-from').fill(today);
@@ -4699,7 +4744,7 @@ test('история и отчёты: тариф, доставка, расчёт
   await expect(settings.getByRole('button', { name: /Загрузить/i })).toHaveCount(0);
 
   // 1. Обычный путь: сделка → лист → курьер → отгрузка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -4750,7 +4795,7 @@ test('история и отчёты: тариф, доставка, расчёт
   await courierContext.close();
 
   // 3. «История» показывает маршрут, его состав и хронологию.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'История' }).first().click();
   await expect(page.getByTestId('history-screen')).toBeVisible();
   await page.getByTestId('history-search').fill(own ?? '');
@@ -5304,7 +5349,7 @@ test('«Активные»: рабочий адрес, интервал 10:00–
    * корректный интервал получал общее «Проверьте правильность заполнения
    * полей». Проверяется именно этот путь — тот, которым пользуется логист.
    */
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
 
@@ -5420,7 +5465,7 @@ test('настройки: переключатель ручной отгрузк
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   const toggle = page.getByTestId('manual-issue-toggle');
   await expect(toggle).toBeVisible();
   // Значение по умолчанию сохранено и показано, а не придумано экраном.
@@ -5431,17 +5476,17 @@ test('настройки: переключатель ручной отгрузк
   await clickAndAwait(page, toggle, 'PUT', '/settings/planning/manual-issue');
   await expect(toggle).not.toBeChecked();
 
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   await expect(page.getByTestId('sheet-ship')).toHaveCount(0);
 
   // Возвращаем разрешение: кнопка снова на месте.
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   await clickAndAwait(page, page.getByTestId('manual-issue-toggle'), 'PUT', '/manual-issue');
   await expect(page.getByTestId('manual-issue-toggle')).toBeChecked();
 
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   const unshipped = page.getByTestId('sheets-UNSHIPPED');
   await expect(unshipped).toBeVisible();
@@ -5533,7 +5578,7 @@ test('два сеанса: подтверждение листа доходит 
    * Черновик производство не трогает: собирать под него нечего, и до
    * подтверждения ни очередь флориста, ни склад о нём знать не обязаны.
    */
-  await admin.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(admin, 'Логистика');
   await admin.getByRole('link', { name: 'Сделки' }).first().click();
   const deal = admin.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
   await expect(deal).toHaveAttribute('data-selectable', 'yes');
@@ -5696,7 +5741,7 @@ test('два сеанса: справочник курьеров у админи
   const token = ((await auth.json()) as { accessToken: string }).accessToken;
   const logist = await seedRole(admin, token, 'LOGISTICIAN', '5566');
 
-  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(admin, 'Сотрудники и курьеры');
   // Вкладки ролей вместо выпадающего фильтра, «Добавить» — в рабочей панели.
   await expect(admin.getByTestId('user-role-tab')).toHaveCount(6);
   await expect(admin.getByTestId('user-add')).toBeVisible();
@@ -5711,7 +5756,7 @@ test('два сеанса: справочник курьеров у админи
   const logistContext = await browser.newContext();
   const logistPage = await logistContext.newPage();
   await login(logistPage, logist.phone, logist.pin);
-  await logistPage.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await openSection(logistPage, 'Сотрудники и курьеры');
 
   // У логиста одна вкладка — «Курьеры», и кнопка называет, кого он заводит.
   await expect(logistPage.getByTestId('user-role-tab')).toHaveCount(1);
@@ -7264,7 +7309,7 @@ test('настройки: переключатель ручного ввода �
 
   // 1. Администратор видит переключатель и его умолчание.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   const toggle = page.getByTestId('manual-entry-toggle');
   await expect(page.getByTestId('manual-entry-form')).toContainText(
     'Разрешить ручной ввод на складе и в самовывозе',
@@ -7343,7 +7388,7 @@ test('«Сделки»: список курьеров не обрезан, сп�
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -7431,7 +7476,7 @@ test('оболочка: меню выезжает поверх экрана и �
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   const workspace = page.getByTestId('deals-workspace');
   await expect(workspace).toBeVisible();
@@ -7461,6 +7506,101 @@ test('оболочка: меню выезжает поверх экрана и �
   await page.locator('#shell-sidebar').getByRole('link', { name: 'Настройки' }).click();
   await expect(page.getByRole('heading', { name: 'Настройки', level: 1 })).toBeVisible();
   await expect(page.locator('.shell--drawer-open')).toHaveCount(0);
+
+  await context.close();
+});
+
+/**
+ * «Маршрутизация»: то, чего не проверял ни один существующий сценарий.
+ *
+ * Создание черновиков, состав, перестановка, перенос, «Создать МЛ» и «Отменить
+ * маршрут» уже покрыты сквозным сценарием черновика и проверкой линии, а
+ * идемпотентность повторного тела — сценарием пустого черновика. Здесь ровно
+ * то, что осталось без проверки: свёрнутое состояние, история, скрытие списка
+ * и переносимость состояния через него.
+ */
+test('маршрутизация: свёрнутый черновик, история и скрытие списка', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+
+  // Свой пустой черновик: он создаётся раскрытым.
+  await page.getByTestId('routing-add-draft').click();
+  const draft = page.locator('.routes__draft').first();
+  await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
+
+  // --- Свёрнутое состояние не прячет тело, а не имеет его ------------------
+  await draft.locator('.routes__draft-head').click();
+  await expect(draft).toHaveAttribute('data-expanded', 'false');
+  // Ни курьера, ни действий, ни истории: содержимое удалено, а не скрыто.
+  await expect(draft.locator('.routes__card')).toHaveCount(0);
+  await expect(draft.getByText('История маршрута')).toHaveCount(0);
+  const collapsedHeight = (await draft.boundingBox())?.height ?? 0;
+  expect(collapsedHeight).toBeLessThan(80);
+
+  // --- История раскрывается внутри карточки --------------------------------
+  await draft.locator('.routes__draft-head').click();
+  await expect(draft).toHaveAttribute('data-expanded', 'true');
+  const history = draft.getByText('История маршрута');
+  await expect(history).toBeVisible();
+  await history.click();
+  await expect(draft.locator('.routes__history[open]')).toHaveCount(1);
+
+  // --- Скрытие списка расширяет карту --------------------------------------
+  const mapBefore = (await page.getByTestId('routing-map-panel').boundingBox())?.width ?? 0;
+  await page.getByTestId('routing-toggle-drafts').click();
+  await expect(page.getByTestId('routing-drafts')).toBeHidden();
+  const mapWide = (await page.getByTestId('routing-map-panel').boundingBox())?.width ?? 0;
+  expect(mapWide).toBeGreaterThan(mapBefore);
+  // Вернуть список нечем, если кнопка исчезла вместе с ним.
+  await expect(page.getByTestId('routing-toggle-drafts')).toBeVisible();
+
+  await page.getByTestId('routing-toggle-drafts').click();
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  // Раскрытый черновик и его раскрытая история пережили скрытие: панель
+  // убирается из сетки, но не размонтируется.
+  await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
+  await expect(draft.locator('.routes__history[open]')).toHaveCount(1);
+
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(0);
+
+  await context.close();
+});
+
+/** «Маршрутизация» на телефоне: обе области и управление панелями доступны. */
+test('маршрутизация на телефоне: список, карта и переключатель без выезда', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.goto('/logistics/routing');
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  await expect(page.getByTestId('routing-map-panel')).toBeVisible();
+  await expect(page.getByTestId('routing-toggle-drafts')).toBeVisible();
+
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(0);
 
   await context.close();
 });
