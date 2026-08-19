@@ -368,7 +368,14 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * Настройка ручного ввода меняет оба рабочих места сразу: у кладовщика
    * появляется поле номера, у менеджера — ручная выдача.
    */
-  'settings.manual_entry_changed': [...PICKUP_SCREEN, ['warehouse-settings'], ...WAREHOUSE_SCREEN],
+  'settings.manual_entry_changed': [
+    ...PICKUP_SCREEN,
+    ['warehouse-settings'],
+    ...WAREHOUSE_SCREEN,
+    // И сам экран настроек: переключатель у второго администратора обязан
+    // показывать то же значение, что и у первого.
+    ['planning-settings'],
+  ],
 
   /*
    * Учёт изменился — перечитываются отчёты и балансы.

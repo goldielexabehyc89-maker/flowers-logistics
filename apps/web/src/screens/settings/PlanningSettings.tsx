@@ -54,6 +54,11 @@ const MICRO = 1_000_000;
 interface PlanningSettingsResponse {
   /** Ручная отгрузка без складского сканирования. Меняет только администратор. */
   manualIssue: { value: { enabled: boolean }; version: number };
+  /**
+   * Ручной ввод номеров. ОДИН флаг на два рабочих места: кладовщик набирает
+   * заказ и ячейку руками, менеджер самовывоза выдаёт без сканирования.
+   */
+  warehouseManualEntry: { value: { enabled: boolean }; version: number };
   shift: { value: { startMinute: number; endMinute: number } | null; version: number };
   serviceTime: {
     value: { carMinutes: number; footMinutes: number };
@@ -118,6 +123,10 @@ export function PlanningSettings(): React.JSX.Element {
     // Вкладка маршрутных листов питается той же настройкой: без этого кнопка
     // «Отгрузить» меняла бы состояние только после перезагрузки страницы.
     await queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
+    // Складской экран и прилавок самовывоза питаются тем же флагом ручного
+    // ввода: поля обязаны появиться или исчезнуть сразу.
+    await queryClient.invalidateQueries({ queryKey: ['warehouse-settings'] });
+    await queryClient.invalidateQueries({ queryKey: ['pickup-day'] });
   };
 
   /**
@@ -137,6 +146,26 @@ export function PlanningSettings(): React.JSX.Element {
     onSuccess: async (_result, enabled) => {
       await invalidate();
       showToast(enabled ? 'Ручная отгрузка разрешена' : 'Ручная отгрузка запрещена', 'success');
+    },
+    onError: (error: unknown) => showToast(errorText(error), 'error'),
+  });
+
+  /**
+   * Переключение ручного ввода номеров.
+   *
+   * Тот же флаг разрешает набор номера на складе и выдачу самовывоза без
+   * скана: два переключателя для одного правила однажды разошлись бы, и
+   * половина смены работала бы по одному правилу, половина — по другому.
+   */
+  const saveManualEntry = useMutation({
+    mutationFn: (enabled: boolean) =>
+      client.put('/api/settings/warehouse/manual-entry', {
+        value: { enabled },
+        expectedVersion: settings.data?.warehouseManualEntry.version ?? 0,
+      }),
+    onSuccess: async (_result, enabled) => {
+      await invalidate();
+      showToast(enabled ? 'Ручной ввод разрешён' : 'Ручной ввод запрещён', 'success');
     },
     onError: (error: unknown) => showToast(errorText(error), 'error'),
   });
@@ -283,6 +312,31 @@ export function PlanningSettings(): React.JSX.Element {
             </p>
             {isAdmin ? null : (
               <p className="muted text-sm" data-testid="manual-issue-readonly">
+                Изменяет только администратор.
+              </p>
+            )}
+          </div>
+
+          <div className="stack" data-testid="manual-entry-form">
+            <h3>Ручной ввод номеров</h3>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                data-testid="manual-entry-toggle"
+                checked={settings.data.warehouseManualEntry.value.enabled}
+                disabled={!isAdmin || saveManualEntry.isPending}
+                onChange={(event) => saveManualEntry.mutate(event.target.checked)}
+              />
+              Разрешить ручной ввод на складе и в самовывозе
+            </label>
+            <p className="muted text-sm">
+              Один флаг на два рабочих места: кладовщик набирает номер заказа и код ячейки руками,
+              менеджер самовывоза выдаёт заказ без сканирования. Сканирование работает всегда и от
+              этого переключателя не зависит. Набранный руками номер подтверждает только то, что
+              человек его набрал, поэтому по умолчанию ввод выключен.
+            </p>
+            {isAdmin ? null : (
+              <p className="muted text-sm" data-testid="manual-entry-readonly">
                 Изменяет только администратор.
               </p>
             )}

@@ -284,6 +284,96 @@ describe('ручной ввод на складе', () => {
     expect(DEFAULT_WAREHOUSE_MANUAL_ENTRY.enabled).toBe(false);
   });
 
+  it('логист видит настройку, но переключить не может', async () => {
+    const admin = await tokenFor(['ADMIN']);
+    const logist = await tokenFor(['LOGISTICIAN']);
+    const before = await readOverHttp(admin);
+
+    /*
+     * Логист читает настройки планирования — переключатель он видит на том же
+     * экране. Менять его он не должен: ручной ввод отменяет доказательство
+     * «предмет физически в руках», и это решение владельца системы.
+     */
+    const seen = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/settings/planning',
+      headers: { authorization: `Bearer ${logist}` },
+    });
+    expect(seen.statusCode).toBe(200);
+    expect(
+      (seen.json() as { warehouseManualEntry: { value: { enabled: boolean } } })
+        .warehouseManualEntry.value.enabled,
+    ).toBe(before.value.enabled);
+
+    const forbidden = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/warehouse/manual-entry',
+      headers: { authorization: `Bearer ${logist}` },
+      payload: { value: { enabled: true }, expectedVersion: before.version },
+    });
+    expect(forbidden.statusCode).toBe(403);
+    expect((await readOverHttp(admin)).value.enabled).toBe(before.value.enabled);
+  });
+
+  it('переключение доходит до склада и до прилавка самовывоза одним флагом', async () => {
+    const admin = await tokenFor(['ADMIN']);
+    const keeper = await tokenFor(['WAREHOUSE']);
+    const manager = await tokenFor(['MANAGER']);
+
+    const readKeeper = async (): Promise<boolean> => {
+      const response = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/warehouse/settings',
+        headers: { authorization: `Bearer ${keeper}` },
+      });
+      return (response.json() as { manualEntry: boolean }).manualEntry;
+    };
+    const readManager = async (): Promise<boolean> => {
+      const response = await ctx.app.inject({
+        method: 'GET',
+        url: '/api/pickup/orders',
+        headers: { authorization: `Bearer ${manager}` },
+      });
+      return (response.json() as { manualEntry: boolean }).manualEntry;
+    };
+
+    const before = await readOverHttp(admin);
+    expect(await readKeeper()).toBe(before.value.enabled);
+    expect(await readManager()).toBe(before.value.enabled);
+
+    const enabled = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/warehouse/manual-entry',
+      headers: { authorization: `Bearer ${admin}` },
+      payload: { value: { enabled: true }, expectedVersion: before.version },
+    });
+    expect(enabled.statusCode).toBe(200);
+
+    // Один флаг — два рабочих места: разъехаться они не могут.
+    expect(await readKeeper()).toBe(true);
+    expect(await readManager()).toBe(true);
+
+    // И событие ушло тем, чью работу настройка меняет.
+    const event = await ctx.db.realtimeEvent.findFirst({
+      where: { topic: 'settings.manual_entry_changed' },
+      orderBy: [{ id: 'desc' }],
+      select: { audienceRoles: true, payload: true },
+    });
+    expect(event?.audienceRoles).toEqual(expect.arrayContaining(['ADMIN', 'WAREHOUSE', 'MANAGER']));
+    expect(JSON.stringify(event?.payload)).toBe(JSON.stringify({ enabled: true }));
+
+    const after = await readOverHttp(admin);
+    const restored = await ctx.app.inject({
+      method: 'PUT',
+      url: '/api/settings/warehouse/manual-entry',
+      headers: { authorization: `Bearer ${admin}` },
+      payload: { value: { enabled: false }, expectedVersion: after.version },
+    });
+    expect(restored.statusCode).toBe(200);
+    expect(await readKeeper()).toBe(false);
+    expect(await readManager()).toBe(false);
+  });
+
   it('кладовщик видит значение своим запросом, но переключить не может', async () => {
     const admin = await tokenFor(['ADMIN']);
     const keeper = await tokenFor(['WAREHOUSE']);

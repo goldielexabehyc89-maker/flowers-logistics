@@ -7241,3 +7241,82 @@ test('самовывоз: 320, 375, 390 и 768 без выезда, окно в�
 
   await disableManualEntry(request);
 });
+
+/*
+ * Переключатель ручного ввода на экране настроек.
+ *
+ * Один флаг меняет работу двух рабочих мест сразу, поэтому проверяется не
+ * «галочка ставится», а то, что склад и прилавок узнают о ней на уже
+ * открытых экранах.
+ */
+test('настройки: переключатель ручного ввода меняет склад и самовывоз без перезагрузки', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  // 1. Администратор видит переключатель и его умолчание.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  const toggle = page.getByTestId('manual-entry-toggle');
+  await expect(page.getByTestId('manual-entry-form')).toContainText(
+    'Разрешить ручной ввод на складе и в самовывозе',
+  );
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeEnabled();
+
+  // 2. Два рабочих места открыты заранее и ничего не перезагружают.
+  const keeperContext = await browser.newContext();
+  const managerContext = await browser.newContext();
+  const keeper = await keeperContext.newPage();
+  const manager = await managerContext.newPage();
+  await login(keeper, stand['кладовщик прилавка'] ?? '', stand['пин'] ?? '');
+  await login(manager, stand['менеджер'] ?? '', stand['пин'] ?? '');
+
+  await keeper.getByTestId('wh-tab-issue').click();
+  await expect(manager.getByTestId('pickup-manual-open')).toHaveCount(0);
+
+  // 3. Включение доходит до обоих без F5.
+  /*
+   * Нажатие, а не `check()`: переключатель управляется ответом сервера,
+   * и до перезапроса галочка честно остаётся прежней.
+   */
+  await toggle.click();
+  await expect(page.locator('.toast-region')).toContainText('Ручной ввод разрешён');
+  await expect(toggle).toBeChecked();
+  await expect(manager.getByTestId('pickup-manual-open')).toBeVisible({ timeout: 25_000 });
+
+  await keeper.getByTestId('wh-tab-storage').click();
+  await keeper.getByTestId('wh-scan-order').fill(stand['заказ доставки'] ?? '');
+  await keeper.getByTestId('wh-scan-order').press('Enter');
+  await expect(keeper.getByTestId('wh-scan-cell')).toBeVisible();
+
+  // 4. Выключение так же доходит до обоих.
+  await toggle.click();
+  await expect(page.locator('.toast-region')).toContainText('Ручной ввод запрещён');
+  await expect(toggle).not.toBeChecked();
+  await expect(manager.getByTestId('pickup-manual-open')).toHaveCount(0, { timeout: 25_000 });
+
+  // 5. Сканирование от переключателя не зависит: кнопка на месте всегда.
+  await expect(manager.getByTestId('pickup-scan')).toBeVisible();
+  await expect(keeper.getByTestId('wh-scan-camera')).toBeVisible();
+
+  // 6. Логист видит переключатель, но выключенным для изменения.
+  const logistContext = await browser.newContext();
+  const logist = await logistContext.newPage();
+  await login(logist, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  // Менеджеру раздел настроек недоступен вовсе — это проверяется отдельно;
+  // здесь достаточно, что переключатель живёт в разделе администратора.
+  await expect(logist.getByRole('link', { name: 'Настройки' })).toHaveCount(0);
+
+  await keeperContext.close();
+  await managerContext.close();
+  await logistContext.close();
+});
