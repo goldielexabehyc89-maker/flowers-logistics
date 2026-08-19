@@ -88,6 +88,14 @@ function seedWarehouseRoute(): {
 }
 
 /**
+ * Курьер стенда с длинным именем: на нём проверяется разметка.
+ *
+ * Имя задаётся сеялкой `seed-e2e-warehouse-stand.ts`; здесь оно нужно,
+ * чтобы открыть карточку именно этого курьера, а не перебирать всех.
+ */
+const LONG_COURIER = 'Александра Константиновна Первопроходцева-Синеглазова';
+
+/**
  * Полный складской стенд: все состояния рабочего места сразу.
  *
  * Сценарии выдачи проверяют соседство — лист без ячейки рядом с собранным,
@@ -118,9 +126,29 @@ function seedWarehouseStand(): Record<string, string> {
  * трёх уровней. Поэтому курьер ищется перебором, а не по тексту: выбирать
  * «первого попавшегося» значило бы зависеть от порядка сеялок.
  */
-async function openIssueRoute(page: Page, routeNumber: string): Promise<Locator> {
+async function openIssueRoute(
+  page: Page,
+  routeNumber: string,
+  courierName?: string,
+): Promise<Locator> {
   const route = page.locator(`[data-testid="issue-route"][data-route-number="${routeNumber}"]`);
   if ((await route.count()) > 0) {
+    return route;
+  }
+
+  /*
+   * Курьер известен — открываем сразу его карточку.
+   *
+   * Перебор всех курьеров работает, но растёт вместе с базой: в полном
+   * прогоне их накапливаются десятки, и сценарий упирается в собственный
+   * предел времени вместо того, чтобы что-то доказать.
+   */
+  if (courierName !== undefined) {
+    await page
+      .locator(`[data-testid="issue-courier"][data-courier="${courierName}"]`)
+      .getByTestId('issue-courier-toggle')
+      .click();
+    await route.first().waitFor({ state: 'visible' });
     return route;
   }
 
@@ -132,7 +160,7 @@ async function openIssueRoute(page: Page, routeNumber: string): Promise<Locator>
   for (let index = 0; index < total; index += 1) {
     await toggles.nth(index).click();
     try {
-      await route.first().waitFor({ state: 'visible', timeout: 2000 });
+      await route.first().waitFor({ state: 'visible', timeout: 1000 });
       return route;
     } catch {
       // Не этот курьер: пробуем следующего.
@@ -6343,7 +6371,7 @@ test('склад на пяти размерах: вкладки, окна, дл�
      * даже на длинном имени курьера и длинном номере листа.
      */
     await page.getByTestId('wh-tab-issue').click();
-    const route = await openIssueRoute(page, longRoute);
+    const route = await openIssueRoute(page, longRoute, LONG_COURIER);
     await expect(route).toContainText(longRoute);
     expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
 
