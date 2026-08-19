@@ -1044,3 +1044,91 @@
   padding: 0;
   list-style: none;
 }
+
+/*
+ * Пустая карта: блок с причиной, а не подпись поверх серого поля.
+ *
+ * Карточка лежит на холсте по тем же правилам, что и всё остальное:
+ * тот же фон, выпуклая тень, никаких рамок. Клики она принимает — в отличие
+ * от `deals-map__notice`, у которого есть кнопка, и та обязана нажиматься.
+ */
+.deals-map__empty {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: min(380px, calc(100% - var(--space-5)));
+  padding: var(--space-4);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out-lg);
+  text-align: left;
+}
+
+.deals-map__empty-title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  line-height: var(--line-height);
+}
+
+.deals-map__empty-text {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height);
+}
+
+/*
+ * Действие пустого состояния — обычная выпуклая кнопка языка светотени.
+ * Нажатая вдавливается: другого признака нажатия в интерфейсе нет.
+ */
+.deals-map__empty-action {
+  min-height: var(--control-height);
+  margin-top: var(--space-1);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.deals-map__empty-action:hover {
+  background: var(--color-surface-hover);
+}
+
+.deals-map__empty-action:active {
+  box-shadow: var(--shadow-in);
+}
+
+.deals-map__empty-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Главное действие раздела названо цветом: чинить адреса — единственное,
+   что здесь вообще можно сделать. */
+.deals-map__empty-action--accent {
+  background: var(--color-accent);
+  box-shadow: var(--shadow-accent);
+  color: var(--color-text-inverse);
+}
+
+.deals-map__empty-action--accent:hover {
+  background: var(--color-accent-hover);
+}
+
+.deals-map__empty-action--accent:active {
+  box-shadow: var(--shadow-in);
+}

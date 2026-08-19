@@ -3523,9 +3523,9 @@ test('карта «Сделок»: подложка Москвы при нуле
 
   // 1. Нуль точек: карта ВСЁ РАВНО показана — подложка Москвы, а не пустой блок.
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
-  await expect(page.getByTestId('deals-map-empty')).toHaveText(
-    'В выбранном дне нет заказов с координатами',
-  );
+  // Пустая карта называет причину, а не только следствие: заголовок, объяснение
+  // и действие, которым её и закрывают.
+  await expect(page.getByTestId('deals-map-empty')).toContainText('Ни одного заказа на карте');
   // Приближать нечего: кнопка не обещает действие, которое ничего не изменит.
   await expect(page.getByTestId('deals-map-zoom')).toBeDisabled();
   // Отметок заказов нет ни одной. Склад при этом показан всегда: маршрут

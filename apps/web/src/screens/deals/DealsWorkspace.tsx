@@ -14,7 +14,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -131,6 +131,16 @@ export function DealsWorkspace(): React.JSX.Element {
    * скрытая панель обязана оставаться возвращаемой.
    */
   const [listHidden, setListHidden] = useState(false);
+  /*
+   * Переход от пустой карты к работе с адресами.
+   *
+   * Кнопка на карте не рассказывает про список, а приводит к нему: панель
+   * открывается, и фокус встаёт на действии первого заказа, которому не хватает
+   * адреса. Фокусировать сразу нельзя — скрытая панель не принимает фокус,
+   * поэтому намерение запоминается и исполняется, когда список уже показан.
+   */
+  const fixAddressRef = useRef<HTMLButtonElement | null>(null);
+  const [fixAddressWanted, setFixAddressWanted] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   const [vehiclesInput, setVehiclesInput] = useState('');
@@ -165,6 +175,21 @@ export function DealsWorkspace(): React.JSX.Element {
   });
 
   const items = useMemo(() => list.data?.items ?? [], [list.data]);
+
+  /** Первый заказ, чья причина внимания чинится адресом: к нему и ведёт карта. */
+  const firstAddressId = useMemo(
+    () => items.find((item) => primaryAttention(item)?.action === 'FIX_ADDRESS')?.id ?? null,
+    [items],
+  );
+
+  useEffect(() => {
+    if (!fixAddressWanted || listHidden) {
+      return;
+    }
+    // Фокус сам подводит прокрутку списка к нужной строке.
+    fixAddressRef.current?.focus();
+    setFixAddressWanted(false);
+  }, [fixAddressWanted, listHidden, firstAddressId]);
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const summary = summarize(selected, visibleIds);
 
@@ -657,6 +682,7 @@ export function DealsWorkspace(): React.JSX.Element {
                               type="button"
                               className="deals__attention-action"
                               data-testid="deal-attention-action"
+                              ref={item.id === firstAddressId ? fixAddressRef : null}
                               onClick={() => {
                                 if (attention.action === 'SET_INTERVAL') {
                                   setIntervalFor(item);
@@ -845,6 +871,11 @@ export function DealsWorkspace(): React.JSX.Element {
             listHidden={listHidden}
             onToggleList={() => setListHidden((current) => !current)}
             onToggle={(point) => setSelected((current) => toggleMapPoint(current, point))}
+            withoutPoint={withoutPoint}
+            onFixAddresses={() => {
+              setListHidden(false);
+              setFixAddressWanted(true);
+            }}
           />
         </div>
       </div>

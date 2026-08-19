@@ -32,6 +32,17 @@ const DealsMapCanvas = lazy(() =>
   import('./DealsMapCanvas').then((module) => ({ default: module.DealsMapCanvas })),
 );
 
+/**
+ * Форма слова «заказ» после числа в родительном падеже.
+ *
+ * «У 1 заказов» читается как опечатка и подрывает доверие к самому числу,
+ * поэтому счётчик согласуется с ним, а не обходится безличным «шт.».
+ */
+function ordersWord(count: number): string {
+  const tail = count % 100;
+  return tail % 10 === 1 && tail !== 11 ? 'заказа' : 'заказов';
+}
+
 export type DealPoint = MapPoint;
 
 interface MapResponse {
@@ -47,6 +58,16 @@ interface DealsMapProps {
   /** Левая панель скрыта — карта занимает всю ширину. */
   listHidden: boolean;
   onToggleList: () => void;
+  /**
+   * Сколько заказов дня осталось без подтверждённой координаты.
+   *
+   * Число считает список — тем же серверным отбором, что и карта. Карта его
+   * только называет: пустая карта без причины выглядит как поломка, а не как
+   * незаконченная работа с адресами.
+   */
+  withoutPoint: number;
+  /** Увести логиста к первому заказу, адрес которого и чинится. */
+  onFixAddresses: () => void;
 }
 
 /**
@@ -126,6 +147,8 @@ export function DealsMap({
   onToggle,
   listHidden,
   onToggleList,
+  withoutPoint,
+  onFixAddresses,
 }: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
   /*
@@ -388,10 +411,59 @@ export function DealsMap({
           </Suspense>
         )}
 
+        {/*
+          Пустая карта объясняет себя сама.
+
+          Прежняя строка «нет заказов с координатами» называла следствие и
+          молчала о причине: логист видел серое поле и не знал, сломалось ли
+          что-то, не тот ли выбран день или работа с адресами просто не
+          доделана. Причин ровно три, и они требуют разного, поэтому блок
+          говорит про ту, которая случилась, и даёт к ней действие.
+        */}
         {empty && !basemapFailed && styleUrl !== '' && (
-          <p className="deals-map__notice" role="status" data-testid="deals-map-empty">
-            В выбранном дне нет заказов с координатами
-          </p>
+          <div className="deals-map__empty" role="status" data-testid="deals-map-empty">
+            <h3 className="deals-map__empty-title">Ни одного заказа на карте</h3>
+            {all.length > 0 ? (
+              <>
+                <p className="deals-map__empty-text">
+                  Точки дня есть — все {all.length} скрыты фильтром времени. Список слева фильтр не
+                  трогает.
+                </p>
+                <button
+                  type="button"
+                  className="deals-map__empty-action"
+                  data-testid="deals-map-empty-action"
+                  onClick={() => {
+                    setFrom('');
+                    setTo('');
+                  }}
+                >
+                  Показать все часы
+                </button>
+              </>
+            ) : withoutPoint > 0 ? (
+              <>
+                <p className="deals-map__empty-text">
+                  На карту попадает только подтверждённая точка. У {withoutPoint}{' '}
+                  {ordersWord(withoutPoint)} дня её нет: адрес не указан, неполон или разошёлся с
+                  МоимСкладом.
+                </p>
+                <button
+                  type="button"
+                  className="deals-map__empty-action deals-map__empty-action--accent"
+                  data-testid="deals-map-empty-action"
+                  onClick={onFixAddresses}
+                >
+                  Исправить адреса · {withoutPoint}
+                </button>
+              </>
+            ) : (
+              <p className="deals-map__empty-text">
+                В выбранном дне заказов нет. Карта остаётся на месте вместе со складом: с него
+                начинается любой маршрут.
+              </p>
+            )}
+          </div>
         )}
       </div>
 
