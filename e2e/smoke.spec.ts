@@ -3005,8 +3005,17 @@ test('карты: собранный заказ окрашен одинаков�
   await expect(dealsDot).toHaveCSS('background-color', expected);
 
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  /*
+   * Карта тяжелее списка: сначала полотно, потом точки.
+   *
+   * Без явного ожидания готовности проверка иногда утверждала про пустую
+   * карту, которая ещё грузила стиль, — и падала не на цвете, а на том,
+   * что рисовать было нечего.
+   */
+  await expect(page.getByTestId('routing-map-surface')).toBeVisible();
+  await expect(page.locator('.map-point').first()).toBeVisible({ timeout: 30_000 });
   const routingDot = page.locator('.map-point--assembled .map-point__dot').first();
-  await expect(routingDot).toBeVisible();
+  await expect(routingDot).toBeVisible({ timeout: 30_000 });
   await expect(routingDot).toHaveCSS('background-color', expected);
 });
 
