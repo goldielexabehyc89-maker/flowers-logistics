@@ -19,12 +19,33 @@ import { authenticateWithRoles } from '../auth/guards.js';
 import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import { MAX_ORDER_NUMBER_LENGTH } from '../warehouse/order-lookup.js';
 import { PICKUP_ROLES, issueToCustomer, type RequestContext } from './service.js';
-import { findPickupByNumber, listPickupsOfDay } from './views.js';
+import {
+  findPickupByNumber,
+  listIssuedOfDay,
+  listPickupQueue,
+  MAX_QUEUE_PAGE_SIZE,
+} from './views.js';
+import { readWarehouseManualEntry } from '../settings/service.js';
 
 const numberSchema = z.string().min(1).max(MAX_ORDER_NUMBER_LENGTH);
 
 const scanQuerySchema = z.object({ number: numberSchema });
-const issueSchema = z.object({ orderNumber: numberSchema });
+
+/**
+ * Способ действия объявляется явно.
+ *
+ * Значения по умолчанию здесь нет намеренно: «не сказали — значит скан»
+ * превратило бы выключенную настройку в украшение.
+ */
+const issueSchema = z.object({
+  orderNumber: numberSchema,
+  source: z.enum(['SCAN', 'MANUAL']),
+});
+
+const queueQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_QUEUE_PAGE_SIZE).optional(),
+  cursor: z.string().min(1).max(500).optional(),
+});
 const dayQuerySchema = z.object({
   deliveryDate: z
     .string()
@@ -43,12 +64,30 @@ function contextOf(request: { ip: string; headers: Record<string, unknown> }): R
 }
 
 export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps): Promise<void> {
-  /** Самовывозы дня: ждут выдачи и уже выданные. */
+  /**
+   * Очередь ожидающих выдачи. Ко дню не привязана: покупатель приходит
+   * когда придёт, и вчерашняя коробка стоит на той же полке.
+   */
   app.get('/api/pickup/orders', async (request) => {
+    await authenticateWithRoles(request, deps, PICKUP_ROLES);
+    const query = queueQuerySchema.parse(request.query);
+
+    const [queue, manual] = await Promise.all([
+      listPickupQueue(deps.db, query),
+      readWarehouseManualEntry(deps.db),
+    ]);
+
+    // Настройка приходит вместе с очередью: у менеджера нет своего экрана
+    // настроек, а знать, доступна ли ручная выдача, он обязан.
+    return { ...queue, manualEntry: manual.value.enabled };
+  });
+
+  /** Выданные за московский день: справочный список, а не рабочая очередь. */
+  app.get('/api/pickup/issued', async (request) => {
     await authenticateWithRoles(request, deps, PICKUP_ROLES);
     const { deliveryDate } = dayQuerySchema.parse(request.query);
 
-    return listPickupsOfDay(deps.db, deliveryDate ?? moscowToday(new Date()));
+    return listIssuedOfDay(deps.db, deliveryDate ?? moscowToday(new Date()));
   });
 
   /** Поиск или скан номера заказа. */
@@ -67,7 +106,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
     return issueToCustomer(
       { db: deps.db },
       actor,
-      { orderNumber: body.orderNumber },
+      { orderNumber: body.orderNumber, source: body.source },
       contextOf(request),
     );
   });

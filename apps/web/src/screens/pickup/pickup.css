@@ -1,0 +1,52 @@
+/*
+ * Прилавок самовывоза.
+ *
+ * Строка очереди — цель для пальца, а не текст со ссылкой: менеджер держит
+ * коробку одной рукой и целится второй.
+ */
+.pickup-scan {
+  width: 100%;
+}
+
+.pickup-queue {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pickup-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 48px;
+  padding: 8px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pickup-row:hover {
+  background: var(--color-surface-hover);
+}
+
+.pickup-row__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.pickup-row__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}

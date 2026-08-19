@@ -41,6 +41,7 @@
     "seed:e2e-warehouse-stand": "tsx apps/api/src/scripts/seed-e2e-warehouse-stand.ts",
     "seed:e2e-florist-queue": "tsx apps/api/src/scripts/seed-e2e-florist-queue.ts",
     "seed:e2e-pickup": "tsx apps/api/src/scripts/seed-e2e-pickup.ts",
+    "seed:e2e-pickup-stand": "tsx apps/api/src/scripts/seed-e2e-pickup-stand.ts",
     "seed:e2e-returns": "tsx apps/api/src/scripts/seed-e2e-returns.ts",
     "snapshot:import": "node apps/api/dist/scripts/snapshot-import.js",
     "snapshot:import:dev": "tsx apps/api/src/scripts/snapshot-import.ts",

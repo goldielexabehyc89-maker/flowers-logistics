@@ -30,7 +30,7 @@ import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from '../warehouse/service.js';
 import { receiveOrder, type FlowDeps } from '../warehouse/placement.js';
 import { isPickupOrder, issueToCustomer, type PickupDeps } from './service.js';
-import { findPickupByNumber, listPickupsOfDay } from './views.js';
+import { findPickupByNumber, listIssuedOfDay, listPickupQueue } from './views.js';
 
 let ctx: TestContext;
 let pickup: PickupDeps;
@@ -219,7 +219,12 @@ describe('выдача покупателю', () => {
     const { order, cell } = await placed();
     const manager = await actorFor(['MANAGER']);
 
-    const result = await issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT);
+    const result = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: order.number, source: 'SCAN' },
+      CONTEXT,
+    );
 
     expect(result).toMatchObject({ orderId: order.id, cellId: cell.id, cellCode: cell.code });
     expect(await activeCellOf(order.id)).toBeNull();
@@ -248,7 +253,7 @@ describe('выдача покупателю', () => {
   it('факт выдачи не редактируется и не удаляется', async () => {
     const { order } = await placed();
     const manager = await actorFor(['MANAGER']);
-    await issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT);
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
 
     const issue = await ctx.db.orderPickupIssue.findUniqueOrThrow({
       where: { orderId: order.id },
@@ -269,10 +274,10 @@ describe('выдача покупателю', () => {
   it('повтор выдачи отказывает штатно и второго факта не создаёт', async () => {
     const { order } = await placed();
     const manager = await actorFor(['MANAGER']);
-    await issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT);
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
 
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT),
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
     ).rejects.toMatchObject({
       code: 'CONFLICT',
       conflict: { kind: 'PICKUP_ALREADY_ISSUED' },
@@ -286,8 +291,8 @@ describe('выдача покупателю', () => {
     const manager = await actorFor(['MANAGER']);
 
     const results = await Promise.allSettled([
-      issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT),
-      issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT),
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
     ]);
 
     expect(results.filter((row) => row.status === 'fulfilled')).toHaveLength(1);
@@ -301,30 +306,50 @@ describe('выдача покупателю', () => {
     // Принят не был: выдавать нечего.
     const notPlaced = await seedOrder();
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: notPlaced.number }, CONTEXT),
+      issueToCustomer(pickup, manager, { orderNumber: notPlaced.number, source: 'SCAN' }, CONTEXT),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
 
     // Обычная доставка: этот раздел не про неё.
     const delivery = await placed({ deliveryMethodId: MOYSKLAD_IDS.deliveryMethodDelivery });
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: delivery.order.number }, CONTEXT),
+      issueToCustomer(
+        pickup,
+        manager,
+        { orderNumber: delivery.order.number, source: 'SCAN' },
+        CONTEXT,
+      ),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PICKUP' } });
 
     // Способ получения не указан вовсе.
     const unknownMethod = await placed({ deliveryMethodId: null });
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: unknownMethod.order.number }, CONTEXT),
+      issueToCustomer(
+        pickup,
+        manager,
+        { orderNumber: unknownMethod.order.number, source: 'SCAN' },
+        CONTEXT,
+      ),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PICKUP' } });
 
     // Источник архивирован или пропал: заказ мог быть отменён.
     const archived = await placed({ sourceArchived: true });
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: archived.order.number }, CONTEXT),
+      issueToCustomer(
+        pickup,
+        manager,
+        { orderNumber: archived.order.number, source: 'SCAN' },
+        CONTEXT,
+      ),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
 
     const missing = await placed({ sourceMissing: true });
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: missing.order.number }, CONTEXT),
+      issueToCustomer(
+        pickup,
+        manager,
+        { orderNumber: missing.order.number, source: 'SCAN' },
+        CONTEXT,
+      ),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
 
     // Ни у одного отказавшего заказа размещение не закрылось.
@@ -342,7 +367,7 @@ describe('выдача покупателю', () => {
     const manager = await actorFor(['MANAGER']);
 
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: shared }, CONTEXT),
+      issueToCustomer(pickup, manager, { orderNumber: shared, source: 'SCAN' }, CONTEXT),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NUMBER_AMBIGUOUS' } });
 
     expect(await activeCellOf(first.order.id)).toBe(first.cell.id);
@@ -373,35 +398,39 @@ describe('карточка и списки', () => {
     expect((await findPickupByNumber(ctx.db, notPlaced.number)).blockers).toContain('NOT_PLACED');
   });
 
-  it('выданный заказ уходит из ожидающих и появляется среди выданных', async () => {
+  it('выданный заказ уходит из очереди и попадает в справку выданных', async () => {
     const day = '2027-06-16';
     const { order } = await placed({ day });
     const manager = await actorFor(['MANAGER']);
 
-    const before = await listPickupsOfDay(ctx.db, day);
-    expect(before.waiting.map((row) => row.orderNumber)).toContain(order.number);
-    expect(before.issued.map((row) => row.orderNumber)).not.toContain(order.number);
+    const before = await listPickupQueue(ctx.db, { limit: 200 });
+    expect(before.items.map((row) => row.orderNumber)).toContain(order.number);
 
-    await issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT);
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
 
-    const after = await listPickupsOfDay(ctx.db, day);
-    expect(after.waiting.map((row) => row.orderNumber)).not.toContain(order.number);
-    const issued = after.issued.find((row) => row.orderNumber === order.number);
-    expect(issued?.blockers).toContain('ALREADY_ISSUED');
-    expect(issued?.issuedAt).not.toBeNull();
+    const after = await listPickupQueue(ctx.db, { limit: 200 });
+    expect(after.items.map((row) => row.orderNumber)).not.toContain(order.number);
+
+    const issued = await listIssuedOfDay(ctx.db, day);
+    const row = issued.issued.find((item) => item.orderNumber === order.number);
+    expect(row?.blockers).toContain('ALREADY_ISSUED');
+    expect(row?.issuedAt).not.toBeNull();
   });
 
-  it('список дня не смешивает соседние дни и чужие способы получения', async () => {
-    const day = '2027-06-17';
-    const mine = await placed({ day });
+  it('очередь не смотрит на день и не берёт чужие способы получения', async () => {
+    const mine = await placed({ day: '2027-06-17' });
     const otherDay = await placed({ day: '2027-06-18' });
-    const delivery = await placed({ day, deliveryMethodId: MOYSKLAD_IDS.deliveryMethodDelivery });
+    const delivery = await placed({
+      day: '2027-06-17',
+      deliveryMethodId: MOYSKLAD_IDS.deliveryMethodDelivery,
+    });
 
-    const view = await listPickupsOfDay(ctx.db, day);
-    const numbers = view.waiting.map((row) => row.orderNumber);
+    const view = await listPickupQueue(ctx.db, { limit: 200 });
+    const numbers = view.items.map((row) => row.orderNumber);
 
+    // Оба дня стоят в ОДНОЙ очереди: покупатель приходит когда придёт.
     expect(numbers).toContain(mine.order.number);
-    expect(numbers).not.toContain(otherDay.order.number);
+    expect(numbers).toContain(otherDay.order.number);
     expect(numbers).not.toContain(delivery.order.number);
   });
 });
@@ -415,6 +444,7 @@ describe('права раздела', () => {
     for (const roles of [['MANAGER'], ['ADMIN']] as Role[][]) {
       const token = await tokenFor(roles);
       expect((await call('GET', '/api/pickup/orders', token)).statusCode).toBe(200);
+      expect((await call('GET', '/api/pickup/issued', token)).statusCode).toBe(200);
       expect((await call('GET', `/api/pickup/scan?number=${order.number}`, token)).statusCode).toBe(
         200,
       );
@@ -422,13 +452,63 @@ describe('права раздела', () => {
 
     for (const roles of [['WAREHOUSE'], ['FLORIST'], ['LOGISTICIAN'], ['COURIER']] as Role[][]) {
       const token = await tokenFor(roles);
-      expect((await call('GET', '/api/pickup/orders', token)).statusCode).toBe(403);
+      for (const url of ['/api/pickup/orders', '/api/pickup/issued']) {
+        expect((await call('GET', url, token)).statusCode, `${roles.join()} ${url}`).toBe(403);
+      }
       expect(
-        (await call('POST', '/api/pickup/issues', token, { orderNumber: order.number })).statusCode,
+        (
+          await call('POST', '/api/pickup/issues', token, {
+            orderNumber: order.number,
+            source: 'SCAN',
+          })
+        ).statusCode,
       ).toBe(403);
     }
 
-    expect((await call('GET', '/api/pickup/orders', null)).statusCode).toBe(401);
+    for (const url of ['/api/pickup/orders', '/api/pickup/issued']) {
+      expect((await call('GET', url, null)).statusCode, url).toBe(401);
+    }
+  });
+
+  it('способ действия обязателен: «не сказали» выдачей не считается', async () => {
+    const { order } = await placed();
+    const token = await tokenFor(['MANAGER']);
+
+    // Без явного `source` запрос не проходит проверку схемы: значение
+    // по умолчанию превратило бы выключенную настройку в украшение.
+    const response = await call('POST', '/api/pickup/issues', token, {
+      orderNumber: order.number,
+    });
+    expect(response.statusCode).toBe(400);
+    expect(await ctx.db.orderPickupIssue.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('лишние поля запроса ничего не решают', async () => {
+    const { order, cell } = await placed();
+    const token = await tokenFor(['MANAGER']);
+
+    /*
+     * Клиент присылает всё, что придумает: чужую ячейку, снятую отмену,
+     * готовый факт выдачи. Сервер берёт из тела только номер и способ,
+     * остальное отбрасывает схемой.
+     */
+    const response = await call('POST', '/api/pickup/issues', token, {
+      orderNumber: order.number,
+      source: 'SCAN',
+      cellId: '00000000-0000-4000-8000-000000000999',
+      cancelled: false,
+      issuedAt: '2000-01-01T00:00:00.000Z',
+      blockers: [],
+    });
+    expect(response.statusCode).toBe(200);
+
+    const issue = await ctx.db.orderPickupIssue.findUniqueOrThrow({
+      where: { orderId: order.id },
+      select: { cellId: true, issuedAt: true },
+    });
+    // Ячейка взята из фактического размещения, а не из тела запроса.
+    expect(issue.cellId).toBe(cell.id);
+    expect(issue.issuedAt.getUTCFullYear()).toBeGreaterThan(2000);
   });
 
   it('менеджер не получает ни склада, ни флориста, ни логистики, ни настроек', async () => {
@@ -483,7 +563,7 @@ describe('след выдачи', () => {
     const { order, cell } = await placed();
     const manager = await actorFor(['MANAGER']);
 
-    await issueToCustomer(pickup, manager, { orderNumber: order.number }, CONTEXT);
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
 
     const entry = await ctx.db.auditLog.findFirstOrThrow({
       where: { action: 'PICKUP_ORDER_ISSUED', actorUserId: manager.userId },

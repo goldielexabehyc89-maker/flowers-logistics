@@ -15,6 +15,7 @@ import {
   blockerLabel,
   canIssue,
   cellLabel,
+  dayLabel,
   primaryBlocker,
   printLabel,
   type PickupCard,
@@ -60,14 +61,28 @@ describe('готовность к выдаче', () => {
       'NOT_PICKUP',
       'NOT_PLACED',
       'ORDER_BLOCKED',
+      'ORDER_CANCELLED',
     ]);
   });
 });
 
 describe('состояние заказа на экране', () => {
-  it('отсутствие ячейки называется честно', () => {
-    expect(cellLabel(card({ cellCode: null }))).toBe('Не принят');
+  it('отсутствие ячейки называется честно и заказ из очереди не исчезает', () => {
+    // «Нет ячейки» — состояние, а не причина спрятать строку: коробку унесли
+    // со полки, и менеджер обязан это видеть, а не гадать.
+    expect(cellLabel(card({ cellCode: null }))).toBe('Нет ячейки');
     expect(cellLabel(card({ cellCode: 'S-07' }))).toBe('S-07');
+  });
+
+  it('день заказа — подпись, а не отбор', () => {
+    expect(dayLabel(card({ deliveryDate: '2027-06-15' }))).toBe('2027-06-15');
+    // Заказ без даты так и называется: очередь общая, и прятать его незачем.
+    expect(dayLabel(card({ deliveryDate: null }))).toBe('без даты');
+  });
+
+  it('отменённый заказ выдавать нельзя', () => {
+    expect(canIssue(card({ blockers: ['ORDER_CANCELLED'] }))).toBe(false);
+    expect(blockerLabel('ORDER_CANCELLED')).toBe('Заказ отменён — выдавать нельзя');
   });
 
   it('все состояния сборки названы по-человечески, а «вне производства» — отдельно', () => {

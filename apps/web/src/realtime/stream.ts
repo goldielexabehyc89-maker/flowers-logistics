@@ -155,6 +155,14 @@ const DELIVERY_SCREEN: string[][] = [
   // Обязательство вернуть букет живёт дольше маршрута и обновляется отдельно.
   ['delivery-returns'],
 ];
+/*
+ * Экран выдачи самовывоза.
+ *
+ * Очередь и справочный список выданных перечитываются вместе: заказ уходит
+ * из одного ровно тогда, когда появляется в другом.
+ */
+const PICKUP_SCREEN: string[][] = [['pickup-day'], ['pickup-issued']];
+
 const USERS_SCREEN: string[][] = [
   ['users'],
   ['user-history'],
@@ -196,7 +204,18 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['order-window'],
     ['status'],
   ],
-  'order.scope_changed': [...DEALS_SCREEN, ...ROUTING_SCREEN, ...FLORIST_SCREEN, ['status']],
+  /*
+   * Выход из области — это и блокировка выдачи самовывоза: архивный или
+   * пропавший заказ обязан покраснеть у менеджера до того, как он отдаст
+   * коробку.
+   */
+  'order.scope_changed': [
+    ...DEALS_SCREEN,
+    ...ROUTING_SCREEN,
+    ...FLORIST_SCREEN,
+    ...PICKUP_SCREEN,
+    ['status'],
+  ],
   'order.geo_changed': [...DEALS_SCREEN, ...DELIVERY_SCREEN, ['map-points'], ['order-window']],
   'order.address_changed': [
     ...DEALS_SCREEN,
@@ -237,6 +256,8 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ...FLORIST_SCREEN,
     ...WAREHOUSE_SCREEN,
     ...DELIVERY_SCREEN,
+    // Отменённый заказ уходит из очереди выдачи, снятая отмена возвращает его.
+    ...PICKUP_SCREEN,
     ['logistics-resolutions'],
   ],
 
@@ -307,7 +328,7 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ...WAREHOUSE_SCREEN,
     ...DEALS_SCREEN,
     ...FLORIST_SCREEN,
-    ['pickup-day'],
+    ...PICKUP_SCREEN,
   ],
   /*
    * Ход комплектования и отгрузки. Курьер здесь обязателен: отгруженный лист
@@ -342,7 +363,12 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['operations-report'],
     ['logistics-history'],
   ],
-  'pickup.issued': [['pickup-day'], ['warehouse-placements']],
+  'pickup.issued': [...PICKUP_SCREEN, ['warehouse-placements']],
+  /*
+   * Настройка ручного ввода меняет оба рабочих места сразу: у кладовщика
+   * появляется поле номера, у менеджера — ручная выдача.
+   */
+  'settings.manual_entry_changed': [...PICKUP_SCREEN, ['warehouse-settings'], ...WAREHOUSE_SCREEN],
 
   /*
    * Учёт изменился — перечитываются отчёты и балансы.

@@ -29,6 +29,7 @@ import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
+import { publishRealtimeEvent } from '../realtime/events.js';
 
 /** Ключи настроек. Значение ключа — часть контракта базы, менять его нельзя. */
 export const SETTING_KEYS = {
@@ -209,13 +210,28 @@ export async function saveWarehouseManualEntry(
     userAgent: string | null;
   },
 ): Promise<{ version: number }> {
-  return writeSetting(db, actor, {
+  const saved = await writeSetting(db, actor, {
     key: SETTING_KEYS.warehouseManualEntry,
     value: { enabled: input.value.enabled },
     expectedVersion: input.expectedVersion,
     ip: input.ip,
     userAgent: input.userAgent,
   });
+
+  /*
+   * Настройка меняет работу двух рабочих мест сразу.
+   *
+   * Кладовщик и менеджер самовывоза узнают о ней без перезапуска приложения:
+   * иначе выключенный ручной ввод остался бы на экране до конца смены. В
+   * событии только признак — ни автора, ни номера заказа, ни версии.
+   */
+  await publishRealtimeEvent(db, {
+    topic: 'settings.manual_entry_changed',
+    payload: { enabled: input.value.enabled },
+    audienceRoles: ['ADMIN', 'WAREHOUSE', 'MANAGER'],
+  });
+
+  return saved;
 }
 
 export interface ShiftSetting {

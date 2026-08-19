@@ -6667,3 +6667,553 @@ test('два сеанса: ячейка, «Требуется перемещен
   await workerContext.close();
   await watcherContext.close();
 });
+
+/**
+ * Стенд прилавка самовывоза: все состояния очереди сразу.
+ *
+ * Как и складской стенд, ставится каждым сценарием заново: очередь проверяется
+ * соседством состояний, и делить её с соседом означало бы зависеть от порядка.
+ */
+function seedPickupStand(): Record<string, string> {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-pickup-stand'], {
+    encoding: 'utf8',
+  });
+  const values: Record<string, string> = {};
+  for (const match of output.matchAll(/^([^:\n]+):\s*(.+)$/gm)) {
+    const key = (match[1] ?? '').trim();
+    if (key !== 'описание') {
+      values[key] = (match[2] ?? '').trim();
+    }
+  }
+  if (values['заказ сегодня'] === undefined) {
+    throw new Error('сеялка прилавка не вернула номера заказов');
+  }
+  return values;
+}
+
+/** Выключает ручной ввод: обычное состояние продукта. */
+async function disableManualEntry(request: APIRequestContext): Promise<void> {
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  const settings = await request.get('/api/settings/planning', { headers });
+  const current = (
+    (await settings.json()) as {
+      warehouseManualEntry: { value: { enabled: boolean }; version: number };
+    }
+  ).warehouseManualEntry;
+  if (!current.value.enabled) {
+    return;
+  }
+
+  const saved = await request.put('/api/settings/warehouse/manual-entry', {
+    headers,
+    data: { value: { enabled: false }, expectedVersion: current.version },
+  });
+  expect(saved.status()).toBe(200);
+}
+
+/*
+ * Очередь прилавка: состав, счётчик и блокирующие состояния.
+ *
+ * Покупатель приходит когда придёт, поэтому вчерашняя коробка стоит в очереди
+ * рядом с завтрашней, а календарь ничего не прячет.
+ */
+test('самовывоз: очередь без привязки к дню, счётчик и блокирующие состояния', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await expect(page.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+
+  const rows = page.locator('[data-testid="pickup-waiting-row"]');
+  const rowOf = (number: string): Locator =>
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${number}"]`);
+
+  // 1. Три дня в одной очереди: календарь ничего не фильтрует.
+  for (const key of ['заказ вчера', 'заказ сегодня', 'заказ завтра']) {
+    await expect(rowOf(stand[key] ?? ''), key).toBeVisible();
+  }
+
+  // 2. Коробки нет на полке — строка осталась и честно называет причину.
+  const withoutCell = rowOf(stand['заказ без ячейки'] ?? '');
+  await expect(withoutCell).toContainText('Нет ячейки');
+  await expect(withoutCell).toContainText('Нет фактической ячейки');
+
+  // 3. Отменённый и выданный из очереди ушли, доставка в неё не попадала.
+  for (const key of ['заказ отменён', 'заказ выдан', 'заказ доставки']) {
+    await expect(rowOf(stand[key] ?? ''), key).toHaveCount(0);
+  }
+
+  // 4. Пропавший источник виден, но заблокирован.
+  await expect(rowOf(stand['заказ пропал'] ?? '')).toContainText('Заказ помечен проблемным');
+
+  // 5. Счётчик считает сервер по всему отбору, а не по показанным строкам.
+  const shown = await rows.count();
+  const counter = Number((await page.getByTestId('pickup-waiting-count').innerText()).trim());
+  expect(counter).toBeGreaterThanOrEqual(shown);
+  expect(counter).toBeGreaterThanOrEqual(5);
+
+  // 6. Ручного ввода нет: настройка выключена, выдача — только сканированием.
+  await expect(page.getByTestId('pickup-manual-open')).toHaveCount(0);
+  await expect(page.getByTestId('pickup-search')).toHaveCount(0);
+  await expect(page.getByTestId('pickup-scan')).toBeVisible();
+
+  // 7. Выданный заказ лежит в справочном списке и очередь не трогает.
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: stand['заказ выдан'] ?? '' }),
+  ).toBeVisible();
+});
+
+/**
+ * Двойник камеры для прилавка.
+ *
+ * Настоящего устройства и разрешения в CI нет, а проводку «кадр → сервер →
+ * выдача» доказать нужно: адаптер подменяется двойником, который отдаёт коды
+ * по команде сценария.
+ */
+async function installCameraDouble(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    interface Globals {
+      __flCameraAdapter?: unknown;
+      __flCameraRunning?: boolean;
+      __flScan?: (code: string) => void;
+      __flClear?: () => void;
+      __flBreak?: () => void;
+    }
+    const scope = globalThis as unknown as Globals;
+
+    const queue: string[] = [];
+    let onCode: ((code: string) => void) | null = null;
+    let onEmpty: (() => void) | null = null;
+    let running = false;
+
+    const pump = (): void => {
+      if (!running) {
+        return;
+      }
+      // Настоящий QR не исчезает из кадра оттого, что приложение занято.
+      const next = queue[0];
+      if (next === undefined) {
+        onEmpty?.();
+      } else {
+        onCode?.(next);
+      }
+      setTimeout(pump, 40);
+    };
+
+    scope.__flCameraAdapter = {
+      start: (
+        _video: unknown,
+        events: { onCode: (code: string) => void; onEmptyFrame: () => void },
+      ) => {
+        onCode = events.onCode;
+        onEmpty = events.onEmptyFrame;
+        running = true;
+        scope.__flCameraRunning = true;
+        setTimeout(pump, 40);
+        return Promise.resolve({
+          stop: () => {
+            running = false;
+            onCode = null;
+            onEmpty = null;
+            scope.__flCameraRunning = false;
+          },
+        });
+      },
+    };
+
+    scope.__flScan = (code: string) => queue.push(code);
+    scope.__flClear = () => {
+      queue.length = 0;
+    };
+    // Обрыв потока: кадры больше не приходят, окно остаётся открытым.
+    scope.__flBreak = () => {
+      running = false;
+    };
+  });
+}
+
+/*
+ * Скан на прилавке: код с телефона покупателя выдаёт заказ сам.
+ *
+ * Отдельного подтверждения нет намеренно — покупатель уже стоит перед
+ * менеджером, а сервер всё равно проверяет отмену, способ получения и ячейку
+ * заново.
+ */
+test('самовывоз с камеры: скан выдаёт заказ, а ошибки названы по причине', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  await installCameraDouble(page);
+  const scan = async (code: string, until: () => Promise<void>): Promise<void> => {
+    await page.evaluate((value) => {
+      (globalThis as unknown as { __flScan: (code: string) => void }).__flScan(value);
+    }, code);
+    await until();
+    await page.evaluate(() => {
+      (globalThis as unknown as { __flClear: () => void }).__flClear();
+    });
+  };
+  const cameraRunning = (): Promise<boolean> =>
+    page.evaluate(
+      () => (globalThis as unknown as { __flCameraRunning?: boolean }).__flCameraRunning === true,
+    );
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  const success = page.getByTestId('scan-success');
+  const error = page.getByTestId('scan-error');
+
+  // 1. Окно компактное, с рамкой и понятной подсказкой.
+  await page.getByTestId('pickup-scan').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
+  await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код заказа');
+  await expect(page.locator('.scanner__reticle')).toBeVisible();
+  const viewport = page.viewportSize();
+  const box = await page.locator('.scanner').boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.height).toBeLessThan((viewport?.height ?? 0) - 8);
+
+  // 2. Каждая причина отказа названа своими словами.
+  const cases: [string, string][] = [
+    ['ЧУЖОЙ-QR-НЕ-ЗАКАЗ', 'Ожидался QR-код заказа'],
+    [stand['заказ доставки'] ?? '', 'Это не самовывозный заказ'],
+    [stand['заказ отменён'] ?? '', 'Заказ отменён'],
+    [stand['заказ без ячейки'] ?? '', 'Заказ не находится в ячейке'],
+    [stand['заказ выдан'] ?? '', 'Заказ уже выдан покупателю'],
+  ];
+  for (const [code, text] of cases) {
+    await scan(code, async () => {
+      await expect(error, code).toContainText(text);
+    });
+    // «Повторить» возвращает к тому же шагу, а не закрывает окно.
+    await page.getByTestId('scan-retry').click();
+    await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код заказа');
+  }
+
+  // 3. Правильный код выдаёт заказ сам: отдельной кнопки подтверждения нет.
+  const target = stand['заказ сегодня'] ?? '';
+  await scan(target, async () => {
+    await expect(success).toContainText(`Заказ ${target} выдан покупателю`);
+  });
+
+  /*
+   * Уведомление об успехе исчезает само, и только потом закрывается окно:
+   * камера гаснет вместе с ним, а не в момент ответа сервера.
+   */
+  await expect(page.getByTestId('scan-title')).toHaveCount(0);
+  await expect(page.getByTestId('pickup-scan')).toBeVisible();
+  expect(await cameraRunning()).toBe(false);
+  await expect(
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${target}"]`),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: target }),
+  ).toBeVisible();
+
+  // 4. Повторный кадр того же кода второй выдачи не делает.
+  await page.getByTestId('pickup-scan').click();
+  await scan(target, async () => {
+    await expect(error).toContainText('Заказ уже выдан покупателю');
+  });
+  await page.getByTestId('scan-cancel').click();
+  expect(await cameraRunning()).toBe(false);
+  await expect(page.locator('[data-testid="pickup-issued-row"]', { hasText: target })).toHaveCount(
+    1,
+  );
+});
+
+/*
+ * Камера отказала — прилавок не останавливается.
+ */
+test('самовывоз: отказ камеры, отсутствие устройства и обрыв потока', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  const denyCamera = async (page: Page, name: string): Promise<void> => {
+    await page.addInitScript(`
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: () => Promise.reject(new DOMException('нет доступа', '${name}')),
+        },
+      });
+    `);
+  };
+
+  for (const [failure, text] of [
+    ['NotAllowedError', 'Доступ к камере'],
+    ['NotFoundError', 'Камера не найдена'],
+  ] as [string, string][]) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await denyCamera(page, failure);
+    await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+    await page.getByTestId('pickup-scan').click();
+    await expect(page.getByTestId('scan-camera-error')).toContainText(text);
+    await page.getByTestId('scan-cancel').click();
+
+    // Очередь работает как работала: отказ камеры её не ломает.
+    await expect(page.getByTestId('pickup-waiting-count')).toBeVisible();
+    await context.close();
+  }
+
+  /*
+   * Поток оборвался: окно осталось открытым, кадры не приходят.
+   * Незавершённое сканирование не выдаёт заказ.
+   */
+  const broken = await browser.newContext();
+  const page = await broken.newPage();
+  await installCameraDouble(page);
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('pickup-scan').click();
+  await page.evaluate(() => {
+    (globalThis as unknown as { __flBreak: () => void }).__flBreak();
+  });
+  await page.evaluate((code) => {
+    (globalThis as unknown as { __flScan: (value: string) => void }).__flScan(code);
+  }, stand['заказ завтра'] ?? '');
+  await page.waitForTimeout(500);
+  await page.getByTestId('scan-cancel').click();
+
+  // Заказ по-прежнему в очереди: оборванный поток ничего не выдал.
+  await expect(
+    page.locator(
+      `[data-testid="pickup-waiting-row"][data-order-number="${stand['заказ завтра'] ?? ''}"]`,
+    ),
+  ).toBeVisible();
+  await broken.close();
+});
+
+/*
+ * Ручная выдача существует только по решению администратора.
+ */
+test('самовывоз: ручная выдача появляется настройкой и выдаёт отдельной кнопкой', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await expect(page.getByTestId('pickup-manual-open')).toHaveCount(0);
+
+  // Прямой запрос ручной выдачи запрещён сервером, а не спрятан экраном.
+  const denied = await page.request.post('/api/pickup/issues', {
+    data: { orderNumber: stand['заказ сегодня'] ?? '', source: 'MANUAL' },
+  });
+  expect([401, 403, 409]).toContain(denied.status());
+
+  await enableManualEntry(request);
+
+  // Настройка доходит до открытого экрана без перезагрузки.
+  await expect(page.getByTestId('pickup-manual-open')).toBeVisible({ timeout: 25_000 });
+  await page.getByTestId('pickup-manual-open').click();
+
+  const target = stand['заказ вчера'] ?? '';
+  await page.getByTestId('pickup-search').fill(target);
+  // Enter только ищет: случайное нажатие не отдаёт коробку.
+  await page.getByTestId('pickup-search').press('Enter');
+  await expect(page.getByTestId('pickup-card-number')).toHaveText(target);
+  await expect(page.locator('[data-testid="pickup-issued-row"]', { hasText: target })).toHaveCount(
+    0,
+  );
+
+  await page.getByTestId('pickup-issue').click();
+  await expect(page.locator('.toast-region')).toContainText(`${target} выдан покупателю`);
+  await expect(
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${target}"]`),
+  ).toHaveCount(0);
+
+  await disableManualEntry(request);
+});
+
+/*
+ * Два менеджера у одного прилавка и склад рядом.
+ *
+ * Очередь у обоих одна и та же: коробка, выданная соседом, обязана исчезнуть
+ * у второго до того, как он пойдёт её искать.
+ */
+test('два сеанса: очередь прилавка обновляется от склада, выдачи и отмены', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await enableManualEntry(request);
+
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  const keeperContext = await browser.newContext();
+  const first = await firstContext.newPage();
+  const second = await secondContext.newPage();
+  const keeper = await keeperContext.newPage();
+
+  await login(first, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await login(second, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await login(keeper, stand['кладовщик прилавка'] ?? '', stand['пин'] ?? '');
+
+  const rowOf = (page: Page, number: string): Locator =>
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${number}"]`);
+
+  // 1. Складская приёмка добавляет заказ в очередь обоих менеджеров.
+  const returning = stand['заказ без ячейки'] ?? '';
+  await expect(rowOf(first, returning)).toContainText('Нет ячейки');
+  await keeper.getByTestId('wh-scan-order').fill(returning);
+  await keeper.getByTestId('wh-scan-order').press('Enter');
+  await keeper.getByTestId('wh-scan-cell').fill(stand['ячейка A'] ?? '');
+  await keeper.getByTestId('wh-place').click();
+  await expect(keeper.locator('.toast-region')).toContainText(returning);
+
+  // Ячейка появилась у обоих без перезагрузки.
+  await expect(rowOf(first, returning)).toContainText(stand['ячейка A'] ?? '');
+  await expect(rowOf(second, returning)).toContainText(stand['ячейка A'] ?? '');
+
+  // 2. Выдача во втором сеансе убирает строку в первом.
+  const target = stand['заказ сегодня'] ?? '';
+  await second.getByTestId('pickup-manual-open').click();
+  await second.getByTestId('pickup-search').fill(target);
+  await second.getByTestId('pickup-search').press('Enter');
+  await expect(second.getByTestId('pickup-card-number')).toHaveText(target);
+  await second.getByTestId('pickup-issue').click();
+  await expect(second.locator('.toast-region')).toContainText('выдан покупателю');
+
+  await expect(rowOf(first, target)).toHaveCount(0);
+
+  // 3. Отмена из источника убирает строку, снятие отмены возвращает её.
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+  const cancelTarget = stand['заказ завтра'] ?? '';
+
+  const cancelled = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: cancelTarget, cancelled: true },
+  });
+  expect(cancelled.status(), await cancelled.text()).toBe(200);
+  await expect(rowOf(first, cancelTarget)).toHaveCount(0);
+  await expect(rowOf(second, cancelTarget)).toHaveCount(0);
+
+  const restored = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: cancelTarget, cancelled: false },
+  });
+  expect(restored.status()).toBe(200);
+  // Коробка всё это время лежала в ячейке — заказ возвращается в очередь.
+  await expect(rowOf(first, cancelTarget)).toBeVisible();
+
+  await disableManualEntry(request);
+  await firstContext.close();
+  await secondContext.close();
+  await keeperContext.close();
+});
+
+/*
+ * Прилавок на телефоне и планшете.
+ */
+test('самовывоз: 320, 375, 390 и 768 без выезда, окно внутри экрана', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await enableManualEntry(request);
+
+  for (const size of [
+    { width: 320, height: 568 },
+    { width: 375, height: 667 },
+    { width: 390, height: 844 },
+    { width: 768, height: 1024 },
+  ]) {
+    const label = `${size.width}×${size.height}`;
+    const context = await browser.newContext({ viewport: size, hasTouch: true });
+    const page = await context.newPage();
+    await installCameraDouble(page);
+    await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+    await expect(page.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+
+    const overflow = async (): Promise<number> =>
+      page.evaluate<number>(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+      );
+    expect(await overflow(), `очередь ${label}`).toBeLessThanOrEqual(1);
+
+    // Поля не вызывают приближения страницы на сенсорном экране.
+    await page.getByTestId('pickup-manual-open').click();
+    await expect(page.getByTestId('pickup-search')).toBeVisible();
+    const fonts = await page.evaluate<number[]>(
+      "Array.from(document.querySelectorAll('input, select, textarea')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+    );
+    for (const font of fonts) {
+      expect(font, `размер шрифта поля ${label}`).toBeGreaterThanOrEqual(16);
+    }
+
+    // Видимый фокус: поле в фокусе отличается от поля без него.
+    await page.getByTestId('pickup-search').focus();
+    const focusRing = await page.evaluate<string>(
+      "(() => { const node = document.activeElement; if (node === null) { return ''; } const style = getComputedStyle(node); return [style.outlineStyle, style.outlineWidth, style.boxShadow, style.borderColor].join('|'); })()",
+    );
+    expect(focusRing.includes('none|0px|none') ? 'нет признака' : 'есть', `фокус ${label}`).toBe(
+      'есть',
+    );
+
+    // Окно камеры целиком внутри экрана, фон под ним неподвижен.
+    await page.getByTestId('pickup-scan').click();
+    const box = await page.locator('.scanner').boundingBox();
+    expect(box, label).not.toBeNull();
+    expect(box!.x, `окно слева ${label}`).toBeGreaterThanOrEqual(-1);
+    expect(box!.x + box!.width, `окно справа ${label}`).toBeLessThanOrEqual(size.width + 1);
+    expect(box!.y + box!.height, `окно снизу ${label}`).toBeLessThanOrEqual(size.height + 1);
+    expect(await overflow(), `окно камеры ${label}`).toBeLessThanOrEqual(1);
+
+    const locked = await page.evaluate<boolean>(
+      "getComputedStyle(document.body).overflow === 'hidden' || document.body.scrollHeight <= window.innerHeight",
+    );
+    expect(locked, `фон под окном ${label}`).toBe(true);
+
+    // Escape закрывает окно камеры и возвращает прилавок.
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('scan-title')).toHaveCount(0);
+    await expect(page.getByTestId('pickup-scan')).toBeVisible();
+
+    await context.close();
+  }
+
+  await disableManualEntry(request);
+});
