@@ -2338,3 +2338,76 @@ input.routes__day {
   font-weight: 400;
   white-space: nowrap;
 }
+
+/*
+ * Состав листа — вдавленный лоток внутри поднятой карточки.
+ *
+ * Прежде это была коробка в рамке с волосяными линиями между строками:
+ * рамка спорила с карточкой, в которой лежала, а линии дробили и без того
+ * короткий список. Углубление говорит «внутри» одним приёмом.
+ */
+.sheets__orders {
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.sheets__order {
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+  font-size: var(--font-size-sm);
+}
+
+.sheets__order + .sheets__order {
+  border-top: 0;
+}
+
+/* Номер остановки — тот же синий кружок, что и в черновике маршрута. */
+.sheets__order-position {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-align: center;
+}
+
+.sheets__order-number {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.sheets__order-interval,
+.sheets__order-address {
+  color: var(--color-text-muted);
+}
+
+/* «состав» / «скрыть» — тихое слово рядом со счётчиком заказов. */
+.sheets__item-toggle-text {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Отмена отгрузки — красное слово на обычной плитке, без красной заливки. */
+.sheets__item .routes__actions .btn--danger {
+  background: var(--surface-raised);
+  color: var(--color-error);
+  box-shadow: var(--shadow-out);
+}
+
+.sheets__item .routes__actions .btn--danger:hover:not(:disabled) {
+  box-shadow: var(--shadow-in);
+}

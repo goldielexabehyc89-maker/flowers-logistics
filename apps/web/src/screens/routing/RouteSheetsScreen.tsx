@@ -119,8 +119,13 @@ function SheetOrders({
           >
             {item.order.number}
           </button>
-          <span className="sheets__order-address">{item.order.address ?? '—'}</span>
+          {/*
+            Время стоит между номером и адресом: остановка читается как
+            «этот заказ, к этому часу, сюда». Адрес идёт последним — он
+            длиннее всех и забирает остаток строки.
+          */}
           <span className="sheets__order-interval muted">{stopInterval(item.order.interval)}</span>
+          <span className="sheets__order-address">{item.order.address ?? '—'}</span>
           {delivered.has(item.order.number) && (
             <span className="sheets__order-state">Доставлен</span>
           )}
@@ -433,12 +438,19 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     }
                                   </StatusBadge>
                                   <span className="muted text-sm">
-                                    заказов: {sheet.totalOrders}
+                                    заказов {sheet.totalOrders}
                                     {sheet.deliveredOrders > 0
-                                      ? ` · доставлено: ${sheet.deliveredOrders}`
+                                      ? ` · доставлено ${sheet.deliveredOrders}`
                                       : ''}
                                   </span>
-                                  <span className="sheets__item-chevron" aria-hidden="true" />
+                                  {/*
+                                    Слово вместо стрелки: стрелка не называет,
+                                    что именно раскроется, и в ряду с другими
+                                    значками читается как украшение.
+                                  */}
+                                  <span className="sheets__item-toggle-text">
+                                    {expandedId === sheet.id ? 'скрыть' : 'состав'}
+                                  </span>
                                 </button>
                                 {/*
                                 Курьер выбирается прямо в листе тем же контролом,
@@ -514,6 +526,7 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                 )}
                                 {section === 'SHIPPED' && (
                                   <Button
+                                    variant="danger"
                                     disabled={busy}
                                     data-testid="sheet-cancel-shipment"
                                     onClick={() => {
@@ -525,12 +538,6 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     Отменить отгрузку
                                   </Button>
                                 )}
-                                <Button
-                                  data-testid="sheet-open"
-                                  onClick={() => setOpenId(sheet.id)}
-                                >
-                                  Открыть лист
-                                </Button>
                               </div>
                             </div>
 
