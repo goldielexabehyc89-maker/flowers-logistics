@@ -287,8 +287,17 @@ export function DealsMap({
           Два простых поля времени. Ничего не пересчитывают и никуда
           не отправляются: только сужают то, что показано на карте.
         */}
+            {/*
+              Подписи «От» и «До» скрыты от глаз, но не от программы чтения.
+              
+              Между двумя полями времени и так стоит тире — оно называет
+              диапазон короче любого слова, а два слова рядом с узкими полями
+              занимали больше места, чем сами поля. Без подписи поле осталось
+              бы безымянным для того, кто его не видит, поэтому текст никуда
+              не делся — он только перестал печататься.
+            */}
             <label className="deals-map__time">
-              От
+              <span className="visually-hidden">Время от</span>
               <input
                 type="time"
                 value={from}
@@ -296,8 +305,11 @@ export function DealsMap({
                 onChange={(event) => setFrom(event.target.value)}
               />
             </label>
+            <span className="deals-map__time-dash" aria-hidden="true">
+              –
+            </span>
             <label className="deals-map__time">
-              До
+              <span className="visually-hidden">Время до</span>
               <input
                 type="time"
                 value={to}
