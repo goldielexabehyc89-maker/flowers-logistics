@@ -22,6 +22,7 @@ import { Plus } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { RouteCard } from './RouteCard';
+import { DraftLeaseRow } from './DraftLeaseRow';
 import { PreviewPanel } from './PreviewPanel';
 import { DraftMapPanel } from './DraftMapPanel';
 import { useWorkspace } from '../logistics/useWorkspace';
@@ -221,6 +222,9 @@ export function RoutingScreen(): React.JSX.Element {
                           {expanded ? 'Свернуть' : 'Развернуть'}
                         </span>
                       </button>
+
+                      {/* Аренда видна и у свёрнутой строки: занят маршрут или свободен. */}
+                      {!expanded && <DraftLeaseRow routeId={draft.id} />}
 
                       {expanded && (
                         <RouteCard
