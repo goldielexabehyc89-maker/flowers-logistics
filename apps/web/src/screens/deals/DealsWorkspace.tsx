@@ -802,16 +802,27 @@ export function DealsWorkspace(): React.JSX.Element {
               )}
             </div>
             <div className="deals__summary-actions">
+              {/*
+                Подписи короткие, полные — в подсказке.
+                
+                «Создать маршрут вручную» и «Распределить автоматически» втроём
+                в ширину панели не помещались и складывались в три строки:
+                панель вырастала втрое, отнимая место у последних карточек.
+                Смысл кнопок задаёт не длина подписи, а место и вид: главная
+                залита акцентом, соседняя — обычная.
+              */}
               <Button
                 variant="primary"
                 data-testid="deals-manual-draft"
+                title="Создать маршрут вручную"
                 disabled={selected.length === 0 || manualDraft.isPending}
                 onClick={() => setCreateOpen(true)}
               >
-                Создать маршрут вручную
+                Создать
               </Button>
               <Button
                 data-testid="deals-auto-plan"
+                title="Распределить автоматически"
                 loading={autoPlan.isPending}
                 disabled={selected.length === 0 || autoPlan.isPending}
                 onClick={() => {
@@ -821,7 +832,7 @@ export function DealsWorkspace(): React.JSX.Element {
                   setSplitOpen(true);
                 }}
               >
-                {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
+                {autoPlan.isPending ? 'Считаем…' : 'Автоматически'}
               </Button>
             </div>
           </div>

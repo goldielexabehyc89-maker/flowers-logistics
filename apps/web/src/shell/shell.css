@@ -483,6 +483,13 @@
     display: none;
   }
 
+  /*
+   * Панель выезжает слева поверх экрана.
+   *
+   * `display: none` в закрытом состоянии убирает её из потока и из обхода
+   * с клавиатуры; выезд рисует `transform`, а не изменение ширины — ширина
+   * пересобирала бы раскладку под меню, чего быть не должно вовсе.
+   */
   .shell--workspace.shell--drawer-open .shell__sidebar {
     display: flex;
     position: fixed;
@@ -490,6 +497,23 @@
     z-index: 20;
     width: var(--drawer-width);
     overflow-y: auto;
+    animation: shell-drawer-in 160ms ease-out;
+  }
+
+  @keyframes shell-drawer-in {
+    from {
+      transform: translateX(-100%);
+    }
+
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .shell--workspace.shell--drawer-open .shell__sidebar {
+      animation: none;
+    }
   }
 
   /*

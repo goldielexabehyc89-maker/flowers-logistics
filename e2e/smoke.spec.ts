@@ -7410,3 +7410,57 @@ test('«Сделки»: список курьеров не обрезан, сп�
 
   await context.close();
 });
+
+/**
+ * Меню — наложение, а не колонка.
+ *
+ * Проверяется не внешний вид, а то, что экран под меню не трогают: раньше
+ * панель занимала колонку, и её появление пересобирало раскладку — список
+ * сжимался, карта уходила в адаптивный режим, раскрытые карточки схлопывались.
+ * Поэтому измеряется положение рабочей области до, во время и после.
+ */
+test('оболочка: меню выезжает поверх экрана и не сдвигает рабочую область', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  seedOrders(2, { withPoint: true });
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  const workspace = page.getByTestId('deals-workspace');
+  await expect(workspace).toBeVisible();
+
+  // Состояние, которое обязано пережить открытие меню.
+  await page.getByTestId('deals-select-all').click();
+  const selected = await page.getByTestId('deals-selected-count').textContent();
+
+  const box = async (): Promise<string> => JSON.stringify(await workspace.boundingBox());
+  const before = await box();
+
+  const menu = page.locator('.shell__menu-button');
+  await menu.click();
+  await expect(page.locator('.shell--drawer-open')).toHaveCount(1);
+
+  // Главное: рабочая область не сдвинулась и не сузилась.
+  expect(await box()).toBe(before);
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(0);
+  // Выбор не сброшен: меню ничего под собой не пересоздаёт.
+  await expect(page.getByTestId('deals-selected-count')).toHaveText(selected ?? '');
+
+  // Выбор раздела выполняет обычный переход и закрывает панель.
+  await page.locator('#shell-sidebar').getByRole('link', { name: 'Настройки' }).click();
+  await expect(page.getByRole('heading', { name: 'Настройки', level: 1 })).toBeVisible();
+  await expect(page.locator('.shell--drawer-open')).toHaveCount(0);
+
+  await context.close();
+});

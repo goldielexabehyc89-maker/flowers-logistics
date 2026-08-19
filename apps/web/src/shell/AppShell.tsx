@@ -39,7 +39,6 @@ import { useAuth } from '../auth/AuthContext';
 import {
   LOGISTICS_TABS,
   isLogisticsPath,
-  isWideLayout,
   splitMobileNavigation,
   visibleSections,
 } from '../navigation/navigation';
@@ -70,32 +69,6 @@ const SECTION_ICONS: Readonly<Record<string, LucideIcon>> = {
   settings: Settings,
 };
 
-/**
- * Ключ сохранённого состояния меню.
- *
- * Состояние живёт в браузере, а не в профиле: это привычка на конкретном
- * устройстве, а не свойство сотрудника. На большом мониторе меню держат
- * раскрытым, на ноутбуке — свёрнутым, и один и тот же человек ожидает разного.
- */
-const SIDEBAR_STORAGE_KEY = 'fl.sidebar.collapsed';
-
-function readCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1';
-  } catch {
-    // Приватный режим и заблокированное хранилище — не повод не открыть меню.
-    return false;
-  }
-}
-
-function writeCollapsed(collapsed: boolean): void {
-  try {
-    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0');
-  } catch {
-    // Настройка не сохранилась — интерфейс всё равно обязан работать.
-  }
-}
-
 export function AppShell(): React.JSX.Element {
   const { user, client, logout, logoutEverywhere } = useAuth();
   const location = useLocation();
@@ -108,7 +81,6 @@ export function AppShell(): React.JSX.Element {
    * остаётся полосой с иконками: полное исчезновение оставляло бы человека без
    * ориентира, где он находится.
    */
-  const [collapsed, setCollapsed] = useState(readCollapsed);
   /**
    * Открыт ли drawer на телефоне.
    *
@@ -158,7 +130,14 @@ export function AppShell(): React.JSX.Element {
   // Карты и крупные рабочие таблицы занимают всю ширину; обычная страница
   // остаётся колонкой. Решение принимается по адресу, а не экраном: иначе
   // каждый раздел договаривался бы о ширине сам.
-  const wide = isWideLayout(location.pathname);
+  /*
+   * Отдельного «узкого» варианта страницы больше нет.
+   *
+   * Ограничение ширины придумывалось, когда меню занимало колонку: без него
+   * строка данных растягивалась во весь монитор. Меню колонки больше не
+   * занимает, и каждый экран рисуется в своей полной рабочей ширине —
+   * два варианта одной страницы означали бы две разные вёрстки одной работы.
+   */
 
   // Внутри «Логистики» заголовок страницы называет ОТКРЫТУЮ ВКЛАДКУ, а не
   // раздел: человек находится в «Сделках», и заголовок «Логистика» ничего
@@ -204,9 +183,15 @@ export function AppShell(): React.JSX.Element {
    * оказывался бы в начале страницы и заново шёл табом до места, где был.
    */
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
   useEffect(() => {
-    if (wasOpenRef.current && !drawerOpen) {
+    if (drawerOpen) {
+      // Фокус уходит в меню: иначе клавиатура остаётся снаружи, и Tab водит
+      // по экрану, который в этот момент не принимает нажатия.
+      const first = sidebarRef.current?.querySelector<HTMLElement>('a, button');
+      first?.focus();
+    } else if (wasOpenRef.current) {
       menuButtonRef.current?.focus();
     }
     wasOpenRef.current = drawerOpen;
@@ -228,42 +213,37 @@ export function AppShell(): React.JSX.Element {
   }, [drawerOpen]);
 
   /*
-   * В рабочем пространстве та же кнопка открывает меню поверх содержимого,
-   * а не сворачивает колонку: колонки там нет вовсе.
+   * Свёрнутого состояния колонки больше нет — меню всегда наложение.
+   *
+   * Прежний признак «свёрнуто» хранился между сеансами и означал ширину
+   * колонки. Колонки нет, хранить нечего: меню открыто ровно столько,
+   * сколько им пользуются.
    */
-  const workspace = isLogisticsPath(location.pathname);
-  const navShown = workspace ? drawerOpen : !collapsed;
-  const menuLabel = navShown ? 'Свернуть меню' : 'Показать меню';
-
-  function toggleCollapsed(): void {
-    setCollapsed((current) => {
-      const next = !current;
-      writeCollapsed(next);
-      return next;
-    });
-  }
+  const navShown = drawerOpen;
+  const menuLabel = navShown ? 'Закрыть меню' : 'Открыть меню';
 
   return (
     <div
       className={[
         'shell',
-        collapsed ? 'shell--collapsed' : null,
         drawerOpen ? 'shell--drawer-open' : null,
         singleSection ? 'shell--single-section' : null,
         /*
-         * Рабочее пространство логистики отдаёт списку и карте всю ширину.
+         * Меню — временное наложение, а не колонка. Везде и всегда.
          *
-         * Постоянная колонка меню отнимала у них около трёхсот пикселей —
-         * ровно там, где ширина и решает: карточка сжималась до таблицы, а
-         * карта переставала быть картой. Навигация никуда не делась, она
-         * открывается той же компактной кнопкой в верхней строке.
+         * Постоянная панель отнимала у работы около трёхсот пикселей ровно
+         * там, где ширина и решает, а её появление сдвигало и пересобирало
+         * раскладку: список сжимался, карта уходила в адаптивный режим,
+         * раскрытые карточки схлопывались. Теперь экран не знает о состоянии
+         * меню вовсе — оно выезжает поверх и уезжает, ничего под собой
+         * не трогая.
          */
-        isLogisticsPath(location.pathname) ? 'shell--workspace' : null,
+        'shell--workspace',
       ]
         .filter((name) => name !== null)
         .join(' ')}
     >
-      <aside className="shell__sidebar" id="shell-sidebar">
+      <aside className="shell__sidebar" id="shell-sidebar" ref={sidebarRef}>
         <div className="shell__brand">
           <span className="shell__brand-mark" aria-hidden>
             Л
@@ -376,7 +356,7 @@ export function AppShell(): React.JSX.Element {
           aria-controls="shell-sidebar"
           aria-label={menuLabel}
           title={menuLabel}
-          onClick={workspace ? () => setDrawerOpen((open) => !open) : toggleCollapsed}
+          onClick={() => setDrawerOpen((open) => !open)}
         >
           {navShown ? (
             <PanelLeftClose size={ICON_SIZE} aria-hidden />
@@ -438,7 +418,7 @@ export function AppShell(): React.JSX.Element {
       </header>
 
       <main className="shell__content">
-        <div className={wide ? 'shell__page shell__page--wide' : 'shell__page'}>
+        <div className="shell__page">
           <Outlet />
         </div>
       </main>
