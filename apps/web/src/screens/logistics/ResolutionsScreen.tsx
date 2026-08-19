@@ -79,6 +79,22 @@ export function readyForSameBouquet(returnState: string | null): boolean {
   return returnState === 'ACCEPTED' || returnState === null;
 }
 
+/** Разделы экрана: нерешённое сверху, решённое остаётся видимым ниже. */
+const RESOLUTION_GROUPS = [
+  {
+    key: 'pending',
+    title: 'Ждут решения',
+    hint: 'сверху те, где букет уже на складе',
+    empty: 'Нерешённых недоставок нет.',
+  },
+  {
+    key: 'done',
+    title: 'Решено',
+    hint: 'остаётся в истории',
+    empty: 'Пока ничего не решено.',
+  },
+] as const;
+
 /** Подпись принятого решения. */
 export const DECISION_LABELS: Readonly<Record<string, string>> = {
   CANCELLED: 'Отменён',
@@ -161,6 +177,22 @@ export function ResolutionsScreen(): React.JSX.Element {
   const rows = list.data.items;
   const sameBouquetReady = choosing === null ? false : readyForSameBouquet(choosing.returnState);
 
+  /*
+   * Нерешённое отделено от решённого, а внутри нерешённого наверх подняты
+   * заказы, чей букет уже на складе: только их можно отправить тем же
+   * букетом, и решение по ним не упирается в ожидание склада.
+   *
+   * Порядок внутри групп в остальном не меняется: он приходит с сервера.
+   */
+  const pending = rows
+    .filter((row) => row.decision === null)
+    .slice()
+    .sort(
+      (a, b) =>
+        Number(readyForSameBouquet(b.returnState)) - Number(readyForSameBouquet(a.returnState)),
+    );
+  const done = rows.filter((row) => row.decision !== null);
+
   return (
     <section className="stack">
       <div className="card stack">
@@ -173,113 +205,168 @@ export function ResolutionsScreen(): React.JSX.Element {
         </div>
       </div>
 
-      <div className="card stack">
-        {rows.length === 0 ? (
+      {rows.length === 0 ? (
+        <div className="card stack">
           <EmptyState title="Нерешённых недоставок нет" />
-        ) : (
-          <div className="table-wrap">
-            <table className="table resolutions">
-              <thead>
-                <tr>
-                  <th>Заказ</th>
-                  <th>Адрес</th>
-                  <th>Курьер</th>
-                  <th>Время</th>
-                  <th>Причина</th>
-                  <th>Возврат</th>
-                  <th>Решение</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => {
-                  const ready = readyForSameBouquet(row.returnState);
-                  const busy = decide.isPending && decide.variables?.id === row.id;
+        </div>
+      ) : (
+        RESOLUTION_GROUPS.map((group) => {
+          const groupRows = group.key === 'pending' ? pending : done;
+          return (
+            <section
+              key={group.key}
+              className={`resolutions__group resolutions__group--${group.key}`}
+              data-testid={`resolutions-${group.key}`}
+            >
+              <div className="resolutions__group-head">
+                <span className="resolutions__group-dot" aria-hidden="true" />
+                <h2 className="resolutions__group-title">{group.title}</h2>
+                <span className="resolutions__group-count">{groupRows.length}</span>
+                <span className="resolutions__group-hint">{group.hint}</span>
+              </div>
 
-                  return (
-                    <tr
-                      key={row.id}
-                      data-order-number={row.orderNumber}
-                      data-testid="resolution-row"
-                    >
-                      <td>
-                        <strong>{row.orderNumber}</strong>
-                        {row.routeNumber !== null && (
-                          <div className="muted text-sm">маршрут {row.routeNumber}</div>
-                        )}
-                      </td>
-                      <td className="resolutions__address">{row.address ?? '—'}</td>
-                      <td>{row.courier?.fullName ?? '—'}</td>
-                      <td>{formatMoscowDateTime(row.failedAt)}</td>
-                      <td>
-                        {row.reasonName}
-                        {row.kind === 'CANCELLED_AFTER_DELIVERY' && (
-                          <div>
-                            <StatusBadge tone="error">Требуется коррекция</StatusBadge>
+              {/*
+                Лоток вдавлен, строки внутри подняты: видно, что заказы лежат
+                В разделе, а не просто идут за его названием.
+              */}
+              <div className="resolutions__tray" role="table" aria-label={group.title}>
+                <div className="resolutions__head" role="row">
+                  <span role="columnheader">Заказ и адрес</span>
+                  <span role="columnheader">Причина</span>
+                  <span role="columnheader">Букет</span>
+                  <span role="columnheader" className="resolutions__head-decision">
+                    Решение
+                  </span>
+                </div>
+
+                {groupRows.length === 0 ? (
+                  <p className="muted text-sm resolutions__empty">{group.empty}</p>
+                ) : (
+                  groupRows.map((row) => {
+                    const ready = readyForSameBouquet(row.returnState);
+                    const busy = decide.isPending && decide.variables?.id === row.id;
+
+                    return (
+                      <div
+                        key={row.id}
+                        className="resolutions__row"
+                        role="row"
+                        data-order-number={row.orderNumber}
+                        data-testid="resolution-row"
+                      >
+                        <div className="resolutions__cell" role="cell">
+                          <div className="resolutions__order">
+                            <strong className="resolutions__number">{row.orderNumber}</strong>
+                            {row.routeNumber !== null && (
+                              <span className="muted text-sm">маршрут {row.routeNumber}</span>
+                            )}
                           </div>
-                        )}
-                      </td>
-                      <td>
-                        <StatusBadge tone={ready ? 'success' : 'warning'}>
-                          {RETURN_STATE_LABELS[row.returnState ?? ''] ?? '—'}
-                        </StatusBadge>
-                      </td>
-                      <td>
-                        {row.decision === null && row.kind === 'CANCELLED_AFTER_DELIVERY' ? (
-                          /*
-                           * Отмена пришла после доставки: букет у клиента,
-                           * деньги, возможно, получены. Система здесь ничего
-                           * не меняет — человек разбирается и закрывает задачу.
-                           */
-                          <Button
-                            variant="ghost"
-                            disabled={busy}
-                            data-testid="resolution-acknowledge"
-                            onClick={() => decide.mutate({ id: row.id, action: 'acknowledge' })}
+                          <div className="muted text-sm resolutions__address">
+                            {row.address ?? '—'}
+                          </div>
+                        </div>
+
+                        <div className="resolutions__cell" role="cell">
+                          <div>{row.reasonName}</div>
+                          {row.kind === 'CANCELLED_AFTER_DELIVERY' && (
+                            <div>
+                              <StatusBadge tone="error">Требуется коррекция</StatusBadge>
+                            </div>
+                          )}
+                          {/*
+                            Время и курьер — одна приглушённая строка: по ним
+                            восстанавливают обстоятельства, а не принимают решение.
+                          */}
+                          <div className="muted text-sm resolutions__when">
+                            {formatMoscowDateTime(row.failedAt)}
+                            {row.courier === null ? '' : ` · ${row.courier.fullName}`}
+                          </div>
+                        </div>
+
+                        <div className="resolutions__cell" role="cell">
+                          {/*
+                            Возврат не требуется — это ответ, а не пропуск.
+                            Прочерк на его месте читался как «неизвестно»
+                            и заставлял открывать заказ, чтобы убедиться.
+                          */}
+                          <StatusBadge
+                            tone={
+                              row.returnState === null ? 'neutral' : ready ? 'success' : 'warning'
+                            }
                           >
-                            Разобрано
-                          </Button>
-                        ) : row.decision === null ? (
-                          <div className="row resolutions__actions">
-                            <Button
-                              variant="ghost"
-                              disabled={busy}
-                              data-testid="resolution-cancel"
-                              onClick={() => decide.mutate({ id: row.id, action: 'cancel-order' })}
-                            >
-                              Отменить заказ
-                            </Button>
+                            {row.returnState === null
+                              ? 'Не требуется'
+                              : (RETURN_STATE_LABELS[row.returnState] ?? row.returnState)}
+                          </StatusBadge>
+                          {/*
+                            Запрет назван прямо в строке букета, а не спрятан
+                            за нажатием: логист видит его до того, как выберет
+                            повторную доставку.
+                          */}
+                          {!ready && (
+                            <span className="resolutions__bouquet-note">
+                              тот же букет отправить нельзя
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="resolutions__cell resolutions__decision" role="cell">
+                          {row.decision === null && row.kind === 'CANCELLED_AFTER_DELIVERY' ? (
+                            /*
+                             * Отмена пришла после доставки: букет у клиента,
+                             * деньги, возможно, получены. Система здесь ничего
+                             * не меняет — человек разбирается и закрывает задачу.
+                             */
                             <Button
                               variant="primary"
                               disabled={busy}
-                              data-testid="resolution-redeliver"
-                              onClick={() => setChoosing(row)}
+                              data-testid="resolution-acknowledge"
+                              onClick={() => decide.mutate({ id: row.id, action: 'acknowledge' })}
                             >
-                              Повторно доставить
+                              Разобрано
                             </Button>
-                          </div>
-                        ) : (
-                          <span className="muted text-sm">
-                            {DECISION_LABELS[row.decision] ?? row.decision}
-                            {row.decidedBy === null ? '' : ` · ${row.decidedBy}`}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+                          ) : row.decision === null ? (
+                            <>
+                              <Button
+                                variant="danger"
+                                disabled={busy}
+                                data-testid="resolution-cancel"
+                                onClick={() =>
+                                  decide.mutate({ id: row.id, action: 'cancel-order' })
+                                }
+                              >
+                                Отменить заказ
+                              </Button>
+                              <Button
+                                variant="primary"
+                                disabled={busy}
+                                data-testid="resolution-redeliver"
+                                onClick={() => setChoosing(row)}
+                              >
+                                Доставить снова
+                              </Button>
+                            </>
+                          ) : (
+                            <span className="resolutions__decided">
+                              <span className="resolutions__decided-what">
+                                {DECISION_LABELS[row.decision] ?? row.decision}
+                              </span>
+                              {row.decidedBy !== null && (
+                                <span className="muted text-sm">{row.decidedBy}</span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+          );
+        })
+      )}
 
-      {/*
-        Способ повторной доставки — отдельный выбор, а не вторая кнопка в ряду.
-        Различие между вариантами не косметическое: один требует принятого
-        складом букета и ничего не пересобирает, другой начинает сборку
-        заново. Показать их рядом с одинаковым весом значило бы предложить
-        человеку угадать.
-      */}
       {choosing !== null && (
         <Modal
           open
