@@ -6320,6 +6320,19 @@ test('склад на пяти размерах: вкладки, окна, дл�
       expect(box.x + box.width, label).toBeLessThanOrEqual(size.width + 1);
     }
 
+    /*
+     * Название вкладки не обрезано.
+     *
+     * Обрезанное слово читается как другое, а нажимать приходится наугад:
+     * поместиться обязан весь текст, а не только рамка кнопки.
+     */
+    const clipped = await page.evaluate<string[]>(
+      `Array.from(document.querySelectorAll('.wh-tabs__item'))
+         .filter((node) => node.scrollWidth > node.clientWidth + 1)
+         .map((node) => node.textContent ?? '')`,
+    );
+    expect(clipped, `обрезанные названия вкладок ${label}`).toEqual([]);
+
     for (const id of tabs) {
       await page.getByTestId(id).click();
       expect(await overflow(), `${id} ${label}`).toBeLessThanOrEqual(1);
