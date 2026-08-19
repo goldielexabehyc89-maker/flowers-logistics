@@ -360,33 +360,6 @@ export function DealsMap({
           время и группировка. Обе строки лежат ПОВЕРХ холста и высоту у карты
           не отнимают.
         */}
-        {/*
-          Легенда внизу карты, а не рядом со счётчиком.
-          
-          Наверху она стояла в одной строке со счётчиком и читалась как часть
-          его подписи, хотя объясняет цвета точек. Внизу она у того, что
-          объясняет, и не отнимает место у самой карты.
-        */}
-        <div className="deals-map__overlay deals-map__overlay--bottom">
-          <ul className="deals-map__legend" data-testid="deals-map-legend">
-            <li>
-              <span className="deals-map__dot deals-map__dot--free" /> доступен
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--picked" /> выбран
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--draft" /> в черновике
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--assembled" /> собран
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--depot" /> склад
-            </li>
-          </ul>
-        </div>
-
         {styleUrl === '' ? (
           <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
             Карта не настроена
@@ -421,6 +394,31 @@ export function DealsMap({
           </p>
         )}
       </div>
+
+      {/*
+        Легенда — подпись под картой, а не накладка на ней.
+
+        Поверх холста она закрывала собой нижний край и спорила с точками,
+        которые объясняет: подпись должна стоять рядом с картинкой,
+        а не на ней.
+      */}
+      <ul className="deals-map__legend" data-testid="deals-map-legend">
+        <li>
+          <span className="deals-map__dot deals-map__dot--free" /> доступен
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--picked" /> выбран
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--draft" /> в черновике
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--assembled" /> собран
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--depot" /> склад
+        </li>
+      </ul>
     </section>
   );
 }

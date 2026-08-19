@@ -707,8 +707,7 @@
   bottom: 12px;
 }
 
-.deals-map__panel,
-.deals-map__legend {
+.deals-map__panel {
   pointer-events: auto;
   display: flex;
   flex-wrap: wrap;
@@ -809,8 +808,23 @@
   color: var(--color-text-muted, #666);
 }
 
+/*
+ * Легенда — подпись под картой: строка значков на фоне страницы.
+ *
+ * Накладкой она закрывала нижний край холста и спорила с точками, которые
+ * объясняет; собственная поверхность делала её похожей на панель управления,
+ * хотя нажимать в ней нечего.
+ */
 .deals-map__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-2) var(--space-1) 0;
   list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
 }
 
 .deals-map__legend li {

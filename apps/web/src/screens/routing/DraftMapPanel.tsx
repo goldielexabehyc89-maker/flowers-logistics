@@ -237,6 +237,27 @@ export function DraftMapPanel({
    * набору точек, а не к подложке под ними: при ненастроенной карте они
    * пропадали вместе с ней, хотя список и заказы работают как обычно.
    */
+  const legend =
+    (
+      /*
+       * Легенда — подпись под картой.
+       *
+       * На холсте три разных значка, и без подписи логист вынужден
+       * догадываться, чем серая точка отличается от синей.
+       */
+      <ul className="routes__legend" data-testid="routing-map-legend">
+        <li>
+          <span className="routes__legend-dot routes__legend-dot--stop" /> остановка черновика
+        </li>
+        <li>
+          <span className="routes__legend-dot routes__legend-dot--free" /> нераспределённая сделка
+        </li>
+        <li>
+          <span className="routes__legend-dot routes__legend-dot--depot" /> склад
+        </li>
+      </ul>
+    );
+
   const panelHeader = (
     <header className="routes__map-header">
       <span
@@ -292,6 +313,7 @@ export function DraftMapPanel({
         <div className="routes__map-empty">
           <EmptyState title="Карта не настроена" description={status.message ?? ''} />
         </div>
+        {legend}
       </section>
     );
   }
@@ -471,6 +493,8 @@ export function DraftMapPanel({
           )}
         </div>
       )}
+
+      {legend}
 
       {traffic !== null && (
         <p className="muted text-sm" data-testid="traffic-note">

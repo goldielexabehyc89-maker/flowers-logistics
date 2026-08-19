@@ -2127,3 +2127,47 @@
 .routes__map-count {
   font-size: var(--font-size-md);
 }
+
+/* Легенда карты: строка значков под холстом, на фоне страницы. */
+.routes__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-2) var(--space-1) 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.routes__legend li {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/*
+ * Форма различает значки наравне с цветом: круг и ромб читаются и без
+ * различения оттенков.
+ */
+.routes__legend-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+}
+
+.routes__legend-dot--stop {
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.routes__legend-dot--free {
+  border-radius: 50%;
+  background: #6b7280;
+}
+
+.routes__legend-dot--depot {
+  background: #333;
+  transform: rotate(45deg);
+}
