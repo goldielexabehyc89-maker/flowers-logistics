@@ -230,26 +230,60 @@ export function DraftMapPanel({
    * и когда подложка есть, и когда её нет. Скрытая панель обязана оставаться
    * возвращаемой, а вернуть её больше неоткуда.
    */
-  const listToggle = (
-    <button
-      type="button"
-      className="routes__map-toggle"
-      aria-expanded={!draftsHidden}
-      aria-controls="routing-drafts"
-      data-testid="routing-toggle-drafts"
-      onClick={onToggleDrafts}
-    >
-      {draftsHidden ? 'Показать черновики' : 'Скрыть черновики'}
-    </button>
+  /*
+   * Шапка панели одна на все состояния.
+   *
+   * Счётчик точек и переключатель нераспределённых относятся к списку и к
+   * набору точек, а не к подложке под ними: при ненастроенной карте они
+   * пропадали вместе с ней, хотя список и заказы работают как обычно.
+   */
+  const panelHeader = (
+    <header className="routes__map-header">
+      <span
+        className="routes__map-count"
+        data-testid="route-line-points"
+        data-points={String(geometry.data?.line.length ?? -1)}
+      >
+        {activeRouteId === null
+          ? 'Черновик не раскрыт'
+          : `Точек на карте ${String(visible.length)}`}
+        {geometry.data?.unavailableReason !== undefined &&
+          geometry.data.unavailableReason !== null && (
+            <span className="routes__map-note" data-testid="route-line-missing">
+              {' · '}
+              {geometry.data.unavailableReason}
+            </span>
+          )}
+      </span>
+      <label className="routes__toggle">
+        <input
+          type="checkbox"
+          checked={showUnassigned}
+          data-testid="map-unassigned-toggle"
+          onChange={(event) => {
+            setShowUnassigned(event.target.checked);
+            setSelectedOrderId(null);
+          }}
+        />
+        Нераспределённые сделки дня
+      </label>
+      <button
+        type="button"
+        className="routes__map-toggle"
+        aria-expanded={!draftsHidden}
+        aria-controls="routing-drafts"
+        data-testid="routing-toggle-drafts"
+        onClick={onToggleDrafts}
+      >
+        {draftsHidden ? 'Показать черновики' : 'Скрыть черновики'}
+      </button>
+    </header>
   );
 
   if (!status.ready) {
     return (
       <section className="routes__map-panel" data-testid="routing-map-panel">
-        <header className="routes__map-header">
-          <span className="routes__map-count">Карта не настроена</span>
-          {listToggle}
-        </header>
+        {panelHeader}
         {/*
           Панель сохраняет полную высоту: сообщение стоит там, где была бы
           карта. Сжатый блок сверху выглядел бы поломкой раскладки, тогда как
@@ -289,37 +323,7 @@ export function DraftMapPanel({
         изображения: счётчик точек и переключатель — управление, и стоять
         им рядом с кнопкой списка, в одном ряду.
       */}
-      <header className="routes__map-header">
-        <span
-          className="routes__map-count"
-          data-testid="route-line-points"
-          data-points={String(geometry.data?.line.length ?? -1)}
-        >
-          {activeRouteId === null
-            ? 'Черновик не раскрыт'
-            : `Точек на карте ${String(visible.length)}`}
-          {geometry.data?.unavailableReason !== undefined &&
-            geometry.data.unavailableReason !== null && (
-              <span className="routes__map-note" data-testid="route-line-missing">
-                {' · '}
-                {geometry.data.unavailableReason}
-              </span>
-            )}
-        </span>
-        <label className="routes__toggle">
-          <input
-            type="checkbox"
-            checked={showUnassigned}
-            data-testid="map-unassigned-toggle"
-            onChange={(event) => {
-              setShowUnassigned(event.target.checked);
-              setSelectedOrderId(null);
-            }}
-          />
-          Нераспределённые сделки дня
-        </label>
-        {listToggle}
-      </header>
+      {panelHeader}
 
       <div className="routes__map-surface" data-testid="routing-map-surface">
         {basemapFailed ? (

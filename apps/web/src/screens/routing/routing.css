@@ -2082,3 +2082,48 @@
   background: var(--color-accent);
   color: #fff;
 }
+
+/*
+ * Подписи кнопок обычного начертания.
+ *
+ * Полужирный делал каждую кнопку главной: строка из трёх одинаково
+ * тяжёлых подписей не говорила, какое действие основное. Вес здесь
+ * такой же, как у кнопок «Сделок», — там же его и мерили.
+ */
+.routes__draft .routes__actions button,
+.routes__draft .routes__actions .routes__history-toggle,
+.routes__draft .routes__lease .btn,
+.routes__draft > .routes__lease .btn,
+.routes__draft .routes__courier-row .btn,
+.routes__draft .routes__hint button,
+.routes__map-toggle,
+.routes__refresh,
+.routes__day-toggle {
+  font-weight: 400;
+}
+
+/*
+ * Дата стоит по центру поля.
+ *
+ * Правило `.routes__day` писалось для обёртки с подписью, а класс висит
+ * на самом `input`: поле становилось flex-колонкой, и значение вместе
+ * со значком календаря прижималось к верхнему краю.
+ */
+.routes__day {
+  flex-direction: row;
+  align-items: center;
+}
+
+/* Счётчик и переключатель шапки читаются как один ряд, а не как форма. */
+.routes__map-header .routes__toggle {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.routes__map-count {
+  font-size: var(--font-size-md);
+}
