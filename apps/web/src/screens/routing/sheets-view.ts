@@ -17,6 +17,19 @@ export const SECTION_TITLES: Record<SheetSection, string> = {
   DELIVERED: 'Доставленные',
 };
 
+/**
+ * Чего ждать от раздела.
+ *
+ * Название говорит про состояние листа, а не про то, чья сейчас очередь
+ * действовать. Подпись отвечает на второй вопрос одной строкой — и снимает
+ * необходимость открывать лист, чтобы это понять.
+ */
+export const SECTION_HINTS: Record<SheetSection, string> = {
+  UNSHIPPED: 'ждут курьера и отгрузки',
+  SHIPPED: 'заказы у курьера',
+  DELIVERED: 'работа закрыта',
+};
+
 export interface SheetView {
   id: string;
   number: string;

@@ -2106,10 +2106,14 @@
  * Дата стоит по центру поля.
  *
  * Правило `.routes__day` писалось для обёртки с подписью, а класс висит
- * на самом `input`: поле становилось flex-колонкой, и значение вместе
+ * и на самом `input`: поле становилось flex-колонкой, и значение вместе
  * со значком календаря прижималось к верхнему краю.
+ *
+ * Селектор именно `input`: тот же класс носит обёртка группы дня
+ * в «Маршрутных листах», и общее правило разворачивало её в строку —
+ * дата уезжала в боковую колонку, а листы вставали справа от неё.
  */
-.routes__day {
+input.routes__day {
   flex-direction: row;
   align-items: center;
 }
@@ -2170,4 +2174,167 @@
 .routes__legend-dot--depot {
   background: #333;
   transform: rotate(45deg);
+}
+
+/* ==========================================================================
+   Маршрутные листы: вдавленный лоток, поднятые карточки
+
+   Цветные полосы во всю ширину заменены заголовком из точки, названия
+   и счётчика: раздел опознаётся цветом точки, а не заливкой, которая
+   спорила с карточками внутри себя.
+   ========================================================================== */
+
+.routes__section-title {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 0 var(--space-1);
+  border-radius: 0;
+  background: none;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+/* Цвет раздела живёт в точке — самой мелкой детали, какой хватает. */
+.routes__section-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+}
+
+[data-testid='sheets-UNSHIPPED'] .routes__section-title,
+[data-testid='sheets-SHIPPED'] .routes__section-title,
+[data-testid='sheets-DELIVERED'] .routes__section-title {
+  background: none;
+  color: var(--color-text);
+}
+
+[data-testid='sheets-UNSHIPPED'] .routes__section-dot {
+  background: var(--color-warning);
+}
+
+[data-testid='sheets-SHIPPED'] .routes__section-dot {
+  background: var(--color-accent);
+}
+
+[data-testid='sheets-DELIVERED'] .routes__section-dot {
+  background: var(--color-success);
+}
+
+.routes__section-count {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Подпись уходит к правому краю: она поясняет раздел, а не продолжает имя. */
+.routes__section-hint {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+}
+
+/*
+ * Лоток раздела вдавлен, карточки внутри подняты.
+ *
+ * Так видно, что листы лежат В разделе, а не просто идут за его названием:
+ * граница раздела читается без единой линии.
+ */
+.routes__section {
+  gap: var(--space-2);
+}
+
+.routes__section .routes__day {
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.routes__section .routes__day-toggle {
+  padding: 0 var(--space-2);
+  border-radius: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.routes__section .routes__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Лист — поднятая плитка, а не строка таблицы. */
+.routes__list-item.sheets__item {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+/* Лист без курьера отмечен фоном: он один в разделе требует действия. */
+.routes__list-item.sheets__item--needs-courier {
+  background: var(--row-warn);
+}
+
+.sheets__item .routes__number {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Поле курьера вдавлено: это ввод, а не действие. */
+.sheets__item .routes__sheet-courier {
+  width: 260px;
+  max-width: 100%;
+  margin-top: 0;
+}
+
+.sheets__item .routes__actions button {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* Отбор листов — одна строка: дата, «Все дни», поиск. */
+.routes__sheet-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.routes__sheet-filters [data-testid='sheets-date'] {
+  flex: none;
+  width: 170px;
+}
+
+.routes__sheet-filters [data-testid='sheets-search'] {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.routes__sheet-filters button {
+  flex: none;
+  min-height: 36px;
+  font-weight: 400;
+  white-space: nowrap;
 }

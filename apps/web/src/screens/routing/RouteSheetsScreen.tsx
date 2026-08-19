@@ -36,6 +36,7 @@ import {
   showsShipButton,
   isDayOpen,
   needsCancelWarning,
+  SECTION_HINTS,
   SECTION_TITLES,
   SHEET_SECTIONS,
   shipBlockedReason,
@@ -292,29 +293,38 @@ export function RouteSheetsScreen(): React.JSX.Element {
 
   return (
     <section className="stack">
+      {/*
+        Отбор одной строкой.
+
+        Подписи «День» и «Поиск» занимали по строке каждая и повторяли то,
+        что и так видно: в поле даты стоит дата, в поле поиска — подсказка.
+        Освободившееся место ушло списку. Доступные имена полей остались
+        на месте: их читают с экрана, даже когда подписи не видно.
+      */}
       <div className="no-print routes__sheet-filters">
-        <Field label="День" hint="Пусто — все дни">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={date}
-              data-testid="sheets-date"
-              onChange={(event) => setDate(event.target.value)}
-            />
-          )}
-        </Field>
-        <Field label="Поиск" hint="Номер листа, номер заказа, имя или телефон курьера">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={search}
-              placeholder="Например, R-12 или Иванов"
-              data-testid="sheets-search"
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          )}
-        </Field>
+        <TextInput
+          type="date"
+          value={date}
+          aria-label="День"
+          data-testid="sheets-date"
+          onChange={(event) => setDate(event.target.value)}
+        />
+        {/* Пустая дата — все дни. Кнопка называет это словами, а не подписью под полем. */}
+        <Button
+          variant="secondary"
+          disabled={date === ''}
+          data-testid="sheets-all-days"
+          onClick={() => setDate('')}
+        >
+          Все дни
+        </Button>
+        <TextInput
+          value={search}
+          aria-label="Поиск"
+          placeholder="Номер листа, номер заказа, имя или телефон курьера"
+          data-testid="sheets-search"
+          onChange={(event) => setSearch(event.target.value)}
+        />
       </div>
 
       {/*
@@ -346,8 +356,11 @@ export function RouteSheetsScreen(): React.JSX.Element {
         return (
           <section key={section} className="routes__section" data-testid={`sheets-${section}`}>
             <h3 className="routes__section-title">
+              {/* Точка состояния: раздел опознаётся цветом раньше, чем прочитан. */}
+              <span className="routes__section-dot" aria-hidden="true" />
               {SECTION_TITLES[section]}{' '}
-              <span className="muted text-sm">({query.data?.total ?? 0})</span>
+              <span className="routes__section-count">{query.data?.total ?? 0}</span>
+              <span className="routes__section-hint">{SECTION_HINTS[section]}</span>
             </h3>
 
             {query.isPending ? (
@@ -378,7 +391,16 @@ export function RouteSheetsScreen(): React.JSX.Element {
                         {day.sheets.map((sheet) => (
                           <li
                             key={sheet.id}
-                            className="routes__list-item sheets__item"
+                            /*
+                              Лист без курьера отмечен фоном: в разделе он один
+                              требует действия, и искать его глазами по пустому
+                              полю курьера — лишняя работа.
+                            */
+                            className={
+                              section === 'UNSHIPPED' && sheet.courier === null
+                                ? 'routes__list-item sheets__item sheets__item--needs-courier'
+                                : 'routes__list-item sheets__item'
+                            }
                             data-testid="sheet-row"
                             data-sheet-number={sheet.number}
                             data-expanded={expandedId === sheet.id ? 'true' : 'false'}
