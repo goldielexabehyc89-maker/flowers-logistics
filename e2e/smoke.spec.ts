@@ -88,14 +88,6 @@ function seedWarehouseRoute(): {
 }
 
 /**
- * Курьер стенда с длинным именем: на нём проверяется разметка.
- *
- * Имя задаётся сеялкой `seed-e2e-warehouse-stand.ts`; здесь оно нужно,
- * чтобы открыть карточку именно этого курьера, а не перебирать всех.
- */
-const LONG_COURIER = 'Александра Константиновна Первопроходцева-Синеглазова';
-
-/**
  * Полный складской стенд: все состояния рабочего места сразу.
  *
  * Сценарии выдачи проверяют соседство — лист без ячейки рядом с собранным,
@@ -129,7 +121,7 @@ function seedWarehouseStand(): Record<string, string> {
 async function openIssueRoute(
   page: Page,
   routeNumber: string,
-  courierName?: string,
+  courierPhone?: string,
 ): Promise<Locator> {
   const route = page.locator(`[data-testid="issue-route"][data-route-number="${routeNumber}"]`);
   if ((await route.count()) > 0) {
@@ -142,10 +134,14 @@ async function openIssueRoute(
    * Перебор всех курьеров работает, но растёт вместе с базой: в полном
    * прогоне их накапливаются десятки, и сценарий упирается в собственный
    * предел времени вместо того, чтобы что-то доказать.
+   *
+   * Ищем по телефону, а не по имени: у стенда своё имя на каждый прогон
+   * не выдумывается, и одноимённых курьеров к концу набора становится
+   * восемь.
    */
-  if (courierName !== undefined) {
+  if (courierPhone !== undefined) {
     await page
-      .locator(`[data-testid="issue-courier"][data-courier="${courierName}"]`)
+      .locator('[data-testid="issue-courier"]', { hasText: courierPhone })
       .getByTestId('issue-courier-toggle')
       .click();
     await route.first().waitFor({ state: 'visible' });
@@ -6371,7 +6367,7 @@ test('склад на пяти размерах: вкладки, окна, дл�
      * даже на длинном имени курьера и длинном номере листа.
      */
     await page.getByTestId('wh-tab-issue').click();
-    const route = await openIssueRoute(page, longRoute, LONG_COURIER);
+    const route = await openIssueRoute(page, longRoute, stand['курьер длинное имя'] ?? '');
     await expect(route).toContainText(longRoute);
     expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
 
