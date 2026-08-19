@@ -223,7 +223,14 @@ export function DraftMapPanel({
   if (!status.ready) {
     return (
       <section className="routes__map-panel" data-testid="routing-map-panel">
-        <EmptyState title="Карта не настроена" description={status.message ?? ''} />
+        {/*
+          Панель сохраняет полную высоту: сообщение стоит там, где была бы
+          карта. Сжатый блок сверху выглядел бы поломкой раскладки, тогда как
+          это честное состояние — подложки нет, а список и действия работают.
+        */}
+        <div className="routes__map-empty">
+          <EmptyState title="Карта не настроена" description={status.message ?? ''} />
+        </div>
       </section>
     );
   }

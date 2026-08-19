@@ -70,20 +70,37 @@
   }
 
   .routes__workspace {
-    grid-template-columns: clamp(360px, 27%, 440px) minmax(0, 1fr);
+    /*
+     * Та же поверхность, что в «Сделках»: две приподнятые панели одной высоты
+     * с одним шагом сетки между ними. Логист ходит между вкладками десятки раз
+     * за смену, и разная геометрия одной работы каждый раз сбивала бы глаз.
+     */
+    grid-template-columns: clamp(460px, 38%, 760px) minmax(0, 1fr);
     align-items: stretch;
     flex: 1 1 auto;
-    /*
-     * Одна цельная поверхность из двух соединённых панелей — ровно та же, что
-     * в «Сделках»: общая внешняя граница, единственный разделитель посередине
-     * и никакого зазора. Логист ходит между вкладками десятки раз за смену,
-     * и разная геометрия одной работы каждый раз сбивала бы глаз.
-     */
-    gap: 0;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-3, 12px);
-    overflow: hidden;
+    gap: var(--space-3);
+    min-height: 0;
+  }
+
+  .routes__drafts,
+  .routes__map-panel {
+    border-radius: var(--radius-xl);
     background: var(--color-surface);
+    box-shadow: var(--shadow-out-lg);
+    overflow: hidden;
+  }
+
+  /* Поля вокруг холста задаёт панель, а не сам холст — как в «Сделках». */
+  .routes__map-panel {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-3);
+    min-height: 0;
+  }
+
+  .routes__map-surface {
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   /* Единственная граница между списком и картой. */
@@ -126,14 +143,31 @@
   list-style: none;
 }
 
+/*
+ * Свёрнутый черновик — одна строка и ничего больше.
+ *
+ * Всё остальное — дата, транспорт, аренда, курьер, действия — живёт в раскрытом
+ * виде. В свёрнутом они превращали список в столбик карточек по три строки, и
+ * найти нужный черновик глазами становилось труднее, чем прочитать их все.
+ */
 .routes__draft {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-hover);
+  box-shadow: var(--shadow-row);
   overflow: hidden;
 }
 
+.routes__draft:hover {
+  box-shadow: var(--shadow-out);
+}
+
+/* Свой раскрытый черновик обведён акцентом: его можно менять. */
 .routes__draft--open {
-  border-color: var(--color-accent, var(--color-border));
+  background: var(--color-surface);
+  box-shadow:
+    var(--shadow-out),
+    0 0 0 1px var(--color-accent);
 }
 
 /*
@@ -142,11 +176,13 @@
  */
 .routes__draft-head {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--space-2);
-  align-items: baseline;
+  /* По центру, а не по базовой линии: точка, номер, счётчик и стрелка на оси. */
+  align-items: center;
   width: 100%;
-  padding: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-3);
   border: 0;
   background: none;
   text-align: left;
@@ -250,6 +286,9 @@
 
 .routes__number {
   font-weight: 600;
+  /* Длинный номер переносится, а не растягивает строку. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Номер заказа кликабелен: он связывает строку списка с маркером на карте. */
@@ -805,26 +844,44 @@
 .routes__drafts-body {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 4px 6px;
+  padding: var(--space-3);
 }
 
+/*
+ * Компактная шапка списка: заголовок, счётчик, день и «+».
+ *
+ * Все элементы одной высоты и по центру: разнобой заметен именно в короткой
+ * строке, где их четыре. Отделена от списка светом, а не линией — линия делала
+ * из шапки отдельное окно поверх панели.
+ */
 .routes__panel-head {
   display: flex;
   gap: var(--space-2);
   align-items: center;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--log-border-soft);
+  flex-wrap: nowrap;
+  padding: var(--space-3);
+  border-bottom: none;
+  box-shadow: 0 6px 12px -10px rgb(163 172 191 / 70%);
 }
 
 .routes__panel-title {
-  font-size: var(--log-font-md);
+  font-size: var(--font-size-md);
   font-weight: 600;
+  white-space: nowrap;
 }
 
+/* Счётчик серверный: он называет, сколько черновиков в дне, а не в списке. */
+.routes__panel-count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* День прижат вправо и одной высоты с остальными элементами строки. */
 .routes__panel-head input[type='date'] {
-  width: 150px;
-  height: 30px;
-  min-height: 30px;
+  width: 160px;
+  height: 36px;
+  min-height: 36px;
   margin-left: auto;
 }
 
@@ -1061,11 +1118,22 @@
   white-space: nowrap;
 }
 
+/*
+ * Счётчик и стрелка прижаты к правому краю и не сжимаются.
+ *
+ * Длинный номер черновика иначе выталкивал бы их за границу строки: у номера
+ * есть куда переноситься, у счётчика — нет.
+ */
 .routes__draft-count,
 .routes__draft-chevron {
   flex: none;
-  color: var(--log-text-faint);
-  font-size: var(--log-font-xs);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.routes__draft-count {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .routes__draft-chevron {
@@ -1375,4 +1443,44 @@
 .routes__map-window-remove:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/*
+ * Холст карты — вдавленный лоток с полями.
+ *
+ * Карта во всю панель до самых её краёв читалась как фон окна, а не рабочая
+ * поверхность. Тот же приём, что принят в «Сделках»: поля и вдавленность дают
+ * ей границу, не рисуя линии.
+ */
+.routes__map-surface {
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in-lg);
+  overflow: hidden;
+}
+
+/*
+ * Ненастроенная карта занимает панель целиком, а не сжимается в блок сверху.
+ *
+ * Панель половинной высоты выглядела бы поломкой раскладки, тогда как на деле
+ * это честное состояние: подложки нет, а список и действия работают. Поэтому
+ * сообщение стоит по центру того места, где была бы карта.
+ */
+.routes__map-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.routes__map-empty .state {
+  align-items: center;
+  max-width: 42ch;
+  background: none;
+  box-shadow: none;
+  text-align: center;
 }

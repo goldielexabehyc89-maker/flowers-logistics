@@ -18,12 +18,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
-import { Button, EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
+import { EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { RouteCard } from './RouteCard';
 import { PreviewPanel } from './PreviewPanel';
 import { DraftMapPanel } from './DraftMapPanel';
 import { useWorkspace } from '../logistics/useWorkspace';
-import { formatDate, type RouteListResponse } from './routing';
+import { type RouteListResponse } from './routing';
 import './routing.css';
 
 export function RoutingScreen(): React.JSX.Element {
@@ -122,14 +122,33 @@ export function RoutingScreen(): React.JSX.Element {
           */}
           <header className="routes__panel-head">
             <span className="routes__panel-title">Черновики дня</span>
-            <span className="muted text-sm">{drafts.length}</span>
+            <span className="routes__panel-count">{drafts.length}</span>
             <TextInput
               type="date"
               aria-label="День"
+              className="routes__day"
               value={day}
               data-testid="routing-day"
               onChange={(event) => setDay(event.target.value)}
             />
+            {/*
+              Пустой черновик заводится одним нажатием и без диалога: спрашивать
+              нечего — день уже выбран рядом, заказов и курьера у него ещё нет.
+              Кнопка стоит в шапке, потому что относится к этому дню и этому
+              списку; внизу она жила в отдельной полосе, которая повторяла дату
+              и отнимала у списка последнюю строку.
+            */}
+            <button
+              type="button"
+              className="routes__draft-add"
+              data-testid="routing-add-draft"
+              aria-label="Добавить пустой черновик"
+              title="Добавить пустой черновик"
+              disabled={createEmpty.isPending}
+              onClick={() => createEmpty.mutate()}
+            >
+              <Plus size={15} aria-hidden="true" />
+            </button>
           </header>
 
           {/* Прокручивается только середина: шапка и действия остаются на месте. */}
@@ -144,7 +163,7 @@ export function RoutingScreen(): React.JSX.Element {
             ) : drafts.length === 0 ? (
               <EmptyState
                 title="Черновиков на этот день нет"
-                description="Черновики создаются в «Сделках» выбором заказов или автоматической разбивкой. Пустой черновик можно завести кнопкой «+» внизу списка."
+                description="Черновики создаются в «Сделках» выбором заказов или автоматической разбивкой. Пустой черновик можно завести кнопкой «+» в шапке списка."
               />
             ) : (
               <ul className="routes__draft-list">
@@ -203,26 +222,6 @@ export function RoutingScreen(): React.JSX.Element {
                 })}
               </ul>
             )}
-          </div>
-
-          <div className="routes__panel-actions">
-            <Button onClick={() => void routes.refetch()}>Обновить список</Button>
-            {/*
-              Пустой черновик заводится одним нажатием и без диалога: спрашивать
-              нечего — день уже выбран сверху, заказов и курьера у него ещё нет.
-            */}
-            <button
-              type="button"
-              className="routes__draft-add"
-              data-testid="routing-add-draft"
-              aria-label="Добавить пустой черновик"
-              title="Добавить пустой черновик"
-              disabled={createEmpty.isPending}
-              onClick={() => createEmpty.mutate()}
-            >
-              <Plus size={15} aria-hidden="true" />
-            </button>
-            <span className="muted text-sm">{formatDate(day)}</span>
           </div>
         </section>
 
