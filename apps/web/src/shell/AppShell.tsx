@@ -17,7 +17,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import {
   Flower2,
@@ -178,6 +178,40 @@ export function AppShell(): React.JSX.Element {
     setDrawerOpen(false);
   }, [location.pathname]);
 
+  /*
+   * Фон не прокручивается, пока меню открыто.
+   *
+   * Иначе колесо под открытым меню уводит страницу, и человек, закрыв его,
+   * оказывается не там, где был. Прежнее значение возвращается при закрытии,
+   * а не затирается пустой строкой: страница могла быть заблокирована и по
+   * другой причине — например, открытым модальным окном.
+   */
+  useEffect(() => {
+    if (!drawerOpen) {
+      return undefined;
+    }
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [drawerOpen]);
+
+  /*
+   * После закрытия фокус возвращается на кнопку меню.
+   *
+   * Меню открывают и с клавиатуры; закрыв его по Escape, человек иначе
+   * оказывался бы в начале страницы и заново шёл табом до места, где был.
+   */
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (wasOpenRef.current && !drawerOpen) {
+      menuButtonRef.current?.focus();
+    }
+    wasOpenRef.current = drawerOpen;
+  }, [drawerOpen]);
+
   // Escape закрывает overlay. Это доступность, а не новый смысл: без клавиатуры
   // выход из меню оставался бы только мышью.
   useEffect(() => {
@@ -337,6 +371,7 @@ export function AppShell(): React.JSX.Element {
         <button
           type="button"
           className="shell__menu-button"
+          ref={menuButtonRef}
           aria-expanded={navShown}
           aria-controls="shell-sidebar"
           aria-label={menuLabel}
