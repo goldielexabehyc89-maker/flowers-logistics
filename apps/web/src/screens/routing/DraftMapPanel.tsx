@@ -37,6 +37,9 @@ export interface DraftMapPanelProps {
   deliveryDate: string;
   activeRouteId: string | null;
   drafts: readonly RouteListItem[];
+  /** Список черновиков скрыт — карта занимает всю рабочую ширину. */
+  draftsHidden: boolean;
+  onToggleDrafts: () => void;
 }
 
 /** Ответ контракта геометрии: линия пути, склад и остановки по порядку. */
@@ -53,6 +56,8 @@ export function DraftMapPanel({
   deliveryDate,
   activeRouteId,
   drafts,
+  draftsHidden,
+  onToggleDrafts,
 }: DraftMapPanelProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -220,9 +225,30 @@ export function DraftMapPanel({
     onError: failure,
   });
 
+  /*
+   * Переключатель списка стоит в панели карты и виден в обоих её состояниях —
+   * и когда подложка есть, и когда её нет. Скрытая панель обязана оставаться
+   * возвращаемой, а вернуть её больше неоткуда.
+   */
+  const listToggle = (
+    <div className="routes__map-actions">
+      <button
+        type="button"
+        className="routes__map-toggle"
+        aria-expanded={!draftsHidden}
+        aria-controls="routing-drafts"
+        data-testid="routing-toggle-drafts"
+        onClick={onToggleDrafts}
+      >
+        {draftsHidden ? 'Показать черновики' : 'Скрыть черновики'}
+      </button>
+    </div>
+  );
+
   if (!status.ready) {
     return (
       <section className="routes__map-panel" data-testid="routing-map-panel">
+        {listToggle}
         {/*
           Панель сохраняет полную высоту: сообщение стоит там, где была бы
           карта. Сжатый блок сверху выглядел бы поломкой раскладки, тогда как
@@ -255,6 +281,7 @@ export function DraftMapPanel({
 
   return (
     <section className="routes__map-panel" data-testid="routing-map-panel">
+      {listToggle}
       {/*
         Служебная строка лежит НАД полотном карты, а не отдельной полосой сверху.
 

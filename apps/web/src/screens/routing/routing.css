@@ -82,6 +82,18 @@
     min-height: 0;
   }
 
+  /*
+   * Скрытая панель убирается из сетки, а не прячется прозрачностью: колонка
+   * нулевой ширины всё равно держала бы отступ, и карта не заняла бы место.
+   */
+  .routes__workspace--list-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .routes__workspace--list-hidden .routes__drafts {
+    display: none;
+  }
+
   .routes__drafts,
   .routes__map-panel {
     border-radius: var(--radius-xl);
@@ -1483,4 +1495,31 @@
   background: none;
   box-shadow: none;
   text-align: center;
+}
+
+/* Переключатель списка черновиков в панели карты. */
+.routes__map-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding-bottom: var(--space-3);
+}
+
+.routes__map-toggle {
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-accent-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.routes__map-toggle:hover {
+  box-shadow: var(--shadow-in);
 }

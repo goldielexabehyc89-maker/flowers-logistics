@@ -16,6 +16,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
 import { Plus } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
@@ -30,6 +31,14 @@ export function RoutingScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { day, draftId, runId, setDay, setDraftId, closeRun } = useWorkspace();
+  /*
+   * Скрытие списка черновиков — только вид, состояние живёт здесь.
+   *
+   * Панель убирается из сетки, но не размонтируется: раскрытый черновик,
+   * взятая аренда, выбранные заказы и положение прокрутки остаются на месте.
+   * Кнопка возврата стоит в карте, которая при этом занимает весь экран.
+   */
+  const [draftsHidden, setDraftsHidden] = useState(false);
 
   const routes = useQuery({
     queryKey: ['routes', day],
@@ -111,8 +120,8 @@ export function RoutingScreen(): React.JSX.Element {
         </p>
       )}
 
-      <div className="routes__workspace">
-        <section className="routes__drafts" data-testid="routing-drafts">
+      <div className={`routes__workspace${draftsHidden ? ' routes__workspace--list-hidden' : ''}`}>
+        <section className="routes__drafts" id="routing-drafts" data-testid="routing-drafts">
           {/*
             Компактная шапка внутри панели списка.
 
@@ -225,7 +234,17 @@ export function RoutingScreen(): React.JSX.Element {
           </div>
         </section>
 
-        <DraftMapPanel deliveryDate={day} activeRouteId={activeId} drafts={drafts} />
+        <DraftMapPanel
+          deliveryDate={day}
+          activeRouteId={activeId}
+          drafts={drafts}
+          draftsHidden={draftsHidden}
+          /*
+            Скрытие — только вид: список не размонтируется, раскрытый черновик,
+            аренда и прокрутка остаются нетронутыми.
+          */
+          onToggleDrafts={() => setDraftsHidden((current) => !current)}
+        />
       </div>
     </section>
   );
