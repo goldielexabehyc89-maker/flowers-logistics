@@ -23,6 +23,7 @@ import {
   saveServiceTime,
   saveShift,
   SETTING_KEYS,
+  DEFAULT_WAREHOUSE_MANUAL_ENTRY,
 } from './service.js';
 
 let ctx: TestContext;
@@ -273,7 +274,14 @@ describe('ручной ввод на складе', () => {
      * подтверждает только то, что человек его набрал.
      */
     expect(current.value.enabled).toBe(false);
-    expect(current.version).toBe(0);
+    /*
+     * Умолчание проверяется по САМОМУ умолчанию, а не по номеру версии.
+     *
+     * База у критического набора общая, и любой соседний файл, включивший
+     * настройку и вернувший её обратно, поднимает версию. Номер версии
+     * доказывал бы порядок запуска файлов, а не безопасное значение.
+     */
+    expect(DEFAULT_WAREHOUSE_MANUAL_ENTRY.enabled).toBe(false);
   });
 
   it('кладовщик видит значение своим запросом, но переключить не может', async () => {

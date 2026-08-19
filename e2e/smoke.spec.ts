@@ -3025,9 +3025,11 @@ test('карты: собранный заказ окрашен одинаков�
 test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({
   page,
   browser,
+  request,
 }: {
   page: Page;
   browser: Browser;
+  request: APIRequestContext;
 }) => {
   const orderNumber = process.env['E2E_PICKUP_ORDER'] ?? '';
   const cellCode = process.env['E2E_PICKUP_CELL'] ?? '';
@@ -3121,7 +3123,24 @@ test('самовывоз: флорист собрал → склад приня�
   });
   await expect(waiting).toContainText(cellCode);
 
-  // 5. Поиск по номеру и выдача покупателю — без второго скана.
+  /*
+   * 5. Выдача покупателю без второго скана.
+   *
+   * Обычный путь прилавка — скан QR-кода с телефона покупателя. Здесь
+   * камеры нет, поэтому администратор разрешает ручной ввод: та же доменная
+   * операция, другой способ её вызвать.
+   */
+  /*
+   * Настройка общая на всё приложение, поэтому сценарий приводит её
+   * в известное состояние сам: полагаться на порядок соседей значило бы
+   * проверять их, а не себя.
+   */
+  await disableManualEntry(request);
+  await expect(managerPage.getByTestId('pickup-manual-open')).toHaveCount(0, { timeout: 25_000 });
+  await enableManualEntry(request);
+  await expect(managerPage.getByTestId('pickup-manual-open')).toBeVisible({ timeout: 25_000 });
+  await managerPage.getByTestId('pickup-manual-open').click();
+
   await managerPage.getByTestId('pickup-search').fill(orderNumber);
   await managerPage.getByTestId('pickup-search').press('Enter');
   const card = managerPage.getByTestId('pickup-card');
@@ -3140,11 +3159,16 @@ test('самовывоз: флорист собрал → склад приня�
   ).toContainText('Выдан');
 
   // 7. Повторная выдача отказывает штатно, а не создаёт второй факт.
+  // После выдачи поле закрывается само: следующий покупатель начинает
+  // со скана, а не с чужого номера в поле.
+  await managerPage.getByTestId('pickup-manual-open').click();
   await managerPage.getByTestId('pickup-search').fill(orderNumber);
   await managerPage.getByTestId('pickup-search').press('Enter');
-  await expect(managerPage.getByTestId('pickup-card-blocked')).toContainText('Уже выдан');
+  await expect(managerPage.getByTestId('pickup-card-blocked')).toContainText('Заказ уже выдан');
   await expect(managerPage.getByTestId('pickup-issue')).toHaveCount(0);
 
+  // Настройка возвращается к умолчанию: соседние сценарии ждут выключенной.
+  await disableManualEntry(request);
   await managerContext.close();
 });
 

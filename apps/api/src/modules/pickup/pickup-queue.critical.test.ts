@@ -12,7 +12,7 @@
  *  * снятая с полки коробка остаётся в очереди с честной причиной;
  *  * счётчик считает ВЕСЬ отбор, а продолжение не теряет и не повторяет строки.
  *
- * ВЛАДЕНИЕ ДАТАМИ: сентябрь 2027 года.
+ * ВЛАДЕНИЕ ДАТАМИ: август 2028 года.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -41,9 +41,9 @@ let cells: CellDeps;
 const CONTEXT = { ip: null, userAgent: null };
 
 /** Дни, забронированные этим файлом. */
-const YESTERDAY = '2027-09-09';
-const TODAY = '2027-09-10';
-const TOMORROW = '2027-09-11';
+const YESTERDAY = '2028-08-09';
+const TODAY = '2028-08-10';
+const TOMORROW = '2028-08-11';
 
 beforeAll(async () => {
   ctx = await createTestContext();
@@ -94,7 +94,7 @@ async function seedOrder(options: SeedOptions = {}): Promise<{ id: string; numbe
     data: {
       externalId: randomUUID(),
       externalName: number,
-      externalUpdated: new Date('2027-09-01T00:00:00.000Z'),
+      externalUpdated: new Date('2028-08-01T00:00:00.000Z'),
       deliveryDate: day === null ? null : toDateColumn(day),
       address: null,
       recipient: 'Синтетический Покупатель',
