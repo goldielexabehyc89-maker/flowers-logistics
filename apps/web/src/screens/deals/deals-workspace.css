@@ -89,27 +89,31 @@
 
 @media (min-width: 1100px) {
   .deals__body {
-    grid-template-columns: clamp(360px, 27%, 440px) minmax(0, 1fr);
     /*
-     * Одна цельная рабочая поверхность из двух соединённых панелей.
+     * Одна рабочая поверхность из двух согласованных частей.
      *
-     * Зазора между ними нет — есть ровно одна вертикальная граница. Обе панели
-     * начинаются от общей верхней линии и доходят до нижней границы рабочей
-     * области. Отдельного ряда фильтров над ними не существует: он разрывал
-     * поверхность на полосы и опускал и список, и карту.
+     * Список заметно шире прежних 440px: в узкой колонке карточка сжимается
+     * до таблицы — номер, адрес и проблема встают в одну строку и перестают
+     * читаться порознь. Карта забирает весь остаток: меньше половины экрана
+     * она уже не карта, а картинка рядом со списком.
+     *
+     * Обе панели начинаются и заканчиваются на одной высоте, между ними —
+     * ровно один шаг сетки. Общей рамки вокруг нет: панели разделяет
+     * промежуток и собственная тень каждой.
      */
-    gap: 0;
+    grid-template-columns: clamp(460px, 38%, 760px) minmax(0, 1fr);
+    gap: var(--space-3);
     align-items: stretch;
     flex: 1 1 auto;
-    border: 1px solid var(--color-border, #d9d9d9);
-    border-radius: var(--radius-3, 12px);
-    overflow: hidden;
-    background: var(--color-surface, #fff);
+    min-height: 0;
   }
 
-  /* Единственная граница между списком и картой. */
-  .deals__column {
-    border-right: 1px solid var(--color-border, #d9d9d9);
+  .deals__column,
+  .deals__map {
+    border-radius: var(--radius-xl);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-out-lg);
+    overflow: hidden;
   }
 }
 
@@ -136,10 +140,43 @@
 .deals__panel-head {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   flex: 0 0 auto;
-  padding: 8px;
-  border-bottom: 1px solid var(--color-border, #d9d9d9);
+  padding: var(--space-3);
+  /*
+   * Шапка отделена от списка светом, а не линией: линия делала из неё
+   * отдельное окно поверх панели, хотя это одна и та же поверхность.
+   */
+  box-shadow: 0 6px 12px -10px rgb(163 172 191 / 70%);
+}
+
+/* Строка шапки: элементы одной высоты, выровненные по центру. */
+.deals__head-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.deals__head-row--quiet {
+  justify-content: space-between;
+  font-size: var(--font-size-sm);
+}
+
+/* День не растягивается: его ширина известна и постоянна. */
+.deals__date {
+  flex: 0 0 auto;
+  width: 168px;
+}
+
+/*
+ * Поиск забирает всю оставшуюся ширину.
+ *
+ * Номер заказа длинный, и обрезанное поле заставляет печатать вслепую:
+ * человек не видит, что уже набрал.
+ */
+.deals__search {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /*
@@ -156,7 +193,7 @@
   .deals__scroll {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 8px;
+    padding: var(--space-3);
   }
 }
 
@@ -188,7 +225,7 @@
 .deals__cards {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -206,46 +243,50 @@
 .deals__card {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  padding: 2px 8px;
-  font-size: var(--font-size-xs);
-  border: 1px solid var(--log-border);
-  border-radius: var(--log-radius-card);
-  background: var(--log-surface);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  font-size: var(--font-size-md);
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-hover);
   cursor: pointer;
-  transition:
-    border-color 100ms ease-out,
-    background 100ms ease-out;
+  box-shadow: var(--shadow-row);
+  transition: box-shadow 120ms ease-out;
 }
 
+/* Наведение приподнимает карточку, а не подкрашивает её. */
 .deals__card:hover {
-  border-color: var(--log-border-strong, #cbd5e1);
-  background: var(--log-surface-soft);
+  box-shadow: var(--shadow-out);
 }
 
 /* Клавиатурный фокус обозначен явно: в референсе его нет, и это его дефект. */
 .deals__card:focus-visible {
   outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
 /*
  * Требующий внимания заказ выделен ТОЛЬКО в списке: на карте его вовсе нет,
  * потому что везти его нельзя.
+ *
+ * Сплошной ярко-красной обводки нет намеренно. Когда таких заказов десятки,
+ * список превращается в решётку из одинаково громких рамок, в которой не видно
+ * ни одного отдельного заказа. Состояние называют мягкий фон, красный текст
+ * причины и её маркер — вместе они читаются, а по отдельности не кричат.
  */
 .deals__card--attention {
-  border-color: var(--color-error, #b3261e);
-  background: color-mix(in srgb, var(--color-error, #b3261e) 5%, transparent);
+  background: var(--row-danger);
 }
 
-/* Выбранная карточка выделена целиком, а не полоской слева. */
+/* Выбранная карточка вдавлена: она уже не приглашает нажать, она выбрана. */
 .deals__card--selected {
-  border-color: var(--color-accent);
-  background: var(--log-selected-bg);
+  background: var(--color-accent-soft);
+  box-shadow: var(--shadow-in);
 }
 
 .deals__card--selected:hover {
-  background: var(--log-selected-bg);
+  background: var(--color-accent-soft);
+  box-shadow: var(--shadow-in);
 }
 
 .deals__card-head {
@@ -283,34 +324,56 @@
 }
 
 /* Кнопка выбора несёт номер последовательности: он же виден на карте. */
+/*
+ * Кружок выбора — один размер у всех карточек.
+ *
+ * Он стоит первым в строке и задаёт ей левую границу: разнобой в пару пикселей
+ * виден сразу, потому что кружки выстроены в колонку. Выбранный показывает
+ * порядковый номер — это и есть порядок остановок в будущем маршруте.
+ */
 .deals__pick {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  font-size: 11px;
-  border: 1px solid var(--border, #d9d9d9);
-  border-radius: 50%;
-  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  box-shadow: var(--shadow-in);
   cursor: pointer;
 }
 
+.deals__card--selected .deals__pick {
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+  box-shadow: var(--shadow-accent);
+}
+
 .deals__pick:disabled {
-  opacity: 0.4;
+  color: var(--color-text-disabled);
   cursor: not-allowed;
 }
 
+/* Номер заказа — главный текст первой строки. */
 .deals__number {
-  /* Номер заказа — 12px/600 тёмным: главная опора строки. */
   font-weight: 600;
-  font-size: var(--log-font-sm);
-  color: var(--log-text);
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+  /* Длинный номер переносится, а не растягивает карточку. */
+  overflow-wrap: anywhere;
+  text-align: left;
 }
 
+/* Адрес — отдельная читаемая строка, а не подпись под номером. */
 .deals__line {
-  /* Адрес — 12px/400 приглушённым: он читается вторым, после номера. */
-  font-size: var(--log-font-sm);
-  color: var(--log-text-muted);
-  line-height: 1.3;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  line-height: 1.35;
   /* Адрес — одна строка с обрезкой: вторая строка стоит трёх сделок в окне.
      Полный адрес доступен подсказкой и в диалоге исправления. */
   white-space: nowrap;
@@ -319,9 +382,9 @@
 }
 
 .deals__muted {
-  /* Интервал и служебные пометки — 11px/400 самым светлым тоном. */
-  color: var(--log-text-faint);
-  font-size: var(--log-font-xs);
+  /* Интервал и служебные пометки — спокойным тоном, но читаемым. */
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
 }
 
 .deals__comment {
@@ -376,44 +439,66 @@
  * которое её закрывает. Причина без действия заставляет гадать, куда нажимать;
  * действие без причины — что именно не так.
  */
+/*
+ * Нижний уровень карточки: причина слева, действие справа.
+ *
+ * Разделительной линии больше нет — уровни разводит расстояние. Линия поверх
+ * мягкого фона добавляла к состоянию ещё одну красную черту, а их и так было
+ * по три на карточку.
+ */
 .deals__attention {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-2);
   align-items: center;
-  margin-top: 2px;
-  padding-top: 2px;
-  border-top: 1px solid color-mix(in srgb, var(--color-error, #b3261e) 30%, transparent);
-  font-size: 13px;
-  color: var(--color-error, #b3261e);
+  margin-top: var(--space-1);
+  font-size: var(--font-size-md);
+  color: var(--color-error);
 }
 
+/* Маркер состояния: небольшой круг, а не восклицательный знак во всю строку. */
 .deals__attention-icon {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--color-error, #b3261e);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--color-error);
+  /* Знак внутри не нужен: круг уже несёт смысл, а буква в нём нечитаема. */
+  font-size: 0;
+  color: transparent;
 }
 
 .deals__attention-text {
   overflow-wrap: anywhere;
 }
 
+/*
+ * Действие, закрывающее причину, — главная кнопка своей карточки.
+ *
+ * Раньше это была тонкая обводка того же красного цвета, что и текст рядом:
+ * действие терялось в описании проблемы. Теперь оно единственное залитое
+ * пятно в карточке и стоит там, где его ищут, — справа снизу.
+ */
 .deals__attention-action {
   margin-left: auto;
-  padding: 2px 8px;
-  border: 1px solid currentcolor;
-  border-radius: 999px;
-  background: none;
-  color: inherit;
-  font-size: 12px;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+  font: inherit;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  box-shadow: var(--shadow-accent);
   cursor: pointer;
+}
+
+.deals__attention-action:hover {
+  background: var(--color-accent-hover);
 }
 
 .deals__blocked {
@@ -441,33 +526,50 @@
  * Панель действий закреплена внизу колонки и лежит ВНЕ области прокрутки:
  * искать кнопки под сотней карточек больше не нужно.
  */
+/*
+ * Закреплённая нижняя панель списка.
+ *
+ * Она стоит в потоке последним элементом колонки, а не поверх неё: плавающая
+ * панель накрывала бы последнюю карточку, и до её кнопки нельзя было бы
+ * дотянуться, сколько ни прокручивай. Отделена от списка светом, а не линией.
+ */
 .deals__summary {
   flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px;
-  border-top: 1px solid var(--color-border, #d9d9d9);
-  background: var(--color-surface, #fff);
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  box-shadow: 0 -6px 12px -10px rgb(163 172 191 / 70%);
+}
+
+/*
+ * Массовый выбор прижат влево и остаётся на месте при переносе.
+ *
+ * Действий три, а ширины панели на три кнопки не хватает: перенос неизбежен,
+ * и он должен выглядеть решением, а не случайностью. «Выбрать все» держит
+ * левый край, создание маршрута уходит вправо.
+ */
+.deals__summary-head {
+  margin-right: auto;
 }
 
 .deals__summary-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--space-2);
   align-items: center;
-  font-weight: 600;
+  min-width: 0;
 }
 
-/* Обе кнопки во всю ширину: это два равноправных исхода одного выбора. */
+/* Кнопки одной строкой: они конкурируют за место, а не за внимание. */
 .deals__summary-actions {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-}
-
-.deals__summary-actions > * {
-  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 /* Карта — фон всей правой панели: от верхней границы до нижней. */
@@ -508,9 +610,19 @@
 
 /* Вторая строка: чем менять показанное. Стоит под первой, тоже поверх холста. */
 .deals-map__overlay--controls {
-  top: 64px;
-  left: 8px;
+  top: 56px;
+  left: 12px;
   right: 56px;
+}
+
+/* Легенда прижата к нижнему краю карты — к тому, что она объясняет. */
+.deals-map__overlay--bottom {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
 }
 
 .deals-map__panel,
@@ -518,15 +630,23 @@
   pointer-events: auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
   max-width: 100%;
-  padding: 3px 10px;
-  border: 1px solid var(--color-border, #d9d9d9);
-  border-radius: 999px;
-  background: rgb(255 255 255 / 92%);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
-  font-size: 12px;
+  min-height: 36px;
+  padding: var(--space-1) var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+  font-size: var(--font-size-sm);
+}
+
+/* Счётчик — главный показатель панели, а не подпись рядом с фильтром. */
+.deals-map__panel--info {
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  color: var(--color-text);
 }
 
 /*
@@ -639,23 +759,41 @@
  * дело, и подложка Москвы нужна логисту не меньше. Сообщение лежит ПОВЕРХ
  * карты и её не заменяет.
  */
+/*
+ * Холст лежит во вдавленном лотке с полями.
+ *
+ * Карта во всю панель до самых её краёв читалась как фон окна, а не как
+ * рабочая поверхность: непонятно, где заканчивается карта и начинается
+ * интерфейс. Поля и вдавленность дают ей границу, не рисуя линии.
+ */
 .deals-map__surface {
   position: relative;
-  height: 100%;
-  border-radius: 0;
   /* На телефоне высота именно фиксированная, а не минимальная: холст занимает
      её целиком через `height: 100%`, а проценты требуют определённой высоты
      родителя. */
   height: 320px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  background: var(--color-surface-muted, #f2f2f2);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in-lg);
 }
 
 /* На широком экране карта забирает всю оставшуюся высоту колонки. */
 @media (min-width: 1100px) {
   .deals-map__surface {
     height: 100%;
+    min-height: 0;
+  }
+
+  /* Поля вокруг холста задаёт панель карты, а не сам холст. */
+  .deals__map {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-3);
+  }
+
+  .deals-map {
+    flex: 1 1 auto;
     min-height: 0;
   }
 }
@@ -675,11 +813,12 @@
   height: 100%;
 }
 
+/* Пустое состояние стоит строго по центру холста, а не жмётся к его низу. */
 .deals-map__notice {
   position: absolute;
   left: 50%;
-  bottom: 12px;
-  transform: translateX(-50%);
+  top: 50%;
+  transform: translate(-50%, -50%);
   margin: 0;
   padding: 6px 12px;
   border-radius: 999px;

@@ -463,6 +463,58 @@
     padding: var(--content-pad-y) var(--content-pad-x);
   }
 
+  /* --- Рабочее пространство: вся ширина списку и карте --------------------- */
+
+  /*
+   * Колонки меню нет совсем, а не «свёрнута до полосы».
+   *
+   * Даже полоса с иконками отнимает ширину там, где она решает: список сжимается
+   * до таблицы, карта перестаёт быть картой. Меню открывается поверх содержимого
+   * той же кнопкой в верхней строке и закрывается по подложке — то же поведение,
+   * что на телефоне, просто применённое к широкому экрану.
+   */
+  .shell--workspace,
+  .shell--workspace.shell--collapsed,
+  .shell--workspace.shell--single-section {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .shell--workspace .shell__sidebar {
+    display: none;
+  }
+
+  .shell--workspace.shell--drawer-open .shell__sidebar {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: var(--drawer-width);
+    overflow-y: auto;
+  }
+
+  .shell--workspace.shell--drawer-open .shell__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+  }
+
+  /*
+   * Имя и роль остаются в продукте, но уезжают в меню.
+   *
+   * В верхней строке они стояли рядом с вкладками и отнимали у них ширину,
+   * а нужны раз в смену. В открытом меню они на прежнем месте внизу.
+   */
+  .shell--workspace .shell__topbar-account {
+    display: none;
+  }
+
+  /* Рабочее пространство само распоряжается отступами и высотой. */
+  .shell--workspace .shell__content {
+    padding: 0;
+    min-height: 0;
+  }
+
   /*
    * Свёрнутое состояние: подписи скрыты, иконки по центру полосы.
    *

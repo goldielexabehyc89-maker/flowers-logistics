@@ -193,6 +193,14 @@ export function AppShell(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, [drawerOpen]);
 
+  /*
+   * В рабочем пространстве та же кнопка открывает меню поверх содержимого,
+   * а не сворачивает колонку: колонки там нет вовсе.
+   */
+  const workspace = isLogisticsPath(location.pathname);
+  const navShown = workspace ? drawerOpen : !collapsed;
+  const menuLabel = navShown ? 'Свернуть меню' : 'Показать меню';
+
   function toggleCollapsed(): void {
     setCollapsed((current) => {
       const next = !current;
@@ -208,6 +216,15 @@ export function AppShell(): React.JSX.Element {
         collapsed ? 'shell--collapsed' : null,
         drawerOpen ? 'shell--drawer-open' : null,
         singleSection ? 'shell--single-section' : null,
+        /*
+         * Рабочее пространство логистики отдаёт списку и карте всю ширину.
+         *
+         * Постоянная колонка меню отнимала у них около трёхсот пикселей —
+         * ровно там, где ширина и решает: карточка сжималась до таблицы, а
+         * карта переставала быть картой. Навигация никуда не делась, она
+         * открывается той же компактной кнопкой в верхней строке.
+         */
+        isLogisticsPath(location.pathname) ? 'shell--workspace' : null,
       ]
         .filter((name) => name !== null)
         .join(' ')}
@@ -320,16 +337,16 @@ export function AppShell(): React.JSX.Element {
         <button
           type="button"
           className="shell__menu-button"
-          aria-expanded={!collapsed}
+          aria-expanded={navShown}
           aria-controls="shell-sidebar"
-          aria-label={collapsed ? 'Показать меню' : 'Свернуть меню'}
-          title={collapsed ? 'Показать меню' : 'Свернуть меню'}
-          onClick={toggleCollapsed}
+          aria-label={menuLabel}
+          title={menuLabel}
+          onClick={workspace ? () => setDrawerOpen((open) => !open) : toggleCollapsed}
         >
-          {collapsed ? (
-            <PanelLeftOpen size={ICON_SIZE} aria-hidden />
-          ) : (
+          {navShown ? (
             <PanelLeftClose size={ICON_SIZE} aria-hidden />
+          ) : (
+            <PanelLeftOpen size={ICON_SIZE} aria-hidden />
           )}
         </button>
         {/*
@@ -369,7 +386,17 @@ export function AppShell(): React.JSX.Element {
         )}
         <div className="shell__topbar-right">
           <ConnectionIndicator client={client} realtime={realtime} />
-          <Button variant="ghost" onClick={() => setAccountOpen(true)}>
+          {/*
+           * Имя открывает карточку учётной записи. В рабочем пространстве
+           * кнопка скрыта стилями: она стояла рядом с вкладками и отнимала у
+           * них ширину, а нужна раз в смену. Там же тот же вход — в меню,
+           * которое открывает кнопка слева.
+           */}
+          <Button
+            variant="ghost"
+            className="shell__topbar-account"
+            onClick={() => setAccountOpen(true)}
+          >
             {user?.fullName ?? 'Пользователь'}
           </Button>
         </div>

@@ -276,7 +276,16 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
               )}
             </span>
           </div>
+        </div>
 
+        {/*
+          Легенда внизу карты, а не рядом со счётчиком.
+          
+          Наверху она стояла в одной строке со счётчиком и читалась как часть
+          его подписи, хотя объясняет цвета точек. Внизу она у того, что
+          объясняет, и не отнимает место у самой карты.
+        */}
+        <div className="deals-map__overlay deals-map__overlay--bottom">
           <ul className="deals-map__legend" data-testid="deals-map-legend">
             <li>
               <span className="deals-map__dot deals-map__dot--free" /> доступен
