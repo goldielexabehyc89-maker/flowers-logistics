@@ -59,10 +59,22 @@ export interface FieldProps {
   label: string;
   hint?: string | undefined;
   error?: string | undefined;
-  children: (fieldProps: { id: string; 'aria-describedby': string | undefined }) => ReactNode;
+  children: (fieldProps: {
+    id: string;
+    'aria-describedby': string | undefined;
+    'aria-invalid': true | undefined;
+  }) => ReactNode;
 }
 
-/** Обёртка поля: связывает подпись, подсказку и сообщение об ошибке. */
+/**
+ * Обёртка поля: связывает подпись, подсказку и сообщение об ошибке.
+ *
+ * `aria-invalid` выставляется здесь же, вместе с сообщением. Раньше о негодном
+ * значении говорил только текст под полем: экранный диктор произносил его лишь
+ * тогда, когда до него доходила очередь, а само поле считалось исправным.
+ * Признак нужен и глазам — по нему поле получает контур, и ошибка перестаёт
+ * держаться на одном красном оттенке.
+ */
 export function Field({ label, hint, error, children }: FieldProps): React.JSX.Element {
   const id = useId();
   const hintId = hint === undefined ? undefined : `${id}-hint`;
@@ -74,7 +86,11 @@ export function Field({ label, hint, error, children }: FieldProps): React.JSX.E
       <label className="field__label" htmlFor={id}>
         {label}
       </label>
-      {children({ id, 'aria-describedby': describedBy })}
+      {children({
+        id,
+        'aria-describedby': describedBy,
+        'aria-invalid': error === undefined ? undefined : true,
+      })}
       {hint !== undefined && (
         <span className="field__hint" id={hintId}>
           {hint}
