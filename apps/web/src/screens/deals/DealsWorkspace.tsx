@@ -122,6 +122,15 @@ export function DealsWorkspace(): React.JSX.Element {
    * подставить «сколько-нибудь» значило бы принять бизнес-решение за человека.
    */
   /** Подтверждение создания маршрута: до него ничего не создаётся. */
+  /*
+   * Скрытие списка — только вид, состояние живёт здесь.
+   *
+   * Список не размонтируется и данных не теряет: панель убирается из сетки,
+   * а её запросы, фильтры, выбор и положение прокрутки остаются нетронутыми.
+   * Кнопка возврата стоит в карте, которая при этом занимает весь экран, —
+   * скрытая панель обязана оставаться возвращаемой.
+   */
+  const [listHidden, setListHidden] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   const [vehiclesInput, setVehiclesInput] = useState('');
@@ -366,13 +375,18 @@ export function DealsWorkspace(): React.JSX.Element {
         </p>
       )}
 
-      <div className="deals__body" data-testid="deals-body">
+      <div
+        className={['deals__body', listHidden ? 'deals__body--list-hidden' : null]
+          .filter((name) => name !== null)
+          .join(' ')}
+        data-testid="deals-body"
+      >
         {/*
           Левая колонка — окно постоянной высоты: шапка со счётчиком и панель
           действий закреплены, прокручивается только сам список. Раньше страница
           росла вместе с числом заказов, и карта уезжала вверх вместе с ней.
         */}
-        <div className="deals__column" data-testid="deals-column">
+        <div className="deals__column" id="deals-column" data-testid="deals-column">
           {/*
             Шапка списка.
 
@@ -813,15 +827,12 @@ export function DealsWorkspace(): React.JSX.Element {
           </div>
         </div>
 
-        <div className="deals__map" data-testid="deals-map-column">
+        <div className="deals__map" id="deals-map-column" data-testid="deals-map-column">
           <DealsMap
             scopeKey={scopeKey}
             selected={selected}
-            /*
-              Выбор по отметке не зависит от того, загружена ли карточка заказа.
-              Раньше клик по маркеру заказа со второй страницы списка молча
-              ничего не делал: обработчик искал заказ среди загруженных.
-            */
+            listHidden={listHidden}
+            onToggleList={() => setListHidden((current) => !current)}
             onToggle={(point) => setSelected((current) => toggleMapPoint(current, point))}
           />
         </div>

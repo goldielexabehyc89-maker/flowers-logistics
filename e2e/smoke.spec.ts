@@ -7320,3 +7320,93 @@ test('настройки: переключатель ручного ввода �
   await managerContext.close();
   await logistContext.close();
 });
+
+/**
+ * Три замечания приёмки «Сделок» — проверяются вместе.
+ *
+ * Все три про то, что видно и достижимо на экране, а не про то, что записано
+ * в базу: список курьеров, обрезанный модальным окном, недоступен так же
+ * надёжно, как отсутствующий, а панель, которую нечем вернуть, теряет карту
+ * до перезагрузки страницы.
+ */
+test('«Сделки»: список курьеров не обрезан, список скрывается, вкладки в лотке', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await ensureCourier(browser);
+  const numbers = seedOrders(2, { withPoint: true });
+  expect(numbers).toHaveLength(2);
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  // --- Вкладки лежат в одном лотке, активная выделена отдельно ---------------
+  const tabs = page.locator('.shell__tabs');
+  const tabsBox = await tabs.boundingBox();
+  expect(tabsBox).not.toBeNull();
+  for (const name of ['Сделки', 'Маршрутизация', 'Маршрутные листы', 'История', 'Отчёты']) {
+    const box = await page.locator('.shell__tabs').getByRole('link', { name }).boundingBox();
+    expect(box, `вкладка «${name}» вне лотка`).not.toBeNull();
+    // Каждая вкладка целиком внутри лотка: лоток — один предмет, а не фон.
+    expect(box!.x).toBeGreaterThanOrEqual(tabsBox!.x - 1);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(tabsBox!.x + tabsBox!.width + 1);
+  }
+  await expect(page.locator('.shell__tabs .shell__tab--active')).toHaveCount(1);
+  // «Требуют решения» со своим счётчиком никуда не делась.
+  await expect(
+    page.locator('.shell__tabs').getByRole('link', { name: /Требуют решения/ }),
+  ).toBeVisible();
+
+  const overflow = async (): Promise<number> =>
+    page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ) as Promise<number>;
+  expect(await overflow()).toBeLessThanOrEqual(0);
+
+  // --- Сворачивание панелей --------------------------------------------------
+  await page.getByTestId('deals-select-all').click();
+  const selectedBefore = await page.getByTestId('deals-selected-count').textContent();
+  expect(selectedBefore).toBeTruthy();
+
+  await page.getByTestId('deals-toggle-list').click();
+  await expect(page.getByTestId('deals-column')).toBeHidden();
+  await expect(page.getByTestId('deals-map-column')).toBeVisible();
+  // Вернуть список нечем, если кнопка исчезла вместе с ним.
+  await expect(page.getByTestId('deals-toggle-list')).toBeVisible();
+  await page.getByTestId('deals-toggle-list').click();
+  await expect(page.getByTestId('deals-column')).toBeVisible();
+
+  // Выбор пережил скрытие: панель прячется, данные — нет.
+  await expect(page.getByTestId('deals-selected-count')).toHaveText(selectedBefore ?? '');
+  expect(await overflow()).toBeLessThanOrEqual(0);
+
+  // --- Список курьеров в модальном окне --------------------------------------
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-courier-field').click();
+
+  const options = page.getByTestId('create-route-courier-option');
+  const count = await options.count();
+  expect(count).toBeGreaterThan(0);
+
+  const last = options.nth(count - 1);
+  const lastBox = await last.boundingBox();
+  const viewport = page.viewportSize();
+  expect(lastBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  // Последний вариант виден целиком: раньше его срезала нижняя граница окна.
+  expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(viewport!.height);
+
+  const label = (await last.textContent()) ?? '';
+  await last.click();
+  await expect(page.getByTestId('create-route-courier-field')).toHaveValue(label.trim());
+
+  await context.close();
+});

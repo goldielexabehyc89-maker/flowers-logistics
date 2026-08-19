@@ -34,19 +34,21 @@
 }
 
 /* Список повторяет ширину поля: это продолжение поля, а не отдельное окно. */
+/*
+ * Список рисуется в портале на `body`, поэтому позиционируется от окна,
+ * а не от поля: `position: fixed`, а координаты, ширину и предельную высоту
+ * задаёт сам контрол по месту поля на экране. Внутри модального окна список
+ * иначе обрезался его нижней границей, и последний курьер был недоступен.
+ */
 .courier-combobox__list {
-  position: absolute;
-  top: calc(100% + 2px);
-  left: 0;
-  right: 0;
-  z-index: 20;
-  max-height: var(--log-popover-max-height);
+  position: fixed;
+  z-index: 60;
   margin: 0;
   padding: var(--space-1);
-  border: 1px solid var(--log-border);
-  border-radius: var(--log-radius-field);
-  background: var(--log-surface);
-  box-shadow: var(--log-shadow-popover);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out-lg);
   list-style: none;
   overflow-y: auto;
 }

@@ -108,6 +108,21 @@
     min-height: 0;
   }
 
+  /*
+   * Скрытая панель убирается из сетки, а не прячется прозрачностью.
+   *
+   * Оставленная нулевой ширины колонка всё равно держала бы отступ, и вторая
+   * панель не занимала бы освободившееся место. Сами компоненты при этом
+   * не размонтируются: скрытый список сохраняет фильтры, выбор и прокрутку.
+   */
+  .deals__body--list-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deals__body--list-hidden .deals__column {
+    display: none;
+  }
+
   .deals__column,
   .deals__map {
     border-radius: var(--radius-xl);
@@ -613,6 +628,67 @@
   top: 56px;
   left: 12px;
   right: 56px;
+}
+
+/* --- Шапка карты ---------------------------------------------------------- */
+
+.deals-map__head {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  /* Шапка отделена от холста светом, а не линией. */
+  box-shadow: 0 6px 12px -10px rgb(163 172 191 / 70%);
+}
+
+.deals-map__head-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* Пояснение к фильтру стоит между счётчиком и полями и их разводит. */
+.deals-map__head-hint {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.deals-map__head-time {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/*
+ * Переключатели панелей — выпуклые кнопки: обе доступны всегда.
+ *
+ * Скрытая панель обязана оставаться возвращаемой, поэтому её кнопка не
+ * исчезает вместе с ней, а меняет подпись на обратное действие.
+ */
+.deals-map__panel-toggle {
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.deals-map__panel-toggle:hover {
+  box-shadow: var(--shadow-in);
+}
+
+.deals-map__panel-toggle--accent {
+  color: var(--color-accent-text);
 }
 
 /* Легенда прижата к нижнему краю карты — к тому, что она объясняет. */

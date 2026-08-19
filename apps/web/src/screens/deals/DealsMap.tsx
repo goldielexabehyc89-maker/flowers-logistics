@@ -44,6 +44,9 @@ interface DealsMapProps {
   selected: readonly string[];
   /** Отдаёт саму точку: пригодность берётся из неё, а не из списка. */
   onToggle: (point: MapPoint) => void;
+  /** Левая панель скрыта — карта занимает всю ширину. */
+  listHidden: boolean;
+  onToggleList: () => void;
 }
 
 /**
@@ -117,7 +120,13 @@ export function splitForMap(
   };
 }
 
-export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
+export function DealsMap({
+  scopeKey,
+  selected,
+  onToggle,
+  listHidden,
+  onToggleList,
+}: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
   /*
    * По умолчанию точки показываются ПООТДЕЛЬНОСТИ.
@@ -248,65 +257,28 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
         где он работает, а не серый прямоугольник. Сообщение об отсутствии
         координат лежит поверх карты и её не заменяет.
       */}
-      <div className="deals-map__surface">
-        {/*
-          Управление картой лежит ПОВЕРХ холста.
+      {/*
+        Шапка карты — настоящая строка над холстом, а не контролы поверх него.
 
-          Отдельная полоса над картой отнимала у неё высоту и разрывала рабочую
-          поверхность на разрозненные ряды. Карта — фон всей правой панели,
-          а её контролы плавают над ней.
-        */}
-        {/*
-          Управление картой двумя плавающими строками.
-
-          Сверху — что показано: счётчик и легенда. Ниже — чем это менять:
-          время и группировка. Обе строки лежат ПОВЕРХ холста и высоту у карты
-          не отнимают.
-        */}
-        <div className="deals-map__overlay deals-map__overlay--top">
-          <div className="deals-map__panel deals-map__panel--info">
-            <span className="deals-map__head-count" data-testid="deals-map-head-count">
-              На карте: {points.length}
-              {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
-              {refreshing && (
-                <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
-                  {' '}
-                  Обновляем…
-                </span>
-              )}
-            </span>
-          </div>
-        </div>
-
-        {/*
-          Легенда внизу карты, а не рядом со счётчиком.
-          
-          Наверху она стояла в одной строке со счётчиком и читалась как часть
-          его подписи, хотя объясняет цвета точек. Внизу она у того, что
-          объясняет, и не отнимает место у самой карты.
-        */}
-        <div className="deals-map__overlay deals-map__overlay--bottom">
-          <ul className="deals-map__legend" data-testid="deals-map-legend">
-            <li>
-              <span className="deals-map__dot deals-map__dot--free" /> доступен
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--picked" /> выбран
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--draft" /> в черновике
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--assembled" /> собран
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--depot" /> склад
-            </li>
-          </ul>
-        </div>
-
-        <div className="deals-map__overlay deals-map__overlay--controls">
-          <div className="deals-map__panel deals-map__panel--controls">
+        Плавающие панели закрывали ту часть карты, на которую и смотрят: точки
+        в верхней трети оказывались под счётчиком и полями времени. Теперь
+        сверху то, что описывает карту, ниже — чем управлять её показом, а сам
+        холст начинается там, где заканчивается управление.
+      */}
+      <div className="deals-map__head">
+        <div className="deals-map__head-row">
+          <span className="deals-map__head-count" data-testid="deals-map-head-count">
+            На карте: {points.length}
+            {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
+            {refreshing && (
+              <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
+                {' '}
+                Обновляем…
+              </span>
+            )}
+          </span>
+          <span className="deals-map__head-hint">Фильтр времени — только для карты</span>
+          <div className="deals-map__head-time">
             {/*
           Счётчик и его пояснения занимают постоянное место: иначе поля времени
           и кнопка группировки прыгали бы при каждом фоновом обновлении.
@@ -333,25 +305,74 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
                 onChange={(event) => setTo(event.target.value)}
               />
             </label>
-
-            <button
-              type="button"
-              className="deals__link deals-map__zoom"
-              data-testid="deals-map-zoom"
-              // Разделять нечего, пока точек нет: кнопка не должна обещать
-              // действие, которое ничего не изменит.
-              disabled={empty}
-              onClick={() => setZoomedOut((value) => !value)}
-            >
-              {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
-            </button>
           </div>
+        </div>
 
-          {/*
-        Постоянная легенда: без неё цвет и форма ничего не значат. Состояния
-        различаются и цветом, и формой — одного цвета мало тому, кто его
-        не различает.
-      */}
+        <div className="deals-map__head-row deals-map__head-row--actions">
+          <button
+            type="button"
+            className="deals-map__panel-toggle deals-map__panel-toggle--accent"
+            aria-expanded={!listHidden}
+            aria-controls="deals-column"
+            data-testid="deals-toggle-list"
+            onClick={onToggleList}
+          >
+            {listHidden ? 'Показать список' : 'Скрыть список'}
+          </button>
+          <button
+            type="button"
+            className="deals__link deals-map__zoom"
+            data-testid="deals-map-zoom"
+            // Разделять нечего, пока точек нет: кнопка не должна обещать
+            // действие, которое ничего не изменит.
+            disabled={empty}
+            onClick={() => setZoomedOut((value) => !value)}
+          >
+            {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
+          </button>
+        </div>
+      </div>
+
+      <div className="deals-map__surface">
+        {/*
+          Управление картой лежит ПОВЕРХ холста.
+
+          Отдельная полоса над картой отнимала у неё высоту и разрывала рабочую
+          поверхность на разрозненные ряды. Карта — фон всей правой панели,
+          а её контролы плавают над ней.
+        */}
+        {/*
+          Управление картой двумя плавающими строками.
+
+          Сверху — что показано: счётчик и легенда. Ниже — чем это менять:
+          время и группировка. Обе строки лежат ПОВЕРХ холста и высоту у карты
+          не отнимают.
+        */}
+        {/*
+          Легенда внизу карты, а не рядом со счётчиком.
+          
+          Наверху она стояла в одной строке со счётчиком и читалась как часть
+          его подписи, хотя объясняет цвета точек. Внизу она у того, что
+          объясняет, и не отнимает место у самой карты.
+        */}
+        <div className="deals-map__overlay deals-map__overlay--bottom">
+          <ul className="deals-map__legend" data-testid="deals-map-legend">
+            <li>
+              <span className="deals-map__dot deals-map__dot--free" /> доступен
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--picked" /> выбран
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--draft" /> в черновике
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--assembled" /> собран
+            </li>
+            <li>
+              <span className="deals-map__dot deals-map__dot--depot" /> склад
+            </li>
+          </ul>
         </div>
 
         {styleUrl === '' ? (

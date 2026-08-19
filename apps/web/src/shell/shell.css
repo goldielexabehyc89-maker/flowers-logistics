@@ -617,12 +617,24 @@
  * текущего. Второй ряд навигации под заголовком отнимал у карты и списка
  * высоту, ничего не добавляя: активная вкладка и есть название раздела.
  */
+/*
+ * Вкладки лежат в одном вдавленном лотке.
+ *
+ * На плоском фоне они читались как отдельные ссылки, разбросанные по строке:
+ * непонятно, где кончается навигация раздела и начинается всё остальное.
+ * Лоток собирает их в один предмет, а вдавленность говорит, что выбирают
+ * внутри него. Границы у лотка нет — её роль выполняет внутренняя светотень.
+ */
 .shell__tabs {
   display: flex;
-  gap: var(--space-1, 4px);
+  gap: var(--space-1);
   align-items: center;
   min-width: 0;
-  /* На узком экране строка прокручивается, а пункты не обрезаются. */
+  padding: 5px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in);
+  /* На узком экране строка прокручивается внутри лотка, а не тянет страницу. */
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -644,21 +656,24 @@
   flex: 0 0 auto;
   display: inline-flex;
   flex-direction: row;
-  align-items: baseline;
+  /* По центру, а не по базовой линии: подписи всех вкладок на одной оси. */
+  align-items: center;
   /* Отступ счётчика — расстоянием строки, а не полем самого счётчика. */
-  gap: 6px;
-  min-height: 0;
-  padding: 4px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-2, 8px);
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  /* Невыбранные вкладки не получают собственной подложки: лоток один. */
+  background: transparent;
   color: var(--color-text-muted);
-  font-size: 14px;
+  font-size: var(--font-size-md);
   text-decoration: none;
   white-space: nowrap;
 }
 
-.shell__tabs .shell__tab:hover {
-  background: var(--color-surface-hover);
+.shell__tabs .shell__tab:hover:not(.shell__tab--active) {
+  color: var(--color-text);
 }
 
 /*
@@ -669,18 +684,24 @@
  * показывается тоже — исчезающий счётчик неотличим от несчитающегося.
  */
 .shell__tab-count {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--color-surface-hover);
-  color: var(--color-text);
-  font-size: 12px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-neutral-soft);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 
-/* Активный раздел выглядит выбранной кнопкой, остальные — невыбранными. */
+/*
+ * Активная вкладка приподнята над лотком.
+ *
+ * Она единственная имеет собственную поверхность и тень: остальные — просто
+ * подписи внутри общего углубления. Различается не одним цветом — ещё формой
+ * поверхности и весом подписи.
+ */
 .shell__tabs .shell__tab--active {
-  border-color: var(--color-border);
   background: var(--color-surface);
-  color: var(--color-text);
+  color: var(--color-accent-text);
   font-weight: 600;
+  box-shadow: var(--shadow-out);
 }
