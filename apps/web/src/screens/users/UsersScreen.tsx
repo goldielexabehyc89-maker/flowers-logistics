@@ -20,6 +20,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
 import {
+  ActionMenu,
   Button,
   ConfirmDialog,
   EmptyState,
@@ -360,40 +361,70 @@ export function UsersScreen(): React.JSX.Element {
                 <tr>
                   <th>ФИО</th>
                   <th>Телефон</th>
-                  <th>Роли</th>
-                  <th>Статус</th>
+                  {/*
+                   * Колонки «Роли» и «Статус» убраны из шапки намеренно.
+                   *
+                   * Роль уже выбрана вкладкой выше — колонка повторяла фильтр в
+                   * каждой строке. Статус в рабочем списке всегда «Активен»:
+                   * значение имеет только отличие от него, и оно показывается
+                   * бейджем у имени, а не отдельной колонкой на весь список.
+                   */}
                   <th>Транспорт</th>
                   <th>Изменён</th>
-                  <th>Действия</th>
+                  <th className="users__actions-head">Действия</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((item) => (
                   <tr key={item.id}>
-                    <td>{item.fullName}</td>
-                    <td className="nowrap">{item.phone}</td>
                     <td>
-                      {/* Подписи берутся только для известных ролей: обращение
-                          ROLE_LABELS[неизвестная] дало бы пустую ячейку. */}
-                      {item.roles.map((role) => ROLE_LABELS[role]).join(', ') ||
-                        (item.hasUnsupportedRoles ? '—' : '')}
-                      {item.hasUnsupportedRoles && (
-                        <div className="text-sm muted">Роли заданы более новой версией</div>
-                      )}
+                      <div className="users__name">
+                        <span className="users__name-text">{item.fullName}</span>
+                        {/*
+                         * Бейджами показываются только ДОПОЛНИТЕЛЬНЫЕ роли —
+                         * те, что сверх выбранной вкладки. Повторять выбранную
+                         * роль в каждой строке значит ничего не сообщать.
+                         * Подписи берутся только для известных ролей: обращение
+                         * ROLE_LABELS[неизвестная] дало бы пустой бейдж.
+                         */}
+                        {item.roles
+                          .filter((value) => value !== role && ROLE_LABELS[value] !== undefined)
+                          .map((value) => (
+                            <StatusBadge key={value} tone="neutral">
+                              {ROLE_LABELS[value]}
+                            </StatusBadge>
+                          ))}
+                        {item.status !== 'ACTIVE' && (
+                          <StatusBadge tone={STATUS_TONES[item.status]}>
+                            {USER_STATUS_LABELS[item.status]}
+                          </StatusBadge>
+                        )}
+                        {item.hasUnsupportedRoles && (
+                          <StatusBadge tone="warning">Роли новее приложения</StatusBadge>
+                        )}
+                      </div>
                     </td>
+                    <td className="nowrap mono">{item.phone}</td>
                     <td>
-                      <StatusBadge tone={STATUS_TONES[item.status]}>
-                        {USER_STATUS_LABELS[item.status]}
-                      </StatusBadge>
-                    </td>
-                    <td>
+                      {/*
+                       * Транспорт есть только у курьера: у флориста и логиста
+                       * колонка стояла прочерком во всю высоту списка.
+                       */}
                       {item.courierProfile === null
-                        ? '—'
+                        ? ''
                         : VEHICLE_TYPE_LABELS[item.courierProfile.defaultVehicleType]}
                     </td>
                     <td className="nowrap">{formatDate(item.updatedAt)}</td>
                     <td>
-                      <div className="row">
+                      {/*
+                       * В строке — то, что делают каждый день; остальное в «Ещё».
+                       *
+                       * Прежние четыре-пять кнопок сеткой растягивали строку до
+                       * высоты карточки, и список переставал просматриваться
+                       * взглядом. Набор действий и условия их доступности здесь
+                       * не изменились — изменилось только, что видно сразу.
+                       */}
+                      <div className="row users__actions">
                         <Button
                           disabled={item.hasUnsupportedRoles}
                           title={
@@ -418,17 +449,28 @@ export function UsersScreen(): React.JSX.Element {
                             Заморозить
                           </Button>
                         )}
-                        {item.status !== 'FROZEN' && (
-                          <Button onClick={() => setConfirm({ kind: 'reset-pin', user: item })}>
-                            Сбросить PIN
-                          </Button>
-                        )}
-                        {item.status === 'PENDING_ACTIVATION' && (
-                          <Button onClick={() => setConfirm({ kind: 'reissue', user: item })}>
-                            Новый код
-                          </Button>
-                        )}
-                        <Button onClick={() => setHistoryFor(item)}>История</Button>
+                        <ActionMenu
+                          testId="user-more"
+                          items={[
+                            ...(item.status !== 'FROZEN'
+                              ? [
+                                  {
+                                    label: 'Сбросить PIN',
+                                    onSelect: () => setConfirm({ kind: 'reset-pin', user: item }),
+                                  },
+                                ]
+                              : []),
+                            ...(item.status === 'PENDING_ACTIVATION'
+                              ? [
+                                  {
+                                    label: 'Новый код',
+                                    onSelect: () => setConfirm({ kind: 'reissue', user: item }),
+                                  },
+                                ]
+                              : []),
+                            { label: 'История', onSelect: () => setHistoryFor(item) },
+                          ]}
+                        />
                       </div>
                     </td>
                   </tr>

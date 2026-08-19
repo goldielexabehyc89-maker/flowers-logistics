@@ -6,7 +6,7 @@
  * сообщения объявляются через aria-live.
  */
 
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import './components.css';
 
@@ -513,6 +513,123 @@ export function SegmentedControl<T extends string>({
  * проверках. Раздел добавляет ячейкам `data-label`, чтобы в карточке осталась
  * подпись столбца; без него поведение прежнее.
  */
+/**
+ * Меню редких действий.
+ *
+ * Появилось потому, что четыре кнопки в строке списка превращают её в блок
+ * высотой с карточку: строка перестаёт просматриваться взглядом, а список —
+ * сравниваться. В строке остаётся то, что делают каждый день, остальное живёт
+ * здесь.
+ *
+ * Меню закрывается по Escape и по нажатию снаружи, и в обоих случаях фокус
+ * возвращается на кнопку: человек, вызвавший меню с клавиатуры, иначе оказался
+ * бы в начале страницы. `aria-expanded` обязателен — без него кнопка не
+ * сообщает, раскрыта она или нет.
+ */
+export interface ActionMenuItem {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean | undefined;
+  testId?: string | undefined;
+}
+
+export function ActionMenu({
+  label = 'Ещё',
+  items,
+  testId,
+}: {
+  label?: string;
+  items: readonly ActionMenuItem[];
+  testId?: string | undefined;
+}): React.JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      if (rootRef.current !== null && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [open]);
+
+  // Пустое меню не рисуется вовсе: кнопка, за которой ничего нет, обманывает.
+  if (items.length === 0) {
+    return null;
+  }
+
+  function close(returnFocus: boolean): void {
+    setOpen(false);
+    if (returnFocus) {
+      buttonRef.current?.focus();
+    }
+  }
+
+  return (
+    <div className="action-menu" ref={rootRef}>
+      <button
+        type="button"
+        ref={buttonRef}
+        className="btn btn--ghost action-menu__button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid={testId}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && open) {
+            event.preventDefault();
+            event.stopPropagation();
+            close(true);
+          }
+        }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div
+          className="action-menu__list"
+          role="menu"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              /*
+               * Останавливаем всплытие: тот же Escape внутри модального окна
+               * закрыл бы окно целиком, и человек потерял бы форму, всего лишь
+               * свернув меню.
+               */
+              event.preventDefault();
+              event.stopPropagation();
+              close(true);
+            }
+          }}
+        >
+          {items.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              className="action-menu__item"
+              disabled={item.disabled === true}
+              data-testid={item.testId}
+              onClick={() => {
+                close(false);
+                item.onSelect();
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DataSurface({
   children,
   className,
