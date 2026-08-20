@@ -150,7 +150,14 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const { showToast } = useToast();
   const today = moscowToday();
 
-  const [date, setDate] = useState('');
+  /*
+   * По умолчанию — сегодняшний день, как в «Сделках» и «Маршрутизации».
+   *
+   * Пустая дата означала «все дни»: экран открывался списком за всю историю,
+   * и сегодняшние листы приходилось искать среди прошлых. Кнопка «Все дни»
+   * рядом возвращает прежний вид одним нажатием.
+   */
+  const [date, setDate] = useState(moscowToday());
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
