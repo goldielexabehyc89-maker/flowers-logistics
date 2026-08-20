@@ -24,6 +24,7 @@ import {
 } from '../../ui/components';
 import { formatDate, moscowToday, ROUTE_STATE_LABELS } from '../routing/routing';
 import './history.css';
+import { CourierCombobox } from './CourierCombobox';
 
 interface HistoryRouteRow {
   id: string;
@@ -256,7 +257,7 @@ export function HistoryScreen(): React.JSX.Element {
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
     queryFn: () =>
-      client.get<{ items: { id: string; fullName: string }[] }>(
+      client.get<{ items: { id: string; fullName: string; phone: string | null }[] }>(
         '/api/users?role=COURIER&status=ACTIVE&limit=100',
       ),
   });
@@ -336,20 +337,22 @@ export function HistoryScreen(): React.JSX.Element {
           />
         </div>
 
-        <select
-          className="history__select"
-          value={courierUserId}
-          aria-label="Курьер"
-          data-testid="history-courier"
-          onChange={(event) => setCourierUserId(event.target.value)}
-        >
-          <option value="">Любой курьер</option>
-          {(couriers.data?.items ?? []).map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.fullName}
-            </option>
-          ))}
-        </select>
+        {/*
+          Курьер выбирается вводом с подсказками, а не длинным списком:
+          курьеров десятки, и искать нужного прокруткой дольше, чем набрать
+          три буквы имени или цифры телефона. Контрол тот же, что и на других
+          экранах, — привыкать заново не приходится.
+        */}
+        <div className="history__courier" data-testid="history-courier">
+          <CourierCombobox
+            options={couriers.data?.items ?? []}
+            value={(couriers.data?.items ?? []).find((item) => item.id === courierUserId) ?? null}
+            label="Курьер"
+            emptyLabel="Любой курьер"
+            testId="history-courier-combobox"
+            onChange={(courier) => setCourierUserId(courier === null ? '' : courier.id)}
+          />
+        </div>
 
         <select
           className="history__select"

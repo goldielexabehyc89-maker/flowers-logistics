@@ -709,3 +709,9 @@
   color: var(--color-error);
   font-size: var(--font-size-xs);
 }
+
+/* Поле курьера в строке отбора не растягивается на всю ширину. */
+.history__courier {
+  flex: none;
+  width: 230px;
+}

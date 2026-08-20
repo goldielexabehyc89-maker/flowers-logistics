@@ -29,6 +29,7 @@ import { formatMoscowDateTime } from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
+import { CourierCombobox } from './CourierCombobox';
 import './reports.css';
 
 interface SettlementTotals {
@@ -326,7 +327,7 @@ export function ReportsScreen(): React.JSX.Element {
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
     queryFn: () =>
-      client.get<{ items: { id: string; fullName: string }[] }>(
+      client.get<{ items: { id: string; fullName: string; phone: string | null }[] }>(
         '/api/users?role=COURIER&status=ACTIVE&limit=100',
       ),
   });
@@ -504,21 +505,27 @@ export function ReportsScreen(): React.JSX.Element {
         {mode === 'SETTLEMENTS' && (
           <>
             <span className="reports__filter-label">Курьер</span>
-            <select
-              className="reports__select"
-              value={courierUserId}
-              aria-label="Курьер"
+            {/*
+              Ввод с подсказками вместо длинного списка: курьеров десятки,
+              и искать нужного прокруткой дольше, чем набрать три буквы имени
+              или цифры телефона.
+            */}
+            <div
+              className="reports__courier"
               title="Баланс считается по одному курьеру"
               data-testid="reports-courier"
-              onChange={(event) => setCourierUserId(event.target.value)}
             >
-              <option value="">Все курьеры</option>
-              {(couriers.data?.items ?? []).map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.fullName}
-                </option>
-              ))}
-            </select>
+              <CourierCombobox
+                options={couriers.data?.items ?? []}
+                value={
+                  (couriers.data?.items ?? []).find((item) => item.id === courierUserId) ?? null
+                }
+                label="Курьер"
+                emptyLabel="Все курьеры"
+                testId="reports-courier-combobox"
+                onChange={(courier) => setCourierUserId(courier === null ? '' : courier.id)}
+              />
+            </div>
             {/* Выгрузка относится ко всему отчёту, поэтому стоит в его шапке. */}
             <a className="reports__export" href={exportUrl('xlsx')} data-testid="reports-xlsx">
               Выгрузить XLSX

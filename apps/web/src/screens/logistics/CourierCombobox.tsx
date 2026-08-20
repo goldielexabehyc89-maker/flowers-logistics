@@ -36,6 +36,14 @@ export interface CourierComboboxProps {
   disabled?: boolean;
   /** Подпись поля для чтения с экрана. */
   label?: string;
+  /**
+   * Как называется пустой выбор.
+   *
+   * В карточке маршрута пусто означает «курьер не назначен», а в строке
+   * отбора — «любой курьер»: это разные утверждения, и одно вместо другого
+   * читается как ошибка.
+   */
+  emptyLabel?: string;
   testId?: string;
   onChange: (courier: CourierOption | null) => void;
 }
@@ -43,6 +51,7 @@ export interface CourierComboboxProps {
 export function CourierCombobox({
   options,
   value,
+  emptyLabel = UNASSIGNED_LABEL,
   disabled = false,
   label = 'Курьер',
   testId = 'courier-combobox',
@@ -211,7 +220,7 @@ export function CourierCombobox({
         aria-autocomplete="list"
         aria-label={label}
         disabled={disabled}
-        placeholder={UNASSIGNED_LABEL}
+        placeholder={emptyLabel}
         // Пока список открыт, в поле живёт запрос; закрытое поле показывает выбор.
         value={open ? query : value === null ? '' : courierLabel(value)}
         data-testid={`${testId}-field`}
@@ -256,7 +265,7 @@ export function CourierCombobox({
                 onMouseEnter={() => setActive(-1)}
                 onClick={() => pick(null)}
               >
-                {UNASSIGNED_LABEL}
+                {emptyLabel}
               </button>
             </li>
 
