@@ -16,10 +16,12 @@
  * коробка — остаётся видимым и объясняет, почему выдавать нельзя.
  */
 
+import { moscowDayRange } from '@fl/shared';
+
 import type { Database } from '../../platform/db.js';
 import { Prisma, type $Enums } from '../../generated/prisma/client.js';
 import { AppError } from '../../platform/errors.js';
-import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
 
@@ -327,16 +329,27 @@ export async function listPickupQueue(
  *
  * Живёт отдельным запросом намеренно: состав активной очереди он не меняет
  * и меняться от него не должен.
+ *
+ * День считается по ФАКТУ выдачи (`OrderPickupIssue.issuedAt`), а не по
+ * плановой дате доставки. Разница видна каждый день: заказ вчерашнего дня,
+ * за которым пришли сегодня, выдан сегодня — и в сегодняшнем списке он обязан
+ * быть; заказ, оформленный на послезавтра и отданный сегодня из рук в руки,
+ * тоже. Плановая дата на попадание в список не влияет вовсе.
+ *
+ * Границы — полуинтервал московского дня: от полуночи включительно до полуночи
+ * следующего дня исключительно, поэтому выдача в 00:00:00 попадает в новый
+ * день, а в 23:59:59.999 — ещё в прежний. Часовой пояс браузера и сервера
+ * в расчёте не участвует.
  */
 export async function listIssuedOfDay(
   db: Database,
   day: string,
 ): Promise<{ deliveryDate: string; issued: PickupCard[] }> {
+  const { from, to } = moscowDayRange(day);
   const orders = await db.deliveryOrder.findMany({
     where: {
       deliveryMethodId: PICKUP_METHOD_ID,
-      pickupIssue: { isNot: null },
-      deliveryDate: toDateColumn(day),
+      pickupIssue: { is: { issuedAt: { gte: from, lt: to } } },
     },
     orderBy: [{ externalName: 'asc' }],
     select: ORDER_SELECT,

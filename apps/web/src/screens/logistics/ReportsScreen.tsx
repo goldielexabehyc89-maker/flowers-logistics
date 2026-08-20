@@ -25,7 +25,7 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
-import { formatMoscowDateTime } from '@fl/shared';
+import { formatMoscowDateTime, shiftCalendarDate } from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
@@ -190,12 +190,15 @@ const REPORT_PERIODS = [
  *
  * Считается назад от сегодняшнего дня: «неделя» — последние семь дней вместе
  * с текущим, а не календарная неделя с понедельника. Отчёт спрашивают так.
+ *
+ * Отсчёт идёт от МОСКОВСКОЙ операционной даты и по календарю строки. Прежний
+ * `new Date().toISOString()` брал UTC-день браузера: с полуночи до трёх часов
+ * ночи по Москве отчёт молча показывал вчерашний день, а у пользователя за
+ * Уралом — завтрашний.
  */
 function periodRange(days: number): { from: string; to: string } {
-  const today = new Date();
-  const to = today.toISOString().slice(0, 10);
-  const start = new Date(today.getTime() - days * 24 * 60 * 60 * 1000);
-  return { from: start.toISOString().slice(0, 10), to };
+  const to = moscowToday();
+  return { from: shiftCalendarDate(to, -days), to };
 }
 
 const CELL_OPERATIONS = {
@@ -247,12 +250,6 @@ export function debtWords(minor: string): string {
   return value > 0n ? 'курьер должен компании' : 'компания должна курьеру';
 }
 
-function weekAgo(today: string): string {
-  const instant = new Date(`${today}T00:00:00.000Z`);
-  instant.setUTCDate(instant.getUTCDate() - 7);
-  return instant.toISOString().slice(0, 10);
-}
-
 export function ReportsScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -260,7 +257,14 @@ export function ReportsScreen(): React.JSX.Element {
   const today = moscowToday();
 
   const [mode, setMode] = useState<'SETTLEMENTS' | 'CASH' | 'OPERATIONS'>('SETTLEMENTS');
-  const [from, setFrom] = useState(weekAgo(today));
+  /*
+   * По умолчанию — «День», то есть сегодняшняя московская операционная дата.
+   *
+   * Раньше экран открывался на неделе: логист приходит за сегодняшней кассой
+   * и расчётом, а видел сумму за семь дней и принимал её за дневную. Другие
+   * сроки остаются на месте и по-прежнему переключаются кнопками.
+   */
+  const [from, setFrom] = useState(today);
   const [to, setTo] = useState(today);
   const [courierUserId, setCourierUserId] = useState('');
   /**

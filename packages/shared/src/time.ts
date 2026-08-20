@@ -57,6 +57,44 @@ export function moscowToday(now: Date = new Date()): string {
 }
 
 /**
+ * Смещение Москвы относительно UTC.
+ *
+ * Перевода часов в Europe/Moscow нет с 2014 года, поэтому обратный перевод
+ * «стенные часы → момент времени» выполняется константой. Прямой перевод
+ * (момент → дата) по-прежнему идёт через `Intl`: там пояс знает база данных
+ * часовых поясов, и полагаться на арифметику незачем.
+ */
+const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+/**
+ * Границы московского календарного дня как абсолютные моменты.
+ *
+ * Полуинтервал: `from` включительно, `to` исключительно. Именно так задаются
+ * выборки «за день» по колонкам-моментам (`issuedAt`, отметки аудита): условие
+ * `<= конец дня` пришлось бы писать с точностью до миллисекунды и всё равно
+ * теряло бы события последней доли секунды.
+ *
+ * Календарная дата разбирается по строке и не проходит через `new Date(value)`:
+ * часовой пояс среды на результат не влияет — ни на сервере, ни в браузере.
+ */
+export function moscowDayRange(date: string): { from: Date; to: Date } {
+  const parts = date.split('-');
+  if (parts.length !== 3) {
+    throw new RangeError('Ожидается календарная дата вида YYYY-MM-DD');
+  }
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    throw new RangeError('Ожидается календарная дата вида YYYY-MM-DD');
+  }
+  return {
+    from: new Date(Date.UTC(year, month - 1, day) - MOSCOW_OFFSET_MS),
+    to: new Date(Date.UTC(year, month - 1, day + 1) - MOSCOW_OFFSET_MS),
+  };
+}
+
+/**
  * Соседний московский день: `+1` — завтра, `-1` — вчера.
  *
  * Сдвиг выполняется по календарю строки, а не прибавлением суток к моменту:

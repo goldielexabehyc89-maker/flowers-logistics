@@ -43,6 +43,21 @@ function flagsOf(order: {
 }
 
 /**
+ * Полные размеры групп складского списка.
+ *
+ * Считаются по тому же признаку действующего размещения, что и сам список,
+ * и не зависят от того, сколько страниц человек уже дочитал.
+ */
+export interface PlacementGroupTotals {
+  /** Требуется перемещение. */
+  relocation: number;
+  /** Отменённые, которые всё ещё физически стоят на полке. */
+  cancelled: number;
+  /** Обычное хранение. */
+  rest: number;
+}
+
+/**
  * Что сейчас лежит на складе.
  *
  * Список строится от РАЗМЕЩЕНИЙ, а не от заказов: склад отвечает за коробки,
@@ -51,10 +66,29 @@ function flagsOf(order: {
 export async function listPlacedOrders(
   db: Database,
   input: { cellId: string | null; limit: number; offset: number },
-): Promise<{ items: PlacedOrderView[]; total: number; limit: number; offset: number }> {
+): Promise<{
+  items: PlacedOrderView[];
+  total: number;
+  limit: number;
+  offset: number;
+  groupTotals: PlacementGroupTotals;
+}> {
   const where = { releasedAt: null, ...(input.cellId === null ? {} : { cellId: input.cellId }) };
 
-  const [rows, total] = await Promise.all([
+  /*
+   * Отменённым считается размещение, у заказа которого отмена пришла из
+   * источника ИЛИ проставлена логистом. Тот же предикат разбирает строки на
+   * группы в интерфейсе: расходись они — счётчик показывал бы одно, а список
+   * под ним другое.
+   *
+   * Перемещение старше отмены: коробка, которую надо переставить, мешает
+   * работе прямо сейчас, даже если заказ отменён.
+   */
+  const cancelledOrder = {
+    OR: [{ cancelledInSource: true }, { cancelledByLogistAt: { not: null } }],
+  };
+
+  const [rows, total, relocationTotal, cancelledTotal] = await Promise.all([
     db.orderPlacement.findMany({
       where,
       orderBy: [{ placedAt: 'desc' }, { id: 'desc' }],
@@ -82,6 +116,10 @@ export async function listPlacedOrders(
       },
     }),
     db.orderPlacement.count({ where }),
+    db.orderPlacement.count({ where: { ...where, requiresRelocation: true } }),
+    db.orderPlacement.count({
+      where: { ...where, requiresRelocation: false, order: cancelledOrder },
+    }),
   ]);
 
   const items = rows.map((row) => {
@@ -100,7 +138,18 @@ export async function listPlacedOrders(
     };
   });
 
-  return { items, total, limit: input.limit, offset: input.offset };
+  /*
+   * Счётчики считаются по ВСЕМУ складу, а не по загруженной странице.
+   * Иначе «Отменённые · 100» означало бы всего лишь «столько попало в первую
+   * сотню», и кладовщик читал бы это как полное число коробок.
+   */
+  const groupTotals: PlacementGroupTotals = {
+    relocation: relocationTotal,
+    cancelled: cancelledTotal,
+    rest: total - relocationTotal - cancelledTotal,
+  };
+
+  return { items, total, limit: input.limit, offset: input.offset, groupTotals };
 }
 
 export interface RouteFlowOrderView extends PlacedOrderView {

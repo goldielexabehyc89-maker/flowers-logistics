@@ -5093,6 +5093,72 @@ test('история и отчёты: тариф, доставка, расчёт
 });
 
 /**
+ * «Отчёты» открываются на сегодняшнем московском дне.
+ *
+ * Логист приходит в отчёты за сегодняшней кассой и сегодняшним расчётом.
+ * Экран открывался на неделе, и недельная сумма читалась как дневная —
+ * ошибка тихая: цифра правдоподобная, просто не та.
+ */
+test('«Отчёты»: при открытии выбран день и все запросы идут одним диапазоном', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // Диапазон запросов записывается ДО перехода в раздел: важен самый первый.
+  const ranged: string[] = [];
+  page.on('request', (request) => {
+    const url = request.url();
+    // Собираются запросы С ДИАПАЗОНОМ: справочники вроде списка касс границ
+    // не имеют и к выбранному периоду отношения не имеют тоже.
+    if (url.includes('/api/logistics/') && url.includes('from=')) {
+      ranged.push(url);
+    }
+  });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+
+  // 1. Выбран «День», а не «Неделя».
+  await expect(page.getByTestId('reports-period-day')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('reports-period-week')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByTestId('reports-from')).toHaveValue(today);
+  await expect(page.getByTestId('reports-to')).toHaveValue(today);
+
+  // 2. Тем же диапазоном ушли и запросы: касса и отчёт спрашивают один день.
+  await expect.poll(() => ranged.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  for (const url of ranged) {
+    expect(url, url).toContain(`from=${today}`);
+    expect(url, url).toContain(`to=${today}`);
+  }
+
+  // 3. «Неделя» по-прежнему сдвигает начало и оставляет конец на сегодня.
+  await page.getByTestId('reports-period-week').click();
+  await expect(page.getByTestId('reports-period-week')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('reports-to')).toHaveValue(today);
+  const from = await page.getByTestId('reports-from').inputValue();
+  expect(from).not.toBe(today);
+  expect(Date.parse(`${today}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)).toBe(
+    7 * 24 * 60 * 60 * 1000,
+  );
+
+  // 4. Возврат ко «Дню» снова сводит границы к сегодняшней дате.
+  await page.getByTestId('reports-period-day').click();
+  await expect(page.getByTestId('reports-from')).toHaveValue(today);
+  await expect(page.getByTestId('reports-to')).toHaveValue(today);
+});
+
+/**
  * «Маршрутизация»: нераспределённая сделка выглядит как в «Сделках»,
  * а пустой черновик заводится кнопкой.
  *
@@ -7543,8 +7609,20 @@ test('«Сделки»: список курьеров не обрезан, сп�
   await page.getByTestId('deals-toggle-list').click();
   await expect(page.getByTestId('deals-column')).toBeVisible();
 
-  // Выбор пережил скрытие: панель прячется, данные — нет.
-  await expect(page.getByTestId('deals-selected-count')).toHaveText(selectedBefore ?? '');
+  /*
+   * Выбор пережил скрытие: панель прячется, данные — нет.
+   *
+   * Уменьшиться выбор вправе ровно по одной причине — заказ стал недоступен
+   * из-за чужого действия, и тогда экран об этом СКАЗАЛ. Тихая потеря выбора
+   * и сброс в ноль по-прежнему валят проверку.
+   */
+  const selectionCount = (text: string | null): number =>
+    Number(/\d+/.exec(text ?? '')?.[0] ?? '0');
+  const selectedAfter = await page.getByTestId('deals-selected-count').textContent();
+  expect(selectionCount(selectedAfter)).toBeGreaterThan(0);
+  if (selectionCount(selectedAfter) !== selectionCount(selectedBefore)) {
+    await expect(page.getByTestId('deals-notice')).toContainText('Из выбора снято заказов');
+  }
   expect(await overflow()).toBeLessThanOrEqual(0);
 
   // --- Список курьеров в модальном окне --------------------------------------

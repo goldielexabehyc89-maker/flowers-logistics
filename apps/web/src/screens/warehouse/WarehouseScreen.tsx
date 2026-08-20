@@ -12,7 +12,7 @@
  * Ни адреса, ни получателя, ни состава заказа здесь нет — сервер их не отдаёт.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
@@ -37,9 +37,28 @@ import {
   blockLabel,
   cellLabel,
   groupPlacements,
+  mergePlacementPages,
+  nextPlacementOffset,
   type PlacedOrderView,
+  type PlacementGroupTotals,
   type ScanContext,
 } from './warehouse-flow';
+
+/**
+ * Размер страницы складского списка.
+ *
+ * Совпадает с прежним единственным запросом: разница не в размере страницы,
+ * а в том, что за первой страницей теперь идут следующие.
+ */
+const PLACEMENTS_PAGE_SIZE = 100;
+
+interface PlacementsPage {
+  items: PlacedOrderView[];
+  total: number;
+  limit: number;
+  offset: number;
+  groupTotals: PlacementGroupTotals;
+}
 
 type Tab = 'storage' | 'picking' | 'issue' | 'returns';
 
@@ -606,13 +625,31 @@ function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const [choice, setChoice] = useState<'ASSEMBLY' | 'STORAGE' | null>(null);
   const [newCell, setNewCell] = useState(false);
 
-  const placements = useQuery({
+  /*
+   * Склад читается страницами и дочитывается кнопкой.
+   *
+   * Раньше запрашивалась одна страница в сто строк и на этом всё: сто первая
+   * коробка и все, что стояли дольше, просто исчезали из списка, хотя
+   * физически продолжали числиться на складе. Ограничение по возрасту здесь
+   * не годится — на полке лежит то, что лежит, независимо от даты.
+   *
+   * `useInfiniteQuery`, а не своё накопление в состоянии: после складской
+   * операции или события реального времени обновляются ВСЕ дочитанные
+   * страницы разом, и список не расходится сам с собой.
+   */
+  const placements = useInfiniteQuery({
     queryKey: ['warehouse-placements'],
-    queryFn: () =>
-      client.get<{ items: PlacedOrderView[]; total: number }>(
-        '/api/warehouse/placements?limit=100',
+    queryFn: ({ pageParam }) =>
+      client.get<PlacementsPage>(
+        `/api/warehouse/placements?limit=${PLACEMENTS_PAGE_SIZE}&offset=${pageParam}`,
       ),
+    initialPageParam: 0,
+    getNextPageParam: (last: PlacementsPage) => nextPlacementOffset(last) ?? undefined,
   });
+
+  const placementPages = placements.data?.pages ?? [];
+  const placementItems = mergePlacementPages(placementPages);
+  const placementTotals = placementPages[0]?.groupTotals ?? null;
 
   const lookup = useMutation({
     mutationFn: (number: string) =>
@@ -912,14 +949,37 @@ function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
             onRetry={() => void placements.refetch()}
           />
         )}
-        {placements.isSuccess && placements.data.items.length === 0 && (
+        {placements.isSuccess && placementItems.length === 0 && (
           <EmptyState
             title="На складе пусто"
             description="Отсканируйте заказ и ячейку, чтобы принять его."
           />
         )}
-        {placements.isSuccess && placements.data.items.length > 0 && (
-          <PlacementGroups items={placements.data.items} />
+        {placements.isSuccess && placementItems.length > 0 && (
+          <PlacementGroups
+            items={placementItems}
+            totals={placementTotals}
+            /*
+              Кнопка стоит ПОСЛЕ групп и одна на весь список: внутри группы
+              она пропадала бы вместе со свёрнутыми отменёнными, и дочитать
+              склад стало бы нечем.
+            */
+            more={
+              placements.hasNextPage ? (
+                <Button
+                  variant="ghost"
+                  className="wh-more"
+                  disabled={placements.isFetchingNextPage}
+                  data-testid="wh-placements-more"
+                  onClick={() => void placements.fetchNextPage()}
+                >
+                  {placements.isFetchingNextPage
+                    ? 'Загружаем…'
+                    : `Показать ещё · загружено ${placementItems.length} из ${placementPages[0]?.total ?? 0}`}
+                </Button>
+              ) : null
+            }
+          />
         )}
       </div>
     </>
@@ -932,7 +992,17 @@ function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
  * Порядок задан правилом в `warehouse-flow.ts`: сначала то, что мешает
  * работе прямо сейчас, потом мёртвый груз, потом обычное хранение.
  */
-function PlacementGroups({ items }: { items: PlacedOrderView[] }): React.JSX.Element {
+function PlacementGroups({
+  items,
+  totals,
+  more,
+}: {
+  items: PlacedOrderView[];
+  /** Полные размеры групп по всему складу; `null`, пока страница не пришла. */
+  totals: PlacementGroupTotals | null;
+  /** Кнопка дочитывания. Стоит после всех групп и от них не зависит. */
+  more: React.ReactNode;
+}): React.JSX.Element {
   const groups = groupPlacements(items);
   const { showToast } = useToast();
   const reportError = useApiError();
@@ -964,7 +1034,9 @@ function PlacementGroups({ items }: { items: PlacedOrderView[] }): React.JSX.Ele
     <div className="stack">
       {groups.relocation.length > 0 && (
         <div className="stack" data-testid="wh-group-relocation">
-          <h4 className="wh-group__title">Требуется перемещение · {groups.relocation.length}</h4>
+          <h4 className="wh-group__title">
+            Требуется перемещение · {totals?.relocation ?? groups.relocation.length}
+          </h4>
           <PlacementTable items={groups.relocation} />
         </div>
       )}
@@ -984,7 +1056,7 @@ function PlacementGroups({ items }: { items: PlacedOrderView[] }): React.JSX.Ele
           >
             <span>Отменённые</span>
             <span className="wh-group__count" data-testid="wh-group-cancelled-count">
-              {groups.cancelled.length}
+              {totals?.cancelled ?? groups.cancelled.length}
             </span>
             <span aria-hidden="true">{cancelledOpen ? '▾' : '▸'}</span>
           </button>
@@ -1000,6 +1072,8 @@ function PlacementGroups({ items }: { items: PlacedOrderView[] }): React.JSX.Ele
       )}
 
       {groups.rest.length > 0 && <PlacementTable items={groups.rest} />}
+
+      {more}
     </div>
   );
 }

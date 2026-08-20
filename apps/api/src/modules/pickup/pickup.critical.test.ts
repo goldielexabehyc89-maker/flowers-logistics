@@ -24,7 +24,7 @@ import {
 } from '../auth/testing/harness.js';
 import { TEST_SECRETS } from '../../platform/testing/secrets.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
-import type { Role } from '@fl/shared';
+import { moscowToday, type Role } from '@fl/shared';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from '../warehouse/service.js';
@@ -411,7 +411,9 @@ describe('карточка и списки', () => {
     const after = await listPickupQueue(ctx.db, { limit: 200 });
     expect(after.items.map((row) => row.orderNumber)).not.toContain(order.number);
 
-    const issued = await listIssuedOfDay(ctx.db, day);
+    // Справка спрашивается за день ВЫДАЧИ: заказ отдали сейчас, а привезти
+    // его собирались в июне 2027 года.
+    const issued = await listIssuedOfDay(ctx.db, moscowToday(new Date()));
     const row = issued.issued.find((item) => item.orderNumber === order.number);
     expect(row?.blockers).toContain('ALREADY_ISSUED');
     expect(row?.issuedAt).not.toBeNull();
@@ -432,6 +434,136 @@ describe('карточка и списки', () => {
     expect(numbers).toContain(mine.order.number);
     expect(numbers).toContain(otherDay.order.number);
     expect(numbers).not.toContain(delivery.order.number);
+  });
+});
+
+/**
+ * Выдача с заданным моментом.
+ *
+ * Служба берёт время из системных часов и подменить их нечем, а факт выдачи
+ * запрещено править после создания. Поэтому размещение закрывается и факт
+ * заводится напрямую — ровно то, что делает служба, но с нужным моментом.
+ */
+async function issuedAtMoment(orderId: string, moment: Date): Promise<void> {
+  const placement = await ctx.db.orderPlacement.findFirstOrThrow({
+    where: { orderId, releasedAt: null },
+    select: { id: true, cellId: true },
+  });
+  const keeper = await actorFor(['WAREHOUSE']);
+
+  await ctx.db.orderPlacement.update({
+    where: { id: placement.id },
+    data: {
+      releasedAt: moment,
+      releasedById: keeper.userId,
+      releaseReason: 'ISSUED_TO_CUSTOMER',
+    },
+  });
+  await ctx.db.orderPickupIssue.create({
+    data: {
+      orderId,
+      placementId: placement.id,
+      cellId: placement.cellId,
+      issuedAt: moment,
+      issuedById: keeper.userId,
+    },
+  });
+}
+
+describe('«Выданы сегодня» считаются по факту выдачи', () => {
+  /*
+   * Дата доставки и день выдачи — разные вещи, и путать их дорого: пока список
+   * строился по плановой дате, заказ, за которым пришли сегодня, показывался
+   * в чужом дне, а сегодняшний список не сходился с кассой.
+   */
+  const DAY = '2027-07-14';
+  const MOSCOW_NOON = new Date('2027-07-14T09:00:00.000Z');
+
+  it('вчерашний заказ, выданный сегодня, в сегодняшнем списке есть', async () => {
+    const { order } = await placed({ day: '2027-07-13' });
+    await issuedAtMoment(order.id, MOSCOW_NOON);
+
+    const view = await listIssuedOfDay(ctx.db, DAY);
+    expect(view.issued.map((row) => row.orderNumber)).toContain(order.number);
+  });
+
+  it('будущий заказ, выданный сегодня, в сегодняшнем списке есть', async () => {
+    const { order } = await placed({ day: '2027-09-01' });
+    await issuedAtMoment(order.id, MOSCOW_NOON);
+
+    const view = await listIssuedOfDay(ctx.db, DAY);
+    expect(view.issued.map((row) => row.orderNumber)).toContain(order.number);
+  });
+
+  it('сегодняшний заказ, выданный в другой день, в сегодняшнем списке отсутствует', async () => {
+    const { order } = await placed({ day: DAY });
+    await issuedAtMoment(order.id, new Date('2027-07-12T09:00:00.000Z'));
+
+    const view = await listIssuedOfDay(ctx.db, DAY);
+    expect(view.issued.map((row) => row.orderNumber)).not.toContain(order.number);
+
+    // И при этом он на месте в СВОЁМ дне: история выдач не потеряна.
+    const own = await listIssuedOfDay(ctx.db, '2027-07-12');
+    expect(own.issued.map((row) => row.orderNumber)).toContain(order.number);
+  });
+
+  it('границы московских суток разделяют дни без пересечения и без щели', async () => {
+    // 00:00:00 по Москве — это 21:00 UTC предыдущих суток.
+    const first = await placed({ day: DAY });
+    await issuedAtMoment(first.order.id, new Date('2027-07-13T21:00:00.000Z'));
+
+    const last = await placed({ day: DAY });
+    await issuedAtMoment(last.order.id, new Date('2027-07-14T20:59:59.999Z'));
+
+    const justBefore = await placed({ day: DAY });
+    await issuedAtMoment(justBefore.order.id, new Date('2027-07-13T20:59:59.999Z'));
+
+    const justAfter = await placed({ day: DAY });
+    await issuedAtMoment(justAfter.order.id, new Date('2027-07-14T21:00:00.000Z'));
+
+    const numbers = (await listIssuedOfDay(ctx.db, DAY)).issued.map((row) => row.orderNumber);
+    expect(numbers).toContain(first.order.number);
+    expect(numbers).toContain(last.order.number);
+    expect(numbers).not.toContain(justBefore.order.number);
+    expect(numbers).not.toContain(justAfter.order.number);
+
+    // Соседние дни забирают ровно то, что не попало в этот.
+    const previous = (await listIssuedOfDay(ctx.db, '2027-07-13')).issued.map(
+      (row) => row.orderNumber,
+    );
+    expect(previous).toContain(justBefore.order.number);
+    const next = (await listIssuedOfDay(ctx.db, '2027-07-15')).issued.map((row) => row.orderNumber);
+    expect(next).toContain(justAfter.order.number);
+  });
+
+  it('часовой пояс среды на разбиение по дням не влияет', async () => {
+    const { order } = await placed({ day: DAY });
+    await issuedAtMoment(order.id, new Date('2027-07-14T20:30:00.000Z'));
+
+    // 20:30 UTC — это 23:30 по Москве того же дня, но уже следующий день
+    // в любом поясе восточнее. Список обязан отвечать одинаково.
+    const previousTz = process.env.TZ;
+    for (const zone of ['UTC', 'Asia/Vladivostok', 'America/Los_Angeles']) {
+      process.env.TZ = zone;
+      const numbers = (await listIssuedOfDay(ctx.db, DAY)).issued.map((row) => row.orderNumber);
+      expect(numbers, zone).toContain(order.number);
+      const next = (await listIssuedOfDay(ctx.db, '2027-07-15')).issued.map(
+        (row) => row.orderNumber,
+      );
+      expect(next, zone).not.toContain(order.number);
+    }
+    process.env.TZ = previousTz;
+  });
+
+  it('рабочая очередь по-прежнему не смотрит на день', async () => {
+    const stale = await placed({ day: '2027-01-05' });
+    const future = await placed({ day: '2027-12-31' });
+
+    const numbers = (await listPickupQueue(ctx.db, { limit: 200 })).items.map(
+      (row) => row.orderNumber,
+    );
+    expect(numbers).toContain(stale.order.number);
+    expect(numbers).toContain(future.order.number);
   });
 });
 

@@ -974,6 +974,118 @@ describe('права и состав ответа', () => {
 
 // --- 8. Календарный день -----------------------------------------------------
 
+describe('складской список читается целиком, а не первой сотней', () => {
+  /*
+   * Прежде интерфейс просил ровно сто строк и на этом останавливался: коробка
+   * под сто первым номером исчезала из списка, хотя стояла на полке. Проверка
+   * идёт по одной ячейке — так набор строк принадлежит только этому тесту и не
+   * зависит от того, что оставили на складе соседние сценарии.
+   */
+  const PAGE = 100;
+
+  async function fillCell(
+    cellId: string,
+    count: number,
+  ): Promise<{ oldest: { id: string; number: string }; relocation: number; cancelled: number }> {
+    const keeper = await actorFor(['WAREHOUSE']);
+    let oldest = { id: '', number: '' };
+    let relocation = 0;
+    let cancelled = 0;
+
+    for (let index = 0; index < count; index += 1) {
+      // Отменённых и требующих перемещения кладём вперемешку и в оба конца
+      // списка: иначе «полный счётчик» нельзя было бы отличить от счётчика
+      // первой страницы.
+      const isCancelled = index % 7 === 0;
+      const needsMove = index % 11 === 0 && !isCancelled;
+      const order = await seedOrder(
+        isCancelled
+          ? { cancelledInSource: true, cancelledInSourceAt: new Date('2027-02-01T09:00:00.000Z') }
+          : {},
+      );
+      if (isCancelled) cancelled += 1;
+      if (needsMove) relocation += 1;
+
+      await ctx.db.orderPlacement.create({
+        data: {
+          orderId: order.id,
+          cellId,
+          placedById: keeper.userId,
+          source: 'RECEIVED',
+          // Чем больше индекс, тем старее коробка: список идёт от свежих.
+          placedAt: new Date(Date.now() - index * 60_000),
+          requiresRelocation: needsMove,
+        },
+      });
+      if (index === count - 1) {
+        oldest = order;
+      }
+    }
+
+    return { oldest, relocation, cancelled };
+  }
+
+  it('первая страница, дочитывание и полные счётчики групп сходятся', async () => {
+    const cell = await seedCell('STORAGE');
+    const seeded = await fillCell(cell.id, PAGE + 1);
+
+    const first = await listPlacedOrders(ctx.db, { cellId: cell.id, limit: PAGE, offset: 0 });
+    expect(first.items).toHaveLength(PAGE);
+    expect(first.total).toBe(PAGE + 1);
+    // Самая старая коробка в первую сотню не поместилась.
+    expect(first.items.map((row) => row.orderId)).not.toContain(seeded.oldest.id);
+
+    // Счётчики считают ВЕСЬ склад, а не загруженную страницу.
+    expect(first.groupTotals.relocation).toBe(seeded.relocation);
+    expect(first.groupTotals.cancelled).toBe(seeded.cancelled);
+    expect(first.groupTotals.rest).toBe(PAGE + 1 - seeded.relocation - seeded.cancelled);
+    expect(
+      first.groupTotals.relocation + first.groupTotals.cancelled + first.groupTotals.rest,
+    ).toBe(first.total);
+
+    const second = await listPlacedOrders(ctx.db, { cellId: cell.id, limit: PAGE, offset: PAGE });
+    expect(second.items.map((row) => row.orderId)).toContain(seeded.oldest.id);
+
+    // Ни одна строка не пришла дважды и ни одна не потерялась.
+    const ids = [...first.items, ...second.items].map((row) => row.orderId);
+    expect(new Set(ids).size).toBe(PAGE + 1);
+  });
+
+  it('снятое с хранения размещение уходит из списка и из счётчиков', async () => {
+    const cell = await seedCell('STORAGE');
+    await fillCell(cell.id, 3);
+
+    const before = await listPlacedOrders(ctx.db, { cellId: cell.id, limit: PAGE, offset: 0 });
+    const victim = before.items[0];
+    expect(victim).toBeDefined();
+
+    const actor = await actorFor(['WAREHOUSE']);
+    await withdrawOrder(
+      flow,
+      actor,
+      { orderNumber: victim!.orderNumber, reason: 'REASSEMBLY' },
+      CONTEXT,
+    );
+
+    const after = await listPlacedOrders(ctx.db, { cellId: cell.id, limit: PAGE, offset: 0 });
+    expect(after.total).toBe(before.total - 1);
+    expect(after.items.map((row) => row.orderId)).not.toContain(victim!.orderId);
+    expect(
+      after.groupTotals.relocation + after.groupTotals.cancelled + after.groupTotals.rest,
+    ).toBe(after.total);
+  });
+
+  it('старая коробка находится сканированием так же, как свежая', async () => {
+    const cell = await seedCell('STORAGE');
+    const seeded = await fillCell(cell.id, PAGE + 1);
+
+    const found = await listPlacedOrders(ctx.db, { cellId: cell.id, limit: PAGE, offset: PAGE });
+    const row = found.items.find((item) => item.orderId === seeded.oldest.id);
+    expect(row?.orderNumber).toBe(seeded.oldest.number);
+    expect(row?.cellCode).toBe(cell.code);
+  });
+});
+
 describe('московский день', () => {
   it('маршрутный лист попадает в свой день независимо от пояса процесса', async () => {
     const order = await seedOrder();

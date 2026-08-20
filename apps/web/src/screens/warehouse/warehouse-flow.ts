@@ -156,6 +156,74 @@ export function groupPlacements<T extends { requiresRelocation: boolean; blocked
   return { relocation, cancelled, rest };
 }
 
+/**
+ * Полные размеры групп складского списка.
+ *
+ * Приходят с сервера и считаются по всему складу, а не по загруженным
+ * страницам: счётчик у заголовка обязан отвечать на вопрос «сколько таких
+ * коробок на складе», а не «сколько их успело попасть в первую сотню».
+ */
+export interface PlacementGroupTotals {
+  relocation: number;
+  cancelled: number;
+  rest: number;
+}
+
+/**
+ * Ключ строки складского списка.
+ *
+ * Одна коробка — это заказ в КОНКРЕТНОЙ ячейке: один заказ может лежать
+ * разложенным по двум ячейкам, и тогда это две разные строки.
+ */
+function placementKey(item: { orderId: string; cellId: string | null }): string {
+  return `${item.orderId}:${item.cellId ?? ''}`;
+}
+
+/**
+ * Склейка дочитанных страниц складского списка.
+ *
+ * Повтор отбрасывается: склад живёт, и между запросом первой и второй страницы
+ * коробку могут снять с хранения — тогда смещение сдвигается, и одна и та же
+ * строка приходит дважды. Кладовщик увидел бы один заказ дважды и пошёл бы
+ * искать вторую коробку.
+ *
+ * Порядок сохраняется: первым остаётся то вхождение, которое пришло раньше.
+ */
+export function mergePlacementPages<T extends { orderId: string; cellId: string | null }>(
+  pages: readonly { items: T[] }[],
+): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const page of pages) {
+    for (const item of page.items) {
+      const key = placementKey(item);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Смещение следующей страницы или `null`, когда дочитывать нечего.
+ *
+ * Считается по фактически полученным строкам, а не по номеру страницы: если
+ * последняя страница пришла короче запрошенной, дочитывать всё равно нужно
+ * ровно до серверного `total`.
+ */
+export function nextPlacementOffset(page: {
+  items: readonly unknown[];
+  total: number;
+  limit: number;
+  offset: number;
+}): number | null {
+  const loaded = page.offset + page.items.length;
+  return loaded < page.total ? loaded : null;
+}
+
 // --- Доска сборки ------------------------------------------------------------
 
 /**
