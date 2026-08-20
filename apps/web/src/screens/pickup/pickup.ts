@@ -83,7 +83,18 @@ export function cellLabel(card: Pick<PickupCard, 'cellCode'>): string {
  * в ней рядом с завтрашней. Заказ без даты так и называется — без даты.
  */
 export function dayLabel(card: Pick<PickupCard, 'deliveryDate'>): string {
-  return card.deliveryDate ?? 'без даты';
+  /*
+   * День читается как дата, а не как машинная запись.
+   *
+   * `2026-08-19` менеджер за прилавком разбирает по частям, а «19.08.2026»
+   * узнаёт сразу — так дата написана на всех остальных экранах.
+   */
+  const value = card.deliveryDate;
+  if (value === null || value === undefined || value === '') {
+    return 'без даты';
+  }
+  const [year, month, day] = value.split('-');
+  return day === undefined ? value : `${day}.${month}.${year}`;
 }
 
 /**

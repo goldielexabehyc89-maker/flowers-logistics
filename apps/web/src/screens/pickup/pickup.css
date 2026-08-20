@@ -50,3 +50,39 @@
   flex-wrap: wrap;
   gap: 4px;
 }
+
+/*
+ * Очередь — плитки во вдавленном лотке.
+ *
+ * Строки были рядами в тонких рамках: за прилавком менеджер ищет одну
+ * коробку из десятка и ведёт по списку пальцем, а ряд без собственной
+ * поверхности сливается с соседним.
+ */
+.pickup-queue {
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.pickup-row {
+  min-height: 56px;
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.pickup-row:hover {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-in);
+}
+
+/* Выданный заказ углублён и приглушён: работа по нему закрыта. */
+.pickup-row--issued {
+  background: var(--surface-inactive);
+  color: var(--color-text-muted);
+  box-shadow: var(--shadow-in);
+}
