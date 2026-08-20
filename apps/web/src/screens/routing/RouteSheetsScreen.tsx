@@ -135,6 +135,15 @@ function SheetOrders({
   );
 }
 
+/** Имя курьера с телефоном, если он есть в загруженном списке. */
+function courierLabel(
+  courier: { id: string; fullName: string },
+  options: readonly { id: string; phone: string | null }[],
+): string {
+  const phone = options.find((item) => item.id === courier.id)?.phone ?? null;
+  return phone === null ? courier.fullName : `${courier.fullName} · ${phone}`;
+}
+
 export function RouteSheetsScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -145,6 +154,8 @@ export function RouteSheetsScreen(): React.JSX.Element {
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  /** Лист, у которого открыт выбор курьера. `null` — все показывают плитку. */
+  const [courierOpenId, setCourierOpenId] = useState<string | null>(null);
   /** Заказ, открытый в окне: логист правит его адрес, интервал и точку. */
   const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   const [openedDays, setOpenedDays] = useState<ReadonlySet<string>>(new Set());
@@ -463,28 +474,72 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     className="routes__sheet-courier"
                                     data-testid="sheet-courier"
                                   >
-                                    <CourierCombobox
-                                      options={couriers.data?.items ?? []}
-                                      value={
-                                        sheet.courier === null
-                                          ? null
-                                          : ((couriers.data?.items ?? []).find(
-                                              (item) => item.id === sheet.courier?.id,
-                                            ) ?? {
-                                              id: sheet.courier.id,
-                                              fullName: sheet.courier.fullName,
-                                              phone: null,
-                                            })
-                                      }
-                                      disabled={busy}
-                                      testId="sheet-courier-combobox"
-                                      onChange={(courier) =>
-                                        assignCourier.mutate({
-                                          sheet,
-                                          courierUserId: courier === null ? null : courier.id,
-                                        })
-                                      }
-                                    />
+                                    {/*
+                                      Сначала ответ, потом инструмент.
+
+                                      Раскрытый список занимал строку у каждого
+                                      листа, даже когда курьера не меняют,
+                                      а главный вопрос — назначен он или нет —
+                                      приходилось вычитывать из поля ввода.
+                                      Плитка отвечает сразу, выбор открывается
+                                      по требованию.
+                                    */}
+                                    {courierOpenId === sheet.id ? (
+                                      <CourierCombobox
+                                        options={couriers.data?.items ?? []}
+                                        value={
+                                          sheet.courier === null
+                                            ? null
+                                            : ((couriers.data?.items ?? []).find(
+                                                (item) => item.id === sheet.courier?.id,
+                                              ) ?? {
+                                                id: sheet.courier.id,
+                                                fullName: sheet.courier.fullName,
+                                                phone: null,
+                                              })
+                                        }
+                                        disabled={busy}
+                                        testId="sheet-courier-combobox"
+                                        onChange={(courier) => {
+                                          assignCourier.mutate({
+                                            sheet,
+                                            courierUserId: courier === null ? null : courier.id,
+                                          });
+                                          setCourierOpenId(null);
+                                        }}
+                                      />
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        className={
+                                          sheet.courier === null
+                                            ? 'routes__courier-pill routes__courier-pill--empty'
+                                            : 'routes__courier-pill'
+                                        }
+                                        disabled={busy}
+                                        aria-expanded={false}
+                                        data-testid="sheet-courier-pick"
+                                        onClick={() => setCourierOpenId(sheet.id)}
+                                      >
+                                        <span className="routes__courier-pill-name">
+                                          {/*
+                                            Телефон берётся из загруженного
+                                            списка: в самом листе его нет,
+                                            а по нему курьера и зовут. Нет
+                                            в списке — показываем одно имя.
+                                          */}
+                                          {sheet.courier === null
+                                            ? 'Курьер не назначен'
+                                            : courierLabel(
+                                                sheet.courier,
+                                                couriers.data?.items ?? [],
+                                              )}
+                                        </span>
+                                        <span className="routes__courier-pill-action">
+                                          {sheet.courier === null ? 'выбрать' : 'сменить'}
+                                        </span>
+                                      </button>
+                                    )}
                                   </div>
                                 ) : (
                                   <div className="muted text-sm" data-testid="sheet-courier">

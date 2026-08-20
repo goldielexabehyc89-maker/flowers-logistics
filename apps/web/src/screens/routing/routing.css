@@ -2411,3 +2411,54 @@ input.routes__day {
 .sheets__item .routes__actions .btn--danger:hover:not(:disabled) {
   box-shadow: var(--shadow-in);
 }
+
+/*
+ * Курьер листа — вдавленная плитка: это поле, а не действие над листом.
+ *
+ * Слово «выбрать» / «сменить» стоит в самой плитке: без него плитка выглядит
+ * подписью и не выдаёт, что по ней можно нажать.
+ */
+.routes__courier-pill {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  box-shadow: var(--shadow-in);
+  cursor: pointer;
+}
+
+/* Незаполненное поле выделено тоном: этот лист один требует действия. */
+.routes__courier-pill--empty {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.routes__courier-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.routes__courier-pill-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routes__courier-pill-action {
+  flex: none;
+  color: var(--color-accent-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
