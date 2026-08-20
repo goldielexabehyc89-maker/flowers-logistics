@@ -1,15 +1,17 @@
 /*
- * «История»: плотный журнал без карточек и без карты.
+ * «История» и «Отчёты» занимают всю ширину рабочего места.
  *
- * Ширина ограничена: это перечень строк, а не рабочее место с картой — на всю
- * ширину монитора строки растягивать незачем, читать их станет труднее.
+ * Прежде ширина была ограничена как у перечня строк. Но здесь не перечень:
+ * в «Истории» четыре колонки и раскрытый маршрут с двумя панелями, в отчётах
+ * тринадцать колонок расчёта. На ограниченной ширине они сжимались
+ * и обрезались, пока справа стояло пустое поле в треть экрана.
  */
 .history,
 .reports {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  max-width: 1152px;
+  gap: var(--space-3);
+  max-width: none;
 }
 
 /*
@@ -661,4 +663,24 @@
 .history__filters .history__select {
   width: auto;
   max-width: 200px;
+}
+
+/* Денежная операция: время, название, сумма, кто — в одну строку. */
+.history__payment {
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 3px 0;
+  border-bottom: 0;
+  font-size: var(--font-size-sm);
+}
+
+.history__payment .history__event-label {
+  flex: 0 1 auto;
+}
+
+.history__payment-amount {
+  flex: none;
+  color: var(--color-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }

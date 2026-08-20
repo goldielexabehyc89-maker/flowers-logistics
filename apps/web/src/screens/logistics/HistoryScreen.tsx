@@ -420,8 +420,13 @@ export function HistoryScreen(): React.JSX.Element {
                         className="history__payment"
                         data-payment-kind={payment.kind}
                       >
+                        {/*
+                          Только время: день назван заголовком выше. Полная дата
+                          не помещалась в узкую колонку и наезжала на название
+                          операции.
+                        */}
                         <span className="history__event-time">
-                          {formatMoscowDateTime(payment.occurredAt)}
+                          {formatMoscowTime(payment.occurredAt)}
                         </span>
                         <span className="history__event-label">
                           {PAYMENT_LABELS[payment.kind] ?? payment.kind}
