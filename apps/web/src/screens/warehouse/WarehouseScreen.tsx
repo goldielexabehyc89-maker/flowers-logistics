@@ -88,7 +88,7 @@ export function WarehouseScreen(): React.JSX.Element {
   const manualEntry = settings.data?.manualEntry ?? false;
 
   return (
-    <section className="stack">
+    <section className="stack warehouse" data-testid="warehouse-screen">
       {/*
         Повторного заголовка и описания здесь нет намеренно.
         Раздел уже назван системной шапкой, а объяснение приёмки,
