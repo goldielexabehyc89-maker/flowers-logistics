@@ -496,3 +496,107 @@
 .history__bar-fail {
   background: var(--color-error);
 }
+
+/* ==========================================================================
+   Раскрытый маршрут: состав и хронология рядом
+   ========================================================================== */
+
+/*
+ * Две панели в ряд, а не одна под другой.
+ *
+ * Состав отвечает «что везли», хронология — «что с этим делали», и разбирают
+ * их вместе: столбцом вторая уезжала под сгиб, и приходилось прокручивать
+ * туда-обратно между вопросом и ответом.
+ */
+.history__details {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 var(--space-2) var(--space-2);
+  border-top: 0;
+}
+
+.history__details .history__block {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.history__block-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+/* Линий между строками нет: список короткий, дробить его нечем. */
+.history__order,
+.history__event {
+  gap: var(--space-2);
+  padding: 3px 0;
+  border-bottom: 0;
+  font-size: var(--font-size-sm);
+}
+
+.history__position {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.history__order-number {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.history__order-interval,
+.history__event-time,
+.history__event-actor {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.history__order-address {
+  flex: 1 1 200px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Время — узкий столбец: в нём только часы и минуты. */
+.history__event-time {
+  width: 48px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history__event-label {
+  flex: 0 1 auto;
+  color: var(--color-text);
+}
+
+.history__event-actor {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.history__event-reason {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Плашки исхода по размеру своего текста. */
+.history__order > .badge {
+  align-self: center;
+}
+
+/* Узкое окно: панели встают одна под другой — рядом им уже не хватает места. */
+@media (max-width: 1100px) {
+  .history__details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

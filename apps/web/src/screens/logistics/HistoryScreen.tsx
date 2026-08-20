@@ -12,7 +12,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { formatMoscowDateTime } from '@fl/shared';
+import { formatMoscowDateTime, formatMoscowTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Button,
@@ -75,6 +75,8 @@ interface HistoryDetails {
     label: string;
     actor: { id: string; fullName: string } | null;
     reason: string | null;
+    /** Подробности события. Для смены состояния — откуда и куда. */
+    details?: { fromState?: string | null; toState?: string | null } | null;
   }[];
 }
 
@@ -119,6 +121,28 @@ function periodRange(days: number): { from: string; to: string } {
   const to = today.toISOString().slice(0, 10);
   const start = new Date(today.getTime() - days * 24 * 60 * 60 * 1000);
   return { from: start.toISOString().slice(0, 10), to };
+}
+
+/**
+ * Подпись события хронологии.
+ *
+ * Смена состояния приходит с сервера строкой из значений перечня —
+ * «Состояние: ACTIVE → COMPLETED». Человеку это ничего не говорит, а сами
+ * значения сервер уже отдаёт отдельными полями, так что называем их здесь,
+ * теми же словами, что и плашка состояния на строке маршрута.
+ */
+function eventLabel(event: {
+  label: string;
+  details?: { fromState?: string | null; toState?: string | null } | null;
+}): string {
+  const from = event.details?.fromState;
+  const to = event.details?.toState;
+  if (typeof from !== 'string' || typeof to !== 'string') {
+    return event.label;
+  }
+  const named = (state: string): string =>
+    ROUTE_STATE_LABELS[state as keyof typeof ROUTE_STATE_LABELS] ?? state;
+  return `Состояние: ${named(from)} → ${named(to)}`;
 }
 
 /** Доля заказов в процентах для полосы результата. Нулевой маршрут — пустая полоса. */
@@ -168,22 +192,27 @@ function RouteDetails({ routeId }: { routeId: string }): React.JSX.Element {
               className="history__order"
               data-order-number={order.number}
             >
+              {/*
+                Порядок остановки: номер, время, исход, адрес. Исход стоит
+                до адреса — по нему разбирают день, а адрес только уточняет,
+                о какой именно остановке речь.
+              */}
               <span className="history__position">{order.position}</span>
               <span className="history__order-number">{order.number}</span>
+              <span className="history__order-interval">{order.interval ?? '—'}</span>
+              {order.removedAt !== null && (
+                <StatusBadge tone="neutral">выведен из маршрута</StatusBadge>
+              )}
+              {order.outcome === 'DELIVERED' && <StatusBadge tone="success">Доставлен</StatusBadge>}
+              {order.outcome === 'NOT_DELIVERED' && (
+                <StatusBadge tone="error">
+                  Не доставлен{order.failureReason === null ? '' : `: ${order.failureReason}`}
+                </StatusBadge>
+              )}
+              {/* Адрес идёт последним и забирает остаток строки: он длиннее всех. */}
               <span className="history__order-address" title={order.address ?? undefined}>
                 {order.address ?? '—'}
               </span>
-              <span className="history__order-recipient">{order.recipient ?? '—'}</span>
-              <span className="history__order-interval">{order.interval ?? '—'}</span>
-              {order.removedAt !== null && (
-                <span className="history__tag">выведен из маршрута</span>
-              )}
-              {order.outcome === 'DELIVERED' && <span className="history__ok">Доставлен</span>}
-              {order.outcome === 'NOT_DELIVERED' && (
-                <span className="history__fail">
-                  Не доставлен{order.failureReason === null ? '' : `: ${order.failureReason}`}
-                </span>
-              )}
             </li>
           ))}
         </ul>
@@ -194,8 +223,12 @@ function RouteDetails({ routeId }: { routeId: string }): React.JSX.Element {
         <ul className="history__events" data-testid="history-events">
           {details.data.events.map((event, index) => (
             <li key={`${event.occurredAt}-${event.action}-${index}`} className="history__event">
-              <span className="history__event-time">{formatMoscowDateTime(event.occurredAt)}</span>
-              <span className="history__event-label">{event.label}</span>
+              {/*
+                Только время: день уже назван заголовком выше, и повторять
+                дату в каждой строке значило бы отдать ей треть ширины.
+              */}
+              <span className="history__event-time">{formatMoscowTime(event.occurredAt)}</span>
+              <span className="history__event-label">{eventLabel(event)}</span>
               <span className="history__event-actor">{event.actor?.fullName ?? 'система'}</span>
               {event.reason !== null && (
                 <span className="history__event-reason">Причина: {event.reason}</span>
