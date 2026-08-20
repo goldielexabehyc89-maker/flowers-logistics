@@ -459,3 +459,31 @@
   font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * Лист и его заказы — один блок.
+ *
+ * Заголовок стоял отдельной строкой над лотком, и лист читался как подпись
+ * рядом со списком, а не как то, что этот список держит. Теперь углубление
+ * одно на всю группу: заголовок и карточки лежат в нём вместе, а граница
+ * листа видна без единой линии.
+ */
+.florist__group {
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+/* Список внутри группы своей поверхности не имеет: она уже есть у группы. */
+.florist__group .florist__list {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.florist__group-head {
+  padding: 0 var(--space-1);
+}
