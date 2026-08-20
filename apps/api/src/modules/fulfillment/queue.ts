@@ -55,6 +55,15 @@ export interface QueueRoute {
   id: string;
   number: string;
   /**
+   * День листа.
+   *
+   * Очередь показывает и вчерашние невыполненные заказы, поэтому в списке
+   * встречаются листы разных дней. Без даты сравнение шло по одному лишь
+   * времени суток, и вчерашний лист на 14:00 вставал ниже сегодняшнего
+   * на 10:00 — при том что машина по нему ждёт со вчера.
+   */
+  deliveryDate: string;
+  /**
    * Время первой запланированной доставки маршрута.
    *
    * Именно оно определяет «самый ранний лист». `null` означает, что ни у одной
@@ -126,8 +135,12 @@ export function isOverdue(
   return order.endMinute !== null && order.endMinute < context.nowMinuteMoscow;
 }
 
-/** Ключ сортировки маршрутной группы: раньше время первой доставки — раньше группа. */
+/** Ключ сортировки маршрутной группы: раньше день и время первой доставки — раньше группа. */
 function compareRoutes(a: QueueRoute, b: QueueRoute): number {
+  // День решает раньше времени суток: вчерашний лист горит сильнее сегодняшнего.
+  if (a.deliveryDate !== b.deliveryDate) {
+    return a.deliveryDate.localeCompare(b.deliveryDate);
+  }
   const aMinute = a.firstStopMinute;
   const bMinute = b.firstStopMinute;
   if (aMinute !== bMinute) {

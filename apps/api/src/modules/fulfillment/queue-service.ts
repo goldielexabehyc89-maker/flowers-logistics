@@ -175,8 +175,14 @@ export function resolveQueueDate(day: QueueDay, now: Date): string {
   return day === 'today' ? today : shiftCalendarDate(today, 1);
 }
 
-/** `date === null` — участие ищется в листе ЛЮБОГО дня: список без границы дня. */
-function orderSelect(date: string | null) {
+/**
+ * Поля заказа для очереди.
+ *
+ * Участие в листе ищется без оглядки на день: очередь показывает вчерашние
+ * невыполненные заказы, и лист под ними тоже вчерашний. Порядок между листами
+ * разных дней задаёт сортировка, а не отбор.
+ */
+function orderSelect() {
   return {
     id: true,
     externalName: true,
@@ -425,7 +431,7 @@ export async function readQueue(
     where: { ...scopeWhere, fulfillmentProcessState: { in: states } },
     // Без границы дня участие в листе ищется по дню САМОГО заказа: иначе
     // вчерашний заказ терял бы свой маршрут и падал вниз списка.
-    select: orderSelect(mine ? null : date),
+    select: orderSelect(),
   });
 
   const routes = await readRoutes(db, rows);
@@ -501,7 +507,7 @@ async function readAssembledPage(
 ): Promise<QueueResult> {
   const rows = await db.deliveryOrder.findMany({
     where: { ...input.scopeWhere, fulfillmentProcessState: 'ASSEMBLED' },
-    select: orderSelect(input.date),
+    select: orderSelect(),
     orderBy: [{ fulfillmentAssembledAt: 'desc' }, { externalName: 'asc' }],
     skip: input.page.offset,
     take: input.page.limit,
@@ -622,7 +628,7 @@ async function readRoutes(
     where: { routeId: { in: routeIds }, removedAt: null },
     select: {
       routeId: true,
-      route: { select: { number: true } },
+      route: { select: { number: true, deliveryDate: true } },
       order: {
         select: {
           intervalKind: true,
@@ -635,9 +641,16 @@ async function readRoutes(
     },
   });
 
-  const grouped = new Map<string, { number: string; minutes: { startMinute: number | null }[] }>();
+  const grouped = new Map<
+    string,
+    { number: string; deliveryDate: string; minutes: { startMinute: number | null }[] }
+  >();
   for (const stop of stops) {
-    const entry = grouped.get(stop.routeId) ?? { number: stop.route.number, minutes: [] };
+    const entry = grouped.get(stop.routeId) ?? {
+      number: stop.route.number,
+      deliveryDate: fromDateColumn(stop.route.deliveryDate),
+      minutes: [],
+    };
     entry.minutes.push({ startMinute: effectiveMinutes(stop.order).startMinute });
     grouped.set(stop.routeId, entry);
   }
@@ -647,6 +660,7 @@ async function readRoutes(
     result.set(id, {
       id,
       number: entry.number,
+      deliveryDate: entry.deliveryDate,
       firstStopMinute: routeFirstStopMinute(entry.minutes),
     });
   }
