@@ -247,6 +247,15 @@ async function login(page: Page, phone: string, pin: string): Promise<void> {
   await page.getByLabel('Телефон').fill(phone);
   await page.getByLabel('PIN').fill(pin);
   await page.getByRole('button', { name: 'Войти' }).click();
+  /*
+   * Вход считается завершённым, когда экран входа сменился.
+   *
+   * Токен живёт в памяти вкладки, а сеанс между полными переходами держит
+   * cookie обновления — она ставится ответом на вход. Без ожидания следующая
+   * же `page.goto` успевала уйти раньше ответа, и сценарий заново получал
+   * форму входа: отказ выглядел как «раздел не отрисовался».
+   */
+  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 20_000 });
 }
 
 /**

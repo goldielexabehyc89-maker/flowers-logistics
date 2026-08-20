@@ -543,16 +543,30 @@ describe('«Выданы сегодня» считаются по факту в�
     // 20:30 UTC — это 23:30 по Москве того же дня, но уже следующий день
     // в любом поясе восточнее. Список обязан отвечать одинаково.
     const previousTz = process.env.TZ;
-    for (const zone of ['UTC', 'Asia/Vladivostok', 'America/Los_Angeles']) {
-      process.env.TZ = zone;
-      const numbers = (await listIssuedOfDay(ctx.db, DAY)).issued.map((row) => row.orderNumber);
-      expect(numbers, zone).toContain(order.number);
-      const next = (await listIssuedOfDay(ctx.db, '2027-07-15')).issued.map(
-        (row) => row.orderNumber,
-      );
-      expect(next, zone).not.toContain(order.number);
+    try {
+      for (const zone of ['UTC', 'Asia/Vladivostok', 'America/Los_Angeles']) {
+        process.env.TZ = zone;
+        const numbers = (await listIssuedOfDay(ctx.db, DAY)).issued.map((row) => row.orderNumber);
+        expect(numbers, zone).toContain(order.number);
+        const next = (await listIssuedOfDay(ctx.db, '2027-07-15')).issued.map(
+          (row) => row.orderNumber,
+        );
+        expect(next, zone).not.toContain(order.number);
+      }
+    } finally {
+      /*
+       * Пояс возвращается ОБЯЗАТЕЛЬНО и именно так.
+       *
+       * Файлы одного набора делят процесс: оставленный чужой пояс сдвинул бы
+       * даты в соседних тестах, а `process.env.TZ = undefined` записал бы туда
+       * строку «undefined» — это хуже, чем не трогать вовсе.
+       */
+      if (previousTz === undefined) {
+        delete process.env.TZ;
+      } else {
+        process.env.TZ = previousTz;
+      }
     }
-    process.env.TZ = previousTz;
   });
 
   it('рабочая очередь по-прежнему не смотрит на день', async () => {
