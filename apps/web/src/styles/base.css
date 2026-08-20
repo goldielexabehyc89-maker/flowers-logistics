@@ -273,23 +273,26 @@ time {
 .wh-tabs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xl);
   background: var(--color-surface);
+  box-shadow: var(--shadow-out);
 }
 
+/* Вкладка — поднятая плитка ростом с палец: сюда попадают, не глядя. */
 .wh-tabs__item {
-  min-height: 40px;
-  padding: 6px 4px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
   color: var(--color-text-muted);
   font: inherit;
-  font-size: 15px;
+  font-size: var(--font-size-md);
   text-align: center;
+  box-shadow: var(--shadow-out);
   cursor: pointer;
 }
 
@@ -312,10 +315,16 @@ time {
   }
 }
 
-/* Активная вкладка отличается заливкой и весом знака, а не только цветом. */
+/*
+ * Выбранная вкладка вдавлена и названа акцентом.
+ *
+ * Различие не только цветом: вдавленность видна и тому, кто цвет не различает,
+ * а вес знака подтверждает выбор третьим признаком.
+ */
 .wh-tabs__item--active {
-  border-color: var(--color-border);
-  background: var(--color-surface-hover);
-  color: var(--color-text);
+  border: 0;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
   font-weight: 600;
+  box-shadow: var(--shadow-in);
 }

@@ -184,3 +184,68 @@
   font-size: 16px;
   cursor: pointer;
 }
+
+/* ==========================================================================
+   Склад: лоток вместо таблицы, строка — плитка
+   ========================================================================== */
+
+/*
+ * Список на складе — плитки во вдавленном лотке.
+ *
+ * Кладовщик работает стоя, часто в перчатках, и ищет глазами одну строку
+ * из десятка. Таблица с волосяными линиями на белом читается хуже плиток:
+ * строка не имеет границ, и взгляд соскальзывает на соседнюю.
+ */
+.warehouse .table-wrap,
+.wh-group .table-wrap {
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+  overflow-x: auto;
+}
+
+.warehouse .table,
+.wh-group .table {
+  border-collapse: separate;
+  border-spacing: 0 var(--space-2);
+}
+
+.warehouse .table th,
+.wh-group .table th {
+  padding: 2px var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.warehouse .table td,
+.wh-group .table td {
+  padding: var(--space-3) var(--space-2);
+  border: 0;
+  background: var(--surface-raised);
+  box-shadow: 0 3px 8px rgb(150 160 182 / 28%);
+}
+
+.warehouse .table td:first-child,
+.wh-group .table td:first-child {
+  border-top-left-radius: var(--radius-lg);
+  border-bottom-left-radius: var(--radius-lg);
+}
+
+.warehouse .table td:last-child,
+.wh-group .table td:last-child {
+  border-top-right-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-lg);
+}
+
+/* Заголовок группы: название и счётчик, без своей поверхности. */
+.wh-group__title {
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-1);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}

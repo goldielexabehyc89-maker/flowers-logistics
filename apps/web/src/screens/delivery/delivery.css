@@ -556,3 +556,32 @@
   font-size: var(--font-size-md);
   font-weight: 600;
 }
+
+/*
+ * Причина недоставки — явная поднятая плитка.
+ *
+ * Кнопки были плоскими прямоугольниками в бледной рамке и на общем фоне
+ * читались как подписи, а не как выбор: курьер у двери не понимал, что
+ * по ним нужно нажать. Теперь они подняты светотенью, а выбранная
+ * вдавливается — различие видно и без цвета.
+ */
+.delivery__reason {
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  box-shadow: var(--shadow-out);
+}
+
+.delivery__reason:hover:not(:disabled) {
+  color: var(--color-accent-text);
+}
+
+.delivery__reason--picked {
+  border: 0;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
