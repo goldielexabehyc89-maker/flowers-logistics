@@ -379,3 +379,46 @@
     display: none;
   }
 }
+
+/*
+ * Очередь — плитки во вдавленном лотке.
+ *
+ * Строка была обведена рамкой, а просроченная — красной: рамка вокруг
+ * каждого заказа превращала список в решётку, и просрочка кричала громче
+ * самого заказа. Теперь строка поднята светотенью, а просроченная окрашена
+ * тоном — плашка «Просрочен» рядом называет то же самое словами.
+ */
+.florist__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.florist__row {
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.florist__row--overdue {
+  border: 0;
+  background: var(--row-danger);
+  box-shadow: var(--shadow-out);
+}
+
+/*
+ * Плашка не растворяется в тоне строки.
+ *
+ * Её фон и фон просроченной строки — оттенки одного красного, и на строке
+ * плашка теряла границы, оставляя красное слово среди красного поля.
+ * Собственная светлая поверхность возвращает ей форму.
+ */
+.florist__row--overdue .badge {
+  background: var(--color-surface);
+  color: var(--color-error);
+}
