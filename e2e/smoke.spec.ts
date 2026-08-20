@@ -1220,7 +1220,14 @@ test('печатная версия листа не содержит навиг�
 
   // «Создать МЛ» приводит прямо в «Маршрутные листы».
   await expect(page).toHaveURL(/\/logistics\/route-sheets/);
-  await page.waitForSelector('.routes__list-item, .state', { state: 'visible' });
+  /*
+   * Ждём именно список, а не «список или любое состояние».
+   *
+   * Экран открывается на сегодняшнем дне и сначала показывает состояние
+   * загрузки: прежнее ожидание засчитывало его за результат и считало листы
+   * раньше, чем они отрисовывались.
+   */
+  await expect(page.locator('.routes__list-item').first()).toBeVisible({ timeout: 15000 });
   const sheets = page.locator('.routes__list-item', { hasText: own ?? '' });
   const anySheet = (await sheets.count()) > 0 ? sheets : page.locator('.routes__list-item');
   if ((await anySheet.count()) === 0) {
@@ -1988,12 +1995,17 @@ test('флорист на телефоне: без нижней полосы, к
 
 test('складские ячейки: администратор управляет справочником, кладовщик только смотрит', async ({
   page,
+  request,
   browser,
 }: {
   page: Page;
+  request: APIRequestContext;
   browser: Browser;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
 
   const WAREHOUSE_PIN = '9753';
   const code = `E2E-${Date.now() % 100_000}`;
@@ -2075,8 +2087,10 @@ test('складские ячейки: администратор управля
 
 test('склад: развилка «сборка или хранение», сборка и отгрузка листа целиком', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
   const storageCell = requiredEnv('E2E_WH_STORAGE_CELL');
   const routeCell = requiredEnv('E2E_WH_ROUTE_CELL');
@@ -2084,6 +2098,9 @@ test('склад: развилка «сборка или хранение», с�
   const firstOrder = requiredEnv('E2E_WH_ORDER_1');
   const secondOrder = requiredEnv('E2E_WH_ORDER_2');
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   await openSection(page, 'Склад');
@@ -2434,13 +2451,21 @@ test('курьер: досрочность, «Не доставлен» с пр�
   await expect(returns).toBeVisible();
   const returned = returns.locator(`[data-order-number="${secondOrder}"]`);
   await expect(returned).toContainText('У курьера');
-  await expect(returned).toContainText('Передайте заказ кладовщику');
+  /*
+   * Пояснение стоит один раз на весь блок, а не в каждой строке.
+   *
+   * Три одинаковых предложения подряд ничего не добавляли, а гарантия
+   * та же: пока склад не принял заказ, он числится за курьером.
+   */
+  await expect(returns).toContainText('Пока склад не принял заказ, он числится за вами');
 
   await returned.getByTestId('delivery-return-departing').click();
   await expect(returned).toContainText('Возвращается на склад');
 
   // 5. История текущего дня показывает оба результата и не скрывает данные.
-  await page.getByRole('link', { name: 'История' }).first().click();
+  // Разделы открываются через меню: боковая панель лежит поверх экрана
+  // и до нажатия на кнопку меню ссылок не показывает.
+  await openSection(page, 'История доставок');
   await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
   // У первого заказа записей ДВЕ: отменённая и новая. Это и есть доказательство
   // того, что история не переписывается — отменённый результат остаётся в ней
@@ -2461,13 +2486,18 @@ test('курьер: досрочность, «Не доставлен» с пр�
 
 test('возврат: логист ждёт склад, склад принимает, повторная доставка открывается', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
   const orderNumber = process.env['E2E_WH_ORDER_2'] ?? '';
   const storageCell = process.env['E2E_WH_STORAGE_CELL'] ?? '';
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   test.skip(orderNumber === '' || storageCell === '', 'не передана складская фикстура (E2E_WH_*)');
 
   /*
@@ -2651,9 +2681,11 @@ test('два логиста решают одну задачу: побеждае
 
 test('два сеанса: приёмка возврата складом убирает красный блок у курьера без F5', async ({
   page,
+  request,
   browser,
 }: {
   page: Page;
+  request: APIRequestContext;
   browser: Browser;
 }) => {
   const orderNumber = process.env['E2E_RET_RETURNING'] ?? '';
@@ -2662,6 +2694,9 @@ test('два сеанса: приёмка возврата складом уби
   const courierPin = process.env['E2E_RET_COURIER_PIN'] ?? '';
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   test.skip(
     orderNumber === '' || cellCode === '' || courierPhone === '' || courierPin === '',
     'не передана фикстура возвратов (E2E_RET_*)',
@@ -3017,13 +3052,18 @@ test('печать: «Общие» показывают серверный на�
 
 test('карты: собранный заказ окрашен одинаково в «Сделках» и «Маршрутизации»', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
   const orderNumber = process.env['E2E_RET_WITH_COURIER'] ?? '';
   const cellCode = process.env['E2E_RET_STORAGE_CELL'] ?? '';
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   test.skip(orderNumber === '' || cellCode === '', 'не передана фикстура возвратов (E2E_RET_*)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
@@ -6059,10 +6099,15 @@ test('выдача: три уровня, отгрузка одного лист�
  */
 test('сборка: лист уходит в «Собранные» и возвращается, когда коробку унесли', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   const stand = seedWarehouseStand();
   const assembled = stand['мл собран'] ?? '';
   const movedOrder = stand['заказ готов 2'] ?? '';
@@ -6212,10 +6257,15 @@ test('два сеанса: отгруженный лист появляется 
  */
 test('два сеанса: самовывоз появляется у менеджера после складской приёмки', async ({
   browser,
+  request,
 }: {
   browser: Browser;
+  request: APIRequestContext;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   const stand = seedWarehouseStand();
   const pickupOrder = stand['заказ самовывоза'] ?? '';
   const cell = stand['ячейка хранения A'] ?? '';
@@ -6675,10 +6725,15 @@ test('камера: отказ, отсутствие устройства, об�
  */
 test('два сеанса: ячейка, «Требуется перемещение» и переход в «Собранные»', async ({
   browser,
+  request,
 }: {
   browser: Browser;
+  request: APIRequestContext;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   const stand = seedWarehouseStand();
   const route = stand['мл без ячейки'] ?? '';
   const freeCell = stand['маршрутная ячейка свободная'] ?? '';
@@ -6808,6 +6863,9 @@ test('самовывоз: очередь без привязки к дню, сч
   request: APIRequestContext;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   const stand = seedPickupStand();
   await disableManualEntry(request);
 
