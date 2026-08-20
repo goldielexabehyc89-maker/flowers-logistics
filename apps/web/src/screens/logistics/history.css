@@ -285,3 +285,214 @@
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
+/* ==========================================================================
+   История: панель отбора, лоток дня, строка маршрута
+   ========================================================================== */
+
+.history__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+/* Готовые периоды: выбранный вдавлен, остальные подняты. */
+.history__periods {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+}
+
+.history__period {
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.history__period--on {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+.history__range {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.history__range input {
+  width: 150px;
+}
+
+.history__range-dash {
+  color: var(--color-text-muted);
+}
+
+.history__filters .history__select {
+  flex: none;
+  width: 190px;
+  min-height: 36px;
+}
+
+/* Поиск занимает всю ширину: он длиннее любого другого отбора. */
+.history__filters .history__search {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.history__day-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 0 var(--space-1);
+}
+
+.history__day-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.history__day-summary {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Деньги дня — поднятая панель: это отдельная запись, а не часть списка. */
+.history__money {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.history__money-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.history__tray {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+/*
+ * Колонки одинаковы во всех строках.
+ *
+ * Ширины не зависят от содержимого: каждая строка — своя сетка, и иначе
+ * длинный номер сдвигал бы соседние колонки относительно шапки.
+ */
+.history__head,
+.history__row-head {
+  display: grid;
+  gap: var(--space-1) var(--space-3);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(0, 0.9fr) 190px;
+  align-items: center;
+}
+
+.history__head {
+  padding: 2px var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.history__head-last {
+  text-align: right;
+}
+
+.history__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__row {
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.history__row-head {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history__cell {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.history__cell--route {
+  flex-wrap: wrap;
+}
+
+.history__number {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.history__cell--last {
+  justify-content: flex-end;
+}
+
+/* Полоса исхода: зелёное доставлено, красное нет, остаток — ещё не известно. */
+.history__bar {
+  display: flex;
+  overflow: hidden;
+  flex: none;
+  width: 56px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.history__bar-ok {
+  background: var(--color-success);
+}
+
+.history__bar-fail {
+  background: var(--color-error);
+}
