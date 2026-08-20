@@ -244,3 +244,340 @@
 .reports__table th:nth-child(2) {
   width: 190px;
 }
+
+/* ==========================================================================
+   Отчёты: шапка, итог и показатели
+   ========================================================================== */
+
+.reports__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.reports__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  border: 0;
+  background: none;
+}
+
+/* Вкладка — поднятая плитка; выбранная вдавлена и названа акцентом. */
+.reports__tab {
+  min-height: 34px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-md);
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.reports__tab--active {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+.reports__period {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.reports__segments {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.reports__segment {
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.reports__segment--on {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+.reports__period input {
+  width: 160px;
+  min-height: 36px;
+}
+
+.reports__dash {
+  color: var(--color-text-muted);
+}
+
+/* Итог слева, слагаемые справа: главный вопрос отчёта — кто кому должен. */
+.reports__totals {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: minmax(260px, 1fr) minmax(0, 2.2fr);
+  align-items: stretch;
+}
+
+.reports__balance {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.reports__balance-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.reports__balance-value {
+  font-size: 30px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.reports__balance-words {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+/* Начальный баланс отделён линией света: он относится к прошлому периоду. */
+.reports__balance-opening {
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.reports__metrics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.reports__metrics-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.reports__summary {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+.reports__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.reports__cell-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.reports__cell-value {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Узкое окно: итог встаёт над показателями, а не жмётся сбоку. */
+@media (max-width: 1000px) {
+  .reports__totals {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Строка отбора: курьер слева, выгрузка справа. */
+.reports__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.reports__filter-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.reports__filters .reports__select {
+  width: auto;
+  max-width: 260px;
+  height: auto;
+  min-height: 36px;
+  padding: 0 var(--space-6) 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  box-shadow: var(--shadow-in);
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position:
+    right 18px center,
+    right 13px center;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+}
+
+/* Выгрузка — действие, а не ссылка в тексте: у неё своя плитка. */
+.reports__export {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  white-space: nowrap;
+  text-decoration: none;
+  box-shadow: var(--shadow-out);
+}
+
+.reports__export:first-of-type {
+  margin-left: auto;
+}
+
+.reports__export:hover {
+  color: var(--color-accent-text);
+  box-shadow: var(--shadow-in);
+}
+
+.reports__section-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 0 var(--space-1);
+}
+
+.reports__section-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.reports__section-hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/*
+ * Таблица во вдавленном лотке, строки — поднятые плитки.
+ *
+ * Разметка остаётся таблицей: её читают с экрана как таблицу, и заменять
+ * её сеткой из блоков значило бы отобрать у людей заголовки колонок.
+ * Поверхность строке даёт фон ячеек, а скругление — крайние из них.
+ */
+.reports__table-wrap {
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+  overflow-x: auto;
+}
+
+.reports__table {
+  border-collapse: separate;
+  border-spacing: 0 var(--space-2);
+}
+
+.reports__table th {
+  padding: 2px var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.reports__table td {
+  padding: var(--space-2);
+  border: 0;
+  background: var(--surface-raised);
+  box-shadow: 0 3px 8px rgb(150 160 182 / 28%);
+}
+
+.reports__table td:first-child {
+  border-top-left-radius: var(--radius-lg);
+  border-bottom-left-radius: var(--radius-lg);
+}
+
+.reports__table td:last-child {
+  border-top-right-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-lg);
+}
+
+/* Вложенные строки заказов углублены: они внутри смены, а не рядом с ней. */
+.reports__table tr.reports__detail td {
+  background: var(--surface-sunken);
+  box-shadow: none;
+}
+
+/*
+ * Строка — одна плитка, а не набор соседних.
+ *
+ * Ячейки сохраняли нижнюю границу от прежнего оформления: на поднятой строке
+ * она резала плитку поперёк, а между ячейками оставались светлые просветы.
+ */
+.reports__table td {
+  border-bottom: 0;
+}
+
+.reports__table {
+  border-spacing: 0 var(--space-2);
+}
+
+.reports__table td .badge {
+  white-space: nowrap;
+}

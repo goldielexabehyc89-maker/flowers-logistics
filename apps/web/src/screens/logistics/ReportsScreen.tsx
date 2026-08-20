@@ -22,6 +22,7 @@ import {
   Field,
   LoadingState,
   Modal,
+  StatusBadge,
   TextInput,
 } from '../../ui/components';
 import { formatMoscowDateTime } from '@fl/shared';
@@ -169,6 +170,33 @@ const GROUPS_PER_PAGE = 25;
  * это обычные расходы и вносятся через «Доп.». В учёте их виды сохранены —
  * прошлые записи никуда не делись и продолжают считаться.
  */
+/** Вкладки отчёта: что именно смотрим. */
+const REPORT_TABS = [
+  { key: 'SETTLEMENTS', title: 'Расчёты с курьерами', testId: 'reports-mode-settlements' },
+  { key: 'CASH', title: 'Касса логистов', testId: 'reports-mode-cash' },
+  { key: 'OPERATIONS', title: 'Операционные показатели', testId: 'reports-mode-operations' },
+] as const;
+
+/** Готовые сроки: день, неделя, месяц назад от сегодняшнего дня. */
+const REPORT_PERIODS = [
+  { key: 'day', title: 'День', days: 0 },
+  { key: 'week', title: 'Неделя', days: 7 },
+  { key: 'month', title: 'Месяц', days: 30 },
+] as const;
+
+/**
+ * Границы срока в календарных днях.
+ *
+ * Считается назад от сегодняшнего дня: «неделя» — последние семь дней вместе
+ * с текущим, а не календарная неделя с понедельника. Отчёт спрашивают так.
+ */
+function periodRange(days: number): { from: string; to: string } {
+  const today = new Date();
+  const to = today.toISOString().slice(0, 10);
+  const start = new Date(today.getTime() - days * 24 * 60 * 60 * 1000);
+  return { from: start.toISOString().slice(0, 10), to };
+}
+
 const CELL_OPERATIONS = {
   EXPENSE_OTHER: { title: 'Дополнительный расход', needsReason: true },
   CASH_HANDED_TO_LOGIST: { title: 'Курьер сдал', needsReason: false },
@@ -303,6 +331,12 @@ export function ReportsScreen(): React.JSX.Element {
       ),
   });
 
+  /** Имя выбранного курьера: баланс считается по одному человеку, и он назван. */
+  const courierName =
+    courierUserId === ''
+      ? null
+      : ((couriers.data?.items ?? []).find((item) => item.id === courierUserId)?.fullName ?? null);
+
   const params = (withPaging = true): string => {
     const search = new URLSearchParams({ from, to });
     if (courierUserId !== '') {
@@ -395,81 +429,104 @@ export function ReportsScreen(): React.JSX.Element {
 
   return (
     <section className="reports" data-testid="reports-screen">
-      <div className="reports__tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={mode === 'SETTLEMENTS'}
-          className={mode === 'SETTLEMENTS' ? 'reports__tab reports__tab--active' : 'reports__tab'}
-          data-testid="reports-mode-settlements"
-          onClick={() => setMode('SETTLEMENTS')}
-        >
-          Расчёты с курьерами
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={mode === 'CASH'}
-          className={mode === 'CASH' ? 'reports__tab reports__tab--active' : 'reports__tab'}
-          data-testid="reports-mode-cash"
-          onClick={() => setMode('CASH')}
-        >
-          Касса логистов
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={mode === 'OPERATIONS'}
-          className={mode === 'OPERATIONS' ? 'reports__tab reports__tab--active' : 'reports__tab'}
-          data-testid="reports-mode-operations"
-          onClick={() => setMode('OPERATIONS')}
-        >
-          Операционные показатели
-        </button>
+      {/*
+        Шапка отчёта: чем смотрим и за какой срок.
+
+        Вкладки и период стояли отдельными полосами, каждая со своими
+        подписями, и вместе занимали четверть экрана до первой цифры.
+        Теперь это одна панель: слева выбор отчёта, справа — срок.
+      */}
+      <div className="reports__head">
+        <div className="reports__tabs" role="tablist">
+          {REPORT_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={mode === tab.key}
+              className={mode === tab.key ? 'reports__tab reports__tab--active' : 'reports__tab'}
+              data-testid={tab.testId}
+              onClick={() => setMode(tab.key)}
+            >
+              {tab.title}
+            </button>
+          ))}
+        </div>
+
+        <div className="reports__period">
+          {/*
+            Готовые сроки вместо счёта дней в уме: «неделя» — самый частый
+            вопрос к отчёту. Кнопки только подставляют границы, поля остаются.
+          */}
+          <div className="reports__segments" role="group" aria-label="Период">
+            {REPORT_PERIODS.map((period) => {
+              const range = periodRange(period.days);
+              const active = from === range.from && to === range.to;
+              return (
+                <button
+                  key={period.key}
+                  type="button"
+                  className={active ? 'reports__segment reports__segment--on' : 'reports__segment'}
+                  aria-pressed={active}
+                  data-testid={`reports-period-${period.key}`}
+                  onClick={() => {
+                    setFrom(range.from);
+                    setTo(range.to);
+                  }}
+                >
+                  {period.title}
+                </button>
+              );
+            })}
+          </div>
+
+          <TextInput
+            type="date"
+            value={from}
+            aria-label="С"
+            data-testid="reports-from"
+            onChange={(event) => setFrom(event.target.value)}
+          />
+          <span className="reports__dash" aria-hidden="true">
+            –
+          </span>
+          <TextInput
+            type="date"
+            value={to}
+            aria-label="По"
+            data-testid="reports-to"
+            onChange={(event) => setTo(event.target.value)}
+          />
+        </div>
       </div>
 
       <div className="reports__filters">
-        <Field label="С">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={from}
-              data-testid="reports-from"
-              onChange={(event) => setFrom(event.target.value)}
-            />
-          )}
-        </Field>
-        <Field label="По">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={to}
-              data-testid="reports-to"
-              onChange={(event) => setTo(event.target.value)}
-            />
-          )}
-        </Field>
         {mode === 'SETTLEMENTS' && (
-          <Field label="Курьер" hint="Баланс считается по одному курьеру">
-            {(props) => (
-              <select
-                {...props}
-                className="reports__select"
-                value={courierUserId}
-                data-testid="reports-courier"
-                onChange={(event) => setCourierUserId(event.target.value)}
-              >
-                <option value="">Все курьеры</option>
-                {(couriers.data?.items ?? []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.fullName}
-                  </option>
-                ))}
-              </select>
-            )}
-          </Field>
+          <>
+            <span className="reports__filter-label">Курьер</span>
+            <select
+              className="reports__select"
+              value={courierUserId}
+              aria-label="Курьер"
+              title="Баланс считается по одному курьеру"
+              data-testid="reports-courier"
+              onChange={(event) => setCourierUserId(event.target.value)}
+            >
+              <option value="">Все курьеры</option>
+              {(couriers.data?.items ?? []).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.fullName}
+                </option>
+              ))}
+            </select>
+            {/* Выгрузка относится ко всему отчёту, поэтому стоит в его шапке. */}
+            <a className="reports__export" href={exportUrl('xlsx')} data-testid="reports-xlsx">
+              Выгрузить XLSX
+            </a>
+            <a className="reports__export" href={exportUrl('pdf')} data-testid="reports-pdf">
+              Итог в PDF
+            </a>
+          </>
         )}
       </div>
 
@@ -490,41 +547,51 @@ export function ReportsScreen(): React.JSX.Element {
               </p>
             )}
 
-            <div className="reports__summary" data-testid="reports-summary">
-              {[
-                ['Начальный баланс', settlements.data.totals.openingBalanceMinor],
-                ['Наличные у курьера', settlements.data.totals.cashReceivedMinor],
-                ['Сдано логисту', settlements.data.totals.handedToLogistMinor],
-                ['Выдано курьеру', settlements.data.totals.issuedToCourierMinor],
-                ['Оплата доставок', settlements.data.totals.deliveryFeesMinor],
-                ['Оплачиваемые попытки', settlements.data.totals.attemptFeesMinor],
-                ['Километры за МКАД', settlements.data.totals.distanceFeesMinor],
-                ['Расходы', settlements.data.totals.expensesMinor],
-                ['Доплаты', settlements.data.totals.bonusesMinor],
-              ].map(([label, value]) => (
-                <div key={label} className="reports__cell">
-                  <span className="reports__cell-label">{label}</span>
-                  <span className="reports__cell-value">{formatMoney(value ?? '0')}</span>
-                </div>
-              ))}
-              <div className="reports__cell reports__cell--total">
-                <span className="reports__cell-label">Конечный баланс</span>
-                <span className="reports__cell-value" data-testid="reports-closing">
+            {/*
+              Итог отдельно от слагаемых.
+
+              Девять плиток одного вида не отвечали на главный вопрос — кто
+              кому должен: конечный баланс терялся среди слагаемых, из которых
+              он и сложился. Теперь он стоит крупно слева, а показатели
+              периода лежат рядом в своём лотке.
+            */}
+            <div className="reports__totals">
+              <div className="reports__balance" data-testid="reports-balance">
+                <span className="reports__balance-title">
+                  Конечный баланс
+                  {courierName === null ? '' : ` · ${courierName}`}
+                </span>
+                <span className="reports__balance-value" data-testid="reports-closing">
                   {formatMoney(settlements.data.totals.closingBalanceMinor)}
                 </span>
-                <span className="reports__cell-words">
+                <span className="reports__balance-words">
                   {debtWords(settlements.data.totals.closingBalanceMinor)}
                 </span>
+                <span className="reports__balance-opening">
+                  Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
+                </span>
               </div>
-            </div>
 
-            <div className="reports__actions">
-              <a className="reports__link" href={exportUrl('xlsx')} data-testid="reports-xlsx">
-                Выгрузить XLSX
-              </a>
-              <a className="reports__link" href={exportUrl('pdf')} data-testid="reports-pdf">
-                Итог в PDF
-              </a>
+              <div className="reports__metrics">
+                <span className="reports__metrics-title">Показатели за период</span>
+                <div className="reports__summary" data-testid="reports-summary">
+                  {[
+                    ['Наличные у курьера', settlements.data.totals.cashReceivedMinor],
+                    ['Сдано логисту', settlements.data.totals.handedToLogistMinor],
+                    ['Выдано курьеру', settlements.data.totals.issuedToCourierMinor],
+                    ['Оплата доставок', settlements.data.totals.deliveryFeesMinor],
+                    ['Оплачиваемые попытки', settlements.data.totals.attemptFeesMinor],
+                    ['Километры за МКАД', settlements.data.totals.distanceFeesMinor],
+                    ['Расходы', settlements.data.totals.expensesMinor],
+                    ['Доплаты', settlements.data.totals.bonusesMinor],
+                  ].map(([label, value]) => (
+                    <div key={label} className="reports__cell">
+                      <span className="reports__cell-label">{label}</span>
+                      <span className="reports__cell-value">{formatMoney(value ?? '0')}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {settlements.data.days.length === 0 ? (
@@ -536,6 +603,19 @@ export function ReportsScreen(): React.JSX.Element {
                   Итоги группы считает сервер по всему отбору, а не по видимым
                   строкам: сумма, зависящая от прокрутки, итогом не является.
                 */}
+                {/*
+                  Заголовок объясняет, что строка кликабельна.
+
+                  Раскрытие ничем себя не выдавало: логист видел таблицу
+                  и не знал, что за строкой есть заказы и разбор начисления.
+                */}
+                <div className="reports__section-head">
+                  <h3 className="reports__section-title">Смены курьеров</h3>
+                  <span className="reports__section-hint">
+                    нажмите строку, чтобы увидеть заказы и из чего сложилось начисление
+                  </span>
+                </div>
+
                 <div className="reports__table-wrap">
                   <table className="reports__table" data-testid="reports-rows">
                     <thead>
@@ -670,8 +750,13 @@ export function ReportsScreen(): React.JSX.Element {
                                 </td>
                                 <td colSpan={2} />
                                 <td>
-                                  {row.outcome === 'DELIVERED' ? 'Доставлен' : 'Не доставлен'}
-                                  {row.cancelled ? ' (отменён)' : ''}
+                                  {/* Исход — плашка: по ней разбирают строку, а не читают её как текст. */}
+                                  <StatusBadge
+                                    tone={row.outcome === 'DELIVERED' ? 'success' : 'error'}
+                                  >
+                                    {row.outcome === 'DELIVERED' ? 'Доставлен' : 'Не доставлен'}
+                                    {row.cancelled ? ' (отменён)' : ''}
+                                  </StatusBadge>
                                 </td>
                                 <td>{formatMoney(row.cashMinor)}</td>
                                 <td>
