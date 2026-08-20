@@ -884,28 +884,79 @@ export function ReportsScreen(): React.JSX.Element {
       ) : operations.isError ? (
         <ErrorState title="Не удалось построить отчёт" onRetry={() => void operations.refetch()} />
       ) : (
-        <div className="reports__summary" data-testid="operations-summary">
-          {[
-            ['Получено заказов', operations.data.orders.received],
-            ['Распределено', operations.data.orders.assigned],
-            ['Не распределено', operations.data.orders.unassigned],
-            ['Отгружено', operations.data.orders.shipped],
-            ['Доставлено', operations.data.orders.delivered],
-            ['Не доставлено', operations.data.orders.failed],
-            ['Маршрутов', operations.data.routes.total],
-            ['Средняя загрузка', operations.data.routes.averageOrders],
-            [
-              'Среднее время маршрута',
-              operations.data.actualMinutes.averageMinutes === null
-                ? 'нет данных'
-                : `${operations.data.actualMinutes.averageMinutes} мин`,
-            ],
-          ].map(([label, value]) => (
-            <div key={String(label)} className="reports__cell">
-              <span className="reports__cell-label">{label}</span>
-              <span className="reports__cell-value">{value}</span>
+        <div className="stack" data-testid="operations-summary">
+          {/*
+            Путь заказа виден целиком.
+
+            Девять одинаковых плиток не показывали главного: сколько заказов
+            дошло от получения до доставки и где именно они осели. Четыре шага
+            стоят в ряд с долей от полученных — провал виден раньше, чем
+            прочитаны числа.
+          */}
+          <div className="reports__funnel">
+            <span className="reports__funnel-title">Путь заказов за период</span>
+            <div className="reports__funnel-steps">
+              {[
+                ['Получено заказов', operations.data.orders.received],
+                ['Распределено', operations.data.orders.assigned],
+                ['Отгружено', operations.data.orders.shipped],
+                ['Доставлено', operations.data.orders.delivered],
+              ].map(([label, value]) => {
+                const received = operations.data.orders.received;
+                const share = received === 0 ? 0 : Math.round((Number(value) / received) * 100);
+                return (
+                  <div key={String(label)} className="reports__step">
+                    <span className="reports__step-label">{label}</span>
+                    <span className="reports__step-value">{value}</span>
+                    <span className="reports__step-bar" aria-hidden="true">
+                      <span className="reports__step-fill" style={{ width: `${share}%` }} />
+                    </span>
+                    <span className="reports__step-share">{share}% от полученных</span>
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          </div>
+
+          {/*
+            Осевшее выделено тоном: это не просто числа, а работа, которую
+            кто-то должен доделать.
+          */}
+          <div className="reports__summary">
+            <div className="reports__cell reports__cell--bad">
+              <span className="reports__cell-label">Не распределено</span>
+              <span className="reports__cell-value">{operations.data.orders.unassigned}</span>
+              <span className="reports__cell-note">ждут маршрута</span>
+            </div>
+            <div className="reports__cell reports__cell--bad">
+              <span className="reports__cell-label">Не доставлено</span>
+              <span className="reports__cell-value">{operations.data.orders.failed}</span>
+              <span className="reports__cell-note">ушли в «Требуют решения»</span>
+            </div>
+            <div className="reports__cell">
+              <span className="reports__cell-label">Маршрутов</span>
+              <span className="reports__cell-value">{operations.data.routes.total}</span>
+              <span className="reports__cell-note">создано за период</span>
+            </div>
+            <div className="reports__cell">
+              <span className="reports__cell-label">Средняя загрузка</span>
+              <span className="reports__cell-value">{operations.data.routes.averageOrders}</span>
+              <span className="reports__cell-note">заказов на маршрут</span>
+            </div>
+            <div className="reports__cell">
+              <span className="reports__cell-label">Среднее время маршрута</span>
+              <span className="reports__cell-value">
+                {operations.data.actualMinutes.averageMinutes === null
+                  ? 'нет данных'
+                  : `${operations.data.actualMinutes.averageMinutes} мин`}
+              </span>
+              <span className="reports__cell-note">
+                {operations.data.actualMinutes.averageMinutes === null
+                  ? 'появится, когда курьеры закроют маршруты'
+                  : 'от первой остановки до последней'}
+              </span>
+            </div>
+          </div>
         </div>
       )}
 

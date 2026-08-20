@@ -581,3 +581,114 @@
 .reports__table td .badge {
   white-space: nowrap;
 }
+
+/* Действия кассы стоят под остатком: они его и меняют. */
+.reports__balance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+/* Две операции стоят в ряд: они парные, и переносить их по одной незачем. */
+.reports__balance-actions .btn {
+  flex: 1 1 auto;
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.reports__filters .reports__search {
+  flex: 1 1 240px;
+  min-width: 0;
+  min-height: 36px;
+}
+
+/* Выгрузка отчёта прижата к правому краю строки действий. */
+.reports__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* Путь заказа: четыре шага в ряд с долей от полученных. */
+.reports__funnel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.reports__funnel-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.reports__funnel-steps {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.reports__step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.reports__step-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.reports__step-value {
+  font-size: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.reports__step-bar {
+  display: block;
+  overflow: hidden;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.reports__step-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+}
+
+.reports__step-share {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Осевшее выделено тоном: это работа, которую кто-то должен доделать. */
+.reports__cell--bad {
+  background: var(--row-danger);
+}
+
+.reports__cell--bad .reports__cell-value {
+  color: var(--color-error);
+}
+
+.reports__cell-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
