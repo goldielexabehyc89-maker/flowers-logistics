@@ -684,3 +684,28 @@
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * Список операций не имеет собственной поверхности.
+ *
+ * У него оставались рамка и почти белый фон от прежнего оформления: внутри
+ * панели «Деньги за день» это выглядело коробкой в коробке, а белое пятно
+ * спорило с полотном, на котором лежит вся страница.
+ */
+.history__payments {
+  gap: var(--space-1);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* «Отменена» — плашка у правого края: операция есть, но силы не имеет. */
+.history__payment .history__tag {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
