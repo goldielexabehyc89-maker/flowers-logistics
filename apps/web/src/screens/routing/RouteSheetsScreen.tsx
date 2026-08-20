@@ -586,6 +586,19 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     </Button>
                                   </>
                                 )}
+                                {/*
+                                  Вход в маршрутный лист.
+
+                                  Кнопка убиралась как лишняя, но за ней стоит
+                                  единственная в продукте печатная форма листа:
+                                  без неё курьеру нечего взять с собой на бумаге.
+                                */}
+                                <Button
+                                  data-testid="sheet-open"
+                                  onClick={() => setOpenId(sheet.id)}
+                                >
+                                  Открыть лист
+                                </Button>
                                 {section === 'SHIPPED' && (
                                   <Button
                                     variant="danger"
@@ -734,7 +747,20 @@ export function RouteSheetsScreen(): React.JSX.Element {
         )}
       </Modal>
 
-      {openId !== null && (
+      {/*
+        Лист открывается отдельным окном.
+
+        Прежде он дорисовывался под всем списком: чтобы его увидеть, нужно было
+        прокрутить мимо всех остальных листов, и связь с той строкой, которую
+        открыли, терялась.
+      */}
+      <Modal
+        open={openId !== null}
+        title="Маршрутный лист"
+        className="sheet-modal"
+        testId="sheet-window"
+        onClose={() => setOpenId(null)}
+      >
         <>
           {sheetCard.isPending ? (
             <LoadingState title="Готовим маршрутный лист…" />
@@ -807,7 +833,7 @@ export function RouteSheetsScreen(): React.JSX.Element {
             </article>
           )}
         </>
-      )}
+      </Modal>
 
       {/* Окно заказа: одно и то же на всех вкладках. */}
       {orderWindowId !== null && (

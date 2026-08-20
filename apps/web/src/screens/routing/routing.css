@@ -2462,3 +2462,47 @@ input.routes__day {
   font-size: var(--font-size-xs);
   font-weight: 600;
 }
+
+/* Окно маршрутного листа шире обычного: это документ, а не форма. */
+.sheet-modal {
+  width: min(920px, 96vw);
+  max-width: none;
+}
+
+/*
+ * На бумаге окно перестаёт быть окном.
+ *
+ * Печатается сам лист во всю ширину страницы: рамка, тень и поля окна
+ * на бумаге означали бы пустую колонку по краю, а служебные кнопки —
+ * строку, которой на листе не место.
+ */
+@media print {
+  .sheet-modal {
+    position: static;
+    display: block;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .sheet-modal::backdrop {
+    display: none;
+  }
+
+  .sheet-modal .modal__header,
+  .sheet-modal .modal__footer {
+    display: none;
+  }
+
+  .sheet-modal .modal__body {
+    padding: 0;
+    overflow: visible;
+  }
+}

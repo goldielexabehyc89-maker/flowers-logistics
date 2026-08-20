@@ -407,14 +407,23 @@ test.describe.configure({ mode: 'serial' });
 test('сквозной сценарий этапа 1', async ({ page, browser }: { page: Page; browser: Browser }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
-  // 1. Первый вход администратора по одноразовому коду.
+  /*
+   * 1. Первый вход администратора по одноразовому коду.
+   *
+   * Заголовок логистического раздела проверяется на НАЛИЧИЕ, а не на показ.
+   * В «Логистике» верхняя строка — это сама навигация раздела, и заголовок
+   * первого уровня оставлен только для чтения с экрана. Требовать его
+   * видимости значило бы закреплять оформление, от которого экран отказался;
+   * доказывать он должен другое — что после входа мы оказались в «Сделках»
+   * и у страницы есть заголовок первого уровня с нужным именем.
+   */
   await activate(page, ADMIN_PHONE, ADMIN_CODE, ADMIN_PIN);
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // 2. Обычный выход и вход по PIN.
   await logout(page);
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // 3. Административная навигация: настройки доступны.
   await openSection(page, 'Настройки');
@@ -532,7 +541,7 @@ test('Сделки: день, поиск, выбор из списка и руч
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // Рабочее пространство: список и карта видны одновременно и показывают
   // одно множество — их питает один серверный отбор.
@@ -564,7 +573,7 @@ test('Сделки: день, поиск, выбор из списка и руч
   await page.getByTestId('deals-manual-draft').click();
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
   await page.getByTestId('create-route-draft').click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
 });
 
@@ -593,7 +602,7 @@ test('карта не настроена: интерфейс говорит че
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   await expect(page.getByText('Карта не настроена', { exact: true })).toBeVisible();
   // Карта не появилась, но работа не остановилась: список черновиков дня
@@ -688,7 +697,7 @@ test('Сделки: ручная точка выводит заказ из «Т�
   // 5. В «Маршрутизации» редактора точки нет: там работают только с заказами,
   //    у которых координаты уже пригодны.
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page.getByRole('button', { name: 'Указать точку' })).toHaveCount(0);
 });
 
@@ -754,7 +763,7 @@ test('собственная подложка: всё с нашего origin и 
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   await expect.poll(() => captured.config !== null, { timeout: 15_000 }).toBe(true);
 
@@ -883,7 +892,7 @@ test('адреса подложки: архив запрашивается из 
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   // Стиль и манифест в порядке: карта настроена, и интерфейс об этом не спорит.
   await expect(page.getByText('Карта не настроена')).toHaveCount(0);
@@ -973,7 +982,7 @@ test('маршрут: черновик → состав → порядок → �
 
   // Переход ведёт в созданный черновик: он раскрыт, а не потерян в списке.
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page.getByRole('button', { name: 'Создать черновик' })).toHaveCount(0);
 
   const card = page.locator('.routes__card');
@@ -1088,7 +1097,7 @@ test('маршрут: черновик → состав → порядок → �
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeAttached();
   await page
     .locator('.routes__list-item', { hasText: routeNumber })
     .getByRole('button', { name: 'Открыть лист' })
@@ -1439,7 +1448,7 @@ test('Сделки: точный выбор → расчёт → превью �
   // 4. Ожидание идёт в «Сделках», а переход ведёт в ВИДИМОЕ предложение:
   //    черновиков ещё нет и не будет до явного «Применить».
   await expect(page).toHaveURL(/\/logistics\/routing\?.*run=/, { timeout: 60_000 });
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page.getByRole('heading', { name: 'Предложенный расчёт' })).toBeVisible();
 
   const drafts = page.getByTestId('routing-drafts').locator('.routes__draft');
@@ -3519,7 +3528,7 @@ test('карта «Сделок»: подложка Москвы при нуле
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // 1. Нуль точек: карта ВСЁ РАВНО показана — подложка Москвы, а не пустой блок.
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
@@ -5041,7 +5050,7 @@ test('маршрутизация: точка дня без номера и пу�
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   /*
    * 1. Пустой черновик одним нажатием.
@@ -5351,7 +5360,7 @@ test('«Активные»: рабочий адрес, интервал 10:00–
    */
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeAttached();
 
   const sheet = page.locator(`[data-sheet-number="${seeded.route}"]`).first();
   await expect(sheet).toBeVisible({ timeout: 20_000 });
@@ -5478,7 +5487,7 @@ test('настройки: переключатель ручной отгрузк
 
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeAttached();
   await expect(page.getByTestId('sheet-ship')).toHaveCount(0);
 
   // Возвращаем разрешение: кнопка снова на месте.
