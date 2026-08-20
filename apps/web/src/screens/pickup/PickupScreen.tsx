@@ -1,22 +1,22 @@
 /**
- * Рабочий экран «Самовывоз» (этап 6.7).
+ * Рабочий экран «Самовывоз».
  *
- * Менеджер работает у прилавка: покупатель уже пришёл, называет номер заказа,
- * менеджер находит коробку и отдаёт. Поэтому экран — это одно поле поиска,
- * одна карточка и одна кнопка, а не таблица с фильтрами.
+ * Менеджер стоит у прилавка: покупатель пришёл, показал QR-код заказа со
+ * своего телефона, менеджер сканирует его и отдаёт коробку. Поэтому главное
+ * действие экрана одно и крупное — «Сканировать заказ», а очередь ниже
+ * отвечает на второй вопрос дня: что вообще ждёт выдачи.
  *
- * Поле работает и со сканером (он ведёт себя как клавиатура и заканчивает
- * ввод `Enter`), и с ручным вводом: сканер ломается чаще, чем заканчивается
- * рабочий день.
+ * Очередь НЕ привязана к дню: покупатель приходит когда придёт, и вчерашняя
+ * коробка стоит на той же полке, что и завтрашняя. День — подпись и порядок,
+ * а не отбор.
  *
- * Второго скана нет намеренно (`FUL-003` п.8): ни ячейки, ни документа
- * покупателя. Владелец решил, что номера заказа достаточно.
- *
- * Ни адреса, ни телефона, ни состава букета здесь нет — сервер их не отдаёт.
+ * Ручной ввод номера — исключение на случай нечитаемого кода, и разрешает его
+ * администратор общей настройкой. Ни адреса, ни телефона, ни состава букета
+ * здесь нет: сервер их не отдаёт, а покупатель уже стоит перед менеджером.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
@@ -29,35 +29,64 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
+import { ScannerScreen } from '../../scan/ScannerScreen';
+import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
   assemblyLabel,
   blockerLabel,
   canIssue,
   cellLabel,
+  dayLabel,
   primaryBlocker,
   printLabel,
   type PickupCard,
-  type PickupDayView,
+  type PickupIssuedView,
+  type PickupQueueView,
 } from './pickup';
+import './pickup.css';
+
+const QUEUE_KEY = ['pickup-day'];
+const ISSUED_KEY = ['pickup-issued'];
 
 export function PickupScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
-  const inputRef = useRef<HTMLInputElement | null>(null);
 
+  const [scanning, setScanning] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
   const [numberInput, setNumberInput] = useState('');
   const [card, setCard] = useState<PickupCard | null>(null);
+  /** Сколько страниц очереди уже показано. Продолжение, а не «все сразу». */
+  const [cursors, setCursors] = useState<string[]>([]);
 
   function reportError(error: unknown, fallback: string): void {
     showToast(error instanceof ApiError ? error.message : fallback, 'error');
   }
 
-  // Московский день считает сервер: параметр дня намеренно не передаётся.
-  const day = useQuery({
-    queryKey: ['pickup-day'],
-    queryFn: () => client.get<PickupDayView>('/api/pickup/orders'),
+  const queue = useQuery({
+    queryKey: [...QUEUE_KEY, cursors.length],
+    queryFn: () => {
+      const cursor = cursors.at(-1);
+      return client.get<PickupQueueView>(
+        cursor === undefined
+          ? '/api/pickup/orders'
+          : `/api/pickup/orders?cursor=${encodeURIComponent(cursor)}`,
+      );
+    },
   });
+
+  const issued = useQuery({
+    queryKey: ISSUED_KEY,
+    queryFn: () => client.get<PickupIssuedView>('/api/pickup/issued'),
+  });
+
+  const manualEntry = queue.data?.manualEntry ?? false;
+
+  const refresh = async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: QUEUE_KEY });
+    await queryClient.invalidateQueries({ queryKey: ISSUED_KEY });
+  };
 
   const lookup = useMutation({
     mutationFn: (value: string) =>
@@ -73,71 +102,86 @@ export function PickupScreen(): React.JSX.Element {
   });
 
   const issue = useMutation({
-    mutationFn: (orderNumber: string) =>
-      client.post<{ orderNumber: string; cellCode: string }>('/api/pickup/issues', { orderNumber }),
+    mutationFn: (input: { orderNumber: string; source: 'SCAN' | 'MANUAL' }) =>
+      client.post<{ orderNumber: string; cellCode: string }>('/api/pickup/issues', input),
     onSuccess: async (result) => {
       setCard(null);
-      await queryClient.invalidateQueries({ queryKey: ['pickup-day'] });
+      setManualOpen(false);
+      await refresh();
       showToast(`Заказ ${result.orderNumber} выдан покупателю`, 'success');
-      inputRef.current?.focus();
     },
     onError: async (error: unknown) => {
       // Карточка перезапрашивается: причина отказа могла появиться прямо сейчас
-      // (заказ выдал другой менеджер либо кладовщик забрал коробку с полки).
+      // (заказ выдал другой менеджер, пришла отмена, коробку сняли с полки).
       reportError(error, 'Не удалось отметить выдачу.');
       if (card !== null) {
         lookup.mutate(card.orderNumber);
       }
-      await queryClient.invalidateQueries({ queryKey: ['pickup-day'] });
+      await refresh();
     },
   });
 
-  function submitNumber(): void {
-    const value = numberInput.trim();
-    if (value !== '') {
-      lookup.mutate(value);
-    }
-  }
-
   return (
     <section className="stack">
+      {/*
+        Одно крупное действие вместо поля поиска: обычная работа за прилавком —
+        это скан кода с телефона покупателя, а не набор номера руками.
+      */}
       <div className="card stack">
-        <div>
-          <h2>Самовывоз</h2>
-          <p className="muted text-sm">
-            Выдача заказов покупателю по номеру. Скан ячейки и проверка документов не требуются.
-          </p>
-        </div>
+        <Button
+          variant="primary"
+          className="pickup-scan"
+          data-testid="pickup-scan"
+          onClick={() => setScanning(true)}
+        >
+          Сканировать заказ
+        </Button>
 
-        <Field label="Номер заказа" hint="Отсканируйте QR или введите номер и нажмите Enter">
-          {(fieldProps) => (
-            <TextInput
-              {...fieldProps}
-              ref={inputRef}
-              value={numberInput}
-              autoFocus
-              data-testid="pickup-search"
-              disabled={lookup.isPending}
-              onChange={(event) => setNumberInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  submitNumber();
-                }
-              }}
-            />
-          )}
-        </Field>
-        <div className="row">
+        {manualEntry && (
           <Button
-            variant="primary"
-            data-testid="pickup-search-submit"
-            disabled={lookup.isPending || numberInput.trim() === ''}
-            onClick={submitNumber}
+            variant="ghost"
+            data-testid="pickup-manual-open"
+            onClick={() => setManualOpen((open) => !open)}
           >
-            Найти
+            Ввести вручную
           </Button>
-        </div>
+        )}
+
+        {manualEntry && manualOpen && (
+          <div className="stack" data-testid="pickup-manual">
+            <Field label="Номер заказа" hint="Найдите заказ и подтвердите выдачу отдельной кнопкой">
+              {(fieldProps) => (
+                <TextInput
+                  {...fieldProps}
+                  value={numberInput}
+                  autoFocus
+                  data-testid="pickup-search"
+                  disabled={lookup.isPending}
+                  onChange={(event) => setNumberInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    /*
+                     * Enter ищет заказ и только. Выдача — отдельное нажатие:
+                     * случайный Enter в поле не должен отдавать коробку.
+                     */
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      if (numberInput.trim() !== '') {
+                        lookup.mutate(numberInput);
+                      }
+                    }
+                  }}
+                />
+              )}
+            </Field>
+            <Button
+              data-testid="pickup-search-submit"
+              disabled={lookup.isPending || numberInput.trim() === ''}
+              onClick={() => lookup.mutate(numberInput)}
+            >
+              Найти
+            </Button>
+          </div>
+        )}
       </div>
 
       {card !== null && (
@@ -149,7 +193,7 @@ export function PickupScreen(): React.JSX.Element {
             </div>
             <div>
               <div className="field__label">День</div>
-              <span data-testid="pickup-card-day">{card.deliveryDate ?? 'не указан'}</span>
+              <span data-testid="pickup-card-day">{dayLabel(card)}</span>
             </div>
             <div>
               <div className="field__label">Ячейка</div>
@@ -163,14 +207,7 @@ export function PickupScreen(): React.JSX.Element {
               <div className="field__label">Печать</div>
               <span>{printLabel(card)}</span>
             </div>
-            <Button
-              variant="ghost"
-              data-testid="pickup-card-close"
-              onClick={() => {
-                setCard(null);
-                inputRef.current?.focus();
-              }}
-            >
+            <Button variant="ghost" data-testid="pickup-card-close" onClick={() => setCard(null)}>
               Закрыть
             </Button>
           </div>
@@ -181,76 +218,162 @@ export function PickupScreen(): React.JSX.Element {
             </p>
           )}
 
-          {canIssue(card) ? (
+          {/*
+            Ручная выдача существует только при разрешённом ручном вводе:
+            обычный путь — скан, который выдаёт заказ сам.
+          */}
+          {canIssue(card) && manualEntry ? (
             <div className="row">
               <Button
                 variant="primary"
                 data-testid="pickup-issue"
                 disabled={issue.isPending}
-                onClick={() => issue.mutate(card.orderNumber)}
+                onClick={() => issue.mutate({ orderNumber: card.orderNumber, source: 'MANUAL' })}
               >
-                Выдан покупателю
+                Выдать покупателю
               </Button>
             </div>
           ) : (
-            <p className="muted text-sm">{primaryBlocker(card)}: выдать нельзя.</p>
+            <p className="muted text-sm">
+              {canIssue(card)
+                ? 'Отсканируйте QR-код заказа: ручная выдача выключена.'
+                : `${primaryBlocker(card) ?? ''}: выдать нельзя.`}
+            </p>
           )}
         </div>
       )}
 
       <div className="card stack">
-        <h3>Ждут выдачи сегодня</h3>
-        {day.isPending ? (
-          <LoadingState title="Загружаем список…" />
-        ) : day.isError ? (
-          <ErrorState title="Не удалось загрузить список" onRetry={() => void day.refetch()} />
-        ) : (day.data?.waiting.length ?? 0) === 0 ? (
+        <div className="row">
+          <h3>Ожидают выдачи</h3>
+          <StatusBadge tone="info">
+            <span data-testid="pickup-waiting-count">{queue.data?.total ?? 0}</span>
+          </StatusBadge>
+        </div>
+
+        {queue.isPending ? (
+          <LoadingState title="Загружаем очередь…" />
+        ) : queue.isError ? (
+          <ErrorState title="Не удалось загрузить очередь" onRetry={() => void queue.refetch()} />
+        ) : queue.data.items.length === 0 ? (
           <EmptyState
-            title="Готовых к выдаче самовывозов нет"
+            title="Очередь пуста"
             description="Заказ появится здесь, когда кладовщик примет его на склад."
           />
         ) : (
-          <ul className="routes__list">
-            {(day.data?.waiting ?? []).map((item) => (
-              <li key={item.orderId} className="routes__list-item" data-testid="pickup-waiting-row">
-                <div>
-                  <span className="routes__number">{item.orderNumber}</span>
-                  <div className="muted text-sm">
-                    Ячейка: {cellLabel(item)} · {assemblyLabel(item.assemblyState)} ·{' '}
-                    {printLabel(item)}
-                  </div>
-                </div>
-                <Button
-                  onClick={() => {
-                    setCard(item);
-                  }}
+          <ul className="pickup-queue">
+            {queue.data.items.map((item) => (
+              <li key={item.orderId}>
+                {/*
+                  Вся строка нажимается: за прилавком целятся в кнопку одной
+                  рукой, держа коробку другой.
+                */}
+                <button
+                  type="button"
+                  className="pickup-row"
+                  data-testid="pickup-waiting-row"
+                  data-order-number={item.orderNumber}
+                  onClick={() => setCard(item)}
                 >
-                  Открыть
-                </Button>
+                  <span className="pickup-row__main">
+                    <strong>{item.orderNumber}</strong>
+                    <span className="muted text-sm">
+                      {dayLabel(item)} · {cellLabel(item)}
+                    </span>
+                  </span>
+                  <span className="pickup-row__badges">
+                    <StatusBadge tone="info">{assemblyLabel(item.assemblyState)}</StatusBadge>
+                    <StatusBadge tone={item.printedJobs > 0 ? 'success' : 'neutral'}>
+                      {printLabel(item)}
+                    </StatusBadge>
+                    {item.blockers.length > 0 && (
+                      <StatusBadge tone="warning">{primaryBlocker(item)}</StatusBadge>
+                    )}
+                  </span>
+                </button>
               </li>
             ))}
           </ul>
+        )}
+
+        {(() => {
+          const next = queue.data?.nextCursor ?? null;
+          return next === null ? null : (
+            <Button data-testid="pickup-more" onClick={() => setCursors((all) => [...all, next])}>
+              Показать ещё
+            </Button>
+          );
+        })()}
+        {cursors.length > 0 && (
+          <Button variant="ghost" data-testid="pickup-first-page" onClick={() => setCursors([])}>
+            В начало очереди
+          </Button>
         )}
       </div>
 
       <div className="card stack">
         <h3>Выданы сегодня</h3>
-        {(day.data?.issued.length ?? 0) === 0 ? (
+        {(issued.data?.issued.length ?? 0) === 0 ? (
           <p className="muted text-sm">Сегодня ещё ничего не выдавали.</p>
         ) : (
-          <ul className="routes__list">
-            {(day.data?.issued ?? []).map((item) => (
-              <li key={item.orderId} className="routes__list-item" data-testid="pickup-issued-row">
-                <div>
-                  <span className="routes__number">{item.orderNumber}</span>
-                  <div className="muted text-sm">Забран из ячейки {cellLabel(item)}</div>
-                </div>
+          <ul className="pickup-queue">
+            {(issued.data?.issued ?? []).map((item) => (
+              <li key={item.orderId} className="pickup-row" data-testid="pickup-issued-row">
+                <span className="pickup-row__main">
+                  <strong>{item.orderNumber}</strong>
+                  <span className="muted text-sm">Забран из ячейки {cellLabel(item)}</span>
+                </span>
                 <StatusBadge tone="success">Выдан</StatusBadge>
               </li>
             ))}
           </ul>
         )}
       </div>
+
+      {scanning && (
+        <ScannerScreen
+          chain="ISSUE"
+          operation="Выдача покупателю"
+          onIntent={async (intent: ScanIntent): Promise<ScanEvent> => {
+            if (intent.kind !== 'issueOrder') {
+              return { type: 'failed', text: 'Ожидался QR-код заказа.' };
+            }
+            try {
+              /*
+               * Скан САМ выдаёт заказ: отдельного подтверждения нет.
+               *
+               * Покупатель уже стоит перед менеджером, а сервер всё равно
+               * проверяет отмену, способ получения и ячейку заново.
+               */
+              const result = await client.post<{ orderNumber: string }>('/api/pickup/issues', {
+                orderNumber: intent.orderNumber,
+                source: 'SCAN',
+              });
+              await refresh();
+              return {
+                type: 'succeeded',
+                text: `Заказ ${result.orderNumber} выдан покупателю`,
+                final: true,
+              };
+            } catch (error: unknown) {
+              /*
+               * Неизвестный номер — это чужой QR, а не сломанный заказ.
+               *
+               * «Заказ не найден» отправляет менеджера искать заказ, которого
+               * не существует: к камере поднесли не тот код.
+               */
+              if (error instanceof ApiError && error.status === 404) {
+                return { type: 'failed', text: 'Ожидался QR-код заказа.' };
+              }
+              return {
+                type: 'failed',
+                text: error instanceof ApiError ? error.message : 'Не удалось выдать заказ.',
+              };
+            }
+          }}
+          onClose={() => setScanning(false)}
+        />
+      )}
     </section>
   );
 }

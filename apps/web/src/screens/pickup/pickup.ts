@@ -6,7 +6,8 @@
  * «ещё не привезли со сборки» вместо пустого места здесь важнее любой анимации.
  */
 
-export type PickupBlocker = 'NOT_PICKUP' | 'ORDER_BLOCKED' | 'NOT_PLACED' | 'ALREADY_ISSUED';
+export type PickupBlocker =
+  'NOT_PICKUP' | 'ORDER_CANCELLED' | 'ORDER_BLOCKED' | 'NOT_PLACED' | 'ALREADY_ISSUED';
 
 export type AssemblyState = 'NEW' | 'IN_ASSEMBLY' | 'ASSEMBLED' | 'NEEDS_REVIEW';
 
@@ -26,18 +27,32 @@ export interface PickupCard {
   blockers: PickupBlocker[];
 }
 
-export interface PickupDayView {
+/**
+ * Страница очереди ожидающих выдачи.
+ *
+ * Счётчик приходит с сервера по ПОЛНОМУ отбору, а не по загруженной странице:
+ * «ожидают выдачи 50» при сотне коробок на полке — это неверная работа.
+ */
+export interface PickupQueueView {
+  total: number;
+  items: PickupCard[];
+  nextCursor: string | null;
+  /** Разрешён ли ручной ввод. Решение администратора, не экрана. */
+  manualEntry: boolean;
+}
+
+export interface PickupIssuedView {
   deliveryDate: string;
-  waiting: PickupCard[];
   issued: PickupCard[];
 }
 
 /** Почему выдать нельзя — словами, которые понятны за прилавком. */
 export const BLOCKER_LABELS: Record<PickupBlocker, string> = {
-  NOT_PICKUP: 'Это не самовывоз: заказ везёт курьер',
+  NOT_PICKUP: 'Это не самовывозный заказ',
+  ORDER_CANCELLED: 'Заказ отменён — выдавать нельзя',
   ORDER_BLOCKED: 'Заказ помечен проблемным',
-  NOT_PLACED: 'Ещё не принят на склад',
-  ALREADY_ISSUED: 'Уже выдан покупателю',
+  NOT_PLACED: 'Нет фактической ячейки',
+  ALREADY_ISSUED: 'Заказ уже выдан покупателю',
 };
 
 export const ASSEMBLY_LABELS: Record<AssemblyState, string> = {
@@ -58,7 +73,28 @@ export function assemblyLabel(state: AssemblyState | null): string {
 
 /** Фактическое место заказа. Отсутствие места называется честно. */
 export function cellLabel(card: Pick<PickupCard, 'cellCode'>): string {
-  return card.cellCode ?? 'Не принят';
+  return card.cellCode ?? 'Нет ячейки';
+}
+
+/**
+ * Подпись дня в строке очереди.
+ *
+ * Справка, а не отбор: очередь одна на все дни, и вчерашняя коробка стоит
+ * в ней рядом с завтрашней. Заказ без даты так и называется — без даты.
+ */
+export function dayLabel(card: Pick<PickupCard, 'deliveryDate'>): string {
+  /*
+   * День читается как дата, а не как машинная запись.
+   *
+   * `2026-08-19` менеджер за прилавком разбирает по частям, а «19.08.2026»
+   * узнаёт сразу — так дата написана на всех остальных экранах.
+   */
+  const value = card.deliveryDate;
+  if (value === null || value === undefined || value === '') {
+    return 'без даты';
+  }
+  const [year, month, day] = value.split('-');
+  return day === undefined ? value : `${day}.${month}.${year}`;
 }
 
 /**

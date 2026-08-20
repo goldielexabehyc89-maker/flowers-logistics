@@ -37,6 +37,9 @@ export interface DraftMapPanelProps {
   deliveryDate: string;
   activeRouteId: string | null;
   drafts: readonly RouteListItem[];
+  /** Список черновиков скрыт — карта занимает всю рабочую ширину. */
+  draftsHidden: boolean;
+  onToggleDrafts: () => void;
 }
 
 /** Ответ контракта геометрии: линия пути, склад и остановки по порядку. */
@@ -53,6 +56,8 @@ export function DraftMapPanel({
   deliveryDate,
   activeRouteId,
   drafts,
+  draftsHidden,
+  onToggleDrafts,
 }: DraftMapPanelProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
@@ -220,10 +225,95 @@ export function DraftMapPanel({
     onError: failure,
   });
 
+  /*
+   * Переключатель списка стоит в панели карты и виден в обоих её состояниях —
+   * и когда подложка есть, и когда её нет. Скрытая панель обязана оставаться
+   * возвращаемой, а вернуть её больше неоткуда.
+   */
+  /*
+   * Шапка панели одна на все состояния.
+   *
+   * Счётчик точек и переключатель нераспределённых относятся к списку и к
+   * набору точек, а не к подложке под ними: при ненастроенной карте они
+   * пропадали вместе с ней, хотя список и заказы работают как обычно.
+   */
+  const legend =
+    (
+      /*
+       * Легенда — подпись под картой.
+       *
+       * На холсте три разных значка, и без подписи логист вынужден
+       * догадываться, чем серая точка отличается от синей.
+       */
+      <ul className="routes__legend" data-testid="routing-map-legend">
+        <li>
+          <span className="routes__legend-dot routes__legend-dot--stop" /> остановка черновика
+        </li>
+        <li>
+          <span className="routes__legend-dot routes__legend-dot--free" /> нераспределённая сделка
+        </li>
+        <li>
+          <span className="routes__legend-dot routes__legend-dot--depot" /> склад
+        </li>
+      </ul>
+    );
+
+  const panelHeader = (
+    <header className="routes__map-header">
+      <span
+        className="routes__map-count"
+        data-testid="route-line-points"
+        data-points={String(geometry.data?.line.length ?? -1)}
+      >
+        {activeRouteId === null
+          ? 'Черновик не раскрыт'
+          : `Точек на карте ${String(visible.length)}`}
+        {geometry.data?.unavailableReason !== undefined &&
+          geometry.data.unavailableReason !== null && (
+            <span className="routes__map-note" data-testid="route-line-missing">
+              {' · '}
+              {geometry.data.unavailableReason}
+            </span>
+          )}
+      </span>
+      <label className="routes__toggle">
+        <input
+          type="checkbox"
+          checked={showUnassigned}
+          data-testid="map-unassigned-toggle"
+          onChange={(event) => {
+            setShowUnassigned(event.target.checked);
+            setSelectedOrderId(null);
+          }}
+        />
+        Нераспределённые сделки дня
+      </label>
+      <button
+        type="button"
+        className="routes__map-toggle"
+        aria-expanded={!draftsHidden}
+        aria-controls="routing-drafts"
+        data-testid="routing-toggle-drafts"
+        onClick={onToggleDrafts}
+      >
+        {draftsHidden ? 'Показать черновики' : 'Скрыть черновики'}
+      </button>
+    </header>
+  );
+
   if (!status.ready) {
     return (
       <section className="routes__map-panel" data-testid="routing-map-panel">
-        <EmptyState title="Карта не настроена" description={status.message ?? ''} />
+        {panelHeader}
+        {/*
+          Панель сохраняет полную высоту: сообщение стоит там, где была бы
+          карта. Сжатый блок сверху выглядел бы поломкой раскладки, тогда как
+          это честное состояние — подложки нет, а список и действия работают.
+        */}
+        <div className="routes__map-empty">
+          <EmptyState title="Карта не настроена" description={status.message ?? ''} />
+        </div>
+        {legend}
       </section>
     );
   }
@@ -249,42 +339,15 @@ export function DraftMapPanel({
   return (
     <section className="routes__map-panel" data-testid="routing-map-panel">
       {/*
-        Служебная строка лежит НАД полотном карты, а не отдельной полосой сверху.
+        Служебная строка — шапка панели, а не ярлык поверх полотна.
 
-        Отдельный ряд отнимал у карты высоту, ради которой её и открывают:
-        счётчик точек и переключатель занимают несколько десятков пикселей,
-        а карта теряла их на всей ширине.
+        Поверх карты она закрывала собой её угол и читалась как часть
+        изображения: счётчик точек и переключатель — управление, и стоять
+        им рядом с кнопкой списка, в одном ряду.
       */}
-      <div className="routes__map-surface" data-testid="routing-map-surface">
-        <div className="routes__map-overlay">
-          <span
-            className="muted text-sm"
-            data-testid="route-line-points"
-            data-points={String(geometry.data?.line.length ?? -1)}
-          >
-            {activeRouteId === null ? 'черновик не раскрыт' : `точек: ${visible.length}`}
-            {geometry.data?.unavailableReason !== undefined &&
-              geometry.data.unavailableReason !== null && (
-                <span className="routes__map-note" data-testid="route-line-missing">
-                  {' · '}
-                  {geometry.data.unavailableReason}
-                </span>
-              )}
-          </span>
-          <label className="routes__toggle">
-            <input
-              type="checkbox"
-              checked={showUnassigned}
-              data-testid="map-unassigned-toggle"
-              onChange={(event) => {
-                setShowUnassigned(event.target.checked);
-                setSelectedOrderId(null);
-              }}
-            />
-            Нераспределённые сделки дня
-          </label>
-        </div>
+      {panelHeader}
 
+      <div className="routes__map-surface" data-testid="routing-map-surface">
         {basemapFailed ? (
           <ErrorState
             title="Подложка карты не загрузилась"
@@ -430,6 +493,8 @@ export function DraftMapPanel({
           )}
         </div>
       )}
+
+      {legend}
 
       {traffic !== null && (
         <p className="muted text-sm" data-testid="traffic-note">

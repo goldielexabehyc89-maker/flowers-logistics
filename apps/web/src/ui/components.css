@@ -1,5 +1,13 @@
 /* Стили общих компонентов. Значения берутся только из design tokens. */
 
+/*
+ * Кнопка выпуклая, потому что доступна.
+ *
+ * Это не украшение, а единственный признак доступности: границ нет, фон совпадает
+ * с полотном, и «можно нажать» читается ровно по приподнятости. Поэтому нажатая
+ * и неактивная кнопки вдавливаются — в обоих случаях приглашения нажать больше
+ * нет, но по разным причинам, и цвет текста их разводит.
+ */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -7,46 +15,72 @@
   gap: var(--space-2);
   min-height: var(--control-height);
   padding: 0 var(--space-4);
-  border: 1px solid var(--color-border);
+  border: none;
   border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text);
   font: inherit;
   font-weight: 500;
   cursor: pointer;
+  box-shadow: var(--shadow-out);
 }
 
 .btn:hover:not(:disabled) {
-  background: var(--color-surface-hover);
+  box-shadow: var(--shadow-in);
+}
+
+.btn:active:not(:disabled) {
+  box-shadow: var(--shadow-in);
 }
 
 .btn:disabled {
-  /* Заблокированное действие видно, но не притворяется доступным. */
-  opacity: 0.5;
+  /*
+   * Прозрачностью неактивность больше не показывается: на светотеневом фоне
+   * полупрозрачная кнопка выглядит не выключенной, а плохо отрисованной.
+   */
+  box-shadow: var(--shadow-in-disabled);
+  color: var(--color-text-disabled);
   cursor: not-allowed;
 }
 
 /*
- * Основная кнопка — единственный градиент в интерфейсе.
+ * Основная кнопка — единственная заливка в интерфейсе.
  *
- * Он маркирует ровно одно: главное действие текущего экрана. Как только
- * градиентом красится вторая кнопка, признак перестаёт работать.
+ * Она маркирует ровно одно: главное действие текущего экрана. Как только
+ * заливкой красится вторая кнопка, признак перестаёт работать. Светотени у неё
+ * нет — цвет и так выводит её из плоскости.
  */
 .btn--primary {
-  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-end));
-  border-color: transparent;
+  background: var(--color-accent);
   color: var(--color-text-inverse);
   box-shadow: var(--shadow-accent);
 }
 
 .btn--primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--color-accent-hover), var(--color-accent-end));
+  background: var(--color-accent-hover);
+  box-shadow: var(--shadow-accent);
 }
 
+.btn--primary:disabled {
+  background: var(--color-surface);
+  box-shadow: var(--shadow-in-disabled);
+  color: var(--color-text-disabled);
+}
+
+/*
+ * Опасное действие названо цветом текста, а не залито красным.
+ *
+ * Сплошная красная заливка притягивает взгляд сильнее главного действия, хотя
+ * отмена и удаление почти никогда не являются тем, что человек пришёл сделать.
+ */
 .btn--danger {
-  background: var(--color-error);
-  border-color: var(--color-error);
-  color: var(--color-text-inverse);
+  background: var(--color-surface);
+  color: var(--color-error);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--color-error-soft);
+  box-shadow: var(--shadow-out);
 }
 
 /* Иконка внутри кнопки не должна сжиматься, когда подпись длинная. */
@@ -60,13 +94,16 @@
   width: var(--control-height);
 }
 
+/* Тихая кнопка не выступает из полотна вовсе, пока на неё не навели. */
 .btn--ghost {
   background: transparent;
-  border-color: transparent;
+  color: var(--color-text-muted);
+  box-shadow: none;
 }
 
 .btn--ghost:hover:not(:disabled) {
-  background: var(--color-surface-hover);
+  color: var(--color-text);
+  box-shadow: var(--shadow-in);
 }
 
 .field {
@@ -91,27 +128,44 @@
   color: var(--color-error);
 }
 
+/* Поле ввода вдавлено: в него кладут, а не по нему нажимают. */
 .input {
   width: 100%;
   min-height: var(--control-height);
   padding: 0 var(--space-3);
-  border: 1px solid var(--color-border-strong);
+  border: none;
   border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text);
   font: inherit;
+  box-shadow: var(--shadow-in);
 }
 
-.input:focus-visible {
-  border-color: var(--color-accent);
+/*
+ * Ошибка поля показана не только цветом: к вдавленности добавляется контур.
+ * Одного красного оттенка недостаточно — его не различит часть людей.
+ */
+.input[aria-invalid='true'] {
+  box-shadow:
+    var(--shadow-in),
+    0 0 0 1px var(--color-error);
 }
 
+/*
+ * Бейдж — пилюля по содержимому.
+ *
+ * `inline-flex` и `justify-self: start` обязательны: прямым элементом сетки
+ * бейдж иначе растягивается на всю колонку и перестаёт читаться как метка
+ * состояния, превращаясь в цветную полосу во всю ширину.
+ */
 .badge {
-  display: inline-block;
-  padding: 1px var(--space-2);
-  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-pill);
   font-size: var(--font-size-xs);
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -132,25 +186,25 @@
   color: var(--color-info);
 }
 .badge--neutral {
-  background: var(--color-surface-muted);
+  background: var(--color-neutral-soft);
   color: var(--color-text-muted);
 }
 
+/* Пустое состояние и загрузка — вдавленный лоток: содержимого в нём пока нет. */
 .state {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-2);
   padding: var(--space-5);
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  border: none;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-muted);
   color: var(--color-text-muted);
+  box-shadow: var(--shadow-in-lg);
 }
 
 .state--error {
-  border-style: solid;
-  border-color: var(--color-error);
   background: var(--color-error-soft);
   color: var(--color-error);
 }
@@ -170,11 +224,11 @@
   width: min(560px, calc(100vw - 2 * var(--space-4)));
   max-height: calc(100dvh - 2 * var(--space-4));
   padding: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
+  border: none;
+  border-radius: var(--radius-2xl);
   background: var(--color-surface);
   color: var(--color-text);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-modal);
 }
 
 /*
@@ -190,7 +244,7 @@
 }
 
 .modal::backdrop {
-  background: rgb(28 36 48 / 45%);
+  background: var(--overlay);
 }
 
 /* Широкое окно: состав заказа с миниатюрами в 560 пикселей не помещается. */
@@ -294,10 +348,13 @@
    */
   flex-wrap: wrap;
   gap: var(--space-1);
-  padding: var(--space-1);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  padding: 5px;
+  background: var(--color-surface-muted);
+  border: none;
   border-radius: var(--radius-md);
+  /* Вдавленная «таблетка»: выбранный режим лежит в ней, а не над ней. */
+  box-shadow: var(--shadow-in);
+  max-width: 100%;
 }
 
 .segmented__item {
@@ -335,14 +392,14 @@
   color: var(--color-accent-hover);
   font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 18px;
 }
 
-/* На выбранном режиме фон уже тёмный: счётчик обязан остаться виден. */
+/* На выбранном режиме фон уже акцентный: счётчик обязан остаться виден. */
 .segmented__item--active .segmented__badge {
   background: var(--color-surface);
-  color: var(--color-text);
+  color: var(--color-accent-text);
 }
 
 .segmented__item:hover:not(.segmented__item--active) {
@@ -350,10 +407,22 @@
 }
 
 /* Выбранный режим ровно один, и он читается без цвета — по контрасту. */
+/*
+ * Выбранный режим вдавлен и подкрашен акцентом, а не залит тёмным.
+ *
+ * Тёмная плашка на светотеневом фоне читалась как отдельный объект поверх
+ * панели — то есть ровно наоборот смыслу выбора. Различие держится не только
+ * цветом: у выбранного режима другая тень и другой вес подписи.
+ */
 .segmented__item--active {
-  background: var(--color-selected);
-  color: var(--color-text-inverse);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
   font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+.segmented__item:hover:not(.segmented__item--active) {
+  box-shadow: var(--shadow-in);
 }
 
 /* --- Таблица --- */
@@ -525,59 +594,136 @@
   }
 }
 
-/* --- Экран сканирования склада --------------------------------------------
-   Экран перекрывает раздел целиком: кладовщик держит коробку и телефон, и
-   любая видимая под камерой кнопка была бы нажата случайно. Управление
-   прижато к низу — до него достаёт большой палец одной руки. */
-.scanner {
+/* --- Окно сканирования склада ----------------------------------------------
+   Камера НЕ занимает весь экран. Полноэкранная камера не оставляет
+   ориентира: не видно ни где человек находится, ни что происходит под ней.
+   Окно с отступами держит и то и другое, а фон затемнён, чтобы случайное
+   касание уходило в закрытие, а не в кнопку под камерой. */
+.scanner-backdrop {
   position: fixed;
   inset: 0;
   z-index: 40;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
+  align-items: center;
+  justify-content: center;
   padding: var(--space-3);
+  background: rgb(15 23 42 / 55%);
+  /*
+   * Прокрутка не уходит на страницу под окном.
+   *
+   * На телефоне список под затемнением уезжает вместе с пальцем, и человек
+   * теряет место, к которому вернётся после закрытия окна.
+   */
+  overscroll-behavior: contain;
+}
+
+/*
+ * Пока открыто любое окно, страница под ним стоит.
+ *
+ * Условие по наличию затемнения, а не флаг в состоянии: окна вкладываются
+ * друг в друга (камера открывается поверх окна отгрузки), и счётчик
+ * открытых окон однажды разошёлся бы с действительностью.
+ */
+body:has(.scanner-backdrop) {
+  overflow: hidden;
+}
+
+.scanner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(420px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
   background: var(--color-surface);
+  box-shadow: var(--shadow-md);
 }
 
 .scanner__bar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
 }
 
-.scanner__video {
-  flex: 1 1 auto;
-  width: 100%;
-  min-height: 0;
-  object-fit: cover;
+.scanner__title {
+  font-size: 17px;
+}
+
+.scanner__close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* Область камеры: фиксированная доля окна, чтобы кнопка отмены оставалась
+   видимой на любом телефоне. */
+.scanner__frame {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  max-height: 52vh;
   border-radius: var(--radius-md);
+  overflow: hidden;
   background: #000;
 }
 
+.scanner__video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Рамка считывания: подсказка, куда наводить. Ничего не решает и ничего
+   не обрезает — распознавание идёт по всему кадру. */
+.scanner__reticle {
+  position: absolute;
+  inset: 18%;
+  border: 2px solid rgb(255 255 255 / 85%);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 9999px rgb(0 0 0 / 25%);
+}
+
+.scanner__hint {
+  margin: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  text-align: center;
+}
+
+.scanner__cancel {
+  width: 100%;
+}
+
 .scanner__failure {
-  flex: 1 1 auto;
   display: flex;
   align-items: center;
+  min-height: 120px;
 }
 
 .scanner__progress {
+  margin: 0;
   font-weight: 600;
+  text-align: center;
 }
 
-/* Уведомление лежит поверх видео и забирает внимание целиком: результат
-   каждого скана обязан быть прочитан, а не мелькнуть в углу. */
 .scanner__live {
   display: contents;
 }
 
+/* Уведомление лежит внутри окна: результат каждого скана обязан быть
+   прочитан, а не мелькнуть в углу экрана. */
 .scanner__notice {
-  position: fixed;
-  left: var(--space-3);
-  right: var(--space-3);
-  bottom: var(--space-3);
-  z-index: 41;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -585,7 +731,6 @@
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  box-shadow: var(--shadow-md);
 }
 
 /* Цвет — дополнение, а не единственный признак: текст и live-region
@@ -596,4 +741,62 @@
 
 .scanner__notice--error {
   border-color: var(--color-error);
+}
+
+/* --- Меню редких действий --- */
+
+.action-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.action-menu__button {
+  min-height: 36px;
+  padding: 0 var(--space-3);
+}
+
+/*
+ * Список лежит ПОВЕРХ содержимого и не растягивает строку.
+ *
+ * В потоке он раздвигал бы соседние строки при каждом раскрытии, и таблица
+ * прыгала бы под курсором. Правый край прибит к кнопке: у последней колонки
+ * меню иначе уезжает за границу окна.
+ */
+.action-menu__list {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: var(--space-1);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out-lg);
+}
+
+.action-menu__item {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.action-menu__item:hover:not(:disabled) {
+  box-shadow: var(--shadow-in);
+}
+
+.action-menu__item:disabled {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
 }

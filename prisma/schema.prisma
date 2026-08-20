@@ -151,6 +151,8 @@ model User {
   returnsAsCourier   OrderReturn[]           @relation("ReturnCourier")
   returnsAccepted    OrderReturn[]           @relation("ReturnAcceptedBy")
   returnTransitions  OrderReturnTransition[] @relation("ReturnTransitionActor")
+  issueChecksMade    RouteIssueCheck[]       @relation("IssueCheckCheckedBy")
+  issueChecksCleared RouteIssueCheck[]       @relation("IssueCheckClearedBy")
   cancelledOrders    DeliveryOrder[]         @relation("OrderCancelledByLogist")
 
   cashEntries        LogistCashEntry[]      @relation("CashOwner")
@@ -791,6 +793,7 @@ model DeliveryOrder {
   fulfillmentPositions DeliveryOrderPosition[]
   fulfillmentRevisions OrderFulfillmentRevision[]
   placements           OrderPlacement[]
+  issueChecks   RouteIssueCheck[]
   pickupIssue          OrderPickupIssue?
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
@@ -2199,6 +2202,9 @@ model RouteCellBinding {
   releasedById String?   @db.Uuid
   releasedBy   User?     @relation("RouteCellReleasedBy", fields: [releasedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Несколько действующих ячеек у листа разрешены, повторная привязка той
+  /// же ячейки — нет. Частичные уникальные индексы объявлены миграцией:
+  /// Prisma не умеет выражать условие `WHERE "releasedAt" IS NULL`.
   @@index([routeId])
   @@index([cellId])
 }
@@ -2211,6 +2217,42 @@ enum IssueSessionState {
   COMPLETED
   /// Отменена администратором с причиной. Уже выданное остаётся в истории.
   CANCELLED
+}
+
+/// Проверенный при отгрузке заказ.
+///
+/// Дополнение к сессии выдачи, а не замена ей. Сессия — одна строка
+/// на маршрут и множества заказов не хранит; единственная связь заказа
+/// с сессией, `OrderPlacement.issueSessionId`, означает «выдан» и по CHECK
+/// заполняется только вместе с `ISSUED_TO_COURIER`.
+///
+/// «Проверен» и «выдан» — разные факты. Кладовщик сначала вносит коробки
+/// в лист, и только после последней происходит одна общая выдача: до неё
+/// маршрут можно оставить, сбросить проверку или обнаружить изменившийся
+/// состав, ничего не выдав.
+model RouteIssueCheck {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  sessionId String            @db.Uuid
+  session   RouteIssueSession @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  checkedAt   DateTime @default(now())
+  checkedById String   @db.Uuid
+  checkedBy   User     @relation("IssueCheckCheckedBy", fields: [checkedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Сброс закрывает отметку, а не стирает её: что именно вносили до сброса,
+  /// обязано остаться видимым.
+  clearedAt   DateTime?
+  clearedById String?   @db.Uuid
+  clearedBy   User?     @relation("IssueCheckClearedBy", fields: [clearedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Одна ДЕЙСТВУЮЩАЯ отметка на заказ внутри сессии — частичный уникальный
+  /// индекс объявлен миграцией: Prisma не умеет выразить условие.
+  @@index([sessionId])
+  @@index([orderId])
 }
 
 /// Сессия выдачи маршрутного листа назначенному курьеру.
@@ -2249,6 +2291,7 @@ model RouteIssueSession {
   version Int @default(1)
 
   placements OrderPlacement[]
+  checks     RouteIssueCheck[]
 
   @@index([routeId, state])
 }

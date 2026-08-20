@@ -623,7 +623,15 @@ async function publishOrderEvent(
       needsAttention: needsLogisticsAttention(reasons),
       deliveryDate: snapshot.deliveryDate,
     },
-    audienceRoles: [...ORDER_AUDIENCE],
+    /*
+     * Выход из области адресуется и менеджеру самовывоза.
+     *
+     * Архив и пропажа источника блокируют выдачу, и человек за прилавком
+     * обязан увидеть это до того, как отдаст коробку. Обычные правки заказа
+     * ему не рассылаются: раздел выдачи от них не меняется.
+     */
+    audienceRoles:
+      topic === 'order.scope_changed' ? [...ORDER_AUDIENCE, 'MANAGER'] : [...ORDER_AUDIENCE],
   });
 }
 
@@ -663,7 +671,8 @@ export async function markSourceMissing(
   await publishRealtimeEvent(tx, {
     topic: 'order.scope_changed',
     payload: { orderId, inScope: false, sourceMissing: true },
-    audienceRoles: [...ORDER_AUDIENCE],
+    // Пропавший заказ блокирует выдачу — менеджер узнаёт об этом сам.
+    audienceRoles: [...ORDER_AUDIENCE, 'MANAGER'],
   });
 
   // Пропавший заказ мог быть распределён. Этот путь не проходит через

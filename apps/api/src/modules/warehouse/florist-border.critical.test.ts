@@ -35,7 +35,13 @@ import { startShift } from '../fulfillment/shifts.js';
 import { readOrderCard } from '../fulfillment/card.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from './service.js';
 import { receiveOrder, type FlowDeps } from './placement.js';
-import { bindRouteCell, confirmCourier, issueOrder, pickOrderToRouteCell } from './route-flow.js';
+import {
+  bindRouteCell,
+  checkOrderForIssue,
+  confirmCourier,
+  pickOrderToRouteCell,
+  shipRoute,
+} from './route-flow.js';
 
 let ctx: TestContext;
 let flow: FlowDeps;
@@ -288,8 +294,10 @@ describe('склад и флорист на одном заказе', () => {
       CONTEXT,
     );
     await confirmCourier(flow, keeper, route.id, { courierUserId: courier.id }, CONTEXT);
-    const issued = await issueOrder(flow, keeper, route.id, { orderNumber: order.number }, CONTEXT);
-    expect(issued.routeActivated).toBe(true);
+    // Лист вносится в проверку и отгружается целиком: поштучной выдачи нет.
+    await checkOrderForIssue(flow, keeper, route.id, { orderNumber: order.number }, CONTEXT);
+    const shipped = await shipRoute(flow, keeper, route.id, CONTEXT);
+    expect(shipped.issued).toBe(1);
 
     // Ни одно производственное поле не сдвинулось: ни статус, ни версия
     // процесса, ни исполнитель, ни бланк, ни задание печати, ни ревизии.

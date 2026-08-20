@@ -14,7 +14,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -122,6 +122,25 @@ export function DealsWorkspace(): React.JSX.Element {
    * подставить «сколько-нибудь» значило бы принять бизнес-решение за человека.
    */
   /** Подтверждение создания маршрута: до него ничего не создаётся. */
+  /*
+   * Скрытие списка — только вид, состояние живёт здесь.
+   *
+   * Список не размонтируется и данных не теряет: панель убирается из сетки,
+   * а её запросы, фильтры, выбор и положение прокрутки остаются нетронутыми.
+   * Кнопка возврата стоит в карте, которая при этом занимает весь экран, —
+   * скрытая панель обязана оставаться возвращаемой.
+   */
+  const [listHidden, setListHidden] = useState(false);
+  /*
+   * Переход от пустой карты к работе с адресами.
+   *
+   * Кнопка на карте не рассказывает про список, а приводит к нему: панель
+   * открывается, и фокус встаёт на действии первого заказа, которому не хватает
+   * адреса. Фокусировать сразу нельзя — скрытая панель не принимает фокус,
+   * поэтому намерение запоминается и исполняется, когда список уже показан.
+   */
+  const fixAddressRef = useRef<HTMLButtonElement | null>(null);
+  const [fixAddressWanted, setFixAddressWanted] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   const [vehiclesInput, setVehiclesInput] = useState('');
@@ -156,6 +175,21 @@ export function DealsWorkspace(): React.JSX.Element {
   });
 
   const items = useMemo(() => list.data?.items ?? [], [list.data]);
+
+  /** Первый заказ, чья причина внимания чинится адресом: к нему и ведёт карта. */
+  const firstAddressId = useMemo(
+    () => items.find((item) => primaryAttention(item)?.action === 'FIX_ADDRESS')?.id ?? null,
+    [items],
+  );
+
+  useEffect(() => {
+    if (!fixAddressWanted || listHidden) {
+      return;
+    }
+    // Фокус сам подводит прокрутку списка к нужной строке.
+    fixAddressRef.current?.focus();
+    setFixAddressWanted(false);
+  }, [fixAddressWanted, listHidden, firstAddressId]);
   const visibleIds = useMemo(() => items.map((item) => item.id), [items]);
   const summary = summarize(selected, visibleIds);
 
@@ -366,13 +400,18 @@ export function DealsWorkspace(): React.JSX.Element {
         </p>
       )}
 
-      <div className="deals__body" data-testid="deals-body">
+      <div
+        className={['deals__body', listHidden ? 'deals__body--list-hidden' : null]
+          .filter((name) => name !== null)
+          .join(' ')}
+        data-testid="deals-body"
+      >
         {/*
           Левая колонка — окно постоянной высоты: шапка со счётчиком и панель
           действий закреплены, прокручивается только сам список. Раньше страница
           росла вместе с числом заказов, и карта уезжала вверх вместе с ней.
         */}
-        <div className="deals__column" data-testid="deals-column">
+        <div className="deals__column" id="deals-column" data-testid="deals-column">
           {/*
             Шапка списка.
 
@@ -381,11 +420,20 @@ export function DealsWorkspace(): React.JSX.Element {
             фильтров над обеими панелями больше нет — из-за него список и карта
             начинались ниже, а экран распадался на разрозненные полосы.
           */}
+          {/*
+            Шапка в два уровня, а не в четыре.
+            
+            День и поиск — то, чем пользуются постоянно, поэтому они стоят одной
+            строкой и поиск забирает всю оставшуюся ширину: номер заказа длинный,
+            и обрезанное поле заставляет печатать вслепую. Переключатель черновиков
+            и счётчик — вторая, более тихая строка: их читают, а не трогают.
+          */}
           <div className="deals__panel-head">
-            <div className="deals__filters">
+            <div className="deals__head-row">
               <TextInput
                 type="date"
                 aria-label="День"
+                className="deals__date"
                 value={date}
                 data-testid="deals-day"
                 onChange={(event) => {
@@ -393,6 +441,20 @@ export function DealsWorkspace(): React.JSX.Element {
                   setPages(1);
                 }}
               />
+              <TextInput
+                aria-label="Поиск в этом дне"
+                className="deals__search"
+                value={search}
+                placeholder="Номер, адрес, получатель или комментарий"
+                data-testid="deals-search"
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPages(1);
+                }}
+              />
+            </div>
+
+            <div className="deals__head-row deals__head-row--quiet">
               <label className="deals__toggle">
                 <input
                   type="checkbox"
@@ -405,48 +467,16 @@ export function DealsWorkspace(): React.JSX.Element {
                 />
                 Черновики
               </label>
-            </div>
-
-            <div className="deals__list-head">
-              <span data-testid="deals-total">
+              <span className="deals__muted" data-testid="deals-total">
                 Заказов: {total}
                 {/*
                   Заказы без координат существуют и требуют работы, но на карте
                   их нет. Счётчик называет оба числа, иначе разница между списком
                   и картой выглядит как потеря заказов.
                 */}
-                {withoutPoint > 0 && (
-                  <span className="deals__muted"> · без координат: {withoutPoint}</span>
-                )}
+                {withoutPoint > 0 && <> · без координат: {withoutPoint}</>}
               </span>
-
-              {/*
-                Одна кнопка с двумя состояниями: пока выбран не весь отбор — она
-                выбирает его целиком, когда выбран весь — снимает выбор.
-              */}
-              <Button
-                onClick={() =>
-                  setSelected((current) =>
-                    allSelected ? clearSelection() : selectAll(current, selectableIds ?? []),
-                  )
-                }
-                disabled={selectable.isPending || (selectableIds?.length ?? 0) === 0}
-                data-testid="deals-select-all"
-              >
-                {selectAllLabel(selected, selectableIds)}
-              </Button>
             </div>
-
-            <TextInput
-              aria-label="Поиск в этом дне"
-              value={search}
-              placeholder="Номер, адрес, получатель или комментарий"
-              data-testid="deals-search"
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setPages(1);
-              }}
-            />
           </div>
 
           <div className="deals__scroll" data-testid="deals-scroll">
@@ -652,6 +682,7 @@ export function DealsWorkspace(): React.JSX.Element {
                               type="button"
                               className="deals__attention-action"
                               data-testid="deal-attention-action"
+                              ref={item.id === firstAddressId ? fixAddressRef : null}
                               onClick={() => {
                                 if (attention.action === 'SET_INTERVAL') {
                                   setIntervalFor(item);
@@ -753,61 +784,98 @@ export function DealsWorkspace(): React.JSX.Element {
             Сводка показывает ВЕСЬ выбор, включая скрытое фильтром, — иначе
             заказ уехал бы в расчёт незаметно для человека.
           */}
-          {selected.length > 0 && (
-            <div className="deals__summary" data-testid="deals-summary">
-              <div className="deals__summary-head">
-                <span data-testid="deals-selected-count">Выбрано: {summary.total}</span>
-                {summary.hiddenCount > 0 && (
-                  <span className="deals__muted" data-testid="deals-hidden-count">
-                    скрыто фильтром: {summary.hiddenCount}
+          {/*
+            Нижняя панель закреплена и видна всегда.
+            
+            Раньше она появлялась только с первым выбранным заказом: кнопки
+            возникали из ниоткуда и сдвигали список под курсором, а до первого
+            нажатия человек не знал, что вообще можно сделать с выбором.
+            Теперь набор действий виден сразу, а недоступность объясняется
+            вдавленным состоянием, а не отсутствием кнопки.
+          */}
+          <div className="deals__summary" data-testid="deals-summary">
+            <div className="deals__summary-head">
+              <Button
+                onClick={() =>
+                  setSelected((current) =>
+                    allSelected ? clearSelection() : selectAll(current, selectableIds ?? []),
+                  )
+                }
+                disabled={selectable.isPending || (selectableIds?.length ?? 0) === 0}
+                data-testid="deals-select-all"
+              >
+                {selectAllLabel(selected, selectableIds)}
+              </Button>
+              {selected.length > 0 && (
+                <>
+                  <span className="deals__muted" data-testid="deals-selected-count">
+                    Выбрано: {summary.total}
                   </span>
-                )}
-                <button
-                  type="button"
-                  className="deals__link"
-                  data-testid="deals-clear"
-                  onClick={() => setSelected(clearSelection())}
-                >
-                  Очистить выбор
-                </button>
-              </div>
-              <div className="deals__summary-actions">
-                <Button
-                  variant="primary"
-                  data-testid="deals-manual-draft"
-                  disabled={manualDraft.isPending}
-                  onClick={() => setCreateOpen(true)}
-                >
-                  Создать маршрут вручную
-                </Button>
-                <Button
-                  data-testid="deals-auto-plan"
-                  loading={autoPlan.isPending}
-                  disabled={autoPlan.isPending}
-                  onClick={() => {
-                    // Тот же единственный сценарий: кнопка спрашивает параметры
-                    // и запускает тот же расчёт. Второго входа в разбивку нет.
-                    setSplitErrors({ vehicles: null, capacityOrders: null });
-                    setSplitOpen(true);
-                  }}
-                >
-                  {autoPlan.isPending ? 'Считаем маршруты…' : 'Распределить автоматически'}
-                </Button>
-              </div>
+                  {summary.hiddenCount > 0 && (
+                    <span className="deals__muted" data-testid="deals-hidden-count">
+                      скрыто фильтром: {summary.hiddenCount}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="deals__link"
+                    data-testid="deals-clear"
+                    onClick={() => setSelected(clearSelection())}
+                  >
+                    Очистить выбор
+                  </button>
+                </>
+              )}
             </div>
-          )}
+            <div className="deals__summary-actions">
+              {/*
+                Подписи короткие, полные — в подсказке.
+                
+                «Создать маршрут вручную» и «Распределить автоматически» втроём
+                в ширину панели не помещались и складывались в три строки:
+                панель вырастала втрое, отнимая место у последних карточек.
+                Смысл кнопок задаёт не длина подписи, а место и вид: главная
+                залита акцентом, соседняя — обычная.
+              */}
+              <Button
+                variant="primary"
+                data-testid="deals-manual-draft"
+                title="Создать маршрут вручную"
+                disabled={selected.length === 0 || manualDraft.isPending}
+                onClick={() => setCreateOpen(true)}
+              >
+                Создать
+              </Button>
+              <Button
+                data-testid="deals-auto-plan"
+                title="Распределить автоматически"
+                loading={autoPlan.isPending}
+                disabled={selected.length === 0 || autoPlan.isPending}
+                onClick={() => {
+                  // Тот же единственный сценарий: кнопка спрашивает параметры
+                  // и запускает тот же расчёт. Второго входа в разбивку нет.
+                  setSplitErrors({ vehicles: null, capacityOrders: null });
+                  setSplitOpen(true);
+                }}
+              >
+                {autoPlan.isPending ? 'Считаем…' : 'Автоматически'}
+              </Button>
+            </div>
+          </div>
         </div>
 
-        <div className="deals__map" data-testid="deals-map-column">
+        <div className="deals__map" id="deals-map-column" data-testid="deals-map-column">
           <DealsMap
             scopeKey={scopeKey}
             selected={selected}
-            /*
-              Выбор по отметке не зависит от того, загружена ли карточка заказа.
-              Раньше клик по маркеру заказа со второй страницы списка молча
-              ничего не делал: обработчик искал заказ среди загруженных.
-            */
+            listHidden={listHidden}
+            onToggleList={() => setListHidden((current) => !current)}
             onToggle={(point) => setSelected((current) => toggleMapPoint(current, point))}
+            withoutPoint={withoutPoint}
+            onFixAddresses={() => {
+              setListHidden(false);
+              setFixAddressWanted(true);
+            }}
           />
         </div>
       </div>

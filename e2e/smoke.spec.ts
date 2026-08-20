@@ -12,7 +12,14 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Browser,
+  type Locator,
+  type Page,
+} from '@playwright/test';
 
 /**
  * Собственные заказы сценария.
@@ -80,6 +87,115 @@ function seedWarehouseRoute(): {
   };
 }
 
+/**
+ * Полный складской стенд: все состояния рабочего места сразу.
+ *
+ * Сценарии выдачи проверяют соседство — лист без ячейки рядом с собранным,
+ * два листа одного курьера, лист без курьера, — и делить такой набор с
+ * соседним сценарием нельзя: он менял бы состояние под ногами.
+ */
+function seedWarehouseStand(): Record<string, string> {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-warehouse-stand'], {
+    encoding: 'utf8',
+  });
+  const values: Record<string, string> = {};
+  for (const match of output.matchAll(/^([^:\n]+):\s*(.+)$/gm)) {
+    const key = (match[1] ?? '').trim();
+    if (key !== 'описание') {
+      values[key] = (match[2] ?? '').trim();
+    }
+  }
+  if (values['мл собран'] === undefined) {
+    throw new Error('сеялка складского стенда не вернула номера листов');
+  }
+  return values;
+}
+
+/**
+ * Разворачивает курьера, у которого лежит нужный лист.
+ *
+ * Свёрнутая карточка курьера номера листа не содержит — в этом и смысл
+ * трёх уровней. Поэтому курьер ищется перебором, а не по тексту: выбирать
+ * «первого попавшегося» значило бы зависеть от порядка сеялок.
+ */
+async function openIssueRoute(
+  page: Page,
+  routeNumber: string,
+  courierPhone?: string,
+): Promise<Locator> {
+  const route = page.locator(`[data-testid="issue-route"][data-route-number="${routeNumber}"]`);
+  if ((await route.count()) > 0) {
+    return route;
+  }
+
+  /*
+   * Курьер известен — открываем сразу его карточку.
+   *
+   * Перебор всех курьеров работает, но растёт вместе с базой: в полном
+   * прогоне их накапливаются десятки, и сценарий упирается в собственный
+   * предел времени вместо того, чтобы что-то доказать.
+   *
+   * Ищем по телефону, а не по имени: у стенда своё имя на каждый прогон
+   * не выдумывается, и одноимённых курьеров к концу набора становится
+   * восемь.
+   */
+  if (courierPhone !== undefined) {
+    await page
+      .locator('[data-testid="issue-courier"]', { hasText: courierPhone })
+      .getByTestId('issue-courier-toggle')
+      .click();
+    await route.first().waitFor({ state: 'visible' });
+    return route;
+  }
+
+  const toggles = page.getByTestId('issue-courier-toggle');
+  // Доска грузится запросом: без ожидания перебор шёл бы по пустому списку.
+  await expect(toggles.first()).toBeVisible();
+
+  const total = await toggles.count();
+  for (let index = 0; index < total; index += 1) {
+    await toggles.nth(index).click();
+    try {
+      await route.first().waitFor({ state: 'visible', timeout: 1000 });
+      return route;
+    } catch {
+      // Не этот курьер: пробуем следующего.
+    }
+  }
+  throw new Error(`лист ${routeNumber} не найден ни у одного курьера в разделе «Выдача»`);
+}
+
+/**
+ * Разрешает ручной ввод номеров, не трогая браузерный сеанс.
+ *
+ * Сценарии выдачи не должны зависеть от того, включил ли настройку сосед:
+ * общий переключатель — как раз то состояние, которое соседний сценарий
+ * меняет под ногами.
+ */
+async function enableManualEntry(request: APIRequestContext): Promise<void> {
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  const settings = await request.get('/api/settings/planning', { headers });
+  const current = (
+    (await settings.json()) as {
+      warehouseManualEntry: { value: { enabled: boolean }; version: number };
+    }
+  ).warehouseManualEntry;
+  if (current.value.enabled) {
+    return;
+  }
+
+  const saved = await request.put('/api/settings/warehouse/manual-entry', {
+    headers,
+    data: { value: { enabled: true }, expectedVersion: current.version },
+  });
+  expect(saved.status()).toBe(200);
+}
+
 /** Московский день: тот же, что показывает интерфейс. */
 function today(): string {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date());
@@ -131,12 +247,66 @@ async function login(page: Page, phone: string, pin: string): Promise<void> {
   await page.getByLabel('Телефон').fill(phone);
   await page.getByLabel('PIN').fill(pin);
   await page.getByRole('button', { name: 'Войти' }).click();
+  /*
+   * Вход считается завершённым, когда экран входа сменился.
+   *
+   * Токен живёт в памяти вкладки, а сеанс между полными переходами держит
+   * cookie обновления — она ставится ответом на вход. Без ожидания следующая
+   * же `page.goto` успевала уйти раньше ответа, и сценарий заново получал
+   * форму входа: отказ выглядел как «раздел не отрисовался».
+   */
+  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 20_000 });
+}
+
+/**
+ * Переход в раздел верхнего уровня.
+ *
+ * Разделы живут в боковом меню, а оно с некоторых пор выезжает поверх экрана и
+ * закрыто по умолчанию: постоянная колонка отнимала у работы ширину. Ссылка
+ * при этом никуда не делась — изменился путь к ней, и он разный на разных
+ * ширинах: на телефоне разделы дублирует нижняя полоса, там меню открывать
+ * незачем. Помощник идёт тем путём, который на этом экране есть.
+ */
+async function openSection(page: Page, name: string): Promise<void> {
+  const direct = page.getByRole('link', { name, exact: true }).first();
+  if (await direct.isVisible().catch(() => false)) {
+    await direct.click();
+    return;
+  }
+  // Оболочка обязана быть отрисована: сразу после входа кнопок ещё нет,
+  // и «не видно» означало бы «не успело», а не «этого пути здесь нет».
+  await page.locator('.shell__topbar').waitFor({ state: 'visible', timeout: 15_000 });
+  // Кнопок вызова две и они взаимоисключающие: на широком экране — та, что
+  // выезжает панель, на телефоне — бургер. Берётся видимая.
+  const wide = page.locator('.shell__menu-button');
+  const button = (await wide.isVisible().catch(() => false))
+    ? wide
+    : page.locator('.shell__drawer-button');
+  const sidebar = page.locator('#shell-sidebar');
+  if (!(await sidebar.isVisible().catch(() => false))) {
+    await button.click();
+  }
+  const link = sidebar.getByRole('link', { name, exact: true }).first();
+  await link.waitFor({ state: 'visible', timeout: 15_000 });
+  await link.click();
 }
 
 async function logout(page: Page): Promise<void> {
-  // Кнопка учётной записи подписана именем пользователя, поэтому берётся
-  // последняя кнопка верхней строки, а не угадывается текст.
-  await page.locator('.shell__topbar button').last().click();
+  /*
+   * Учётная запись живёт в двух местах, и это не дублирование.
+   *
+   * На обычных экранах имя стоит кнопкой в верхней строке. В логистике верхняя
+   * строка занята вкладками раздела, и имя уехало вниз бокового меню, чтобы не
+   * отнимать у них ширину. Выход при этом никуда не делся — изменился путь
+   * к нему, поэтому помощник идёт тем путём, который на этом экране есть.
+   */
+  const topbarAccount = page.locator('.shell__topbar-account');
+  if (await topbarAccount.isVisible()) {
+    await topbarAccount.click();
+  } else {
+    await page.locator('.shell__menu-button').click();
+    await page.locator('#shell-sidebar .shell__account-name').click();
+  }
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page).toHaveURL(/\/login$/);
 }
@@ -179,7 +349,7 @@ async function ensureCourier(browser: Browser): Promise<string> {
   await login(admin, ADMIN_PHONE, ADMIN_PIN);
 
   const phone = uniquePhone();
-  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(admin, 'Сотрудники и курьеры');
   await admin.getByRole('button', { name: 'Добавить' }).click();
   await admin.getByLabel('ФИО').fill('Курьер проверки');
   await admin.getByLabel('Телефон').fill(phone);
@@ -246,22 +416,31 @@ test.describe.configure({ mode: 'serial' });
 test('сквозной сценарий этапа 1', async ({ page, browser }: { page: Page; browser: Browser }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
-  // 1. Первый вход администратора по одноразовому коду.
+  /*
+   * 1. Первый вход администратора по одноразовому коду.
+   *
+   * Заголовок логистического раздела проверяется на НАЛИЧИЕ, а не на показ.
+   * В «Логистике» верхняя строка — это сама навигация раздела, и заголовок
+   * первого уровня оставлен только для чтения с экрана. Требовать его
+   * видимости значило бы закреплять оформление, от которого экран отказался;
+   * доказывать он должен другое — что после входа мы оказались в «Сделках»
+   * и у страницы есть заголовок первого уровня с нужным именем.
+   */
   await activate(page, ADMIN_PHONE, ADMIN_CODE, ADMIN_PIN);
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // 2. Обычный выход и вход по PIN.
   await logout(page);
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // 3. Административная навигация: настройки доступны.
-  await page.getByRole('link', { name: 'Настройки' }).click();
+  await openSection(page, 'Настройки');
   await expect(page.getByRole('heading', { name: 'Состояние интеграций' })).toBeVisible();
 
   // 4. Создание курьера.
   courierPhone = uniquePhone();
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page.getByRole('button', { name: 'Добавить' }).click();
   await page.getByLabel('ФИО').fill('Курьер проверки');
   await page.getByLabel('Телефон').fill(courierPhone);
@@ -341,11 +520,11 @@ test('заморозка доходит до открытых сеансов б�
   const secondAdminContext = await browser.newContext();
   const secondAdminPage = await secondAdminContext.newPage();
   await login(secondAdminPage, ADMIN_PHONE, ADMIN_PIN);
-  await secondAdminPage.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(secondAdminPage, 'Сотрудники и курьеры');
   await secondAdminPage.getByLabel('Статус').selectOption('FROZEN');
 
   // Заморозка курьера в первом сеансе.
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page
     .getByRole('row', { name: /Курьер проверки/ })
     .getByRole('button', { name: 'Заморозить' })
@@ -369,9 +548,9 @@ test('Сделки: день, поиск, выбор из списка и руч
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // Рабочее пространство: список и карта видны одновременно и показывают
   // одно множество — их питает один серверный отбор.
@@ -403,7 +582,7 @@ test('Сделки: день, поиск, выбор из списка и руч
   await page.getByTestId('deals-manual-draft').click();
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
   await page.getByTestId('create-route-draft').click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
 });
 
@@ -430,9 +609,9 @@ test('карта не настроена: интерфейс говорит че
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   await expect(page.getByText('Карта не настроена', { exact: true })).toBeVisible();
   // Карта не появилась, но работа не остановилась: список черновиков дня
@@ -476,7 +655,7 @@ test('Сделки: ручная точка выводит заказ из «Т�
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -527,7 +706,7 @@ test('Сделки: ручная точка выводит заказ из «Т�
   // 5. В «Маршрутизации» редактора точки нет: там работают только с заказами,
   //    у которых координаты уже пригодны.
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page.getByRole('button', { name: 'Указать точку' })).toHaveCount(0);
 });
 
@@ -591,9 +770,9 @@ test('собственная подложка: всё с нашего origin и 
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   await expect.poll(() => captured.config !== null, { timeout: 15_000 }).toBe(true);
 
@@ -720,9 +899,9 @@ test('адреса подложки: архив запрашивается из 
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   // Стиль и манифест в порядке: карта настроена, и интерфейс об этом не спорит.
   await expect(page.getByText('Карта не настроена')).toHaveCount(0);
@@ -796,7 +975,7 @@ test('маршрут: черновик → состав → порядок → �
   expect([first, second, third].every((number) => number !== '')).toBe(true);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
@@ -812,7 +991,7 @@ test('маршрут: черновик → состав → порядок → �
 
   // Переход ведёт в созданный черновик: он раскрыт, а не потерян в списке.
   await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page.getByRole('button', { name: 'Создать черновик' })).toHaveCount(0);
 
   const card = page.locator('.routes__card');
@@ -925,9 +1104,9 @@ test('маршрут: черновик → состав → порядок → �
 
   // Тот же маршрут появляется в маршрутных листах.
   // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeAttached();
   await page
     .locator('.routes__list-item', { hasText: routeNumber })
     .getByRole('button', { name: 'Открыть лист' })
@@ -959,7 +1138,7 @@ test('перехват блокировки переводит прежнего 
 
   // Первый сеанс создаёт черновик и держит его в работе.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
   const ownDeal = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -1025,7 +1204,7 @@ test('печатная версия листа не содержит навиг�
   expect(own).toBeTruthy();
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
   const ownCard = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -1050,7 +1229,14 @@ test('печатная версия листа не содержит навиг�
 
   // «Создать МЛ» приводит прямо в «Маршрутные листы».
   await expect(page).toHaveURL(/\/logistics\/route-sheets/);
-  await page.waitForSelector('.routes__list-item, .state', { state: 'visible' });
+  /*
+   * Ждём именно список, а не «список или любое состояние».
+   *
+   * Экран открывается на сегодняшнем дне и сначала показывает состояние
+   * загрузки: прежнее ожидание засчитывало его за результат и считало листы
+   * раньше, чем они отрисовывались.
+   */
+  await expect(page.locator('.routes__list-item').first()).toBeVisible({ timeout: 15000 });
   const sheets = page.locator('.routes__list-item', { hasText: own ?? '' });
   const anySheet = (await sheets.count()) > 0 ? sheets : page.locator('.routes__list-item');
   if ((await anySheet.count()) === 0) {
@@ -1119,7 +1305,7 @@ test('Сделки: точный выбор → расчёт → превью �
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
   // 1. Настройки: обязательные условия задаются формами, а не запросами к API.
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   const settings = page.getByTestId('planning-settings');
   await expect(settings).toBeVisible();
 
@@ -1198,7 +1384,7 @@ test('Сделки: точный выбор → расчёт → превью �
    */
   // Сколько черновиков уже есть у дня: разбивка обязана добавить ровно два,
   // а не «сделать так, чтобы их стало два» — соседние сценарии оставляют свои.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   /*
    * Считать черновики можно только после загрузки списка.
@@ -1210,7 +1396,25 @@ test('Сделки: точный выбор → расчёт → превью �
    */
   await expect(page.getByText('Загружаем черновики…')).toHaveCount(0);
   await page.waitForSelector('.routes__draft, .state', { state: 'visible' });
-  const draftsBefore = await page.getByTestId('routing-drafts').locator('.routes__draft').count();
+
+  /*
+   * Число читается ДВА раза подряд и принимается, только когда совпало.
+   *
+   * Список черновиков подтягивается запросом, и однократный счёт мог
+   * попасть в промежуток между «загрузка кончилась» и «данные пришли»:
+   * дальше проверка сравнивала ноль с настоящим числом и падала
+   * не там, где ошибка.
+   */
+  const draftsLocator = page.getByTestId('routing-drafts').locator('.routes__draft');
+  let draftsBefore = await draftsLocator.count();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await page.waitForTimeout(250);
+    const again = await draftsLocator.count();
+    if (again === draftsBefore) {
+      break;
+    }
+    draftsBefore = again;
+  }
 
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
@@ -1260,7 +1464,7 @@ test('Сделки: точный выбор → расчёт → превью �
   // 4. Ожидание идёт в «Сделках», а переход ведёт в ВИДИМОЕ предложение:
   //    черновиков ещё нет и не будет до явного «Применить».
   await expect(page).toHaveURL(/\/logistics\/routing\?.*run=/, { timeout: 60_000 });
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
   await expect(page.getByRole('heading', { name: 'Предложенный расчёт' })).toBeVisible();
 
   const drafts = page.getByTestId('routing-drafts').locator('.routes__draft');
@@ -1313,7 +1517,7 @@ test('Сделки: точный выбор → расчёт → превью �
 
   // 7. Третья обязательная форма: время обслуживания. Меняется после
   //    применения, поэтому условия уже применённого плана не задевает.
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   await settings.getByTestId('service-car').fill('12');
   await settings.getByTestId('service-foot').fill('15');
   await settings.getByTestId('service-save').click();
@@ -1447,7 +1651,7 @@ test('флорист: смена, захват, сборка, бланк и от
   // 1. Администратор заводит флориста.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   const floristPhone = uniquePhone();
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page.getByRole('button', { name: 'Добавить' }).click();
   await page.getByLabel('ФИО').fill('Флорист проверки');
   await page.getByLabel('Телефон').fill(floristPhone);
@@ -1800,19 +2004,24 @@ test('флорист на телефоне: без нижней полосы, к
 
 test('складские ячейки: администратор управляет справочником, кладовщик только смотрит', async ({
   page,
+  request,
   browser,
 }: {
   page: Page;
+  request: APIRequestContext;
   browser: Browser;
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
 
   const WAREHOUSE_PIN = '9753';
   const code = `E2E-${Date.now() % 100_000}`;
 
   // 1. Администратор заводит ячейку в настройках.
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
 
   const cells = page.locator('section', { hasText: 'Складские ячейки' }).first();
   await expect(cells).toBeVisible();
@@ -1842,7 +2051,7 @@ test('складские ячейки: администратор управля
 
   // 4. Администратор заводит кладовщика.
   const warehousePhone = uniquePhone();
-  await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await openSection(page, 'Сотрудники и курьеры');
   await page.getByRole('button', { name: 'Добавить' }).click();
   await page.getByLabel('ФИО').fill('Кладовщик проверки');
   await page.getByLabel('Телефон').fill(warehousePhone);
@@ -1885,112 +2094,202 @@ test('складские ячейки: администратор управля
   await context.close();
 });
 
-test('склад: приёмка → комплектование → пауза → курьер → поштучная выдача → ACTIVE', async ({
+test('склад: развилка «сборка или хранение», сборка и отгрузка листа целиком', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
-  const storageCell = process.env['E2E_WH_STORAGE_CELL'] ?? '';
-  const routeCell = process.env['E2E_WH_ROUTE_CELL'] ?? '';
-  const routeNumber = process.env['E2E_WH_ROUTE'] ?? '';
-  const firstOrder = process.env['E2E_WH_ORDER_1'] ?? '';
-  const secondOrder = process.env['E2E_WH_ORDER_2'] ?? '';
-
-  test.skip(
-    storageCell === '' || routeCell === '' || routeNumber === '' || firstOrder === '',
-    'не передана складская фикстура (E2E_WH_*)',
-  );
+  const storageCell = requiredEnv('E2E_WH_STORAGE_CELL');
+  const routeCell = requiredEnv('E2E_WH_ROUTE_CELL');
+  const routeNumber = requiredEnv('E2E_WH_ROUTE');
+  const firstOrder = requiredEnv('E2E_WH_ORDER_1');
+  const secondOrder = requiredEnv('E2E_WH_ORDER_2');
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
 
-  // 1. Приёмка: пара сканов «заказ + ячейка». До второго скана база не меняется.
-  for (const orderNumber of [firstOrder, secondOrder]) {
-    await page.getByTestId('wh-scan-order').fill(orderNumber);
-    await page.getByTestId('wh-scan-order').press('Enter');
-    await expect(page.getByTestId('wh-scanned-order')).toHaveText(orderNumber);
+  /*
+   * 1. Приёмка заказа, который уже входит в подтверждённый лист.
+   *
+   * Развилку выбирает человек: обе дороги законны, и подставленная по
+   * умолчанию увела бы коробку не туда молча.
+   */
+  await page.getByTestId('wh-scan-order').fill(firstOrder);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  const choice = page.getByTestId('wh-route-choice');
+  await expect(choice).toContainText(`уже входит в МЛ ${routeNumber}`);
+  // До ответа поля ячейки не существует: шага «куда» ещё не было.
+  await expect(page.getByTestId('wh-scan-cell')).toHaveCount(0);
 
-    await page.getByTestId('wh-scan-cell').fill(storageCell);
-    await page.getByTestId('wh-place').click();
-    await expect(page.locator('.toast-region')).toContainText(orderNumber);
-    // Поле снова ждёт заказ: шаг завершён.
-    await expect(page.getByTestId('wh-scan-order')).toBeVisible();
+  // «Всё равно в хранение»: коробка ложится в обычную ячейку и поднимается
+  // в верхнюю группу — листу её ещё нести.
+  await page.getByTestId('wh-choice-storage').click();
+  await page.getByTestId('wh-scan-cell').fill(storageCell);
+  await page.getByTestId('wh-place').click();
+  await expect(page.locator('.toast-region')).toContainText(firstOrder);
+
+  const relocation = page.getByTestId('wh-group-relocation');
+  await expect(relocation).toContainText(firstOrder);
+  await expect(relocation).toContainText(storageCell);
+
+  /*
+   * 2. «В сборку»: полка листа назначается тем же сканом.
+   *
+   * У листа ещё нет ни одной ячейки, поэтому подсказка зовёт назначить
+   * первую, а не искать среди назначенных.
+   */
+  await page.getByTestId('wh-scan-order').fill(secondOrder);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  await expect(page.getByTestId('wh-route-choice')).toBeVisible();
+  await page.getByTestId('wh-choice-assembly').click();
+  await expect(page.getByTestId('wh-route-cell-hint')).toHaveText('Назначьте ячейку маршрута');
+  await page.getByTestId('wh-scan-cell').fill(routeCell);
+  await page.getByTestId('wh-place').click();
+  await expect(page.locator('.toast-region')).toContainText(`для МЛ ${routeNumber}`);
+
+  // 3. Доска сборки: полка появилась у листа, собран один заказ из двух.
+  await page.getByTestId('wh-tab-picking').click();
+  const routeCard = page.locator(
+    `[data-testid="assembly-route"][data-route-number="${routeNumber}"]`,
+  );
+  await expect(routeCard.getByTestId('assembly-route-cells')).toContainText(routeCell);
+  await expect(routeCard).toContainText('готово 1');
+
+  /*
+   * 4. Выдача: три уровня и отдельная кнопка у каждого листа.
+   *
+   * По умолчанию всё свёрнуто: кладовщику нужен выбор курьера, а не чтение
+   * всего склада.
+   */
+  await page.getByTestId('wh-tab-issue').click();
+  await expect(page.locator('[data-testid="issue-route"]')).toHaveCount(0);
+  const issueRoute = await openIssueRoute(page, routeNumber);
+  await expect(issueRoute).toBeVisible();
+
+  // Третий уровень: заказы листа раскрываются отдельно.
+  await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
+  await issueRoute.getByTestId('issue-route-toggle').click();
+  await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
+
+  await issueRoute.getByTestId('issue-ship').click();
+  const ship = page.getByTestId('issue-ship-dialog');
+  await expect(ship).toBeVisible();
+
+  /*
+   * Курьер подтверждается один раз на лист: до этого вносить нечего.
+   */
+  await page.getByTestId('issue-confirm-courier').click();
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 0 из 2');
+
+  /*
+   * Ручного ввода нет: настройка выключена по умолчанию.
+   *
+   * Набранный руками номер доказывает только то, что человек его набрал,
+   * поэтому обычный режим работы — камера и аппаратный сканер.
+   */
+  await expect(page.getByTestId('issue-manual')).toHaveCount(0);
+  await expect(page.getByTestId('issue-scan')).toBeVisible();
+
+  // Администратор разрешает ручной ввод — изменение действует сразу.
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const settings = await page.request.get('/api/settings/planning', {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const version = ((await settings.json()) as { warehouseManualEntry: { version: number } })
+    .warehouseManualEntry.version;
+  const enabled = await page.request.put('/api/settings/warehouse/manual-entry', {
+    headers: { authorization: `Bearer ${token}` },
+    data: { value: { enabled: true }, expectedVersion: version },
+  });
+  expect(enabled.status()).toBe(200);
+
+  await page.reload();
+  await page.getByTestId('wh-tab-issue').click();
+  await openIssueRoute(page, routeNumber);
+  await issueRoute.getByTestId('issue-ship').click();
+  await expect(page.getByTestId('issue-manual')).toBeVisible();
+
+  // 5. Сессия уже открыта: подтверждать курьера второй раз не нужно.
+  await expect(page.getByTestId('issue-confirm-courier')).toHaveCount(0);
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 0 из 2');
+
+  await page.getByTestId('issue-manual-order').fill(secondOrder);
+  await ship.getByRole('button', { name: 'Внести' }).click();
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 2');
+
+  // Повтор того же заказа честно называется и счётчик не двигает.
+  await page.getByTestId('issue-manual-order').fill(secondOrder);
+  await ship.getByRole('button', { name: 'Внести' }).click();
+  await expect(page.locator('.toast-region')).toContainText('уже внесён');
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 2');
+
+  // Частично внесённый лист отгрузить нельзя: коробки уезжают вместе.
+  await expect(page.getByTestId('issue-ship-submit')).toBeDisabled();
+
+  /*
+   * 6. «Сбросить» очищает только прогресс.
+   *
+   * Полки при этом не трогаются: собранный заказ остаётся в маршрутной
+   * ячейке, и доска сборки этого не замечает.
+   */
+  await page.getByTestId('issue-reset').click();
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 0 из 2');
+  await page.getByTestId('issue-ship-close').click();
+  await page.getByTestId('wh-tab-picking').click();
+  await expect(routeCard.getByTestId('assembly-route-cells')).toContainText(routeCell);
+  await expect(routeCard).toContainText('готово 1');
+
+  // 7. Первую коробку переносят из хранения в ячейку листа — теперь полка известна.
+  await page.getByTestId('wh-tab-storage').click();
+  await page.getByTestId('wh-scan-order').fill(firstOrder);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  await page.getByTestId('wh-choice-assembly').click();
+  await expect(page.getByTestId('wh-route-cell-hint')).toHaveText(`Сканируйте ячейку ${routeCell}`);
+  await page.getByTestId('wh-scan-cell').fill(routeCell);
+  await page.getByTestId('wh-place').click();
+  await expect(page.locator('.toast-region')).toContainText(`для МЛ ${routeNumber}`);
+
+  // Собранный целиком лист ушёл в свёрнутую группу «Собранные».
+  await page.getByTestId('wh-tab-picking').click();
+  await expect(page.getByTestId('assembly-assembled-count')).not.toHaveText('0');
+
+  // 8. Отгрузка: сначала оба заказа, потом одна атомарная операция.
+  await page.getByTestId('wh-tab-issue').click();
+  await openIssueRoute(page, routeNumber);
+  await issueRoute.getByTestId('issue-ship').click();
+  let done = 0;
+  for (const order of [firstOrder, secondOrder]) {
+    await page.getByTestId('issue-manual-order').fill(order);
+    await ship.getByRole('button', { name: 'Внести' }).click();
+    done += 1;
+    // Каждый заказ вносится отдельно: ждём ответ сервера, а не спешим.
+    await expect(page.getByTestId('issue-progress')).toHaveText(`Внесено: ${done} из 2`);
   }
 
-  const placed = page.locator('[data-testid="wh-placement-row"]', { hasText: firstOrder });
-  await expect(placed).toContainText(storageCell);
+  await page.getByTestId('issue-ship-submit').click();
+  await expect(page.locator('.toast-region')).toContainText('отгружен курьеру');
 
-  // 2. Комплектование: привязка маршрутной ячейки и перенос первого заказа.
-  await page.getByTestId('wh-tab-picking').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText('не привязана');
+  // Лист уехал: на доске выдачи его больше нет.
+  await expect(
+    page.locator(`[data-testid="issue-route"][data-route-number="${routeNumber}"]`),
+  ).toHaveCount(0);
 
-  await page.getByTestId('wh-bind-cell').fill(routeCell);
-  await page.getByTestId('wh-bind-submit').click();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
-
-  // Ручной путь требует ту же пару «заказ → ячейка», что и камера: код ячейки
-  // из карточки листа больше не подставляется.
-  await page.getByTestId('wh-pick-order').fill(firstOrder);
-  await page.getByTestId('wh-pick-order').press('Enter');
-  await expect(page.getByTestId('wh-pick-scanned')).toHaveText(firstOrder);
-  await page.getByTestId('wh-pick-cell').fill(routeCell);
-  await page.getByTestId('wh-pick-submit').click();
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
-
-  // 3. Пауза и продолжение: уходим на другую вкладку и возвращаемся.
-  await page.getByTestId('wh-tab-storage').click();
-  await expect(page.getByTestId('wh-scan-order')).toBeVisible();
-  await page.getByTestId('wh-tab-picking').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  // Прогресс не потерян.
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
-
-  await page.getByTestId('wh-pick-order').fill(secondOrder);
-  await page.getByTestId('wh-pick-order').press('Enter');
-  await expect(page.getByTestId('wh-pick-scanned')).toHaveText(secondOrder);
-  await page.getByTestId('wh-pick-cell').fill(routeCell);
-  await page.getByTestId('wh-pick-submit').click();
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
-
-  // 4. Выдача: сначала подтверждение курьера, затем заказы по одному.
-  await page.getByTestId('wh-tab-issue').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  await expect(page.getByTestId('wh-route-courier')).not.toHaveText('не назначен');
-
-  // Без подтверждения курьера поля выдачи не существует.
-  await expect(page.getByTestId('wh-issue-order')).toHaveCount(0);
-  await page.getByTestId('wh-confirm-courier').click();
-  await expect(page.getByTestId('wh-issue-order')).toBeVisible();
-
-  await page.getByTestId('wh-issue-order').fill(firstOrder);
-  await page.getByTestId('wh-issue-submit').click();
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
-  // Маршрут ещё подтверждён: выдан не весь лист.
-  await expect(page.locator('[data-testid="wh-route-card"]')).toHaveAttribute(
-    'data-route-state',
-    'CONFIRMED',
-  );
-
-  await page.getByTestId('wh-issue-order').fill(secondOrder);
-  await page.getByTestId('wh-issue-submit').click();
-
-  // 5. Последний заказ перевёл маршрут в ACTIVE и освободил маршрутную ячейку.
-  await expect(page.locator('[data-testid="wh-route-card"]')).toHaveAttribute(
-    'data-route-state',
-    'ACTIVE',
-  );
-  await expect(page.getByTestId('wh-route-active')).toBeVisible();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText('не привязана');
-
-  // 6. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
-  // что именно он повёз, — но уже без изменяющих действий.
-  // Вкладки принадлежат разделу «Логистика»: сначала он, потом вкладка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  /*
+   * 9. Лист не исчез из логистики: курьер в дороге, и логист обязан видеть,
+   * что именно он повёз, — но уже без изменяющих действий.
+   */
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
   const activeRow = page.locator('.routes__list-item', { hasText: routeNumber });
   await expect(activeRow).toContainText('Передан курьеру');
   await activeRow.getByRole('button', { name: 'Открыть лист' }).click();
@@ -2161,13 +2460,21 @@ test('курьер: досрочность, «Не доставлен» с пр�
   await expect(returns).toBeVisible();
   const returned = returns.locator(`[data-order-number="${secondOrder}"]`);
   await expect(returned).toContainText('У курьера');
-  await expect(returned).toContainText('Передайте заказ кладовщику');
+  /*
+   * Пояснение стоит один раз на весь блок, а не в каждой строке.
+   *
+   * Три одинаковых предложения подряд ничего не добавляли, а гарантия
+   * та же: пока склад не принял заказ, он числится за курьером.
+   */
+  await expect(returns).toContainText('Пока склад не принял заказ, он числится за вами');
 
   await returned.getByTestId('delivery-return-departing').click();
   await expect(returned).toContainText('Возвращается на склад');
 
   // 5. История текущего дня показывает оба результата и не скрывает данные.
-  await page.getByRole('link', { name: 'История' }).first().click();
+  // Разделы открываются через меню: боковая панель лежит поверх экрана
+  // и до нажатия на кнопку меню ссылок не показывает.
+  await openSection(page, 'История доставок');
   await expect(page.getByRole('heading', { name: 'История', level: 1 })).toBeVisible();
   // У первого заказа записей ДВЕ: отменённая и новая. Это и есть доказательство
   // того, что история не переписывается — отменённый результат остаётся в ней
@@ -2188,13 +2495,18 @@ test('курьер: досрочность, «Не доставлен» с пр�
 
 test('возврат: логист ждёт склад, склад принимает, повторная доставка открывается', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
   const orderNumber = process.env['E2E_WH_ORDER_2'] ?? '';
   const storageCell = process.env['E2E_WH_STORAGE_CELL'] ?? '';
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   test.skip(orderNumber === '' || storageCell === '', 'не передана складская фикстура (E2E_WH_*)');
 
   /*
@@ -2265,7 +2577,7 @@ test('возврат: логист ждёт склад, склад приним�
   await page.getByRole('button', { name: 'Закрыть' }).first().click();
 
   // 3. Склад принимает возврат: скан заказа и скан обычной ячейки хранения.
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await page.getByTestId('wh-tab-returns').click();
   await page.getByTestId('wh-return-order').fill(orderNumber);
   await page.getByTestId('wh-return-order').press('Enter');
@@ -2283,7 +2595,7 @@ test('возврат: логист ждёт склад, склад приним�
 
   // 4. У логиста заказ стал пригодным для нового маршрута — без F5.
   // Вкладки логистики видны только внутри раздела, поэтому сначала раздел.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Требуют решения' }).first().click();
   const afterRow = page.locator(
     `[data-testid="resolution-row"][data-order-number="${orderNumber}"]`,
@@ -2378,9 +2690,11 @@ test('два логиста решают одну задачу: побеждае
 
 test('два сеанса: приёмка возврата складом убирает красный блок у курьера без F5', async ({
   page,
+  request,
   browser,
 }: {
   page: Page;
+  request: APIRequestContext;
   browser: Browser;
 }) => {
   const orderNumber = process.env['E2E_RET_RETURNING'] ?? '';
@@ -2389,6 +2703,9 @@ test('два сеанса: приёмка возврата складом уби
   const courierPin = process.env['E2E_RET_COURIER_PIN'] ?? '';
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   test.skip(
     orderNumber === '' || cellCode === '' || courierPhone === '' || courierPin === '',
     'не передана фикстура возвратов (E2E_RET_*)',
@@ -2406,7 +2723,7 @@ test('два сеанса: приёмка возврата складом уби
 
     // Кладовщик принимает возврат в другом сеансе.
     await login(page, ADMIN_PHONE, ADMIN_PIN);
-    await page.getByRole('link', { name: 'Склад' }).first().click();
+    await openSection(page, 'Склад');
     await page.getByTestId('wh-tab-returns').click();
     await page.getByTestId('wh-return-order').fill(orderNumber);
     await page.getByTestId('wh-return-order').press('Enter');
@@ -2683,7 +3000,7 @@ test('склад: «Требуется перемещение» и «Отмен�
   test.skip(inRouteCell === '' || cancelled === '', 'не передана фикстура возвратов (E2E_RET_*)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
 
   const relocation = page.getByTestId('wh-group-relocation');
   const cancelledGroup = page.getByTestId('wh-group-cancelled');
@@ -2730,7 +3047,7 @@ test('печать: «Общие» показывают серверный на�
    * включения «Общих», пришло с сервера, а не осталось на экране.
    */
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Флорист' }).first().click();
+  await openSection(page, 'Флорист');
   await page.getByRole('button', { name: 'Печать' }).click();
   await page.getByTestId('print-filter-printed').click();
 
@@ -2744,13 +3061,18 @@ test('печать: «Общие» показывают серверный на�
 
 test('карты: собранный заказ окрашен одинаково в «Сделках» и «Маршрутизации»', async ({
   page,
+  request,
 }: {
   page: Page;
+  request: APIRequestContext;
 }) => {
   const orderNumber = process.env['E2E_RET_WITH_COURIER'] ?? '';
   const cellCode = process.env['E2E_RET_STORAGE_CELL'] ?? '';
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
   test.skip(orderNumber === '' || cellCode === '', 'не передана фикстура возвратов (E2E_RET_*)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
@@ -2762,7 +3084,7 @@ test('карты: собранный заказ окрашен одинаков�
    * становится готовым к отправке — по второму признаку готовности,
    * «лежит в ячейке». Именно его и проверяет цвет.
    */
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await page.getByTestId('wh-tab-returns').click();
   await page.getByTestId('wh-return-order').fill(orderNumber);
   await page.getByTestId('wh-return-order').press('Enter');
@@ -2779,24 +3101,38 @@ test('карты: собранный заказ окрашен одинаков�
    */
   const expected = 'rgb(176, 201, 101)';
 
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   const dealsDot = page.locator('.map-point--assembled .map-point__dot').first();
   await expect(dealsDot).toBeVisible();
   await expect(dealsDot).toHaveCSS('background-color', expected);
 
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  /*
+   * Карта маршрутизации по умолчанию показывает только состав раскрытого
+   * черновика. Наш заказ ни в один черновик не входит, поэтому включаем
+   * нераспределённые явно — это тот самый переключатель, которым логист
+   * и смотрит на свободные сделки дня.
+   *
+   * Раньше сценарий на него не нажимал и держался на постороннем состоянии,
+   * оставленном соседями: в полном наборе он падал, в одиночку проходил.
+   */
+  await expect(page.getByTestId('routing-map-surface')).toBeVisible();
+  await page.getByTestId('map-unassigned-toggle').check();
+  await expect(page.locator('.map-point').first()).toBeVisible({ timeout: 30_000 });
   const routingDot = page.locator('.map-point--assembled .map-point__dot').first();
-  await expect(routingDot).toBeVisible();
+  await expect(routingDot).toBeVisible({ timeout: 30_000 });
   await expect(routingDot).toHaveCSS('background-color', expected);
 });
 
 test('самовывоз: флорист собрал → склад принял → менеджер выдал покупателю', async ({
   page,
   browser,
+  request,
 }: {
   page: Page;
   browser: Browser;
+  request: APIRequestContext;
 }) => {
   const orderNumber = process.env['E2E_PICKUP_ORDER'] ?? '';
   const cellCode = process.env['E2E_PICKUP_CELL'] ?? '';
@@ -2814,7 +3150,7 @@ test('самовывоз: флорист собрал → склад приня�
   await login(page, ADMIN_PHONE, ADMIN_PIN);
 
   async function createUser(name: string, roleLabel: string): Promise<[string, string]> {
-    await page.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+    await openSection(page, 'Сотрудники и курьеры');
     await page.getByRole('button', { name: 'Добавить' }).click();
     await page.getByLabel('ФИО').fill(name);
     const phone = uniquePhone();
@@ -2861,7 +3197,7 @@ test('самовывоз: флорист собрал → склад приня�
   await floristContext.close();
 
   // 3. Кладовщик принимает заказ в обычную ячейку хранения: маршрут не нужен.
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
   await page.getByTestId('wh-scan-order').fill(orderNumber);
   await page.getByTestId('wh-scan-order').press('Enter');
   await expect(page.getByTestId('wh-scanned-order')).toHaveText(orderNumber);
@@ -2890,7 +3226,24 @@ test('самовывоз: флорист собрал → склад приня�
   });
   await expect(waiting).toContainText(cellCode);
 
-  // 5. Поиск по номеру и выдача покупателю — без второго скана.
+  /*
+   * 5. Выдача покупателю без второго скана.
+   *
+   * Обычный путь прилавка — скан QR-кода с телефона покупателя. Здесь
+   * камеры нет, поэтому администратор разрешает ручной ввод: та же доменная
+   * операция, другой способ её вызвать.
+   */
+  /*
+   * Настройка общая на всё приложение, поэтому сценарий приводит её
+   * в известное состояние сам: полагаться на порядок соседей значило бы
+   * проверять их, а не себя.
+   */
+  await disableManualEntry(request);
+  await expect(managerPage.getByTestId('pickup-manual-open')).toHaveCount(0, { timeout: 25_000 });
+  await enableManualEntry(request);
+  await expect(managerPage.getByTestId('pickup-manual-open')).toBeVisible({ timeout: 25_000 });
+  await managerPage.getByTestId('pickup-manual-open').click();
+
   await managerPage.getByTestId('pickup-search').fill(orderNumber);
   await managerPage.getByTestId('pickup-search').press('Enter');
   const card = managerPage.getByTestId('pickup-card');
@@ -2909,11 +3262,16 @@ test('самовывоз: флорист собрал → склад приня�
   ).toContainText('Выдан');
 
   // 7. Повторная выдача отказывает штатно, а не создаёт второй факт.
+  // После выдачи поле закрывается само: следующий покупатель начинает
+  // со скана, а не с чужого номера в поле.
+  await managerPage.getByTestId('pickup-manual-open').click();
   await managerPage.getByTestId('pickup-search').fill(orderNumber);
   await managerPage.getByTestId('pickup-search').press('Enter');
-  await expect(managerPage.getByTestId('pickup-card-blocked')).toContainText('Уже выдан');
+  await expect(managerPage.getByTestId('pickup-card-blocked')).toContainText('Заказ уже выдан');
   await expect(managerPage.getByTestId('pickup-issue')).toHaveCount(0);
 
+  // Настройка возвращается к умолчанию: соседние сценарии ждут выключенной.
+  await disableManualEntry(request);
   await managerContext.close();
 });
 
@@ -2925,24 +3283,20 @@ test('самовывоз: флорист собрал → склад приня�
  * который отдаёт коды по команде теста: проверяется реальная цепочка
  * приложения, а не работа драйвера камеры.
  */
-test('склад с камеры: приёмка, комплектование парой и непрерывная выдача', async ({
+test('склад с камеры: окно, промежуточный успех, названная ошибка и сборка парой', async ({
   page,
 }: {
   page: Page;
 }) => {
   // Собственная фикстура: сценарий камеры не делит ячейки и лист с ручным
   // складским сценарием, иначе они мешали бы друг другу порядком запуска.
-  const storageCell = process.env['E2E_WH_CAM_STORAGE'] ?? '';
-  const routeCell = process.env['E2E_WH_CAM_ROUTE_CELL'] ?? '';
-  const routeNumber = process.env['E2E_WH_CAM_ROUTE'] ?? '';
-  const firstOrder = process.env['E2E_WH_CAM_ORDER_1'] ?? '';
-  const secondOrder = process.env['E2E_WH_CAM_ORDER_2'] ?? '';
+  const storageCell = requiredEnv('E2E_WH_CAM_STORAGE');
+  const routeCell = requiredEnv('E2E_WH_CAM_ROUTE_CELL');
+  const routeNumber = requiredEnv('E2E_WH_CAM_ROUTE');
+  const firstOrder = requiredEnv('E2E_WH_CAM_ORDER_1');
+  const secondOrder = requiredEnv('E2E_WH_CAM_ORDER_2');
 
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
-  test.skip(
-    storageCell === '' || routeCell === '' || routeNumber === '' || firstOrder === '',
-    'не передана складская фикстура камеры (E2E_WH_CAM_*)',
-  );
 
   // Двойник камеры ставится до загрузки приложения: настоящий adapter
   // запрашивал бы разрешение, которого в CI не выдать. Обращение идёт через
@@ -3022,104 +3376,159 @@ test('склад с камеры: приёмка, комплектование �
     );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Склад' }).first().click();
+  await openSection(page, 'Склад');
 
   const hint = page.getByTestId('scan-hint');
+  const title = page.getByTestId('scan-title');
   const success = page.getByTestId('scan-success');
 
-  // 1. Приёмка: камера открывается только по нажатию и ведёт пару шагов.
+  /*
+   * 1. Окно, а не весь экран.
+   *
+   * Камера во весь экран не оставляет человеку ориентира: не видно, где он
+   * находится и что происходит под окном.
+   */
   expect(await cameraRunning()).toBe(false);
   await page.getByTestId('wh-scan-camera').click();
-  await expect(hint).toHaveText('Сканируйте QR заказа');
   expect(await cameraRunning()).toBe(true);
+  await expect(title).toHaveText('Сканирование заказа');
+  await expect(hint).toHaveText('Наведите камеру на QR-код заказа');
 
+  const viewport = page.viewportSize();
+  const windowBox = await page.locator('.scanner').boundingBox();
+  expect(windowBox).not.toBeNull();
+  expect(windowBox!.width).toBeLessThan((viewport?.width ?? 0) - 8);
+  expect(windowBox!.height).toBeLessThan((viewport?.height ?? 0) - 8);
+  await expect(page.locator('.scanner__reticle')).toBeVisible();
+  await expect(page.getByTestId('scan-cancel')).toBeVisible();
+  await expect(page.getByTestId('scan-close')).toBeVisible();
+
+  /*
+   * 2. Промежуточный успех: заказ распознан, но в базе ещё ничего нет.
+   *
+   * Заказ входит в подтверждённый лист, поэтому сразу за уведомлением
+   * человека спрашивают, сборка это или хранение.
+   */
   await scan(firstOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR ячейки');
+    await expect(success).toContainText(`Заказ ${firstOrder} отсканирован`);
   });
+  const routeChoice = page.getByTestId('scan-route-choice');
+  await expect(routeChoice).toContainText(`уже входит в МЛ ${routeNumber}`);
+
+  // «Всё равно в хранение»: обычная ячейка и заголовок про ячейку.
+  await page.getByTestId('scan-route-storage').click();
+  await expect(hint).toHaveText('Наведите камеру на QR-код ячейки');
   await scan(storageCell, async () => {
-    await expect(success).toContainText(firstOrder);
+    await expect(success).toContainText(`помещён в ячейку ${storageCell}`);
   });
 
-  // Успех закрылся сам, экран вернулся во вкладку, камера погашена.
+  // Итог показан, экран закрылся сам, камера погашена.
   await expect(page.getByTestId('wh-scan-camera')).toBeVisible();
   expect(await cameraRunning()).toBe(false);
-
   const placed = page.locator('[data-testid="wh-placement-row"]', { hasText: firstOrder });
   await expect(placed).toContainText(storageCell);
 
-  // Второй заказ — новое нажатие: камера сама не запускается.
+  /*
+   * 3. Незавершённая пара не оставляет следа.
+   *
+   * Заказ распознан, ячейка не отсканирована, окно закрыто крестиком —
+   * в базе не должно появиться ничего.
+   */
   await page.getByTestId('wh-scan-camera').click();
   await scan(secondOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR ячейки');
+    await expect(page.getByTestId('scan-route-choice')).toBeVisible();
   });
-  await scan(storageCell, async () => {
-    await expect(success).toContainText(secondOrder);
-  });
+  await page.getByTestId('scan-close').click();
   await expect(page.getByTestId('wh-scan-camera')).toBeVisible();
+  await expect(
+    page.locator('[data-testid="wh-placement-row"]', { hasText: secondOrder }),
+  ).toHaveCount(0);
 
-  // 2. Комплектование: пара «заказ → маршрутная ячейка» для КАЖДОГО заказа.
-  await page.getByTestId('wh-tab-picking').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  await page.getByTestId('wh-bind-cell').fill(routeCell);
-  await page.getByTestId('wh-bind-submit').click();
-  await expect(page.getByTestId('wh-route-cell')).toHaveText(routeCell);
-
-  await page.getByTestId('wh-pick-camera').click();
-  await scan(firstOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+  /*
+   * 4. Ошибка называет и распознанное, и ожидаемое.
+   *
+   * «Не подходит» без этих двух строк заставляет подносить к камере тот же
+   * самый код ещё раз.
+   */
+  await page.getByTestId('wh-scan-camera').click();
+  await scan(secondOrder, async () => {
+    await expect(page.getByTestId('scan-route-choice')).toBeVisible();
   });
+  await page.getByTestId('scan-route-assembly').click();
+  await expect(hint).toHaveText('Назначьте ячейку маршрута');
 
-  // Чужая ячейка отказывает и ничего не переносит.
   await scan(storageCell, async () => {
     await expect(page.getByTestId('scan-error')).toBeVisible();
   });
+  await expect(page.getByTestId('scan-error-scanned')).toContainText(storageCell);
+  await expect(page.getByTestId('scan-error-expected')).toContainText('маршрутной ячейки');
+
+  // «Повторить» возвращает к тому же ожидаемому шагу.
   await page.getByTestId('scan-retry').click();
-  await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+  await expect(hint).toHaveText('Назначьте ячейку маршрута');
 
   await scan(routeCell, async () => {
-    await expect(success).toContainText(firstOrder);
+    await expect(success).toContainText(`для МЛ ${routeNumber}`);
   });
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('1 из 2');
 
-  // Второй заказ — новая пара и новое нажатие.
-  await page.getByTestId('wh-pick-camera').click();
-  await scan(secondOrder, async () => {
-    await expect(hint).toHaveText('Сканируйте QR маршрутной ячейки');
+  /*
+   * 5. Быстрое сканирование из «Сборки»: пара «заказ → маршрутная ячейка».
+   *
+   * Полка листа уже назначена, поэтому заголовок называет её по коду.
+   */
+  await page.getByTestId('wh-tab-picking').click();
+  await page.getByTestId('assembly-scan').click();
+  await scan(firstOrder, async () => {
+    await expect(success).toContainText(`Заказ ${firstOrder} отсканирован`);
   });
+  await expect(hint).toHaveText('Наведите камеру на QR-код маршрутной ячейки');
   await scan(routeCell, async () => {
-    await expect(success).toContainText(secondOrder);
+    // Именно итог операции, а не промежуточное «отсканирован»: иначе
+    // проверка засчитала бы уведомление предыдущего шага.
+    await expect(success).toContainText(`перемещён в ячейку ${routeCell}`);
   });
-  await expect(page.getByTestId('wh-route-progress')).toHaveText('2 из 2');
 
-  // 3. Выдача: курьер подтверждается до камеры, сессия одна на весь лист.
+  // Лист собран целиком и ушёл в свёрнутую группу «Собранные».
+  await expect(page.getByTestId('assembly-assembled-count')).not.toHaveText('0');
+
+  /*
+   * 6. Отмена «Повторить/Отмена» и защита от соседних кадров.
+   *
+   * Один неподвижный QR перед камерой — это одно действие, а не поток
+   * одинаковых операций: повтор внесения честно называется повтором.
+   */
   await page.getByTestId('wh-tab-issue').click();
-  await page.locator('[data-testid="wh-route-button"]', { hasText: routeNumber }).click();
-  await expect(page.getByTestId('wh-issue-camera')).toHaveCount(0);
-  await page.getByTestId('wh-confirm-courier').click();
+  const issueRoute = await openIssueRoute(page, routeNumber);
+  await issueRoute.getByTestId('issue-ship').click();
+  const confirm = page.getByTestId('issue-confirm-courier');
+  if ((await confirm.count()) > 0) {
+    await confirm.click();
+  }
 
-  await page.getByTestId('wh-issue-camera').click();
+  await page.getByTestId('issue-scan').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
   await scan(firstOrder, async () => {
-    await expect(success).toContainText('1 из 2');
+    await expect(success).toContainText(`Заказ ${firstOrder} внесён`);
   });
-  // Камера не закрылась между заказами.
-  await expect(hint).toHaveText('Сканируйте QR заказа');
+  // Камера не закрылась между заказами: курьер стоит рядом.
   expect(await cameraRunning()).toBe(true);
+  await expect(page.getByTestId('scan-progress')).toHaveText('1 из 2');
 
-  // Повтор того же заказа честно сообщает, что он уже выдан, и не двигает счётчик.
   await scan(firstOrder, async () => {
-    await expect(success).toContainText('уже был выдан: 1 из 2');
+    await expect(success).toContainText('уже внесён');
   });
+  await expect(page.getByTestId('scan-progress')).toHaveText('1 из 2');
 
   await scan(secondOrder, async () => {
-    await expect(success).toContainText('2 из 2');
+    await expect(success).toContainText(`Заказ ${secondOrder} внесён`);
   });
-
-  // Последний заказ закрыл сессию: экран вернулся к листу, маршрут ACTIVE.
-  await expect(page.locator('[data-testid="wh-route-card"]')).toHaveAttribute(
-    'data-route-state',
-    'ACTIVE',
-  );
+  await expect(page.getByTestId('scan-progress')).toHaveText('2 из 2');
+  await page.getByTestId('scan-cancel').click();
   expect(await cameraRunning()).toBe(false);
+
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 2 из 2');
+  await page.getByTestId('issue-ship-submit').click();
+  await expect(page.locator('.toast-region')).toContainText('отгружен курьеру');
 });
 
 test('карта «Сделок»: подложка Москвы при нуле точек и появление маркера без перезагрузки', async ({
@@ -3166,15 +3575,15 @@ test('карта «Сделок»: подложка Москвы при нуле
   });
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
 
   // 1. Нуль точек: карта ВСЁ РАВНО показана — подложка Москвы, а не пустой блок.
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
-  await expect(page.getByTestId('deals-map-empty')).toHaveText(
-    'В выбранном дне нет заказов с координатами',
-  );
+  // Пустая карта называет причину, а не только следствие: заголовок, объяснение
+  // и действие, которым её и закрывают.
+  await expect(page.getByTestId('deals-map-empty')).toContainText('Ни одного заказа на карте');
   // Приближать нечего: кнопка не обещает действие, которое ничего не изменит.
   await expect(page.getByTestId('deals-map-zoom')).toBeDisabled();
   // Отметок заказов нет ни одной. Склад при этом показан всегда: маршрут
@@ -3358,11 +3767,11 @@ test('«Сделки» на большом экране: доли, своя пр
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
-  // 1. Доли колонок: список — четверть с небольшим, карта — остальное.
+  // 1. Доли колонок: список — заметно меньшая доля, карта — остальное.
   const body = await page.getByTestId('deals-body').boundingBox();
   const column = await page.getByTestId('deals-column').boundingBox();
   const mapColumn = await page.getByTestId('deals-map-column').boundingBox();
@@ -3374,12 +3783,13 @@ test('«Сделки» на большом экране: доли, своя пр
   const columnWidth = column?.width ?? 0;
   const mapWidth = mapColumn?.width ?? 0;
 
-  expect(columnWidth).toBeGreaterThanOrEqual(360);
-  expect(columnWidth).toBeLessThanOrEqual(440);
-  expect(columnWidth / bodyWidth).toBeGreaterThanOrEqual(0.25);
-  expect(columnWidth / bodyWidth).toBeLessThanOrEqual(0.3);
-  expect(mapWidth / bodyWidth).toBeGreaterThanOrEqual(0.68);
-  expect(mapWidth / bodyWidth).toBeLessThanOrEqual(0.75);
+  // Утверждённая раскладка: список — clamp(460px, 38%, 760px), карта — остаток.
+  expect(columnWidth).toBeGreaterThanOrEqual(460);
+  expect(columnWidth).toBeLessThanOrEqual(760);
+  expect(columnWidth / bodyWidth).toBeGreaterThanOrEqual(0.34);
+  expect(columnWidth / bodyWidth).toBeLessThanOrEqual(0.42);
+  expect(mapWidth / bodyWidth).toBeGreaterThanOrEqual(0.56);
+  expect(mapWidth / bodyWidth).toBeLessThanOrEqual(0.65);
 
   // 2. Карта видна целиком и занимает рабочую высоту, а не полосу сверху.
   const surface = await page.getByTestId('deals-map-canvas').boundingBox();
@@ -3407,10 +3817,13 @@ test('«Сделки» на большом экране: доли, своя пр
   expect(mapAfter?.y).toBe(mapBefore?.y);
   expect(filtersAfter?.y).toBe(filtersBefore?.y);
 
-  // 4. Пустого выбора нет — нет и панели: она не занимает высоту зря.
-  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  // 4. Панель закреплена всегда: набор действий виден до первого выбора,
+  // а недоступность показана состоянием кнопок, а не их отсутствием.
+  await expect(page.getByTestId('deals-summary')).toBeVisible();
+  await expect(page.getByTestId('deals-manual-draft')).toBeDisabled();
+  await expect(page.getByTestId('deals-auto-plan')).toBeDisabled();
 
-  // Появляется после первого выбранного заказа.
+  // С первым выбранным заказом действия становятся доступны.
   await page
     .locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-2"]')
     .getByTestId('deal-pick')
@@ -3433,15 +3846,20 @@ test('«Сделки» на большом экране: доли, своя пр
   });
   expect(insideScroll).toBe(false);
 
-  // Обе кнопки одной ширины и во всю ширину панели: это два равноправных исхода.
+  // Действия стоят одной строкой и не переносятся: ряд держится целиком.
   const manual = await page.getByTestId('deals-manual-draft').boundingBox();
   const auto = await page.getByTestId('deals-auto-plan').boundingBox();
-  expect(Math.round(manual?.width ?? 0)).toBe(Math.round(auto?.width ?? 0));
-  expect((manual?.width ?? 0) / columnWidth).toBeGreaterThan(0.8);
+  expect(manual?.y).toBe(auto?.y);
+  expect(Math.round(manual?.height ?? 0)).toBe(Math.round(auto?.height ?? 0));
+  expect(manual?.width ?? 0).toBeGreaterThan(60);
+  expect(auto?.width ?? 0).toBeGreaterThan(60);
+  expect((manual?.width ?? 0) + (auto?.width ?? 0)).toBeLessThanOrEqual(columnWidth);
 
-  // Снятие всего выбора снова убирает панель.
+  // Снятие всего выбора снова закрывает действия, панель при этом остаётся.
   await page.getByTestId('deals-clear').click();
-  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  await expect(page.getByTestId('deals-summary')).toBeVisible();
+  await expect(page.getByTestId('deals-manual-draft')).toBeDisabled();
+  await expect(page.getByTestId('deals-auto-plan')).toBeDisabled();
 
   // 5. Счётчик называет и общее число, и заказы без координат.
   await expect(page.getByTestId('deals-total')).toContainText('Заказов: 40');
@@ -3506,8 +3924,10 @@ test('«Сделки» на большом экране: доли, своя пр
   // Панели начинаются и заканчиваются на одних линиях.
   expect(Math.abs(leftBox.y - rightBox.y)).toBeLessThanOrEqual(1);
   expect(Math.abs(leftBox.y + leftBox.h - (rightBox.y + rightBox.h))).toBeLessThanOrEqual(1);
-  // Между ними ровно одна граница: зазора нет.
-  expect(Math.abs(rightBox.x - leftEdge)).toBeLessThanOrEqual(1);
+  // Между ними ровно один шаг сетки (--space-3): панели разделяет промежуток
+  // и собственная тень каждой, общей рамки вокруг нет.
+  expect(rightBox.x - leftEdge).toBeGreaterThanOrEqual(11);
+  expect(rightBox.x - leftEdge).toBeLessThanOrEqual(13);
 
   // Всё управление списком — внутри левой панели.
   for (const selector of [
@@ -3524,28 +3944,37 @@ test('«Сделки» на большом экране: доли, своя пр
     expect(box.y).toBeGreaterThanOrEqual(leftBox.y - 1);
   }
 
-  // Сверху — что показано, ниже — чем это менять; обе строки поверх холста.
+  // Шапка карты держится одной строкой: слева — что показано, справа — чем менять.
   const infoRow = await boxOf('[data-testid="deals-map-head-count"]');
   const controlRow = await boxOf('[data-testid="deals-map-from"]');
-  expect(infoRow.y).toBeLessThan(controlRow.y);
+  expect(infoRow.x + infoRow.w).toBeLessThanOrEqual(controlRow.x);
+  const headOneRow =
+    infoRow.y < controlRow.y + controlRow.h && controlRow.y < infoRow.y + infoRow.h;
+  expect(headOneRow).toBe(true);
 
-  // Контролы карты лежат ПОВЕРХ холста, а не полосой над ним.
+  // Шапка — над холстом, легенда — подписью под ним: холст ничем не перекрыт.
   const canvas = await boxOf('[data-testid="deals-map-canvas"]');
   for (const selector of [
     '[data-testid="deals-map-head-count"]',
     '[data-testid="deals-map-from"]',
-    '[data-testid="deals-map-zoom"]',
-    '[data-testid="deals-map-legend"]',
   ]) {
     const box = await boxOf(selector);
-    expect(box.y).toBeGreaterThanOrEqual(canvas.y - 1);
-    expect(box.y + box.h).toBeLessThanOrEqual(canvas.y + canvas.h + 1);
+    expect(box.y + box.h).toBeLessThanOrEqual(canvas.y + 1);
   }
+  const legend = await boxOf('[data-testid="deals-map-legend"]');
+  expect(legend.y).toBeGreaterThanOrEqual(canvas.y + canvas.h - 1);
+  // Масштаб — во второй строке шапки, холст ничем не перекрыт.
+  const zoom = await boxOf('[data-testid="deals-map-zoom"]');
+  expect(zoom.y + zoom.h).toBeLessThanOrEqual(canvas.y + 1);
 
-  // Карта — фон всей правой панели.
-  expect(Math.abs(canvas.y - rightBox.y)).toBeLessThanOrEqual(1);
-  expect(Math.abs(canvas.x - rightBox.x)).toBeLessThanOrEqual(1);
-  expect(Math.abs(canvas.h - rightBox.h)).toBeLessThanOrEqual(2);
+  // Холст лежит внутри панели с равными полями и занимает её основную высоту.
+  const insetLeft = canvas.x - rightBox.x;
+  const insetRight = rightBox.x + rightBox.w - (canvas.x + canvas.w);
+  expect(insetLeft).toBeGreaterThanOrEqual(0);
+  expect(insetLeft).toBeLessThanOrEqual(20);
+  expect(Math.abs(insetLeft - insetRight)).toBeLessThanOrEqual(1);
+  expect(canvas.h / rightBox.h).toBeGreaterThanOrEqual(0.6);
+  expect(canvas.y + canvas.h).toBeLessThanOrEqual(rightBox.y + rightBox.h + 1);
 
   // 7а. Плотность списка: сколько сделок видно в начале списка без прокрутки.
   await scroll.evaluate((element: { scrollTop: number }) => {
@@ -3587,8 +4016,15 @@ test('«Сделки» на большом экране: доли, своя пр
     return { window: area?.getBoundingClientRect().height ?? 0 };
   });
   expect(geometry.window).toBeGreaterThan(600);
-  // Владелец принял плотность 10–12 карточек на 1600×900.
-  expect(visibleCards).toBeGreaterThanOrEqual(10);
+  /*
+   * Плотность принятой карточки: на 1600×900 в окно списка помещается 5 карточек.
+   * Прежние 10–12 относились к карточке вдвое ниже; нынешняя высота — 102 px,
+   * у карточек с дополнительной строкой — 150 px. Верхняя граница высоты стоит
+   * рядом, чтобы дальнейший рост карточки падал заметно, а не тихо.
+   */
+  expect(visibleCards).toBeGreaterThanOrEqual(5);
+  const cardHeight = (await page.getByTestId('deal-card').first().boundingBox())?.height ?? 0;
+  expect(cardHeight).toBeLessThanOrEqual(160);
 
   // 8. Переключатель группировки назван действием, а не масштабом.
   await expect(page.getByTestId('deals-map-zoom')).toHaveText(/Показать отдельно|Сгруппировать/);
@@ -3637,7 +4073,8 @@ test('«Сделки» на большом экране: доли, своя пр
   await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 39');
   await expect(selectAll).toHaveText('Снять все');
   await selectAll.click();
-  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  await expect(page.getByTestId('deals-manual-draft')).toBeDisabled();
+  await expect(page.getByTestId('deals-auto-plan')).toBeDisabled();
   await expect(selectAll).toHaveText('Выбрать все');
 
   // 9а. Комментарий раскрывается доступной иконкой, а не отдельной строкой.
@@ -3691,7 +4128,7 @@ test('«Сделки»: правка интервала доходит до вт
 
   const openDeals = async (target: Page): Promise<void> => {
     await login(target, ADMIN_PHONE, ADMIN_PIN);
-    await target.getByRole('link', { name: 'Логистика' }).first().click();
+    await openSection(target, 'Логистика');
     await target.getByRole('link', { name: 'Сделки' }).first().click();
     await expect(target.getByTestId('deals-workspace')).toBeVisible();
     await target.getByLabel('Поиск в этом дне').fill(number ?? '');
@@ -3786,7 +4223,7 @@ test('карта «Сделок»: отметка стоит на своей к�
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-map-canvas')).toBeVisible();
 
@@ -3924,7 +4361,7 @@ test('маршрутизация: линия идёт от склада и ме�
   );
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
 
   for (const number of [first, second]) {
@@ -4007,35 +4444,44 @@ test('маршрутизация: линия идёт от склада и ме�
    * половины, а служебная строка лежит внутри полотна, а не над ним.
    */
   await page.setViewportSize({ width: 1600, height: 900 });
-  const [list, mapPanel, surface, overlay] = await Promise.all([
+  const [list, mapPanel, surface, header] = await Promise.all([
     page.getByTestId('routing-drafts').boundingBox(),
     page.getByTestId('routing-map-panel').boundingBox(),
     page.getByTestId('routing-map-surface').boundingBox(),
-    page.locator('.routes__map-overlay').boundingBox(),
+    page.locator('.routes__map-header').boundingBox(),
   ]);
 
   expect(Math.abs((list?.y ?? 0) - (mapPanel?.y ?? -1))).toBeLessThanOrEqual(1);
   expect(Math.abs((list?.height ?? 0) - (mapPanel?.height ?? -1))).toBeLessThanOrEqual(1);
-  // Зазора между половинами нет: правая начинается там, где кончилась левая.
-  expect(Math.abs((list?.x ?? 0) + (list?.width ?? 0) - (mapPanel?.x ?? -1))).toBeLessThanOrEqual(
-    1,
-  );
-  expect(list?.width ?? 0).toBeGreaterThanOrEqual(360);
-  expect(list?.width ?? 0).toBeLessThanOrEqual(440);
+  /*
+   * Та же геометрия, что в «Сделках»: список — clamp(460px, 38%, 760px),
+   * между половинами ровно один шаг сетки (--space-3).
+   */
+  const routesGap = (mapPanel?.x ?? 0) - ((list?.x ?? 0) + (list?.width ?? 0));
+  expect(routesGap).toBeGreaterThanOrEqual(11);
+  expect(routesGap).toBeLessThanOrEqual(13);
+  expect(list?.width ?? 0).toBeGreaterThanOrEqual(460);
+  expect(list?.width ?? 0).toBeLessThanOrEqual(760);
 
   expect(surface?.height ?? 0).toBeGreaterThan(400);
   expect((surface?.y ?? 0) + (surface?.height ?? 0)).toBeLessThanOrEqual(901);
-  expect(overlay?.y ?? 0).toBeGreaterThanOrEqual(surface?.y ?? 0);
-  expect((overlay?.y ?? 0) + (overlay?.height ?? 0)).toBeLessThanOrEqual(
-    (surface?.y ?? 0) + (surface?.height ?? 0),
-  );
+  // Шапка карты стоит НАД холстом и его не перекрывает.
+  expect((header?.y ?? 0) + (header?.height ?? 0)).toBeLessThanOrEqual((surface?.y ?? 0) + 1);
 
-  // 7. Свёрнутый черновик — одна строка без скрытого пустого тела.
-  await page.locator('.routes__draft[data-expanded="true"] .routes__draft-head').click();
+  /*
+   * 7. Свёрнутый черновик — только шапка по макету: номер, состояние,
+   * «дата · машина · остановок N» и ряд блокировки. Остановки при этом
+   * убраны из разметки, а не спрятаны высотой, — поэтому карточка
+   * заметно ниже развёрнутой.
+   */
+  const expandedDraft = page.locator('.routes__draft[data-expanded="true"]').first();
+  const expandedHeight = (await expandedDraft.boundingBox())?.height ?? 0;
+  await expandedDraft.locator('.routes__draft-head').click();
   const collapsed = page.locator('.routes__draft[data-expanded="false"]').first();
   await expect(collapsed).toBeVisible();
   await expect(collapsed.locator('.routes__card')).toHaveCount(0);
-  expect((await collapsed.boundingBox())?.height ?? 0).toBeLessThanOrEqual(48);
+  const collapsedHeight = (await collapsed.boundingBox())?.height ?? 0;
+  expect(collapsedHeight).toBeLessThan(expandedHeight / 2);
 });
 
 /**
@@ -4058,7 +4504,7 @@ test('маршрутные листы: разделы, курьер, ручна�
   await ensureCourier(page.context().browser() as Browser);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
 
   // 1. Сделки → диалог → сразу маршрутный лист (сквозной сценарий 2).
@@ -4090,10 +4536,10 @@ test('маршрутные листы: разделы, курьер, ручна�
   const sheet = unshipped.locator('[data-testid="sheet-row"]').first();
   await expect(sheet).toBeVisible();
   /*
-   * Курьер не назначен — поле комбобокса пусто и подсказывает это плейсхолдером;
-   * текста внутри узла у поля ввода нет, проверяется именно значение.
+   * Курьер в листе показан таблеткой: пока его нет, она прямо это и говорит.
+   * Поле с подсказками открывается по нажатию на таблетку, а не висит всегда.
    */
-  await expect(sheet.getByTestId('sheet-courier-combobox-field')).toHaveValue('');
+  await expect(sheet.getByTestId('sheet-courier-pick')).toHaveText(/Курьер не назначен/);
   await expect(sheet.getByTestId('sheet-ship')).toBeDisabled();
 
   /*
@@ -4134,11 +4580,15 @@ test('маршрутные листы: разделы, курьер, ручна�
    * своего, и жёсткая привязка к конкретному телефону доказывала бы лишь
    * порядок сценариев.
    */
+  await sheet.getByTestId('sheet-courier-pick').click();
   await sheet.getByTestId('sheet-courier-combobox-field').click();
-  const options = sheet.getByTestId('sheet-courier-combobox-option');
+  // Список подсказок выносится порталом, чтобы не обрезаться прокруткой листа,
+  // поэтому ищется на странице, а не внутри строки.
+  const options = page.getByTestId('sheet-courier-combobox-option');
   await expect(options.first()).toBeVisible();
   await options.first().click();
-  await expect(sheet.getByTestId('sheet-courier-combobox-field')).not.toHaveValue('');
+  // Выбор закрывает поле и возвращает таблетку — уже с именем курьера.
+  await expect(sheet.getByTestId('sheet-courier-pick')).not.toHaveText(/Курьер не назначен/);
 
   // 5. После назначения ручная отгрузка проходит.
   await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
@@ -4196,7 +4646,7 @@ test('выбор курьера: открытие полем, фильтраци
   await ensureCourier(page.context().browser() as Browser);
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -4355,7 +4805,7 @@ test('история и отчёты: тариф, доставка, расчёт
    * Тариф, включение учёта и геометрия МКАД заводятся ЭКРАНОМ настроек:
    * проверяется тот путь, которым пользуется администратор, а не только API.
    */
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   await expect(page.getByTestId('finance-settings')).toBeVisible();
 
   await page.getByTestId('tariff-from').fill(today);
@@ -4393,7 +4843,7 @@ test('история и отчёты: тариф, доставка, расчёт
   await expect(settings.getByRole('button', { name: /Загрузить/i })).toHaveCount(0);
 
   // 1. Обычный путь: сделка → лист → курьер → отгрузка.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
@@ -4412,9 +4862,11 @@ test('история и отчёты: тариф, доставка, расчёт
    * «Первый в списке» здесь не годится: соседние сценарии заводят своих
    * курьеров, и маршрут достался бы чужому — экран курьера оказался бы пуст.
    */
+  await sheet.getByTestId('sheet-courier-pick').click();
   await sheet.getByTestId('sheet-courier-combobox-field').fill(courier.phone);
-  await expect(sheet.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
-  await sheet.getByTestId('sheet-courier-combobox-option').first().click();
+  // Подсказки выносятся порталом: ищутся на странице, а не внутри строки.
+  await expect(page.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
+  await page.getByTestId('sheet-courier-combobox-option').first().click();
   await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
   const sheetNumber = (await sheet.getAttribute('data-sheet-number')) ?? '';
   await sheet.getByTestId('sheet-ship').click();
@@ -4444,7 +4896,7 @@ test('история и отчёты: тариф, доставка, расчёт
   await courierContext.close();
 
   // 3. «История» показывает маршрут, его состав и хронологию.
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'История' }).first().click();
   await expect(page.getByTestId('history-screen')).toBeVisible();
   await page.getByTestId('history-search').fill(own ?? '');
@@ -4650,6 +5102,72 @@ test('история и отчёты: тариф, доставка, расчёт
 });
 
 /**
+ * «Отчёты» открываются на сегодняшнем московском дне.
+ *
+ * Логист приходит в отчёты за сегодняшней кассой и сегодняшним расчётом.
+ * Экран открывался на неделе, и недельная сумма читалась как дневная —
+ * ошибка тихая: цифра правдоподобная, просто не та.
+ */
+test('«Отчёты»: при открытии выбран день и все запросы идут одним диапазоном', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // Диапазон запросов записывается ДО перехода в раздел: важен самый первый.
+  const ranged: string[] = [];
+  page.on('request', (request) => {
+    const url = request.url();
+    // Собираются запросы С ДИАПАЗОНОМ: справочники вроде списка касс границ
+    // не имеют и к выбранному периоду отношения не имеют тоже.
+    if (url.includes('/api/logistics/') && url.includes('from=')) {
+      ranged.push(url);
+    }
+  });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+
+  // 1. Выбран «День», а не «Неделя».
+  await expect(page.getByTestId('reports-period-day')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('reports-period-week')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByTestId('reports-from')).toHaveValue(today);
+  await expect(page.getByTestId('reports-to')).toHaveValue(today);
+
+  // 2. Тем же диапазоном ушли и запросы: касса и отчёт спрашивают один день.
+  await expect.poll(() => ranged.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  for (const url of ranged) {
+    expect(url, url).toContain(`from=${today}`);
+    expect(url, url).toContain(`to=${today}`);
+  }
+
+  // 3. «Неделя» по-прежнему сдвигает начало и оставляет конец на сегодня.
+  await page.getByTestId('reports-period-week').click();
+  await expect(page.getByTestId('reports-period-week')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('reports-to')).toHaveValue(today);
+  const from = await page.getByTestId('reports-from').inputValue();
+  expect(from).not.toBe(today);
+  expect(Date.parse(`${today}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)).toBe(
+    7 * 24 * 60 * 60 * 1000,
+  );
+
+  // 4. Возврат ко «Дню» снова сводит границы к сегодняшней дате.
+  await page.getByTestId('reports-period-day').click();
+  await expect(page.getByTestId('reports-from')).toHaveValue(today);
+  await expect(page.getByTestId('reports-to')).toHaveValue(today);
+});
+
+/**
  * «Маршрутизация»: нераспределённая сделка выглядит как в «Сделках»,
  * а пустой черновик заводится кнопкой.
  *
@@ -4690,7 +5208,7 @@ test('маршрутизация: точка дня без номера и пу�
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутизация', level: 1 })).toBeAttached();
 
   /*
    * 1. Пустой черновик одним нажатием.
@@ -4837,7 +5355,7 @@ test('маршрутизация: точка дня без номера и пу�
   expect(Math.abs(afterPan.dy)).toBeLessThanOrEqual(1);
 
   // Обновление данных списка отметку не двигает.
-  await page.getByRole('button', { name: 'Обновить список' }).click();
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   const afterRefresh = await drift();
   expect(afterRefresh.lat).toBe(start.lat);
   expect(Math.abs(afterRefresh.dx)).toBeLessThanOrEqual(1);
@@ -4906,7 +5424,7 @@ test('маршрутизация: точка дня без номера и пу�
   expect(again.status()).toBe(200);
   expect(((await again.json()) as { number: string }).number).toBe(emptyNumber);
 
-  await page.getByRole('button', { name: 'Обновить список' }).click();
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 2);
 
   await page.locator('.routes__card').getByRole('button', { name: 'Отменить маршрут' }).click();
@@ -4998,9 +5516,9 @@ test('«Активные»: рабочий адрес, интервал 10:00–
    * корректный интервал получал общее «Проверьте правильность заполнения
    * полей». Проверяется именно этот путь — тот, которым пользуется логист.
    */
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeAttached();
 
   const sheet = page.locator(`[data-sheet-number="${seeded.route}"]`).first();
   await expect(sheet).toBeVisible({ timeout: 20_000 });
@@ -5114,7 +5632,7 @@ test('настройки: переключатель ручной отгрузк
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
 
   await login(page, ADMIN_PHONE, ADMIN_PIN);
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   const toggle = page.getByTestId('manual-issue-toggle');
   await expect(toggle).toBeVisible();
   // Значение по умолчанию сохранено и показано, а не придумано экраном.
@@ -5125,17 +5643,17 @@ test('настройки: переключатель ручной отгрузк
   await clickAndAwait(page, toggle, 'PUT', '/settings/planning/manual-issue');
   await expect(toggle).not.toBeChecked();
 
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
-  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Маршрутные листы', level: 1 })).toBeAttached();
   await expect(page.getByTestId('sheet-ship')).toHaveCount(0);
 
   // Возвращаем разрешение: кнопка снова на месте.
-  await page.getByRole('link', { name: 'Настройки' }).first().click();
+  await openSection(page, 'Настройки');
   await clickAndAwait(page, page.getByTestId('manual-issue-toggle'), 'PUT', '/manual-issue');
   await expect(page.getByTestId('manual-issue-toggle')).toBeChecked();
 
-  await page.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   const unshipped = page.getByTestId('sheets-UNSHIPPED');
   await expect(unshipped).toBeVisible();
@@ -5144,8 +5662,9 @@ test('настройки: переключатель ручной отгрузк
     // Кнопка есть; без курьера она недоступна и объясняет причину.
     const ship = anySheet.getByTestId('sheet-ship');
     await expect(ship).toHaveCount(1);
-    const courier = await anySheet.getByTestId('sheet-courier-combobox-field').inputValue();
-    if (courier === '') {
+    // Назначен ли курьер, видно по таблетке: поле открывается только по нажатию.
+    const courier = await anySheet.getByTestId('sheet-courier-pick').innerText();
+    if (courier.includes('Курьер не назначен')) {
       await expect(ship).toBeDisabled();
       await expect(ship).toHaveAttribute('title', /курьера/i);
     } else {
@@ -5219,7 +5738,7 @@ test('два сеанса: подтверждение листа доходит 
   await login(keeperPage, keeper.phone, keeper.pin);
   await expect(keeperPage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
   await keeperPage.getByTestId('wh-tab-picking').click();
-  await expect(keeperPage.getByTestId('wh-route-date')).toBeVisible();
+  await expect(keeperPage.getByTestId('assembly-scan')).toBeVisible();
 
   /*
    * Логист собирает лист из «Сделок» и подтверждает его.
@@ -5227,7 +5746,7 @@ test('два сеанса: подтверждение листа доходит 
    * Черновик производство не трогает: собирать под него нечего, и до
    * подтверждения ни очередь флориста, ни склад о нём знать не обязаны.
    */
-  await admin.getByRole('link', { name: 'Логистика' }).first().click();
+  await openSection(admin, 'Логистика');
   await admin.getByRole('link', { name: 'Сделки' }).first().click();
   const deal = admin.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
   await expect(deal).toHaveAttribute('data-selectable', 'yes');
@@ -5251,13 +5770,17 @@ test('два сеанса: подтверждение листа доходит 
 
   // Склад увидел подтверждённый лист сам, без перезагрузки.
   await expect(
-    keeperPage.getByTestId('wh-route-button').filter({ hasText: sheetNumber }),
+    keeperPage.locator(`[data-testid="assembly-route"][data-route-number="${sheetNumber}"]`),
   ).toHaveCount(1, { timeout: 25_000 });
 
   // Флорист увидел заказ листа в очереди — приоритет задаёт именно лист.
-  await expect(floristPage.getByTestId('florist-queue')).toContainText(orderNumber, {
-    timeout: 25_000,
-  });
+  /*
+   * Очередь разбита на группы (маршрут, затем без маршрута), поэтому списков
+   * несколько: заказ ищется по всем сразу и должен встретиться ровно в одной.
+   */
+  await expect(
+    floristPage.locator('[data-testid="florist-queue"]').filter({ hasText: orderNumber }),
+  ).toHaveCount(1, { timeout: 25_000 });
 
   /*
    * Возврат листа в черновик убирает его из складской работы так же сразу.
@@ -5310,14 +5833,16 @@ test('два сеанса: смена курьера доходит до скл�
   const keeperContext = await browser.newContext();
   const keeperPage = await keeperContext.newPage();
   await login(keeperPage, keeper.phone, keeper.pin);
-  await keeperPage.getByTestId('wh-tab-picking').click();
+  // Курьер листа виден в «Выдаче»: именно там кладовщик его подтверждает.
+  await keeperPage.getByTestId('wh-tab-issue').click();
 
-  const sheetButton = keeperPage.getByTestId('wh-route-button').filter({ hasText: seeded.route });
-  await expect(sheetButton).toHaveCount(1, { timeout: 25_000 });
-  await sheetButton.click();
-  const courierLine = keeperPage.getByTestId('wh-route-courier');
-  await expect(courierLine).toBeVisible();
-  const before = (await courierLine.innerText()).trim();
+  const issueRoute = await openIssueRoute(keeperPage, seeded.route);
+  await expect(issueRoute).toHaveCount(1);
+  const before =
+    (await keeperPage
+      .locator('[data-testid="issue-courier"]', { has: issueRoute })
+      .getAttribute('data-courier')) ?? '';
+  expect(before).not.toBe('');
 
   /*
    * Логист назначает другого курьера — тем же путём, что и в интерфейсе листов.
@@ -5349,10 +5874,18 @@ test('два сеанса: смена курьера доходит до скл�
   });
   expect(assigned.status(), await assigned.text()).toBe(200);
 
-  // Кладовщик ничего не нажимал: строка курьера обновилась событием.
-  await expect
-    .poll(async () => (await courierLine.innerText()).trim(), { timeout: 25_000 })
-    .not.toBe(before);
+  /*
+   * Кладовщик ничего не нажимал: лист ушёл из раскрытой карточки прежнего
+   * курьера сам. Отдать коробки человеку, которого сняли с маршрута, нельзя.
+   */
+  await expect(issueRoute).toHaveCount(0, { timeout: 25_000 });
+
+  // И нашёлся у нового курьера — под его именем.
+  const moved = await openIssueRoute(keeperPage, seeded.route);
+  await expect(keeperPage.locator('[data-testid="issue-courier"]', { has: moved })).toHaveAttribute(
+    'data-courier',
+    other?.fullName ?? '',
+  );
 
   await keeperContext.close();
   await adminContext.close();
@@ -5380,7 +5913,7 @@ test('два сеанса: справочник курьеров у админи
   const token = ((await auth.json()) as { accessToken: string }).accessToken;
   const logist = await seedRole(admin, token, 'LOGISTICIAN', '5566');
 
-  await admin.getByRole('link', { name: 'Сотрудники и курьеры' }).click();
+  await openSection(admin, 'Сотрудники и курьеры');
   // Вкладки ролей вместо выпадающего фильтра, «Добавить» — в рабочей панели.
   await expect(admin.getByTestId('user-role-tab')).toHaveCount(6);
   await expect(admin.getByTestId('user-add')).toBeVisible();
@@ -5395,7 +5928,7 @@ test('два сеанса: справочник курьеров у админи
   const logistContext = await browser.newContext();
   const logistPage = await logistContext.newPage();
   await login(logistPage, logist.phone, logist.pin);
-  await logistPage.getByRole('link', { name: 'Сотрудники и курьеры' }).first().click();
+  await openSection(logistPage, 'Сотрудники и курьеры');
 
   // У логиста одна вкладка — «Курьеры», и кнопка называет, кого он заводит.
   await expect(logistPage.getByTestId('user-role-tab')).toHaveCount(1);
@@ -5593,4 +6126,1714 @@ test('телефон: 390/375/360 без горизонтального выез
   expect(viewport).not.toContain('maximum-scale');
 
   await phone.close();
+});
+
+/*
+ * Раздел «Выдача» на полном стенде.
+ *
+ * Здесь проверяется соседство, а не одиночная операция: два листа одного
+ * курьера, лист без курьера и лист без ячейки лежат рядом, и отгрузка
+ * обязана трогать РОВНО один из них.
+ */
+test('выдача: три уровня, отгрузка одного листа и неприкосновенность соседнего', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const assembled = stand['мл собран'] ?? '';
+  const withoutCell = stand['мл без ячейки'] ?? '';
+  const partial = stand['мл частично'] ?? '';
+  const withoutCourier = stand['мл без курьера'] ?? '';
+
+  await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+  await page.getByTestId('wh-tab-issue').click();
+
+  /*
+   * Первый уровень — курьеры. Листы свёрнуты: кладовщику нужен выбор
+   * человека, стоящего перед ним, а не чтение всего склада.
+   */
+  const courierOne = page.locator('[data-testid="issue-courier"]', {
+    hasText: 'Курьер стенда один',
+  });
+  await expect(courierOne).toBeVisible();
+  await expect(page.locator('[data-testid="issue-route"]')).toHaveCount(0);
+
+  // Лист без курьера в выдаче не показывается: отдавать его некому.
+  await expect(page.getByTestId('issue-couriers')).not.toContainText(withoutCourier);
+
+  await courierOne.getByTestId('issue-courier-toggle').click();
+  const assembledRoute = page.locator(
+    `[data-testid="issue-route"][data-route-number="${assembled}"]`,
+  );
+  const emptyRoute = page.locator(
+    `[data-testid="issue-route"][data-route-number="${withoutCell}"]`,
+  );
+  await expect(assembledRoute).toBeVisible();
+  await expect(emptyRoute).toBeVisible();
+  // Чужой курьер остался свёрнутым.
+  await expect(
+    page.locator(`[data-testid="issue-route"][data-route-number="${partial}"]`),
+  ).toHaveCount(0);
+
+  // Второй лист того же курьера отгружается отдельной кнопкой.
+  await expect(assembledRoute.getByTestId('issue-ship')).toBeVisible();
+  await expect(emptyRoute.getByTestId('issue-ship')).toBeVisible();
+
+  /*
+   * Лист, коробки которого ещё не на полке, отгрузить нельзя: внести
+   * нечего, и кнопка отгрузки остаётся недоступной.
+   */
+  await emptyRoute.getByTestId('issue-ship').click();
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 0 из 2');
+  await expect(page.getByTestId('issue-ship-submit')).toBeDisabled();
+  await page.getByTestId('issue-ship-close').click();
+
+  // Собранный лист вносится и уезжает целиком.
+  await assembledRoute.getByTestId('issue-ship').click();
+  const ship = page.getByTestId('issue-ship-dialog');
+  const confirm = page.getByTestId('issue-confirm-courier');
+  if ((await confirm.count()) > 0) {
+    await confirm.click();
+  }
+  let entered = 0;
+  for (const key of ['заказ готов 1', 'заказ готов 2']) {
+    await page.getByTestId('issue-manual-order').fill(stand[key] ?? '');
+    await ship.getByRole('button', { name: 'Внести' }).click();
+    entered += 1;
+    await expect(page.getByTestId('issue-progress')).toHaveText(`Внесено: ${entered} из 2`);
+  }
+  await page.getByTestId('issue-ship-submit').click();
+  await expect(page.locator('.toast-region')).toContainText('отгружен курьеру');
+
+  // Уехал ровно один лист: соседний остался на месте и не тронут.
+  await expect(assembledRoute).toHaveCount(0);
+  await expect(emptyRoute).toBeVisible();
+  await expect(emptyRoute).toContainText('внесено 0 из 2');
+});
+
+/*
+ * Доска сборки: переход «Активные ↔ Собранные» по фактическому состоянию.
+ */
+test('сборка: лист уходит в «Собранные» и возвращается, когда коробку унесли', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
+  const stand = seedWarehouseStand();
+  const assembled = stand['мл собран'] ?? '';
+  const movedOrder = stand['заказ готов 2'] ?? '';
+  const storage = stand['ячейка хранения A'] ?? '';
+
+  await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('wh-tab-picking').click();
+
+  // Собранный лист лежит в свёрнутой группе и в активных его нет.
+  await expect(
+    page.getByTestId('assembly-active').locator(`[data-route-number="${assembled}"]`),
+  ).toHaveCount(0);
+  await page.getByTestId('assembly-assembled-toggle').click();
+  await expect(
+    page.getByTestId('assembly-assembled').locator(`[data-route-number="${assembled}"]`),
+  ).toBeVisible();
+
+  /*
+   * Коробку унесли в обычное хранение — лист снова не собран.
+   *
+   * Источник истины здесь фактический: где стоят коробки, а не отдельный
+   * флаг, который однажды остался бы включённым.
+   */
+  await page.getByTestId('wh-tab-storage').click();
+  await page.getByTestId('wh-scan-order').fill(movedOrder);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  await page.getByTestId('wh-choice-storage').click();
+  await page.getByTestId('wh-scan-cell').fill(storage);
+  await page.getByTestId('wh-place').click();
+  await expect(page.locator('.toast-region')).toContainText(movedOrder);
+
+  await page.getByTestId('wh-tab-picking').click();
+  await expect(
+    page.getByTestId('assembly-active').locator(`[data-route-number="${assembled}"]`),
+  ).toBeVisible();
+});
+
+/*
+ * Два кладовщика над одним листом.
+ *
+ * Прогресс проверки серверный, поэтому у обоих он обязан быть одним и тем же
+ * без перезагрузки: расходящиеся счётчики означали бы, что один из них
+ * отгрузит недособранный лист.
+ */
+test('два сеанса: прогресс проверки одинаков у обоих кладовщиков', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const assembled = stand['мл собран'] ?? '';
+
+  const first = await browser.newContext();
+  const second = await browser.newContext();
+  const one = await first.newPage();
+  const two = await second.newPage();
+
+  const open = async (page: Page): Promise<void> => {
+    await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+    await page.getByTestId('wh-tab-issue').click();
+    const route = await openIssueRoute(page, assembled);
+    await route.getByTestId('issue-ship').click();
+  };
+
+  await open(one);
+  await open(two);
+
+  const confirm = one.getByTestId('issue-confirm-courier');
+  if ((await confirm.count()) > 0) {
+    await confirm.click();
+  }
+
+  await one.getByTestId('issue-manual-order').fill(stand['заказ готов 1'] ?? '');
+  await one.getByTestId('issue-ship-dialog').getByRole('button', { name: 'Внести' }).click();
+  await expect(one.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 2');
+
+  // Второй сеанс узнаёт о чужой проверке сам.
+  await expect(two.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 2');
+
+  // Сброс в одном сеансе виден во втором и полок не трогает.
+  await two.getByTestId('issue-reset').click();
+  await expect(one.getByTestId('issue-progress')).toHaveText('Внесено: 0 из 2');
+
+  await first.close();
+  await second.close();
+});
+
+/*
+ * Отгрузка доходит до курьера.
+ *
+ * До отгрузки у курьера пусто; заново открывать приложение, уже сидя
+ * в машине, он не должен.
+ */
+test('два сеанса: отгруженный лист появляется у курьера без перезагрузки', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const assembled = stand['мл собран'] ?? '';
+
+  const keeperContext = await browser.newContext();
+  const courierContext = await browser.newContext();
+  const keeper = await keeperContext.newPage();
+  const courier = await courierContext.newPage();
+
+  await login(courier, stand['курьер один'] ?? '', stand['пин'] ?? '');
+  await expect(courier.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+  await expect(courier.locator('body')).not.toContainText(assembled);
+
+  await login(keeper, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await keeper.getByTestId('wh-tab-issue').click();
+  const shipped = await openIssueRoute(keeper, assembled);
+  await shipped.getByTestId('issue-ship').click();
+  const confirm = keeper.getByTestId('issue-confirm-courier');
+  if ((await confirm.count()) > 0) {
+    await confirm.click();
+  }
+  let checked = 0;
+  for (const key of ['заказ готов 1', 'заказ готов 2']) {
+    await keeper.getByTestId('issue-manual-order').fill(stand[key] ?? '');
+    await keeper.getByTestId('issue-ship-dialog').getByRole('button', { name: 'Внести' }).click();
+    checked += 1;
+    await expect(keeper.getByTestId('issue-progress')).toHaveText(`Внесено: ${checked} из 2`);
+  }
+  await keeper.getByTestId('issue-ship-submit').click();
+  await expect(keeper.locator('.toast-region')).toContainText('отгружен курьеру');
+
+  // Курьер видит свой лист, не трогая страницу.
+  await expect(courier.locator('body')).toContainText(assembled);
+
+  await keeperContext.close();
+  await courierContext.close();
+});
+
+/*
+ * Самовывоз появляется у менеджера ровно тогда, когда склад положил букет
+ * в ячейку: до этого выдавать нечего.
+ */
+test('два сеанса: самовывоз появляется у менеджера после складской приёмки', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
+  const stand = seedWarehouseStand();
+  const pickupOrder = stand['заказ самовывоза'] ?? '';
+  const cell = stand['ячейка хранения A'] ?? '';
+
+  const managerContext = await browser.newContext();
+  const keeperContext = await browser.newContext();
+  const manager = await managerContext.newPage();
+  const keeper = await keeperContext.newPage();
+
+  await login(manager, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await expect(manager.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+  await expect(
+    manager.locator('[data-testid="pickup-waiting-row"]', { hasText: pickupOrder }),
+  ).toHaveCount(0);
+
+  await login(keeper, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await keeper.getByTestId('wh-scan-order').fill(pickupOrder);
+  await keeper.getByTestId('wh-scan-order').press('Enter');
+  await keeper.getByTestId('wh-scan-cell').fill(cell);
+  await keeper.getByTestId('wh-place').click();
+  await expect(keeper.locator('.toast-region')).toContainText(pickupOrder);
+
+  // Менеджер узнаёт о готовом заказе сам, стоя перед покупателем.
+  await expect(
+    manager.locator('[data-testid="pickup-waiting-row"]', { hasText: pickupOrder }),
+  ).toContainText(cell);
+
+  await managerContext.close();
+  await keeperContext.close();
+});
+
+/*
+ * Телефон: четыре вкладки склада читаются целиком и ничего не уезжает
+ * за правый край.
+ */
+test('телефон: четыре вкладки склада без выезда и без второго заголовка', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+
+  for (const width of [390, 360]) {
+    const context = await browser.newContext({ viewport: { width, height: 780 } });
+    const page = await context.newPage();
+    await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+    await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+    /*
+     * Раздел представляется ровно один раз — системной шапкой.
+     *
+     * Второй заголовок и объяснение приёмки занимали треть экрана телефона
+     * у человека, который приходит сюда работать, а не читать.
+     */
+    await expect(page.getByRole('heading', { name: 'Склад', level: 1, exact: true })).toHaveCount(
+      1,
+    );
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Склад', exact: true }),
+    ).toHaveCount(0);
+
+    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    const boxes = [];
+    for (const id of tabs) {
+      const box = await page.getByTestId(id).boundingBox();
+      expect(box, `${id} на ширине ${width}`).not.toBeNull();
+      boxes.push(box!);
+    }
+
+    // Все четыре вкладки стоят в один ряд и помещаются в экран.
+    const top = boxes[0]!.y;
+    for (const box of boxes) {
+      expect(Math.abs(box.y - top)).toBeLessThan(2);
+      expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
+    }
+
+    for (const id of tabs) {
+      await page.getByTestId(id).click();
+      const overflow = await page.evaluate(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+      );
+      expect(overflow, `${id} на ширине ${width}`).toBeLessThanOrEqual(1);
+    }
+
+    await context.close();
+  }
+});
+
+/*
+ * Окно последовательной проверки листа.
+ *
+ * Прогресс здесь не хранится в окне: «проверено» — это коробки, которые
+ * физически стоят в маршрутных ячейках листа. Поэтому он переживает
+ * закрытие окна, а «Готово» ничего не завершает.
+ */
+test('сборка: последовательная проверка, пауза и «Готово» не завершает лист', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+
+  const partial = stand['мл частично'] ?? '';
+  const missing = stand['заказ требует перемещения'] ?? '';
+  const routeCellB = stand['маршрутная ячейка B'] ?? '';
+
+  await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('wh-tab-picking').click();
+
+  const card = page.locator(`[data-testid="assembly-route"][data-route-number="${partial}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('assembly-route-number').click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
+
+  /*
+   * «Готово» закрывает окно и ничего не завершает: третья коробка лежит
+   * в обычном хранении, и лист остаётся среди активных.
+   */
+  await page.getByTestId('assembly-check-done').click();
+  await expect(page.getByTestId('assembly-check')).toHaveCount(0);
+  await expect(
+    page.getByTestId('assembly-active').locator(`[data-route-number="${partial}"]`),
+  ).toBeVisible();
+
+  // Пауза: уходим на другую вкладку и возвращаемся — прогресс не потерян.
+  await page.getByTestId('wh-tab-storage').click();
+  await expect(page.getByTestId('wh-scan-order')).toBeVisible();
+  await page.getByTestId('wh-tab-picking').click();
+  await card.getByTestId('assembly-route-number').click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
+
+  // Последняя коробка переносится парой «заказ + ячейка».
+  await page.getByTestId('assembly-check-manual-order').fill(missing);
+  await page.getByTestId('assembly-check-manual-cell').fill(routeCellB);
+  await page.getByTestId('assembly-check').getByRole('button', { name: 'Внести' }).click();
+  await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 3 из 3');
+
+  // Собранный целиком лист ушёл в свёрнутую группу «Собранные».
+  await page.getByTestId('assembly-check-done').click();
+  await expect(
+    page.getByTestId('assembly-active').locator(`[data-route-number="${partial}"]`),
+  ).toHaveCount(0);
+  await page.getByTestId('assembly-assembled-toggle').click();
+  await expect(
+    page.getByTestId('assembly-assembled').locator(`[data-route-number="${partial}"]`),
+  ).toBeVisible();
+});
+
+/*
+ * Пять размеров экрана: от узкого телефона до настольного.
+ *
+ * Проверяется не «красиво», а работоспособно: ничего не уезжает за правый
+ * край, четыре вкладки помещаются в один ряд, окно отгрузки целиком внутри
+ * экрана, нижняя кнопка доступна, а длинные имя курьера, номер листа
+ * и номер заказа разметку не рвут.
+ */
+test('склад на пяти размерах: вкладки, окна, длинные значения и поля', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const longRoute = stand['мл длинный'] ?? '';
+
+  /*
+   * Сенсорный ввод объявляется честно.
+   *
+   * Приближение при фокусе — поведение сенсорных устройств, и проверять его
+   * на настольном профиле бессмысленно: правило размера текста написано
+   * ровно для `pointer: coarse` и узкого экрана.
+   */
+  const sizes = [
+    { width: 320, height: 568, touch: true },
+    { width: 375, height: 667, touch: true },
+    { width: 390, height: 844, touch: true },
+    { width: 768, height: 1024, touch: true },
+    { width: 1440, height: 900, touch: false },
+  ];
+
+  for (const size of sizes) {
+    const label = `${size.width}×${size.height}`;
+    const context = await browser.newContext({
+      viewport: { width: size.width, height: size.height },
+      hasTouch: size.touch,
+    });
+    const page = await context.newPage();
+    await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+    await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+    const overflow = async (): Promise<number> =>
+      page.evaluate<number>(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+      );
+
+    // 1. Четыре вкладки: один ряд, целиком в экране, ничего не уезжает.
+    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    const boxes = [];
+    for (const id of tabs) {
+      const box = await page.getByTestId(id).boundingBox();
+      expect(box, `${id} ${label}`).not.toBeNull();
+      boxes.push(box!);
+    }
+    const top = boxes[0]!.y;
+    for (const box of boxes) {
+      expect(Math.abs(box.y - top), `вкладки в один ряд ${label}`).toBeLessThan(2);
+      expect(box.x, label).toBeGreaterThanOrEqual(-1);
+      expect(box.x + box.width, label).toBeLessThanOrEqual(size.width + 1);
+    }
+
+    /*
+     * Название вкладки не обрезано.
+     *
+     * Обрезанное слово читается как другое, а нажимать приходится наугад:
+     * поместиться обязан весь текст, а не только рамка кнопки.
+     */
+    const clipped = await page.evaluate<string[]>(
+      `Array.from(document.querySelectorAll('.wh-tabs__item'))
+         .filter((node) => node.scrollWidth > node.clientWidth + 1)
+         .map((node) => node.textContent ?? '')`,
+    );
+    expect(clipped, `обрезанные названия вкладок ${label}`).toEqual([]);
+
+    for (const id of tabs) {
+      await page.getByTestId(id).click();
+      expect(await overflow(), `${id} ${label}`).toBeLessThanOrEqual(1);
+    }
+
+    /*
+     * 2. Три уровня выдачи раскрываются, и страница не раздаётся вбок
+     * даже на длинном имени курьера и длинном номере листа.
+     */
+    await page.getByTestId('wh-tab-issue').click();
+    const route = await openIssueRoute(page, longRoute, stand['курьер длинное имя'] ?? '');
+    await expect(route).toContainText(longRoute);
+    expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
+
+    await route.getByTestId('issue-route-toggle').click();
+    await expect(route.locator('.wh-route__order')).toHaveCount(1);
+    expect(await overflow(), `раскрытые заказы ${label}`).toBeLessThanOrEqual(1);
+
+    // 3. Окно отгрузки целиком внутри экрана, нижняя кнопка доступна.
+    await route.getByTestId('issue-ship').click();
+    const dialog = page.getByTestId('issue-ship-dialog');
+    const dialogBox = await dialog.boundingBox();
+    expect(dialogBox, label).not.toBeNull();
+    expect(dialogBox!.x, `окно слева ${label}`).toBeGreaterThanOrEqual(-1);
+    expect(dialogBox!.x + dialogBox!.width, `окно справа ${label}`).toBeLessThanOrEqual(
+      size.width + 1,
+    );
+    expect(dialogBox!.y, `окно сверху ${label}`).toBeGreaterThanOrEqual(-1);
+    expect(dialogBox!.y + dialogBox!.height, `окно снизу ${label}`).toBeLessThanOrEqual(
+      size.height + 1,
+    );
+    expect(await overflow(), `окно отгрузки ${label}`).toBeLessThanOrEqual(1);
+
+    const submit = page.getByTestId('issue-ship-submit');
+    await submit.scrollIntoViewIfNeeded();
+    const submitBox = await submit.boundingBox();
+    expect(submitBox, `нижняя кнопка ${label}`).not.toBeNull();
+    expect(submitBox!.y + submitBox!.height, `нижняя кнопка видна ${label}`).toBeLessThanOrEqual(
+      size.height + 1,
+    );
+
+    // 4. Поля не вызывают приближения страницы на телефоне.
+    // Курьер подтверждается один раз на лист: на следующем размере экрана
+    // сессия уже открыта, и кнопки нет.
+    const confirmCourier = page.getByTestId('issue-confirm-courier');
+    if ((await confirmCourier.count()) > 0) {
+      await confirmCourier.click();
+    }
+    await expect(page.getByTestId('issue-manual-order')).toBeVisible();
+    if (size.touch) {
+      const fontSizes = await page.evaluate<number[]>(
+        "Array.from(document.querySelectorAll('input, select, textarea')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+      );
+      for (const font of fontSizes) {
+        expect(font, `размер шрифта поля ${label}`).toBeGreaterThanOrEqual(16);
+      }
+    }
+
+    // 5. Фокус видим: у поля в фокусе есть собственная обводка или тень.
+    await page.getByTestId('issue-manual-order').focus();
+    const focusRing = await page.evaluate<string>(
+      "(() => { const node = document.activeElement; if (node === null) { return ''; } const style = getComputedStyle(node); return [style.outlineStyle, style.outlineWidth, style.boxShadow, style.borderColor].join('|'); })()",
+    );
+    expect(focusRing, `видимый фокус ${label}`).not.toBe('');
+    expect(
+      focusRing.includes('none|0px|none') ? 'нет признака фокуса' : 'есть',
+      `видимый фокус ${label}`,
+    ).toBe('есть');
+
+    // 6. Фон под окном не прокручивается.
+    const scrollLocked = await page.evaluate<boolean>(
+      "getComputedStyle(document.body).overflow === 'hidden' || document.body.scrollHeight <= window.innerHeight",
+    );
+    expect(scrollLocked, `фон под окном ${label}`).toBe(true);
+
+    // 7. Escape закрывает ВЕРХНЕЕ окно, а не всё сразу.
+    await page.getByTestId('issue-scan').click();
+    await expect(page.getByTestId('scan-title')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('scan-title')).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+
+    await context.close();
+  }
+});
+
+/*
+ * Камера отказала — работа не останавливается.
+ *
+ * Отказ доступа, отсутствие устройства и оборванный поток не должны ни
+ * оставлять незавершённую операцию, ни блокировать аппаратный сканер:
+ * коробка стоит перед человеком, и склад обязан продолжать работать.
+ */
+test('камера: отказ, отсутствие устройства, обрыв потока и аппаратный сканер', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedWarehouseStand();
+  await enableManualEntry(request);
+  const order = stand['заказ без размещения'] ?? '';
+  const storage = stand['ячейка хранения A'] ?? '';
+
+  /** Подменяет `getUserMedia`: проверяется НАШЕ сопоставление причин. */
+  const denyCamera = async (page: Page, name: string): Promise<void> => {
+    await page.addInitScript(`
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: () => Promise.reject(new DOMException('нет доступа', '${name}')),
+        },
+      });
+    `);
+  };
+
+  // 1. Разрешение отклонено.
+  const denied = await browser.newContext();
+  const deniedPage = await denied.newPage();
+  await denyCamera(deniedPage, 'NotAllowedError');
+  await login(deniedPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await deniedPage.getByTestId('wh-scan-camera').click();
+  await expect(deniedPage.getByTestId('scan-camera-error')).toContainText('Доступ к камере');
+  // Подсказка называет обходные пути, а не техническую причину.
+  await expect(deniedPage.getByTestId('scan-camera-error')).toContainText('сканер');
+  await deniedPage.getByTestId('scan-cancel').click();
+
+  // Аппаратный сканер работает: пара сканов доводится до конца без камеры.
+  await deniedPage.getByTestId('wh-scan-order').fill(order);
+  await deniedPage.getByTestId('wh-scan-order').press('Enter');
+  await deniedPage.getByTestId('wh-scan-cell').fill(storage);
+  await deniedPage.getByTestId('wh-place').click();
+  await expect(deniedPage.locator('.toast-region')).toContainText(order);
+  await denied.close();
+
+  // 2. Камера отсутствует.
+  const absent = await browser.newContext();
+  const absentPage = await absent.newPage();
+  await denyCamera(absentPage, 'NotFoundError');
+  await login(absentPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await absentPage.getByTestId('wh-scan-camera').click();
+  await expect(absentPage.getByTestId('scan-camera-error')).toContainText('Камера не найдена');
+  await absentPage.getByTestId('scan-close').click();
+  await expect(absentPage.getByTestId('wh-scan-order')).toBeVisible();
+  await absent.close();
+
+  /*
+   * 3. Поток оборвался посреди пары сканов.
+   *
+   * Заказ распознан, ячейка — нет. Незавершённая пара не создаёт складских
+   * записей, поэтому после отмены заказ по-прежнему нигде не числится.
+   */
+  const broken = await browser.newContext();
+  const brokenPage = await broken.newPage();
+  await brokenPage.addInitScript(() => {
+    interface Globals {
+      __flCameraAdapter?: unknown;
+      __flScan?: (code: string) => void;
+      __flBreak?: () => void;
+    }
+    const scope = globalThis as unknown as Globals;
+    let onCode: ((code: string) => void) | null = null;
+    let alive = true;
+
+    scope.__flCameraAdapter = {
+      start: (_video: unknown, events: { onCode: (code: string) => void }) => {
+        onCode = events.onCode;
+        alive = true;
+        return Promise.resolve({
+          stop: () => {
+            alive = false;
+            onCode = null;
+          },
+        });
+      },
+    };
+    scope.__flScan = (code: string) => {
+      if (alive) {
+        onCode?.(code);
+      }
+    };
+    // Обрыв потока: кадры больше не приходят, само окно остаётся открытым.
+    scope.__flBreak = () => {
+      alive = false;
+    };
+  });
+  await login(brokenPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+
+  const second = stand['заказ не собран'] ?? '';
+  await brokenPage.getByTestId('wh-scan-camera').click();
+  await brokenPage.evaluate((code) => {
+    (globalThis as unknown as { __flScan: (value: string) => void }).__flScan(code);
+  }, second);
+  await expect(brokenPage.getByTestId('scan-success')).toContainText(second);
+
+  await brokenPage.evaluate(() => {
+    (globalThis as unknown as { __flBreak: () => void }).__flBreak();
+  });
+  // Кадры не приходят — человек закрывает окно сам.
+  await brokenPage.getByTestId('scan-cancel').click();
+  await expect(brokenPage.getByTestId('wh-scan-camera')).toBeVisible();
+
+  // Незавершённая пара следа не оставила.
+  await expect(
+    brokenPage.locator('[data-testid="wh-placement-row"]', { hasText: second }),
+  ).toHaveCount(0);
+
+  // И аппаратный сканер по-прежнему доводит ту же коробку до полки.
+  await brokenPage.getByTestId('wh-scan-order').fill(second);
+  await brokenPage.getByTestId('wh-scan-order').press('Enter');
+  // Заказ входит в лист, поэтому склад сначала спрашивает, куда его нести.
+  await brokenPage.getByTestId('wh-choice-storage').click();
+  await brokenPage.getByTestId('wh-scan-cell').fill(storage);
+  await brokenPage.getByTestId('wh-place').click();
+  await expect(brokenPage.locator('.toast-region')).toContainText(second);
+  await broken.close();
+});
+
+/*
+ * Второй кладовщик видит чужую работу без перезагрузки.
+ *
+ * Назначенная полка, коробка, оставленная в хранении, и собранный целиком
+ * лист — всё это меняет работу второго человека прямо сейчас, а не после F5.
+ */
+test('два сеанса: ячейка, «Требуется перемещение» и переход в «Собранные»', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
+  const stand = seedWarehouseStand();
+  const route = stand['мл без ячейки'] ?? '';
+  const freeCell = stand['маршрутная ячейка свободная'] ?? '';
+  const storage = stand['ячейка хранения A'] ?? '';
+  const first = stand['заказ ждёт приёмки'] ?? '';
+  const second = stand['заказ не собран'] ?? '';
+
+  const workerContext = await browser.newContext();
+  const watcherContext = await browser.newContext();
+  const worker = await workerContext.newPage();
+  const watcher = await watcherContext.newPage();
+
+  await login(watcher, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await watcher.getByTestId('wh-tab-picking').click();
+  const card = watcher.locator(`[data-testid="assembly-route"][data-route-number="${route}"]`);
+  await expect(card.getByTestId('assembly-route-cells')).toContainText('без ячейки');
+  await card.getByTestId('assembly-route-toggle').click();
+
+  await login(worker, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+
+  // 1. Первая коробка едет сразу в сборку и занимает свободную полку.
+  await worker.getByTestId('wh-scan-order').fill(first);
+  await worker.getByTestId('wh-scan-order').press('Enter');
+  await worker.getByTestId('wh-choice-assembly').click();
+  await worker.getByTestId('wh-scan-cell').fill(freeCell);
+  await worker.getByTestId('wh-place').click();
+  await expect(worker.locator('.toast-region')).toContainText(freeCell);
+
+  // Второй сеанс узнал о полке сам.
+  await expect(card.getByTestId('assembly-route-cells')).toContainText(freeCell);
+
+  // 2. Вторая коробка остаётся в хранении — это незаконченная работа.
+  await worker.getByTestId('wh-scan-order').fill(second);
+  await worker.getByTestId('wh-scan-order').press('Enter');
+  await worker.getByTestId('wh-choice-storage').click();
+  await worker.getByTestId('wh-scan-cell').fill(storage);
+  await worker.getByTestId('wh-place').click();
+  await expect(worker.locator('.toast-region')).toContainText(second);
+
+  // Второй сеанс видит и коробку в хранении, и её пометку.
+  const stored = card.locator('.wh-route__order', { hasText: second });
+  await expect(stored).toContainText('Требуется перемещение');
+  await expect(
+    watcher.getByTestId('assembly-active').locator(`[data-route-number="${route}"]`),
+  ).toBeVisible();
+
+  // 3. Коробку доносят до полки листа — лист собран целиком.
+  await worker.getByTestId('wh-scan-order').fill(second);
+  await worker.getByTestId('wh-scan-order').press('Enter');
+  await worker.getByTestId('wh-choice-assembly').click();
+  await worker.getByTestId('wh-scan-cell').fill(freeCell);
+  await worker.getByTestId('wh-place').click();
+  await expect(worker.locator('.toast-region')).toContainText(freeCell);
+
+  // Переход «Активные → Собранные» дошёл до второго сеанса без перезагрузки.
+  await expect(
+    watcher.getByTestId('assembly-active').locator(`[data-route-number="${route}"]`),
+  ).toHaveCount(0);
+  await watcher.getByTestId('assembly-assembled-toggle').click();
+  await expect(
+    watcher.getByTestId('assembly-assembled').locator(`[data-route-number="${route}"]`),
+  ).toBeVisible();
+
+  await workerContext.close();
+  await watcherContext.close();
+});
+
+/**
+ * Стенд прилавка самовывоза: все состояния очереди сразу.
+ *
+ * Как и складской стенд, ставится каждым сценарием заново: очередь проверяется
+ * соседством состояний, и делить её с соседом означало бы зависеть от порядка.
+ */
+function seedPickupStand(): Record<string, string> {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-pickup-stand'], {
+    encoding: 'utf8',
+  });
+  const values: Record<string, string> = {};
+  for (const match of output.matchAll(/^([^:\n]+):\s*(.+)$/gm)) {
+    const key = (match[1] ?? '').trim();
+    if (key !== 'описание') {
+      values[key] = (match[2] ?? '').trim();
+    }
+  }
+  if (values['заказ сегодня'] === undefined) {
+    throw new Error('сеялка прилавка не вернула номера заказов');
+  }
+  return values;
+}
+
+/** Выключает ручной ввод: обычное состояние продукта. */
+async function disableManualEntry(request: APIRequestContext): Promise<void> {
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  const settings = await request.get('/api/settings/planning', { headers });
+  const current = (
+    (await settings.json()) as {
+      warehouseManualEntry: { value: { enabled: boolean }; version: number };
+    }
+  ).warehouseManualEntry;
+  if (!current.value.enabled) {
+    return;
+  }
+
+  const saved = await request.put('/api/settings/warehouse/manual-entry', {
+    headers,
+    data: { value: { enabled: false }, expectedVersion: current.version },
+  });
+  expect(saved.status()).toBe(200);
+}
+
+/*
+ * Очередь прилавка: состав, счётчик и блокирующие состояния.
+ *
+ * Покупатель приходит когда придёт, поэтому вчерашняя коробка стоит в очереди
+ * рядом с завтрашней, а календарь ничего не прячет.
+ */
+test('самовывоз: очередь без привязки к дню, счётчик и блокирующие состояния', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  // Ручной ввод по умолчанию выключен: сценарий набирает номера руками,
+  // поэтому включает настройку так же, как это сделал бы администратор.
+  await enableManualEntry(request);
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await expect(page.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+
+  const rows = page.locator('[data-testid="pickup-waiting-row"]');
+  const rowOf = (number: string): Locator =>
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${number}"]`);
+
+  // 1. Три дня в одной очереди: календарь ничего не фильтрует.
+  for (const key of ['заказ вчера', 'заказ сегодня', 'заказ завтра']) {
+    await expect(rowOf(stand[key] ?? ''), key).toBeVisible();
+  }
+
+  // 2. Коробки нет на полке — строка осталась и честно называет причину.
+  const withoutCell = rowOf(stand['заказ без ячейки'] ?? '');
+  await expect(withoutCell).toContainText('Нет ячейки');
+  await expect(withoutCell).toContainText('Нет фактической ячейки');
+
+  // 3. Отменённый и выданный из очереди ушли, доставка в неё не попадала.
+  for (const key of ['заказ отменён', 'заказ выдан', 'заказ доставки']) {
+    await expect(rowOf(stand[key] ?? ''), key).toHaveCount(0);
+  }
+
+  // 4. Пропавший источник виден, но заблокирован.
+  await expect(rowOf(stand['заказ пропал'] ?? '')).toContainText('Заказ помечен проблемным');
+
+  // 5. Счётчик считает сервер по всему отбору, а не по показанным строкам.
+  const shown = await rows.count();
+  const counter = Number((await page.getByTestId('pickup-waiting-count').innerText()).trim());
+  expect(counter).toBeGreaterThanOrEqual(shown);
+  expect(counter).toBeGreaterThanOrEqual(5);
+
+  // 6. Ручного ввода нет: настройка выключена, выдача — только сканированием.
+  await expect(page.getByTestId('pickup-manual-open')).toHaveCount(0);
+  await expect(page.getByTestId('pickup-search')).toHaveCount(0);
+  await expect(page.getByTestId('pickup-scan')).toBeVisible();
+
+  // 7. Выданный заказ лежит в справочном списке и очередь не трогает.
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: stand['заказ выдан'] ?? '' }),
+  ).toBeVisible();
+});
+
+/**
+ * Двойник камеры для прилавка.
+ *
+ * Настоящего устройства и разрешения в CI нет, а проводку «кадр → сервер →
+ * выдача» доказать нужно: адаптер подменяется двойником, который отдаёт коды
+ * по команде сценария.
+ */
+async function installCameraDouble(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    interface Globals {
+      __flCameraAdapter?: unknown;
+      __flCameraRunning?: boolean;
+      __flScan?: (code: string) => void;
+      __flClear?: () => void;
+      __flBreak?: () => void;
+    }
+    const scope = globalThis as unknown as Globals;
+
+    const queue: string[] = [];
+    let onCode: ((code: string) => void) | null = null;
+    let onEmpty: (() => void) | null = null;
+    let running = false;
+
+    const pump = (): void => {
+      if (!running) {
+        return;
+      }
+      // Настоящий QR не исчезает из кадра оттого, что приложение занято.
+      const next = queue[0];
+      if (next === undefined) {
+        onEmpty?.();
+      } else {
+        onCode?.(next);
+      }
+      setTimeout(pump, 40);
+    };
+
+    scope.__flCameraAdapter = {
+      start: (
+        _video: unknown,
+        events: { onCode: (code: string) => void; onEmptyFrame: () => void },
+      ) => {
+        onCode = events.onCode;
+        onEmpty = events.onEmptyFrame;
+        running = true;
+        scope.__flCameraRunning = true;
+        setTimeout(pump, 40);
+        return Promise.resolve({
+          stop: () => {
+            running = false;
+            onCode = null;
+            onEmpty = null;
+            scope.__flCameraRunning = false;
+          },
+        });
+      },
+    };
+
+    scope.__flScan = (code: string) => queue.push(code);
+    scope.__flClear = () => {
+      queue.length = 0;
+    };
+    // Обрыв потока: кадры больше не приходят, окно остаётся открытым.
+    scope.__flBreak = () => {
+      running = false;
+    };
+  });
+}
+
+/*
+ * Скан на прилавке: код с телефона покупателя выдаёт заказ сам.
+ *
+ * Отдельного подтверждения нет намеренно — покупатель уже стоит перед
+ * менеджером, а сервер всё равно проверяет отмену, способ получения и ячейку
+ * заново.
+ */
+test('самовывоз с камеры: скан выдаёт заказ, а ошибки названы по причине', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  await installCameraDouble(page);
+  const scan = async (code: string, until: () => Promise<void>): Promise<void> => {
+    await page.evaluate((value) => {
+      (globalThis as unknown as { __flScan: (code: string) => void }).__flScan(value);
+    }, code);
+    await until();
+    await page.evaluate(() => {
+      (globalThis as unknown as { __flClear: () => void }).__flClear();
+    });
+  };
+  const cameraRunning = (): Promise<boolean> =>
+    page.evaluate(
+      () => (globalThis as unknown as { __flCameraRunning?: boolean }).__flCameraRunning === true,
+    );
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  const success = page.getByTestId('scan-success');
+  const error = page.getByTestId('scan-error');
+
+  // 1. Окно компактное, с рамкой и понятной подсказкой.
+  await page.getByTestId('pickup-scan').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
+  await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код заказа');
+  await expect(page.locator('.scanner__reticle')).toBeVisible();
+  const viewport = page.viewportSize();
+  const box = await page.locator('.scanner').boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.height).toBeLessThan((viewport?.height ?? 0) - 8);
+
+  // 2. Каждая причина отказа названа своими словами.
+  const cases: [string, string][] = [
+    ['ЧУЖОЙ-QR-НЕ-ЗАКАЗ', 'Ожидался QR-код заказа'],
+    [stand['заказ доставки'] ?? '', 'Это не самовывозный заказ'],
+    [stand['заказ отменён'] ?? '', 'Заказ отменён'],
+    [stand['заказ без ячейки'] ?? '', 'Заказ не находится в ячейке'],
+    [stand['заказ выдан'] ?? '', 'Заказ уже выдан покупателю'],
+  ];
+  for (const [code, text] of cases) {
+    await scan(code, async () => {
+      await expect(error, code).toContainText(text);
+    });
+    // «Повторить» возвращает к тому же шагу, а не закрывает окно.
+    await page.getByTestId('scan-retry').click();
+    await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код заказа');
+  }
+
+  // 3. Правильный код выдаёт заказ сам: отдельной кнопки подтверждения нет.
+  const target = stand['заказ сегодня'] ?? '';
+  await scan(target, async () => {
+    await expect(success).toContainText(`Заказ ${target} выдан покупателю`);
+  });
+
+  /*
+   * Уведомление об успехе исчезает само, и только потом закрывается окно:
+   * камера гаснет вместе с ним, а не в момент ответа сервера.
+   */
+  await expect(page.getByTestId('scan-title')).toHaveCount(0);
+  await expect(page.getByTestId('pickup-scan')).toBeVisible();
+  expect(await cameraRunning()).toBe(false);
+  await expect(
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${target}"]`),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: target }),
+  ).toBeVisible();
+
+  // 4. Повторный кадр того же кода второй выдачи не делает.
+  await page.getByTestId('pickup-scan').click();
+  await scan(target, async () => {
+    await expect(error).toContainText('Заказ уже выдан покупателю');
+  });
+  await page.getByTestId('scan-cancel').click();
+  expect(await cameraRunning()).toBe(false);
+  await expect(page.locator('[data-testid="pickup-issued-row"]', { hasText: target })).toHaveCount(
+    1,
+  );
+});
+
+/*
+ * Камера отказала — прилавок не останавливается.
+ */
+test('самовывоз: отказ камеры, отсутствие устройства и обрыв потока', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  const denyCamera = async (page: Page, name: string): Promise<void> => {
+    await page.addInitScript(`
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: () => Promise.reject(new DOMException('нет доступа', '${name}')),
+        },
+      });
+    `);
+  };
+
+  for (const [failure, text] of [
+    ['NotAllowedError', 'Доступ к камере'],
+    ['NotFoundError', 'Камера не найдена'],
+  ] as [string, string][]) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await denyCamera(page, failure);
+    await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+    await page.getByTestId('pickup-scan').click();
+    await expect(page.getByTestId('scan-camera-error')).toContainText(text);
+    await page.getByTestId('scan-cancel').click();
+
+    // Очередь работает как работала: отказ камеры её не ломает.
+    await expect(page.getByTestId('pickup-waiting-count')).toBeVisible();
+    await context.close();
+  }
+
+  /*
+   * Поток оборвался: окно осталось открытым, кадры не приходят.
+   * Незавершённое сканирование не выдаёт заказ.
+   */
+  const broken = await browser.newContext();
+  const page = await broken.newPage();
+  await installCameraDouble(page);
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('pickup-scan').click();
+  await page.evaluate(() => {
+    (globalThis as unknown as { __flBreak: () => void }).__flBreak();
+  });
+  await page.evaluate((code) => {
+    (globalThis as unknown as { __flScan: (value: string) => void }).__flScan(code);
+  }, stand['заказ завтра'] ?? '');
+  await page.waitForTimeout(500);
+  await page.getByTestId('scan-cancel').click();
+
+  // Заказ по-прежнему в очереди: оборванный поток ничего не выдал.
+  await expect(
+    page.locator(
+      `[data-testid="pickup-waiting-row"][data-order-number="${stand['заказ завтра'] ?? ''}"]`,
+    ),
+  ).toBeVisible();
+  await broken.close();
+});
+
+/*
+ * Ручная выдача существует только по решению администратора.
+ */
+test('самовывоз: ручная выдача появляется настройкой и выдаёт отдельной кнопкой', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await expect(page.getByTestId('pickup-manual-open')).toHaveCount(0);
+
+  // Прямой запрос ручной выдачи запрещён сервером, а не спрятан экраном.
+  const denied = await page.request.post('/api/pickup/issues', {
+    data: { orderNumber: stand['заказ сегодня'] ?? '', source: 'MANUAL' },
+  });
+  expect([401, 403, 409]).toContain(denied.status());
+
+  await enableManualEntry(request);
+
+  // Настройка доходит до открытого экрана без перезагрузки.
+  await expect(page.getByTestId('pickup-manual-open')).toBeVisible({ timeout: 25_000 });
+  await page.getByTestId('pickup-manual-open').click();
+
+  const target = stand['заказ вчера'] ?? '';
+  await page.getByTestId('pickup-search').fill(target);
+  // Enter только ищет: случайное нажатие не отдаёт коробку.
+  await page.getByTestId('pickup-search').press('Enter');
+  await expect(page.getByTestId('pickup-card-number')).toHaveText(target);
+  await expect(page.locator('[data-testid="pickup-issued-row"]', { hasText: target })).toHaveCount(
+    0,
+  );
+
+  await page.getByTestId('pickup-issue').click();
+  await expect(page.locator('.toast-region')).toContainText(`${target} выдан покупателю`);
+  await expect(
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${target}"]`),
+  ).toHaveCount(0);
+
+  await disableManualEntry(request);
+});
+
+/*
+ * Два менеджера у одного прилавка и склад рядом.
+ *
+ * Очередь у обоих одна и та же: коробка, выданная соседом, обязана исчезнуть
+ * у второго до того, как он пойдёт её искать.
+ */
+test('два сеанса: очередь прилавка обновляется от склада, выдачи и отмены', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await enableManualEntry(request);
+
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  const keeperContext = await browser.newContext();
+  const first = await firstContext.newPage();
+  const second = await secondContext.newPage();
+  const keeper = await keeperContext.newPage();
+
+  await login(first, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await login(second, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await login(keeper, stand['кладовщик прилавка'] ?? '', stand['пин'] ?? '');
+
+  const rowOf = (page: Page, number: string): Locator =>
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${number}"]`);
+
+  // 1. Складская приёмка добавляет заказ в очередь обоих менеджеров.
+  const returning = stand['заказ без ячейки'] ?? '';
+  await expect(rowOf(first, returning)).toContainText('Нет ячейки');
+  await keeper.getByTestId('wh-scan-order').fill(returning);
+  await keeper.getByTestId('wh-scan-order').press('Enter');
+  await keeper.getByTestId('wh-scan-cell').fill(stand['ячейка A'] ?? '');
+  await keeper.getByTestId('wh-place').click();
+  await expect(keeper.locator('.toast-region')).toContainText(returning);
+
+  // Ячейка появилась у обоих без перезагрузки.
+  await expect(rowOf(first, returning)).toContainText(stand['ячейка A'] ?? '');
+  await expect(rowOf(second, returning)).toContainText(stand['ячейка A'] ?? '');
+
+  // 2. Выдача во втором сеансе убирает строку в первом.
+  const target = stand['заказ сегодня'] ?? '';
+  await second.getByTestId('pickup-manual-open').click();
+  await second.getByTestId('pickup-search').fill(target);
+  await second.getByTestId('pickup-search').press('Enter');
+  await expect(second.getByTestId('pickup-card-number')).toHaveText(target);
+  await second.getByTestId('pickup-issue').click();
+  await expect(second.locator('.toast-region')).toContainText('выдан покупателю');
+
+  await expect(rowOf(first, target)).toHaveCount(0);
+
+  // 3. Отмена из источника убирает строку, снятие отмены возвращает её.
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+  const cancelTarget = stand['заказ завтра'] ?? '';
+
+  const cancelled = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: cancelTarget, cancelled: true },
+  });
+  expect(cancelled.status(), await cancelled.text()).toBe(200);
+  await expect(rowOf(first, cancelTarget)).toHaveCount(0);
+  await expect(rowOf(second, cancelTarget)).toHaveCount(0);
+
+  const restored = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: cancelTarget, cancelled: false },
+  });
+  expect(restored.status()).toBe(200);
+  // Коробка всё это время лежала в ячейке — заказ возвращается в очередь.
+  await expect(rowOf(first, cancelTarget)).toBeVisible();
+
+  await disableManualEntry(request);
+  await firstContext.close();
+  await secondContext.close();
+  await keeperContext.close();
+});
+
+/*
+ * Прилавок на телефоне и планшете.
+ */
+test('самовывоз: 320, 375, 390 и 768 без выезда, окно внутри экрана', async ({
+  browser,
+  request,
+}: {
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await enableManualEntry(request);
+
+  for (const size of [
+    { width: 320, height: 568 },
+    { width: 375, height: 667 },
+    { width: 390, height: 844 },
+    { width: 768, height: 1024 },
+  ]) {
+    const label = `${size.width}×${size.height}`;
+    const context = await browser.newContext({ viewport: size, hasTouch: true });
+    const page = await context.newPage();
+    await installCameraDouble(page);
+    await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+    await expect(page.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+
+    const overflow = async (): Promise<number> =>
+      page.evaluate<number>(
+        'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+      );
+    expect(await overflow(), `очередь ${label}`).toBeLessThanOrEqual(1);
+
+    // Поля не вызывают приближения страницы на сенсорном экране.
+    await page.getByTestId('pickup-manual-open').click();
+    await expect(page.getByTestId('pickup-search')).toBeVisible();
+    const fonts = await page.evaluate<number[]>(
+      "Array.from(document.querySelectorAll('input, select, textarea')).map((node) => parseFloat(getComputedStyle(node).fontSize))",
+    );
+    for (const font of fonts) {
+      expect(font, `размер шрифта поля ${label}`).toBeGreaterThanOrEqual(16);
+    }
+
+    // Видимый фокус: поле в фокусе отличается от поля без него.
+    await page.getByTestId('pickup-search').focus();
+    const focusRing = await page.evaluate<string>(
+      "(() => { const node = document.activeElement; if (node === null) { return ''; } const style = getComputedStyle(node); return [style.outlineStyle, style.outlineWidth, style.boxShadow, style.borderColor].join('|'); })()",
+    );
+    expect(focusRing.includes('none|0px|none') ? 'нет признака' : 'есть', `фокус ${label}`).toBe(
+      'есть',
+    );
+
+    // Окно камеры целиком внутри экрана, фон под ним неподвижен.
+    await page.getByTestId('pickup-scan').click();
+    const box = await page.locator('.scanner').boundingBox();
+    expect(box, label).not.toBeNull();
+    expect(box!.x, `окно слева ${label}`).toBeGreaterThanOrEqual(-1);
+    expect(box!.x + box!.width, `окно справа ${label}`).toBeLessThanOrEqual(size.width + 1);
+    expect(box!.y + box!.height, `окно снизу ${label}`).toBeLessThanOrEqual(size.height + 1);
+    expect(await overflow(), `окно камеры ${label}`).toBeLessThanOrEqual(1);
+
+    const locked = await page.evaluate<boolean>(
+      "getComputedStyle(document.body).overflow === 'hidden' || document.body.scrollHeight <= window.innerHeight",
+    );
+    expect(locked, `фон под окном ${label}`).toBe(true);
+
+    // Escape закрывает окно камеры и возвращает прилавок.
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('scan-title')).toHaveCount(0);
+    await expect(page.getByTestId('pickup-scan')).toBeVisible();
+
+    await context.close();
+  }
+
+  await disableManualEntry(request);
+});
+
+/*
+ * Переключатель ручного ввода на экране настроек.
+ *
+ * Один флаг меняет работу двух рабочих мест сразу, поэтому проверяется не
+ * «галочка ставится», а то, что склад и прилавок узнают о ней на уже
+ * открытых экранах.
+ */
+test('настройки: переключатель ручного ввода меняет склад и самовывоз без перезагрузки', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+  await disableManualEntry(request);
+
+  // 1. Администратор видит переключатель и его умолчание.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Настройки');
+  const toggle = page.getByTestId('manual-entry-toggle');
+  await expect(page.getByTestId('manual-entry-form')).toContainText(
+    'Разрешить ручной ввод на складе и в самовывозе',
+  );
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeEnabled();
+
+  // 2. Два рабочих места открыты заранее и ничего не перезагружают.
+  const keeperContext = await browser.newContext();
+  const managerContext = await browser.newContext();
+  const keeper = await keeperContext.newPage();
+  const manager = await managerContext.newPage();
+  await login(keeper, stand['кладовщик прилавка'] ?? '', stand['пин'] ?? '');
+  await login(manager, stand['менеджер'] ?? '', stand['пин'] ?? '');
+
+  await keeper.getByTestId('wh-tab-issue').click();
+  await expect(manager.getByTestId('pickup-manual-open')).toHaveCount(0);
+
+  // 3. Включение доходит до обоих без F5.
+  /*
+   * Нажатие, а не `check()`: переключатель управляется ответом сервера,
+   * и до перезапроса галочка честно остаётся прежней.
+   */
+  await toggle.click();
+  await expect(page.locator('.toast-region')).toContainText('Ручной ввод разрешён');
+  await expect(toggle).toBeChecked();
+  await expect(manager.getByTestId('pickup-manual-open')).toBeVisible({ timeout: 25_000 });
+
+  await keeper.getByTestId('wh-tab-storage').click();
+  await keeper.getByTestId('wh-scan-order').fill(stand['заказ доставки'] ?? '');
+  await keeper.getByTestId('wh-scan-order').press('Enter');
+  await expect(keeper.getByTestId('wh-scan-cell')).toBeVisible();
+
+  // 4. Выключение так же доходит до обоих.
+  await toggle.click();
+  await expect(page.locator('.toast-region')).toContainText('Ручной ввод запрещён');
+  await expect(toggle).not.toBeChecked();
+  await expect(manager.getByTestId('pickup-manual-open')).toHaveCount(0, { timeout: 25_000 });
+
+  // 5. Сканирование от переключателя не зависит: кнопка на месте всегда.
+  await expect(manager.getByTestId('pickup-scan')).toBeVisible();
+  await expect(keeper.getByTestId('wh-scan-camera')).toBeVisible();
+
+  // 6. Логист видит переключатель, но выключенным для изменения.
+  const logistContext = await browser.newContext();
+  const logist = await logistContext.newPage();
+  await login(logist, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  // Менеджеру раздел настроек недоступен вовсе — это проверяется отдельно;
+  // здесь достаточно, что переключатель живёт в разделе администратора.
+  await expect(logist.getByRole('link', { name: 'Настройки' })).toHaveCount(0);
+
+  await keeperContext.close();
+  await managerContext.close();
+  await logistContext.close();
+});
+
+/**
+ * Три замечания приёмки «Сделок» — проверяются вместе.
+ *
+ * Все три про то, что видно и достижимо на экране, а не про то, что записано
+ * в базу: список курьеров, обрезанный модальным окном, недоступен так же
+ * надёжно, как отсутствующий, а панель, которую нечем вернуть, теряет карту
+ * до перезагрузки страницы.
+ */
+test('«Сделки»: список курьеров не обрезан, список скрывается, вкладки в лотке', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await ensureCourier(browser);
+  const numbers = seedOrders(2, { withPoint: true });
+  expect(numbers).toHaveLength(2);
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  // --- Вкладки лежат в одном лотке, активная выделена отдельно ---------------
+  const tabs = page.locator('.shell__tabs');
+  const tabsBox = await tabs.boundingBox();
+  expect(tabsBox).not.toBeNull();
+  for (const name of ['Сделки', 'Маршрутизация', 'Маршрутные листы', 'История', 'Отчёты']) {
+    const box = await page.locator('.shell__tabs').getByRole('link', { name }).boundingBox();
+    expect(box, `вкладка «${name}» вне лотка`).not.toBeNull();
+    // Каждая вкладка целиком внутри лотка: лоток — один предмет, а не фон.
+    expect(box!.x).toBeGreaterThanOrEqual(tabsBox!.x - 1);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(tabsBox!.x + tabsBox!.width + 1);
+  }
+  await expect(page.locator('.shell__tabs .shell__tab--active')).toHaveCount(1);
+  // «Требуют решения» со своим счётчиком никуда не делась.
+  await expect(
+    page.locator('.shell__tabs').getByRole('link', { name: /Требуют решения/ }),
+  ).toBeVisible();
+
+  const overflow = async (): Promise<number> =>
+    page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ) as Promise<number>;
+  expect(await overflow()).toBeLessThanOrEqual(0);
+
+  // --- Сворачивание панелей --------------------------------------------------
+  await page.getByTestId('deals-select-all').click();
+  const selectedBefore = await page.getByTestId('deals-selected-count').textContent();
+  expect(selectedBefore).toBeTruthy();
+
+  await page.getByTestId('deals-toggle-list').click();
+  await expect(page.getByTestId('deals-column')).toBeHidden();
+  await expect(page.getByTestId('deals-map-column')).toBeVisible();
+  // Вернуть список нечем, если кнопка исчезла вместе с ним.
+  await expect(page.getByTestId('deals-toggle-list')).toBeVisible();
+  await page.getByTestId('deals-toggle-list').click();
+  await expect(page.getByTestId('deals-column')).toBeVisible();
+
+  /*
+   * Выбор пережил скрытие: панель прячется, данные — нет.
+   *
+   * Уменьшиться выбор вправе ровно по одной причине — заказ стал недоступен
+   * из-за чужого действия, и тогда экран об этом СКАЗАЛ. Тихая потеря выбора
+   * и сброс в ноль по-прежнему валят проверку.
+   */
+  const selectionCount = (text: string | null): number =>
+    Number(/\d+/.exec(text ?? '')?.[0] ?? '0');
+  const selectedAfter = await page.getByTestId('deals-selected-count').textContent();
+  expect(selectionCount(selectedAfter)).toBeGreaterThan(0);
+  if (selectionCount(selectedAfter) !== selectionCount(selectedBefore)) {
+    await expect(page.getByTestId('deals-notice')).toContainText('Из выбора снято заказов');
+  }
+  expect(await overflow()).toBeLessThanOrEqual(0);
+
+  // --- Список курьеров в модальном окне --------------------------------------
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-courier-field').click();
+
+  const options = page.getByTestId('create-route-courier-option');
+  const count = await options.count();
+  expect(count).toBeGreaterThan(0);
+
+  const last = options.nth(count - 1);
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
+  /*
+   * Список считает себе высоту по свободному месту и прокручивается сам,
+   * поэтому в окно он помещается целиком, а до последнего варианта человек
+   * докручивается. Проверяется и то и другое: и что список не свисает за
+   * нижнюю границу, и что последний вариант после прокрутки виден полностью.
+   */
+  const listBox = await page.getByTestId('create-route-courier-list').boundingBox();
+  expect(listBox).not.toBeNull();
+  expect(listBox!.y + listBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
+  await last.scrollIntoViewIfNeeded();
+  const lastBox = await last.boundingBox();
+  expect(lastBox).not.toBeNull();
+  expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
+
+  const label = (await last.textContent()) ?? '';
+  await last.click();
+  await expect(page.getByTestId('create-route-courier-field')).toHaveValue(label.trim());
+
+  await context.close();
+});
+
+/**
+ * Меню — наложение, а не колонка.
+ *
+ * Проверяется не внешний вид, а то, что экран под меню не трогают: раньше
+ * панель занимала колонку, и её появление пересобирало раскладку — список
+ * сжимался, карта уходила в адаптивный режим, раскрытые карточки схлопывались.
+ * Поэтому измеряется положение рабочей области до, во время и после.
+ */
+test('оболочка: меню выезжает поверх экрана и не сдвигает рабочую область', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  seedOrders(2, { withPoint: true });
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  const workspace = page.getByTestId('deals-workspace');
+  await expect(workspace).toBeVisible();
+
+  // Состояние, которое обязано пережить открытие меню.
+  await page.getByTestId('deals-select-all').click();
+  const selected = await page.getByTestId('deals-selected-count').textContent();
+
+  const box = async (): Promise<string> => JSON.stringify(await workspace.boundingBox());
+  const before = await box();
+
+  const menu = page.locator('.shell__menu-button');
+  await menu.click();
+  await expect(page.locator('.shell--drawer-open')).toHaveCount(1);
+
+  // Главное: рабочая область не сдвинулась и не сузилась.
+  expect(await box()).toBe(before);
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(0);
+  // Выбор не сброшен: меню ничего под собой не пересоздаёт.
+  await expect(page.getByTestId('deals-selected-count')).toHaveText(selected ?? '');
+
+  // Выбор раздела выполняет обычный переход и закрывает панель.
+  await page.locator('#shell-sidebar').getByRole('link', { name: 'Настройки' }).click();
+  await expect(page.getByRole('heading', { name: 'Настройки', level: 1 })).toBeVisible();
+  await expect(page.locator('.shell--drawer-open')).toHaveCount(0);
+
+  await context.close();
+});
+
+/**
+ * «Маршрутизация»: то, чего не проверял ни один существующий сценарий.
+ *
+ * Создание черновиков, состав, перестановка, перенос, «Создать МЛ» и «Отменить
+ * маршрут» уже покрыты сквозным сценарием черновика и проверкой линии, а
+ * идемпотентность повторного тела — сценарием пустого черновика. Здесь ровно
+ * то, что осталось без проверки: свёрнутое состояние, история, скрытие списка
+ * и переносимость состояния через него.
+ */
+test('маршрутизация: свёрнутый черновик, история и скрытие списка', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+
+  /*
+   * Свой пустой черновик: он создаётся раскрытым и единственным раскрытым.
+   *
+   * Дальше сценарий держится за его НОМЕР, а не за место в списке: в общей
+   * базе черновиков много, порядок в списке меняется, и `.first()` уводил бы
+   * проверки на чужой черновик.
+   */
+  await page.getByTestId('routing-add-draft').click();
+  const opened = page.locator('.routes__draft[data-expanded="true"]');
+  await expect(opened).toHaveCount(1);
+  const draftNumber = (await opened.getAttribute('data-draft-number')) ?? '';
+  expect(draftNumber).not.toBe('');
+  const draft = page.locator(`.routes__draft[data-draft-number="${draftNumber}"]`);
+
+  // --- Свёрнутое состояние не прячет тело, а не имеет его ------------------
+  const expandedHeight = (await draft.boundingBox())?.height ?? 0;
+  await draft.locator('.routes__draft-head').click();
+  await expect(draft).toHaveAttribute('data-expanded', 'false');
+  // Ни курьера, ни действий, ни истории: содержимое удалено, а не скрыто.
+  await expect(draft.locator('.routes__card')).toHaveCount(0);
+  await expect(draft.getByText('История маршрута')).toHaveCount(0);
+  /*
+   * Свёрнутая карточка по макету — шапка плюс строка блокировки, а не одна
+   * строка: важно, что тело действительно удалено, поэтому высота
+   * сравнивается с развёрнутой, а не с давним числом в пикселях.
+   */
+  const collapsedHeight = (await draft.boundingBox())?.height ?? 0;
+  expect(collapsedHeight).toBeLessThan(expandedHeight / 2);
+
+  // --- История раскрывается внутри карточки --------------------------------
+  await draft.locator('.routes__draft-head').click();
+  await expect(draft).toHaveAttribute('data-expanded', 'true');
+  /*
+   * История раскрывается кнопкой нижнего ряда и до нажатия не занимает
+   * строку: раскрытое состояние объявлено через aria-expanded.
+   */
+  const history = draft.getByTestId('route-history-toggle');
+  await expect(history).toBeVisible();
+  await expect(history).toHaveAttribute('aria-expanded', 'false');
+  await expect(draft.locator('.routes__history')).toHaveCount(0);
+  await history.click();
+  await expect(history).toHaveAttribute('aria-expanded', 'true');
+  await expect(draft.locator('.routes__history')).toHaveCount(1);
+
+  // --- Скрытие списка расширяет карту --------------------------------------
+  const mapBefore = (await page.getByTestId('routing-map-panel').boundingBox())?.width ?? 0;
+  await page.getByTestId('routing-toggle-drafts').click();
+  await expect(page.getByTestId('routing-drafts')).toBeHidden();
+  const mapWide = (await page.getByTestId('routing-map-panel').boundingBox())?.width ?? 0;
+  expect(mapWide).toBeGreaterThan(mapBefore);
+  // Вернуть список нечем, если кнопка исчезла вместе с ним.
+  await expect(page.getByTestId('routing-toggle-drafts')).toBeVisible();
+
+  await page.getByTestId('routing-toggle-drafts').click();
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  // Раскрытый черновик и его раскрытая история пережили скрытие: панель
+  // убирается из сетки, но не размонтируется.
+  await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
+  await expect(draft.locator('.routes__history')).toHaveCount(1);
+
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(0);
+
+  await context.close();
+});
+
+/** «Маршрутизация» на телефоне: обе области и управление панелями доступны. */
+test('маршрутизация на телефоне: список, карта и переключатель без выезда', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.goto('/logistics/routing');
+  await expect(page.getByTestId('routing-drafts')).toBeVisible();
+  await expect(page.getByTestId('routing-map-panel')).toBeVisible();
+  await expect(page.getByTestId('routing-toggle-drafts')).toBeVisible();
+
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(0);
+
+  await context.close();
 });

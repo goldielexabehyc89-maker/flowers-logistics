@@ -1,0 +1,88 @@
+/*
+ * Прилавок самовывоза.
+ *
+ * Строка очереди — цель для пальца, а не текст со ссылкой: менеджер держит
+ * коробку одной рукой и целится второй.
+ */
+.pickup-scan {
+  width: 100%;
+}
+
+.pickup-queue {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pickup-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 48px;
+  padding: 8px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pickup-row:hover {
+  background: var(--color-surface-hover);
+}
+
+.pickup-row__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.pickup-row__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/*
+ * Очередь — плитки во вдавленном лотке.
+ *
+ * Строки были рядами в тонких рамках: за прилавком менеджер ищет одну
+ * коробку из десятка и ведёт по списку пальцем, а ряд без собственной
+ * поверхности сливается с соседним.
+ */
+.pickup-queue {
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.pickup-row {
+  min-height: 56px;
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.pickup-row:hover {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-in);
+}
+
+/* Выданный заказ углублён и приглушён: работа по нему закрыта. */
+.pickup-row--issued {
+  background: var(--surface-inactive);
+  color: var(--color-text-muted);
+  box-shadow: var(--shadow-in);
+}

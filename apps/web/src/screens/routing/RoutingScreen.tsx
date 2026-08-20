@@ -16,10 +16,13 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { VEHICLE_TYPE_LABELS } from '@fl/shared';
 import { Plus } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, EmptyState, ErrorState, LoadingState, TextInput } from '../../ui/components';
 import { RouteCard } from './RouteCard';
+import { DraftLeaseRow } from './DraftLeaseRow';
 import { PreviewPanel } from './PreviewPanel';
 import { DraftMapPanel } from './DraftMapPanel';
 import { useWorkspace } from '../logistics/useWorkspace';
@@ -30,6 +33,14 @@ export function RoutingScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { day, draftId, runId, setDay, setDraftId, closeRun } = useWorkspace();
+  /*
+   * Скрытие списка черновиков — только вид, состояние живёт здесь.
+   *
+   * Панель убирается из сетки, но не размонтируется: раскрытый черновик,
+   * взятая аренда, выбранные заказы и положение прокрутки остаются на месте.
+   * Кнопка возврата стоит в карте, которая при этом занимает весь экран.
+   */
+  const [draftsHidden, setDraftsHidden] = useState(false);
 
   const routes = useQuery({
     queryKey: ['routes', day],
@@ -111,8 +122,8 @@ export function RoutingScreen(): React.JSX.Element {
         </p>
       )}
 
-      <div className="routes__workspace">
-        <section className="routes__drafts" data-testid="routing-drafts">
+      <div className={`routes__workspace${draftsHidden ? ' routes__workspace--list-hidden' : ''}`}>
+        <section className="routes__drafts" id="routing-drafts" data-testid="routing-drafts">
           {/*
             Компактная шапка внутри панели списка.
 
@@ -122,14 +133,36 @@ export function RoutingScreen(): React.JSX.Element {
           */}
           <header className="routes__panel-head">
             <span className="routes__panel-title">Черновики дня</span>
-            <span className="muted text-sm">{drafts.length}</span>
+            <span className="routes__panel-count">{drafts.length}</span>
             <TextInput
               type="date"
               aria-label="День"
+              className="routes__day"
               value={day}
               data-testid="routing-day"
               onChange={(event) => setDay(event.target.value)}
             />
+            {/*
+              Пустой черновик заводится одним нажатием и без диалога: спрашивать
+              нечего — день уже выбран рядом, заказов и курьера у него ещё нет.
+              Кнопка стоит в шапке, потому что относится к этому дню и этому
+              списку; внизу она жила в отдельной полосе, которая повторяла дату
+              и отнимала у списка последнюю строку.
+            */}
+            <Button className="routes__refresh" onClick={() => void routes.refetch()}>
+              Обновить
+            </Button>
+            <button
+              type="button"
+              className="routes__draft-add"
+              data-testid="routing-add-draft"
+              aria-label="Добавить пустой черновик"
+              title="Добавить пустой черновик"
+              disabled={createEmpty.isPending}
+              onClick={() => createEmpty.mutate()}
+            >
+              <Plus size={15} aria-hidden="true" />
+            </button>
           </header>
 
           {/* Прокручивается только середина: шапка и действия остаются на месте. */}
@@ -144,7 +177,7 @@ export function RoutingScreen(): React.JSX.Element {
             ) : drafts.length === 0 ? (
               <EmptyState
                 title="Черновиков на этот день нет"
-                description="Черновики создаются в «Сделках» выбором заказов или автоматической разбивкой. Пустой черновик можно завести кнопкой «+» внизу списка."
+                description="Черновики создаются в «Сделках» выбором заказов или автоматической разбивкой. Пустой черновик можно завести кнопкой «+» в шапке списка."
               />
             ) : (
               <ul className="routes__draft-list">
@@ -179,14 +212,19 @@ export function RoutingScreen(): React.JSX.Element {
                           aria-hidden="true"
                         />
                         <span className="routes__number">{draft.number}</span>
-                        <span className="routes__draft-count">
-                          {draft.orderCount} зак.
+                        <span className="routes__draft-badge">Черновик</span>
+                        <span className="routes__draft-meta">
+                          {formatDate(draft.deliveryDate)} ·{' '}
+                          {VEHICLE_TYPE_LABELS[draft.vehicleType]} · остановок {draft.orderCount}
                           {draft.conflictCount > 0 ? ` · расхождений: ${draft.conflictCount}` : ''}
                         </span>
-                        <span className="routes__draft-chevron" aria-hidden="true">
-                          {expanded ? '▲' : '▼'}
+                        <span className="routes__draft-toggle-text">
+                          {expanded ? 'Свернуть' : 'Развернуть'}
                         </span>
                       </button>
+
+                      {/* Аренда видна и у свёрнутой строки: занят маршрут или свободен. */}
+                      {!expanded && <DraftLeaseRow routeId={draft.id} />}
 
                       {expanded && (
                         <RouteCard
@@ -204,29 +242,19 @@ export function RoutingScreen(): React.JSX.Element {
               </ul>
             )}
           </div>
-
-          <div className="routes__panel-actions">
-            <Button onClick={() => void routes.refetch()}>Обновить список</Button>
-            {/*
-              Пустой черновик заводится одним нажатием и без диалога: спрашивать
-              нечего — день уже выбран сверху, заказов и курьера у него ещё нет.
-            */}
-            <button
-              type="button"
-              className="routes__draft-add"
-              data-testid="routing-add-draft"
-              aria-label="Добавить пустой черновик"
-              title="Добавить пустой черновик"
-              disabled={createEmpty.isPending}
-              onClick={() => createEmpty.mutate()}
-            >
-              <Plus size={15} aria-hidden="true" />
-            </button>
-            <span className="muted text-sm">{formatDate(day)}</span>
-          </div>
         </section>
 
-        <DraftMapPanel deliveryDate={day} activeRouteId={activeId} drafts={drafts} />
+        <DraftMapPanel
+          deliveryDate={day}
+          activeRouteId={activeId}
+          drafts={drafts}
+          draftsHidden={draftsHidden}
+          /*
+            Скрытие — только вид: список не размонтируется, раскрытый черновик,
+            аренда и прокрутка остаются нетронутыми.
+          */
+          onToggleDrafts={() => setDraftsHidden((current) => !current)}
+        />
       </div>
     </section>
   );

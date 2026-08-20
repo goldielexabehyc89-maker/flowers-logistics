@@ -235,8 +235,24 @@ describe('граница логиста не сдвинулась', () => {
     const courierFlorist = await seedUser(ctx.db, { roles: ['COURIER', 'FLORIST'] });
     const plainCourier = await seedUser(ctx.db, { roles: ['COURIER'] });
 
-    const listed = await listUsers(ctx, logisticianActor(logist.id), { limit: 200, offset: 0 });
-    const ids = listed.items.map((item) => item.id);
+    /*
+     * Список собирается постранично, а не одной страницей.
+     *
+     * Прежде проверка запрашивала первые 200 записей и молча полагалась
+     * на то, что общая тестовая база меньше страницы. База растёт вместе
+     * с набором тестов, список отсортирован по имени — и созданный здесь
+     * курьер просто переставал попадать на первую страницу. Проверка падала
+     * не потому, что граница логиста сдвинулась, а потому, что данных стало
+     * больше.
+     */
+    const ids: string[] = [];
+    for (let offset = 0; ; offset += 200) {
+      const page = await listUsers(ctx, logisticianActor(logist.id), { limit: 200, offset });
+      ids.push(...page.items.map((item) => item.id));
+      if (ids.length >= page.total || page.items.length === 0) {
+        break;
+      }
+    }
 
     expect(ids).toContain(plainCourier.id);
     for (const hidden of [florist.id, manager.id, courierFlorist.id]) {

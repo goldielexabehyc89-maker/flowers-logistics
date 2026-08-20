@@ -1,42 +1,51 @@
 /**
  * Чтение раздела «Самовывоз».
  *
- * Менеджеру нужно ровно три вещи: найти заказ по номеру, увидеть, готов ли он
- * и где лежит, и подтвердить выдачу. Поэтому карточка называет состояние
+ * Менеджеру нужно ровно три вещи: видеть очередь ожидающих выдачи заказов,
+ * найти нужный по номеру и отдать его. Поэтому карточка называет состояние
  * сборки и печати, но не показывает ни состава букета, ни адреса, ни телефона:
  * человек уже стоит перед менеджером, и его данные для выдачи не нужны.
  *
- * Московский день считает сервер: браузер кассы стоит в произвольном поясе,
- * и «сегодня» по его часам однажды разошлось бы с рабочим днём склада.
+ * ОЧЕРЕДЬ НЕ ПРИВЯЗАНА К ДНЮ. Покупатель приходит когда придёт: вчерашний,
+ * сегодняшний и завтрашний заказы стоят на одной полке и в одном списке.
+ * День — справочная подпись и порядок, а не фильтр: заказ, потерявшийся
+ * из-за смены календарной даты, означает букет, который никто не отдаст.
+ *
+ * Из очереди заказ уходит ровно двумя способами: его выдали покупателю или
+ * его отменили. Всё остальное — архив источника, пропажа, снятая с полки
+ * коробка — остаётся видимым и объясняет, почему выдавать нельзя.
  */
 
+import { moscowDayRange } from '@fl/shared';
+
 import type { Database } from '../../platform/db.js';
-import type { $Enums } from '../../generated/prisma/client.js';
+import { Prisma, type $Enums } from '../../generated/prisma/client.js';
 import { AppError } from '../../platform/errors.js';
-import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
-import { isPickupOrder } from './service.js';
 
 /** Точный UUID способа получения «Самовывоз»: название ключом не является. */
 const PICKUP_METHOD_ID = MOYSKLAD_IDS.deliveryMethodPickup;
 
 /**
- * Предел списка дня.
+ * Размер страницы очереди.
  *
- * Прилавок самовывоза — это десятки заказов, а не тысячи. Ограничение стоит
- * не ради красоты: без него один испорченный день выгрузил бы весь склад
- * в браузер кассы.
+ * Очередь листается продолжением, а не обрезается: прилавок обычно короткий,
+ * но «первые двести и молча всё» однажды спрячет коробку, за которой пришли.
  */
-const LIST_LIMIT = 200;
+export const QUEUE_PAGE_SIZE = 50;
+export const MAX_QUEUE_PAGE_SIZE = 200;
 
 /** Почему заказ нельзя выдать прямо сейчас. */
 export type PickupBlocker =
   /** Способ получения — доставка либо иной: раздел не про него. */
   | 'NOT_PICKUP'
-  /** Источник архивирован или пропал из МоегоСклада. */
+  /** Заказ отменён: выдавать нечего. */
+  | 'ORDER_CANCELLED'
+  /** Источник архивирован, пропал или вышел из производственной области. */
   | 'ORDER_BLOCKED'
-  /** Заказ ещё не принят на склад: фактической ячейки нет. */
+  /** Коробки сейчас нет ни в одной ячейке. */
   | 'NOT_PLACED'
   /** Заказ уже выдан покупателю. */
   | 'ALREADY_ISSUED';
@@ -68,6 +77,8 @@ const ORDER_SELECT = {
   fulfillmentInScope: true,
   sourceArchived: true,
   sourceMissing: true,
+  cancelledInSource: true,
+  cancelledByLogistAt: true,
   fulfillmentProcessState: true,
   fulfillmentAssembledAt: true,
   placements: {
@@ -75,7 +86,9 @@ const ORDER_SELECT = {
     select: { cell: { select: { id: true, code: true } } },
   },
   printJobs: { select: { state: true } },
-  pickupIssue: { select: { issuedAt: true, issuedById: true } },
+  pickupIssue: {
+    select: { issuedAt: true, issuedById: true, cell: { select: { id: true, code: true } } },
+  },
 } as const;
 
 type OrderRow = {
@@ -86,22 +99,46 @@ type OrderRow = {
   fulfillmentInScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
   fulfillmentProcessState: $Enums.OrderFulfillmentProcessState;
   fulfillmentAssembledAt: Date | null;
   placements: { cell: { id: string; code: string } }[];
   printJobs: { state: $Enums.PrintJobState }[];
-  pickupIssue: { issuedAt: Date; issuedById: string } | null;
+  pickupIssue: { issuedAt: Date; issuedById: string; cell: { id: string; code: string } } | null;
 };
 
+/**
+ * Самовывоз ли это ПО СПОСОБУ ПОЛУЧЕНИЯ.
+ *
+ * Только точный UUID справочника. Производственная область сюда не входит
+ * намеренно: архивный заказ перестаёт быть «в производстве», но самовывозом
+ * быть не перестаёт — и обязан остаться на глазах у менеджера, а не исчезнуть
+ * с полки вместе с коробкой.
+ */
+export function isPickupMethod(order: { deliveryMethodId: string | null }): boolean {
+  return order.deliveryMethodId === PICKUP_METHOD_ID;
+}
+
+/** Отменён ли заказ. Признак нормализованный: импорт и логист пишут в него оба. */
+export function isCancelled(order: {
+  cancelledInSource: boolean;
+  cancelledByLogistAt: Date | null;
+}): boolean {
+  return order.cancelledInSource || order.cancelledByLogistAt !== null;
+}
+
 function toCard(order: OrderRow): PickupCard {
-  const pickup = isPickupOrder(order);
   const placement = order.placements[0] ?? null;
 
   const blockers: PickupBlocker[] = [];
-  if (!pickup) {
+  if (!isPickupMethod(order)) {
     blockers.push('NOT_PICKUP');
   }
-  if (order.sourceArchived || order.sourceMissing) {
+  if (isCancelled(order)) {
+    blockers.push('ORDER_CANCELLED');
+  }
+  if (order.sourceArchived || order.sourceMissing || !order.fulfillmentInScope) {
     blockers.push('ORDER_BLOCKED');
   }
   if (order.pickupIssue !== null) {
@@ -114,15 +151,21 @@ function toCard(order: OrderRow): PickupCard {
     orderId: order.id,
     orderNumber: order.externalName,
     deliveryDate: order.deliveryDate === null ? null : fromDateColumn(order.deliveryDate),
-    isPickup: pickup,
+    isPickup: isPickupMethod(order),
     // Состояние сборки показывается как контекст: склад и выдача от него
     // не зависят (`FUL-001`), но менеджеру полезно видеть, собран ли букет.
     assemblyState: order.fulfillmentInScope ? order.fulfillmentProcessState : null,
     assembledAt: order.fulfillmentAssembledAt?.toISOString() ?? null,
     printJobs: order.printJobs.length,
     printedJobs: order.printJobs.filter((job) => job.state === 'PRINTED').length,
-    cellId: placement?.cell.id ?? null,
-    cellCode: placement?.cell.code ?? null,
+    /*
+     * Выданный заказ показывает ячейку, ИЗ КОТОРОЙ его забрали.
+     *
+     * Действующего размещения у него уже нет, и «нет ячейки» в справке
+     * о выдаче отвечало бы не на тот вопрос: спрашивают «откуда отдали».
+     */
+    cellId: placement?.cell.id ?? order.pickupIssue?.cell.id ?? null,
+    cellCode: placement?.cell.code ?? order.pickupIssue?.cell.code ?? null,
     issuedAt: order.pickupIssue?.issuedAt.toISOString() ?? null,
     issuedById: order.pickupIssue?.issuedById ?? null,
     blockers,
@@ -144,33 +187,174 @@ export async function findPickupByNumber(db: Database, scanned: string): Promise
   return toCard(order);
 }
 
+export interface PickupQueuePage {
+  total: number;
+  items: PickupCard[];
+  /** Продолжение списка. `null` — страница последняя. */
+  nextCursor: string | null;
+}
+
 /**
- * Самовывозы выбранного московского дня: готовые к выдаче и уже выданные.
+ * Ключ продолжения.
  *
- * Один запрос на день, а не «все размещения склада»: менеджеру нужен его
- * прилавок сегодня, а не история всего здания.
+ * Смещением листать нельзя: между страницами заказ выдают, отменяют и
+ * принимают на склад, и «следующие пятьдесят» показали бы одни строки дважды,
+ * а другие не показали бы вовсе. Ключ повторяет порядок сортировки целиком.
  */
-export async function listPickupsOfDay(
+interface QueueCursor {
+  day: string;
+  number: string;
+  id: string;
+}
+
+function encodeCursor(cursor: QueueCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeCursor(raw: string): QueueCursor {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as QueueCursor;
+    if (
+      typeof parsed.day !== 'string' ||
+      typeof parsed.number !== 'string' ||
+      typeof parsed.id !== 'string'
+    ) {
+      throw new Error('bad shape');
+    }
+    return parsed;
+  } catch {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'bad pickup cursor',
+      publicMessage: 'Продолжение списка устарело. Обновите страницу.',
+    });
+  }
+}
+
+/**
+ * Очередь ожидающих выдачи.
+ *
+ * Состав: самовывоз по точному UUID, который УЖЕ побывал на складе (есть хоть
+ * одно размещение), ещё не выдан и не отменён. Отсутствие коробки в ячейке
+ * прямо сейчас из очереди не убирает — оно называется отдельной причиной.
+ *
+ * Порядок: сначала самая ранняя дата, потом номер. Заказы без даты идут
+ * последними: у них не «сегодня», у них ничего, и ставить их вперёд датированных
+ * значило бы обещать срочность, которой никто не объявлял.
+ */
+export async function listPickupQueue(
+  db: Database,
+  input: { limit?: number | undefined; cursor?: string | undefined } = {},
+): Promise<PickupQueuePage> {
+  const limit = Math.min(Math.max(input.limit ?? QUEUE_PAGE_SIZE, 1), MAX_QUEUE_PAGE_SIZE);
+  const cursor = input.cursor === undefined ? null : decodeCursor(input.cursor);
+
+  /*
+   * Отбор и порядок пишутся SQL целиком.
+   *
+   * Сравнение тройкой «(день, номер, id) больше ключа» — единственный способ
+   * пролистать без пропусков и повторов; условиями Prisma это не выражается,
+   * а собирать страницу в памяти означало бы выгружать весь склад.
+   *
+   * Заказ без даты получает служебное «9999-12-31»: он обязан оказаться
+   * после датированных и в порядке, и в ключе продолжения.
+   */
+  const waiting = Prisma.sql`
+    FROM "DeliveryOrder" AS o
+    WHERE o."deliveryMethodId" = ${PICKUP_METHOD_ID}
+      AND NOT o."cancelledInSource"
+      AND o."cancelledByLogistAt" IS NULL
+      AND EXISTS (SELECT 1 FROM "OrderPlacement" p WHERE p."orderId" = o."id")
+      AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
+  `;
+
+  const keyset =
+    cursor === null
+      ? Prisma.empty
+      : Prisma.sql`
+          AND (
+            COALESCE(o."deliveryDate", DATE '9999-12-31'),
+            o."externalName",
+            o."id"
+          ) > (${cursor.day}::date, ${cursor.number}, ${cursor.id}::uuid)
+        `;
+
+  const [counted, page] = await Promise.all([
+    db.$queryRaw<{ total: bigint }[]>`SELECT count(*)::bigint AS "total" ${waiting}`,
+    db.$queryRaw<{ id: string; day: Date; number: string }[]>`
+      SELECT o."id",
+             COALESCE(o."deliveryDate", DATE '9999-12-31') AS "day",
+             o."externalName" AS "number"
+      ${waiting}
+      ${keyset}
+      ORDER BY COALESCE(o."deliveryDate", DATE '9999-12-31') ASC, o."externalName" ASC, o."id" ASC
+      LIMIT ${limit + 1}
+    `,
+  ]);
+
+  // Счётчик считается по ВСЕМУ отбору, а не по странице: «ожидают выдачи 3»
+  // при пятидесяти коробках на полке — это неверная работа, а не мелочь.
+  const total = Number(counted[0]?.total ?? 0n);
+
+  const hasMore = page.length > limit;
+  const visible = hasMore ? page.slice(0, limit) : page;
+  const last = visible.at(-1) ?? null;
+
+  const orders = await db.deliveryOrder.findMany({
+    where: { id: { in: visible.map((row) => row.id) } },
+    select: ORDER_SELECT,
+  });
+  const byId = new Map(orders.map((order) => [order.id, order]));
+
+  return {
+    total,
+    // Порядок задаёт SQL: повторная сортировка в памяти разошлась бы с ключом
+    // продолжения на первом же заказе без даты.
+    items: visible
+      .map((row) => byId.get(row.id))
+      .filter((order): order is OrderRow => order !== undefined)
+      .map(toCard),
+    nextCursor:
+      hasMore && last !== null
+        ? encodeCursor({
+            day: fromDateColumn(last.day),
+            number: last.number,
+            id: last.id,
+          })
+        : null,
+  };
+}
+
+/**
+ * Выданные за московский день: справочный список, а не рабочая очередь.
+ *
+ * Живёт отдельным запросом намеренно: состав активной очереди он не меняет
+ * и меняться от него не должен.
+ *
+ * День считается по ФАКТУ выдачи (`OrderPickupIssue.issuedAt`), а не по
+ * плановой дате доставки. Разница видна каждый день: заказ вчерашнего дня,
+ * за которым пришли сегодня, выдан сегодня — и в сегодняшнем списке он обязан
+ * быть; заказ, оформленный на послезавтра и отданный сегодня из рук в руки,
+ * тоже. Плановая дата на попадание в список не влияет вовсе.
+ *
+ * Границы — полуинтервал московского дня: от полуночи включительно до полуночи
+ * следующего дня исключительно, поэтому выдача в 00:00:00 попадает в новый
+ * день, а в 23:59:59.999 — ещё в прежний. Часовой пояс браузера и сервера
+ * в расчёте не участвует.
+ */
+export async function listIssuedOfDay(
   db: Database,
   day: string,
-): Promise<{ deliveryDate: string; waiting: PickupCard[]; issued: PickupCard[] }> {
+): Promise<{ deliveryDate: string; issued: PickupCard[] }> {
+  const { from, to } = moscowDayRange(day);
   const orders = await db.deliveryOrder.findMany({
     where: {
-      deliveryDate: toDateColumn(day),
-      fulfillmentInScope: true,
       deliveryMethodId: PICKUP_METHOD_ID,
+      pickupIssue: { is: { issuedAt: { gte: from, lt: to } } },
     },
     orderBy: [{ externalName: 'asc' }],
     select: ORDER_SELECT,
-    take: LIST_LIMIT,
+    take: MAX_QUEUE_PAGE_SIZE,
   });
 
-  const cards = orders.map(toCard);
-
-  return {
-    deliveryDate: day,
-    // «Ждут выдачи» — те, у кого есть фактическая ячейка и нет факта выдачи.
-    waiting: cards.filter((card) => card.issuedAt === null && card.cellId !== null),
-    issued: cards.filter((card) => card.issuedAt !== null),
-  };
+  return { deliveryDate: day, issued: orders.map(toCard) };
 }

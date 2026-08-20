@@ -12,19 +12,19 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { formatMoscowDateTime } from '@fl/shared';
+import { formatMoscowDateTime, formatMoscowTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Button,
   EmptyState,
   ErrorState,
-  Field,
   LoadingState,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
 import { formatDate, moscowToday, ROUTE_STATE_LABELS } from '../routing/routing';
 import './history.css';
+import { CourierCombobox } from './CourierCombobox';
 
 interface HistoryRouteRow {
   id: string;
@@ -76,6 +76,8 @@ interface HistoryDetails {
     label: string;
     actor: { id: string; fullName: string } | null;
     reason: string | null;
+    /** Подробности события. Для смены состояния — откуда и куда. */
+    details?: { fromState?: string | null; toState?: string | null } | null;
   }[];
 }
 
@@ -100,6 +102,54 @@ const PAYMENT_LABELS: Record<string, string> = {
   DESK_HANDED_TO_COMPANY: 'Касса: сдано в компанию',
   DESK_ADJUSTMENT: 'Касса: обратная корректировка',
 };
+
+/** Готовые периоды отбора: день, неделя, месяц назад от сегодняшнего дня. */
+const HISTORY_PERIODS = [
+  { key: 'day', title: 'День', days: 0 },
+  { key: 'week', title: 'Неделя', days: 7 },
+  { key: 'month', title: 'Месяц', days: 30 },
+] as const;
+
+/**
+ * Границы периода в календарных днях Москвы.
+ *
+ * Считается от сегодняшнего дня назад: «неделя» — это последние семь дней
+ * вместе с текущим, а не календарная неделя с понедельника. Логист спрашивает
+ * историю именно так.
+ */
+function periodRange(days: number): { from: string; to: string } {
+  const today = new Date();
+  const to = today.toISOString().slice(0, 10);
+  const start = new Date(today.getTime() - days * 24 * 60 * 60 * 1000);
+  return { from: start.toISOString().slice(0, 10), to };
+}
+
+/**
+ * Подпись события хронологии.
+ *
+ * Смена состояния приходит с сервера строкой из значений перечня —
+ * «Состояние: ACTIVE → COMPLETED». Человеку это ничего не говорит, а сами
+ * значения сервер уже отдаёт отдельными полями, так что называем их здесь,
+ * теми же словами, что и плашка состояния на строке маршрута.
+ */
+function eventLabel(event: {
+  label: string;
+  details?: { fromState?: string | null; toState?: string | null } | null;
+}): string {
+  const from = event.details?.fromState;
+  const to = event.details?.toState;
+  if (typeof from !== 'string' || typeof to !== 'string') {
+    return event.label;
+  }
+  const named = (state: string): string =>
+    ROUTE_STATE_LABELS[state as keyof typeof ROUTE_STATE_LABELS] ?? state;
+  return `Состояние: ${named(from)} → ${named(to)}`;
+}
+
+/** Доля заказов в процентах для полосы результата. Нулевой маршрут — пустая полоса. */
+function barShare(part: number, total: number): number {
+  return total === 0 ? 0 : Math.round((part / total) * 100);
+}
 
 /** Деньги в истории показываются так же, как в отчётах. */
 function money(minor: string): string {
@@ -143,22 +193,27 @@ function RouteDetails({ routeId }: { routeId: string }): React.JSX.Element {
               className="history__order"
               data-order-number={order.number}
             >
+              {/*
+                Порядок остановки: номер, время, исход, адрес. Исход стоит
+                до адреса — по нему разбирают день, а адрес только уточняет,
+                о какой именно остановке речь.
+              */}
               <span className="history__position">{order.position}</span>
               <span className="history__order-number">{order.number}</span>
+              <span className="history__order-interval">{order.interval ?? '—'}</span>
+              {order.removedAt !== null && (
+                <StatusBadge tone="neutral">выведен из маршрута</StatusBadge>
+              )}
+              {order.outcome === 'DELIVERED' && <StatusBadge tone="success">Доставлен</StatusBadge>}
+              {order.outcome === 'NOT_DELIVERED' && (
+                <StatusBadge tone="error">
+                  Не доставлен{order.failureReason === null ? '' : `: ${order.failureReason}`}
+                </StatusBadge>
+              )}
+              {/* Адрес идёт последним и забирает остаток строки: он длиннее всех. */}
               <span className="history__order-address" title={order.address ?? undefined}>
                 {order.address ?? '—'}
               </span>
-              <span className="history__order-recipient">{order.recipient ?? '—'}</span>
-              <span className="history__order-interval">{order.interval ?? '—'}</span>
-              {order.removedAt !== null && (
-                <span className="history__tag">выведен из маршрута</span>
-              )}
-              {order.outcome === 'DELIVERED' && <span className="history__ok">Доставлен</span>}
-              {order.outcome === 'NOT_DELIVERED' && (
-                <span className="history__fail">
-                  Не доставлен{order.failureReason === null ? '' : `: ${order.failureReason}`}
-                </span>
-              )}
             </li>
           ))}
         </ul>
@@ -169,8 +224,12 @@ function RouteDetails({ routeId }: { routeId: string }): React.JSX.Element {
         <ul className="history__events" data-testid="history-events">
           {details.data.events.map((event, index) => (
             <li key={`${event.occurredAt}-${event.action}-${index}`} className="history__event">
-              <span className="history__event-time">{formatMoscowDateTime(event.occurredAt)}</span>
-              <span className="history__event-label">{event.label}</span>
+              {/*
+                Только время: день уже назван заголовком выше, и повторять
+                дату в каждой строке значило бы отдать ей треть ширины.
+              */}
+              <span className="history__event-time">{formatMoscowTime(event.occurredAt)}</span>
+              <span className="history__event-label">{eventLabel(event)}</span>
               <span className="history__event-actor">{event.actor?.fullName ?? 'система'}</span>
               {event.reason !== null && (
                 <span className="history__event-reason">Причина: {event.reason}</span>
@@ -198,7 +257,7 @@ export function HistoryScreen(): React.JSX.Element {
   const couriers = useQuery({
     queryKey: ['couriers-for-routes'],
     queryFn: () =>
-      client.get<{ items: { id: string; fullName: string }[] }>(
+      client.get<{ items: { id: string; fullName: string; phone: string | null }[] }>(
         '/api/users?role=COURIER&status=ACTIVE&limit=100',
       ),
   });
@@ -228,75 +287,96 @@ export function HistoryScreen(): React.JSX.Element {
   return (
     <section className="history" data-testid="history-screen">
       <div className="history__filters">
-        <Field label="С">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={from}
-              data-testid="history-from"
-              onChange={(event) => setFrom(event.target.value)}
-            />
-          )}
-        </Field>
-        <Field label="По">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={to}
-              data-testid="history-to"
-              onChange={(event) => setTo(event.target.value)}
-            />
-          )}
-        </Field>
-        <Field label="Курьер">
-          {(props) => (
-            <select
-              {...props}
-              className="history__select"
-              value={courierUserId}
-              data-testid="history-courier"
-              onChange={(event) => setCourierUserId(event.target.value)}
-            >
-              <option value="">Любой</option>
-              {(couriers.data?.items ?? []).map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.fullName}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-        <Field label="Состояние">
-          {(props) => (
-            <select
-              {...props}
-              className="history__select"
-              value={state}
-              data-testid="history-state"
-              onChange={(event) => setState(event.target.value)}
-            >
-              <option value="">Любое</option>
-              {Object.entries(ROUTE_STATE_LABELS).map(([key, label]) => (
-                <option key={key} value={key}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-        <Field label="Поиск" hint="Номер листа, номер заказа, курьер">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={search}
-              placeholder="Например, R-12 или 212109"
-              data-testid="history-search"
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          )}
-        </Field>
+        {/*
+          Готовые периоды вместо счёта дней в уме.
+
+          «Последняя неделя» — самый частый вопрос к истории, и набирать
+          под него две даты руками приходилось каждый раз. Кнопки только
+          подставляют границы: сами поля остаются, и любой другой период
+          по-прежнему набирается вручную.
+        */}
+        <div className="history__periods" role="group" aria-label="Период">
+          {HISTORY_PERIODS.map((period) => {
+            const range = periodRange(period.days);
+            const active = from === range.from && to === range.to;
+            return (
+              <button
+                key={period.key}
+                type="button"
+                className={active ? 'history__period history__period--on' : 'history__period'}
+                aria-pressed={active}
+                data-testid={`history-period-${period.key}`}
+                onClick={() => {
+                  setFrom(range.from);
+                  setTo(range.to);
+                }}
+              >
+                {period.title}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="history__range">
+          <TextInput
+            type="date"
+            value={from}
+            aria-label="С"
+            data-testid="history-from"
+            onChange={(event) => setFrom(event.target.value)}
+          />
+          <span className="history__range-dash" aria-hidden="true">
+            –
+          </span>
+          <TextInput
+            type="date"
+            value={to}
+            aria-label="По"
+            data-testid="history-to"
+            onChange={(event) => setTo(event.target.value)}
+          />
+        </div>
+
+        {/*
+          Курьер выбирается вводом с подсказками, а не длинным списком:
+          курьеров десятки, и искать нужного прокруткой дольше, чем набрать
+          три буквы имени или цифры телефона. Контрол тот же, что и на других
+          экранах, — привыкать заново не приходится.
+        */}
+        <div className="history__courier" data-testid="history-courier">
+          <CourierCombobox
+            options={couriers.data?.items ?? []}
+            value={(couriers.data?.items ?? []).find((item) => item.id === courierUserId) ?? null}
+            label="Курьер"
+            emptyLabel="Любой курьер"
+            testId="history-courier-combobox"
+            onChange={(courier) => setCourierUserId(courier === null ? '' : courier.id)}
+          />
+        </div>
+
+        <select
+          className="history__select"
+          value={state}
+          aria-label="Состояние"
+          data-testid="history-state"
+          onChange={(event) => setState(event.target.value)}
+        >
+          <option value="">Любое состояние</option>
+          {Object.entries(ROUTE_STATE_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+
+        <TextInput
+          className="history__search"
+          value={search}
+          aria-label="Поиск"
+          placeholder="Номер листа, номер заказа или курьер"
+          data-testid="history-search"
+          onChange={(event) => setSearch(event.target.value)}
+        />
       </div>
 
       {history.isPending ? (
@@ -312,7 +392,21 @@ export function HistoryScreen(): React.JSX.Element {
         <>
           {history.data.days.map((day) => (
             <section key={day.date} className="history__day" data-testid="history-day">
-              <h3 className="history__day-title">{formatDate(day.date)}</h3>
+              {/*
+                Сводка стоит рядом с датой: сколько маршрутов было и чем
+                кончились. Без неё день приходилось пересчитывать глазами
+                по строкам.
+              */}
+              <div className="history__day-head">
+                <h3 className="history__day-title">{formatDate(day.date)}</h3>
+                <span className="history__day-summary">
+                  маршрутов {day.routes.length} · доставлено{' '}
+                  {day.routes.reduce((sum, route) => sum + route.deliveredCount, 0)}
+                  {day.routes.some((route) => route.failedCount > 0)
+                    ? ` · не доставлено ${day.routes.reduce((sum, route) => sum + route.failedCount, 0)}`
+                    : ''}
+                </span>
+              </div>
 
               {/*
                 Денежные операции дня: сдача, выдача и дополнительные расходы.
@@ -320,72 +414,123 @@ export function HistoryScreen(): React.JSX.Element {
                 а не в отчётах.
               */}
               {day.payments.length > 0 && (
-                <ul className="history__payments" data-testid="history-payments">
-                  {day.payments.map((payment) => (
+                <div className="history__money">
+                  <span className="history__money-title">Деньги за день</span>
+                  <ul className="history__payments" data-testid="history-payments">
+                    {day.payments.map((payment) => (
+                      <li
+                        key={payment.id}
+                        className="history__payment"
+                        data-payment-kind={payment.kind}
+                      >
+                        {/*
+                          Только время: день назван заголовком выше. Полная дата
+                          не помещалась в узкую колонку и наезжала на название
+                          операции.
+                        */}
+                        <span className="history__event-time">
+                          {formatMoscowTime(payment.occurredAt)}
+                        </span>
+                        <span className="history__event-label">
+                          {PAYMENT_LABELS[payment.kind] ?? payment.kind}
+                        </span>
+                        <span className="history__payment-amount">
+                          {money(payment.amountMinor)}
+                        </span>
+                        <span className="history__event-actor">
+                          {payment.courierName} · {payment.actorName ?? 'автор неизвестен'}
+                        </span>
+                        {payment.reason !== null && (
+                          <span className="history__event-reason">{payment.reason}</span>
+                        )}
+                        {payment.reversed && <span className="history__tag">отменена</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/*
+                Лоток вдавлен, маршруты внутри подняты — как в «Листах»
+                и «Требуют решения»: одна и та же мысль об одном и том же.
+              */}
+              <div className="history__tray" role="table" aria-label={`Маршруты ${day.date}`}>
+                <div className="history__head" role="row">
+                  <span role="columnheader">Маршрут</span>
+                  <span role="columnheader">Курьер</span>
+                  <span role="columnheader">Результат</span>
+                  <span role="columnheader" className="history__head-last">
+                    Последний результат
+                  </span>
+                </div>
+                <ul className="history__list">
+                  {day.routes.map((route) => (
                     <li
-                      key={payment.id}
-                      className="history__payment"
-                      data-payment-kind={payment.kind}
+                      key={route.id}
+                      className="history__row"
+                      data-testid="history-route"
+                      data-route-number={route.number}
+                      data-expanded={openId === route.id ? 'true' : 'false'}
                     >
-                      <span className="history__event-time">
-                        {formatMoscowDateTime(payment.occurredAt)}
-                      </span>
-                      <span className="history__event-label">
-                        {PAYMENT_LABELS[payment.kind] ?? payment.kind}
-                      </span>
-                      <span className="history__payment-amount">{money(payment.amountMinor)}</span>
-                      <span className="history__event-actor">
-                        {payment.courierName} · {payment.actorName ?? 'автор неизвестен'}
-                      </span>
-                      {payment.reason !== null && (
-                        <span className="history__event-reason">{payment.reason}</span>
-                      )}
-                      {payment.reversed && <span className="history__tag">отменена</span>}
+                      <button
+                        type="button"
+                        className="history__row-head"
+                        aria-expanded={openId === route.id}
+                        data-testid="history-expand"
+                        onClick={() => setOpenId(openId === route.id ? null : route.id)}
+                      >
+                        <span className="history__cell history__cell--route">
+                          <span className="history__number">{route.number}</span>
+                          <StatusBadge tone={route.state === 'CANCELLED' ? 'neutral' : 'info'}>
+                            {ROUTE_STATE_LABELS[route.state]}
+                          </StatusBadge>
+                        </span>
+
+                        <span className="history__cell muted">
+                          {route.courier?.fullName ?? 'курьер не назначен'}
+                        </span>
+
+                        {/*
+                        Полоса показывает исход маршрута раньше, чем прочитаны
+                        числа: зелёное — доставлено, красное — нет, пустое —
+                        результатов ещё не было.
+                      */}
+                        <span className="history__cell history__cell--result">
+                          <span className="history__bar" aria-hidden="true">
+                            <span
+                              className="history__bar-ok"
+                              style={{
+                                width: `${barShare(route.deliveredCount, route.orderCount)}%`,
+                              }}
+                            />
+                            <span
+                              className="history__bar-fail"
+                              style={{ width: `${barShare(route.failedCount, route.orderCount)}%` }}
+                            />
+                          </span>
+                          <span className="muted">
+                            {route.deliveredCount} из {route.orderCount}
+                            {route.failedCount > 0 ? ` · не доставлено ${route.failedCount}` : ''}
+                          </span>
+                        </span>
+
+                        <span className="history__cell history__cell--last">
+                          <span className="muted history__time">
+                            {route.lastResultAt === null
+                              ? 'без результатов'
+                              : formatMoscowDateTime(route.lastResultAt)}
+                          </span>
+                          <span className="history__chevron" aria-hidden="true">
+                            {openId === route.id ? '▲' : '▼'}
+                          </span>
+                        </span>
+                      </button>
+
+                      {openId === route.id && <RouteDetails routeId={route.id} />}
                     </li>
                   ))}
                 </ul>
-              )}
-              <ul className="history__list">
-                {day.routes.map((route) => (
-                  <li
-                    key={route.id}
-                    className="history__row"
-                    data-testid="history-route"
-                    data-route-number={route.number}
-                    data-expanded={openId === route.id ? 'true' : 'false'}
-                  >
-                    <button
-                      type="button"
-                      className="history__row-head"
-                      aria-expanded={openId === route.id}
-                      data-testid="history-expand"
-                      onClick={() => setOpenId(openId === route.id ? null : route.id)}
-                    >
-                      <span className="history__number">{route.number}</span>
-                      <StatusBadge tone={route.state === 'CANCELLED' ? 'neutral' : 'info'}>
-                        {ROUTE_STATE_LABELS[route.state]}
-                      </StatusBadge>
-                      <span className="muted">
-                        {route.courier?.fullName ?? 'курьер не назначен'}
-                      </span>
-                      <span className="muted">
-                        заказов: {route.orderCount} · доставлено: {route.deliveredCount}
-                        {route.failedCount > 0 ? ` · не доставлено: ${route.failedCount}` : ''}
-                      </span>
-                      <span className="muted history__time">
-                        {route.lastResultAt === null
-                          ? 'результатов нет'
-                          : formatMoscowDateTime(route.lastResultAt)}
-                      </span>
-                      <span className="history__chevron" aria-hidden="true">
-                        {openId === route.id ? '▲' : '▼'}
-                      </span>
-                    </button>
-
-                    {openId === route.id && <RouteDetails routeId={route.id} />}
-                  </li>
-                ))}
-              </ul>
+              </div>
             </section>
           ))}
 

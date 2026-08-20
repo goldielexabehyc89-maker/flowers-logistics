@@ -70,20 +70,49 @@
   }
 
   .routes__workspace {
-    grid-template-columns: clamp(360px, 27%, 440px) minmax(0, 1fr);
+    /*
+     * Та же поверхность, что в «Сделках»: две приподнятые панели одной высоты
+     * с одним шагом сетки между ними. Логист ходит между вкладками десятки раз
+     * за смену, и разная геометрия одной работы каждый раз сбивала бы глаз.
+     */
+    grid-template-columns: clamp(460px, 38%, 760px) minmax(0, 1fr);
     align-items: stretch;
     flex: 1 1 auto;
-    /*
-     * Одна цельная поверхность из двух соединённых панелей — ровно та же, что
-     * в «Сделках»: общая внешняя граница, единственный разделитель посередине
-     * и никакого зазора. Логист ходит между вкладками десятки раз за смену,
-     * и разная геометрия одной работы каждый раз сбивала бы глаз.
-     */
-    gap: 0;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-3, 12px);
-    overflow: hidden;
+    gap: var(--space-3);
+    min-height: 0;
+  }
+
+  /*
+   * Скрытая панель убирается из сетки, а не прячется прозрачностью: колонка
+   * нулевой ширины всё равно держала бы отступ, и карта не заняла бы место.
+   */
+  .routes__workspace--list-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .routes__workspace--list-hidden .routes__drafts {
+    display: none;
+  }
+
+  .routes__drafts,
+  .routes__map-panel {
+    border-radius: var(--radius-xl);
     background: var(--color-surface);
+    box-shadow: var(--shadow-out-lg);
+    overflow: hidden;
+  }
+
+  /* Поля вокруг холста задаёт панель, а не сам холст — как в «Сделках». */
+  .routes__map-panel {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-3);
+    min-height: 0;
+  }
+
+  .routes__map-surface {
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   /* Единственная граница между списком и картой. */
@@ -126,14 +155,31 @@
   list-style: none;
 }
 
+/*
+ * Свёрнутый черновик — одна строка и ничего больше.
+ *
+ * Всё остальное — дата, транспорт, аренда, курьер, действия — живёт в раскрытом
+ * виде. В свёрнутом они превращали список в столбик карточек по три строки, и
+ * найти нужный черновик глазами становилось труднее, чем прочитать их все.
+ */
 .routes__draft {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border: none;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-hover);
+  box-shadow: var(--shadow-row);
   overflow: hidden;
 }
 
+.routes__draft:hover {
+  box-shadow: var(--shadow-out);
+}
+
+/* Свой раскрытый черновик обведён акцентом: его можно менять. */
 .routes__draft--open {
-  border-color: var(--color-accent, var(--color-border));
+  background: var(--color-surface);
+  box-shadow:
+    var(--shadow-out),
+    0 0 0 1px var(--color-accent);
 }
 
 /*
@@ -144,9 +190,11 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  align-items: baseline;
+  /* По центру: номер, бейдж, справка и подпись переключателя на одной оси. */
+  align-items: center;
   width: 100%;
-  padding: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
   border: 0;
   background: none;
   text-align: left;
@@ -250,6 +298,10 @@
 
 .routes__number {
   font-weight: 600;
+  /* Номер не сжимается: он опознаёт черновик, остальное — справка. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Номер заказа кликабелен: он связывает строку списка с маркером на карте. */
@@ -805,26 +857,44 @@
 .routes__drafts-body {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 4px 6px;
+  padding: var(--space-3);
 }
 
+/*
+ * Компактная шапка списка: заголовок, счётчик, день и «+».
+ *
+ * Все элементы одной высоты и по центру: разнобой заметен именно в короткой
+ * строке, где их четыре. Отделена от списка светом, а не линией — линия делала
+ * из шапки отдельное окно поверх панели.
+ */
 .routes__panel-head {
   display: flex;
   gap: var(--space-2);
   align-items: center;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--log-border-soft);
+  flex-wrap: nowrap;
+  padding: var(--space-3);
+  border-bottom: none;
+  box-shadow: 0 6px 12px -10px rgb(163 172 191 / 70%);
 }
 
 .routes__panel-title {
-  font-size: var(--log-font-md);
+  font-size: var(--font-size-md);
   font-weight: 600;
+  white-space: nowrap;
 }
 
+/* Счётчик серверный: он называет, сколько черновиков в дне, а не в списке. */
+.routes__panel-count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* День прижат вправо и одной высоты с остальными элементами строки. */
 .routes__panel-head input[type='date'] {
-  width: 150px;
-  height: 30px;
-  min-height: 30px;
+  width: 160px;
+  height: 36px;
+  min-height: 36px;
   margin-left: auto;
 }
 
@@ -879,7 +949,6 @@
 }
 
 .routes__draft-head {
-  flex-wrap: nowrap;
   gap: 6px;
   align-items: center;
   padding: 3px 6px;
@@ -1024,7 +1093,6 @@
 }
 
 .routes__draft-head {
-  flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
   padding: 10px 12px;
@@ -1050,22 +1118,74 @@
   background: var(--log-status-ok);
 }
 
+/*
+ * Номер не сжимается и не обрезается.
+ *
+ * Прежде он занимал всю свободную ширину и уступал её соседям до нуля:
+ * в строке оставались бейдж и подпись переключателя, а сам номер —
+ * единственное, по чему черновик опознают, — исчезал.
+ */
 .routes__draft-head .routes__number {
-  overflow: hidden;
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--log-text-strong);
-  font-size: var(--log-font-md);
-  font-weight: 700;
-  text-overflow: ellipsis;
+  flex: 0 0 auto;
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
   white-space: nowrap;
+}
+
+/* Бейдж состояния рядом с номером: строка называет, что это черновик. */
+.routes__draft-badge {
+  flex: none;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+
+/* Дата, транспорт и число остановок — тихая справка после номера. */
+.routes__draft-meta {
+  /* Справка уступает место номеру и бейджу, а не наоборот. */
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: left;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Подпись переключателя стоит своей строкой.
+ *
+ * В одной строке с номером она отнимала у него ширину, и номер обрезался
+ * многоточием — а он здесь главное: по нему черновик и опознают.
+ */
+.routes__draft-toggle-text {
+  flex: 0 0 100%;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.routes__refresh {
+  flex: none;
+  min-height: 36px;
 }
 
 .routes__draft-count,
 .routes__draft-chevron {
   flex: none;
-  color: var(--log-text-faint);
-  font-size: var(--log-font-xs);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.routes__draft-count {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .routes__draft-chevron {
@@ -1157,7 +1277,7 @@
   background: var(--log-selected-text);
   color: var(--log-surface);
   font-size: var(--log-font-2xs);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .routes__draft .routes__stop-body {
@@ -1375,4 +1495,1014 @@
 .routes__map-window-remove:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/*
+ * Холст карты — вдавленный лоток с полями.
+ *
+ * Карта во всю панель до самых её краёв читалась как фон окна, а не рабочая
+ * поверхность. Тот же приём, что принят в «Сделках»: поля и вдавленность дают
+ * ей границу, не рисуя линии.
+ */
+.routes__map-surface {
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in-lg);
+  overflow: hidden;
+}
+
+/*
+ * Ненастроенная карта занимает панель целиком, а не сжимается в блок сверху.
+ *
+ * Панель половинной высоты выглядела бы поломкой раскладки, тогда как на деле
+ * это честное состояние: подложки нет, а список и действия работают. Поэтому
+ * сообщение стоит по центру того места, где была бы карта.
+ */
+.routes__map-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.routes__map-empty .state {
+  align-items: center;
+  max-width: 42ch;
+  background: none;
+  box-shadow: none;
+  text-align: center;
+}
+
+/* Переключатель списка черновиков в панели карты. */
+.routes__map-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding-bottom: var(--space-3);
+}
+
+.routes__map-toggle {
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-accent-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.routes__map-toggle:hover {
+  box-shadow: var(--shadow-in);
+}
+
+/* ==========================================================================
+   Раскрытая карточка черновика
+   ========================================================================== */
+
+/* Причина запрета слева, действие справа: читается как предложение. */
+.routes__hint {
+  justify-content: space-between;
+  background: var(--bg-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.routes__hint-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--color-text-muted);
+}
+
+/*
+ * Препятствия подтверждения — предупреждение, а не перечень.
+ *
+ * Прежде причины шли строкой рядом с расхождениями заказов и терялись среди
+ * них: логист видел текст, но не понимал, что именно из-за него выключена
+ * кнопка «Создать МЛ».
+ */
+.routes__blockers {
+  display: block;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+}
+
+.routes__blockers-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.routes__blockers-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routes__blockers-list li::before {
+  content: '• ';
+}
+
+/* Курьер: имя или его отсутствие — ответ, кнопка — вход в изменение. */
+.routes__courier-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: 36px;
+}
+
+.routes__courier-label {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.routes__courier-value {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Незаполненное поле выделено тоном: пустая строка молчала бы. */
+.routes__courier-value--empty {
+  color: var(--color-warning);
+}
+
+/* Три действия строки: выше, ниже, вернуть в «Сделки». */
+.routes__stop-controls {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  align-items: center;
+}
+
+.routes__stop-move {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--log-border);
+  border-radius: 5px;
+  background: var(--log-surface);
+  color: var(--log-text-muted);
+  cursor: pointer;
+}
+
+.routes__stop-move:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.routes__stop-move:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Время стоит рядом с номером и не растягивает строку. */
+.routes__stop-head .routes__stop-time {
+  flex: none;
+}
+
+/*
+ * Кнопки внутри раскрытого черновика одного роста.
+ *
+ * Обычная кнопка занимает здесь три строки высоты: карточка живёт в узкой
+ * колонке списка, и рядом со строкой «Курьер» такая кнопка перевешивала
+ * собой весь состав маршрута.
+ */
+.routes__draft .routes__courier-row button,
+.routes__draft .routes__hint button {
+  flex: none;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: var(--log-radius-control);
+  font-size: var(--log-font-sm);
+  font-weight: 500;
+}
+
+/*
+ * Шапка правой панели: счётчик и переключатель слева, скрытие списка справа.
+ *
+ * Прежде эти же элементы лежали накладкой в углу карты и спорили с ней
+ * за внимание. Ряд над полотном стоит те же несколько десятков пикселей,
+ * но читается как управление, а не как подпись к изображению.
+ */
+.routes__map-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+  font-size: var(--font-size-sm);
+}
+
+.routes__map-count {
+  flex: none;
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+/* Кнопка списка прижата к правому краю ряда. */
+.routes__map-header .routes__map-toggle {
+  margin-left: auto;
+}
+
+/*
+ * Строка аренды: состояние слева, выход из него справа.
+ *
+ * Все три состояния занимают одну и ту же строку и одно и то же место:
+ * карточка не прыгает, когда маршрут берут в работу или отпускают.
+ */
+.routes__lease {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: 36px;
+}
+
+/* Удерживаемая аренда — спокойное «всё в порядке», а не предупреждение. */
+.routes__lease-badge {
+  flex: none;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+.routes__lease-text {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Действие аренды прижато к правому краю строки. */
+.routes__lease .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+.routes__draft .routes__lease .btn {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: var(--log-radius-control);
+  font-size: var(--log-font-sm);
+  font-weight: 500;
+}
+
+/* Телефон курьера — продолжение имени, а не отдельное поле. */
+.routes__courier-phone {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+/* Сумма к получению выделена среди служебных подписей строки. */
+.routes__stop-cash {
+  flex: none;
+  color: var(--color-text);
+  font-size: var(--log-font-sm);
+  font-weight: 600;
+}
+
+/*
+ * Нижний ряд: подтверждение, отмена и история.
+ *
+ * История — текстовое действие: заливать её наравне с «Создать МЛ» значило бы
+ * равнять просмотр записей с выпуском маршрутного листа.
+ */
+.routes__draft .routes__actions .routes__history-toggle {
+  flex: none;
+  background: none;
+  color: var(--color-text-muted);
+  box-shadow: none;
+}
+
+.routes__draft .routes__actions .routes__history-toggle:hover {
+  color: var(--color-accent-text);
+}
+
+.routes__history {
+  padding-top: var(--space-2);
+}
+
+/*
+ * Строка заказа — выпуклая карточка без рамки.
+ *
+ * Рамка и заливка спорили с языком остального экрана, где разделяет
+ * светотень: ряд из трёх обведённых прямоугольников читался как таблица,
+ * а не как переставляемые остановки.
+ */
+.routes__draft .routes__stop {
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.routes__draft .routes__stops {
+  gap: var(--space-2);
+  padding: 2px;
+}
+
+/* Кнопки строки — тоже выпуклые, без обводки. */
+.routes__stop-move,
+.routes__stop-remove {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.routes__stop-move:hover:not(:disabled),
+.routes__stop-remove:hover:not(:disabled) {
+  box-shadow: var(--shadow-in);
+}
+
+.routes__stop-move:disabled,
+.routes__stop-remove:disabled {
+  box-shadow: none;
+}
+
+/* ==========================================================================
+   Черновики: язык светотени вместо рамок
+
+   Экран собран из рамок и заливок — прежний язык интерфейса. В утверждённом
+   макете разделяет только свет: карточка лежит на том же полотне и поднята
+   тенью, а выбранная не обводится синим, а поднимается выше соседей.
+   ========================================================================== */
+
+.routes__draft {
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.routes__draft:hover {
+  border: 0;
+}
+
+/* Раскрытая поднята выше соседей — этого достаточно, обводка лишняя. */
+.routes__draft--open {
+  border: 0;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out-lg);
+}
+
+/* Шапка — часть той же карточки: ни подложки, ни отчёркивания. */
+.routes__draft-head,
+.routes__draft--open .routes__draft-head {
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  background: none;
+}
+
+/* Тело карточки продолжает шапку, а не лежит в собственной коробке. */
+.routes__draft .routes__card {
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* Строка заказа: поднятая плитка с воздухом внутри. */
+.routes__draft .routes__stop {
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.routes__draft .routes__stops {
+  gap: var(--space-2);
+  max-height: none;
+  padding: 2px;
+}
+
+.routes__draft .routes__position {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.routes__draft .routes__stop-head {
+  gap: var(--space-2);
+}
+
+.routes__draft .routes__number {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.routes__draft .routes__stop-address {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.routes__draft .routes__stop-time {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.routes__draft .routes__stop-cash {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+/* Ручка перетаскивания не спорит с номером за внимание. */
+.routes__draft .routes__stop-grip {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-md);
+}
+
+/* Кнопки строки — поднятые плитки, а не обведённые квадраты. */
+.routes__stop-move,
+.routes__stop-remove {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  box-shadow: var(--shadow-out);
+}
+
+.routes__stop-controls {
+  gap: var(--space-2);
+}
+
+/* Нижний ряд: залита только главная кнопка. */
+.routes__draft .routes__actions {
+  gap: var(--space-2);
+  padding-top: var(--space-1);
+}
+
+.routes__draft .routes__actions button {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+/* Отмена — красное слово на обычной кнопке, а не красная заливка. */
+.routes__draft .routes__actions .btn--danger {
+  background: var(--color-surface);
+  color: var(--color-error);
+  box-shadow: var(--shadow-out);
+}
+
+.routes__draft .routes__actions .btn--danger:hover:not(:disabled) {
+  box-shadow: var(--shadow-in);
+}
+
+/* История — только слово: у просмотра записей нет своей поверхности. */
+.routes__draft .routes__actions .routes__history-toggle {
+  margin-left: auto;
+  font-weight: 500;
+}
+
+/* Действия аренды и курьера — акцентное слово на поднятой плитке. */
+.routes__draft .routes__lease .btn,
+.routes__draft .routes__courier-row .btn {
+  height: 36px;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-accent-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  box-shadow: var(--shadow-out);
+}
+
+.routes__draft .routes__lease .btn--primary {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.routes__draft .routes__lease,
+.routes__draft .routes__courier-row {
+  min-height: 40px;
+}
+
+.routes__courier-label,
+.routes__courier-value {
+  font-size: var(--font-size-md);
+}
+
+/* Кнопка курьера стоит сразу за именем, а не у дальнего края строки. */
+.routes__draft .routes__courier-value {
+  flex: 0 1 auto;
+}
+
+.routes__draft .routes__courier-row {
+  justify-content: flex-start;
+}
+
+/* Подписи кнопок не ломаются на два слова. */
+.routes__draft .routes__actions button,
+.routes__draft .routes__lease .btn,
+.routes__draft .routes__courier-row .btn {
+  white-space: nowrap;
+}
+
+/* Строки карточки идут плотнее: между ними воздух одного шага. */
+.routes__draft .routes__card {
+  gap: var(--space-2);
+}
+
+.routes__draft .routes__lease,
+.routes__draft .routes__courier-row {
+  min-height: 36px;
+}
+
+/* Строка аренды свёрнутой карточки живёт в её же полях. */
+.routes__draft > .routes__lease {
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.routes__draft > .routes__lease .btn {
+  height: 36px;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-accent-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+}
+
+.routes__draft > .routes__lease .btn--primary {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+/*
+ * Подписи кнопок обычного начертания.
+ *
+ * Полужирный делал каждую кнопку главной: строка из трёх одинаково
+ * тяжёлых подписей не говорила, какое действие основное. Вес здесь
+ * такой же, как у кнопок «Сделок», — там же его и мерили.
+ */
+.routes__draft .routes__actions button,
+.routes__draft .routes__actions .routes__history-toggle,
+.routes__draft .routes__lease .btn,
+.routes__draft > .routes__lease .btn,
+.routes__draft .routes__courier-row .btn,
+.routes__draft .routes__hint button,
+.routes__map-toggle,
+.routes__refresh,
+.routes__day-toggle {
+  font-weight: 400;
+}
+
+/*
+ * Дата стоит по центру поля.
+ *
+ * Правило `.routes__day` писалось для обёртки с подписью, а класс висит
+ * и на самом `input`: поле становилось flex-колонкой, и значение вместе
+ * со значком календаря прижималось к верхнему краю.
+ *
+ * Селектор именно `input`: тот же класс носит обёртка группы дня
+ * в «Маршрутных листах», и общее правило разворачивало её в строку —
+ * дата уезжала в боковую колонку, а листы вставали справа от неё.
+ */
+input.routes__day {
+  flex-direction: row;
+  align-items: center;
+}
+
+/* Счётчик и переключатель шапки читаются как один ряд, а не как форма. */
+.routes__map-header .routes__toggle {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.routes__map-count {
+  font-size: var(--font-size-md);
+}
+
+/* Легенда карты: строка значков под холстом, на фоне страницы. */
+.routes__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  padding: var(--space-2) var(--space-1) 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.routes__legend li {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/*
+ * Форма различает значки наравне с цветом: круг и ромб читаются и без
+ * различения оттенков.
+ */
+.routes__legend-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+}
+
+.routes__legend-dot--stop {
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.routes__legend-dot--free {
+  border-radius: 50%;
+  background: #6b7280;
+}
+
+.routes__legend-dot--depot {
+  background: #333;
+  transform: rotate(45deg);
+}
+
+/* ==========================================================================
+   Маршрутные листы: вдавленный лоток, поднятые карточки
+
+   Цветные полосы во всю ширину заменены заголовком из точки, названия
+   и счётчика: раздел опознаётся цветом точки, а не заливкой, которая
+   спорила с карточками внутри себя.
+   ========================================================================== */
+
+.routes__section-title {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 0 var(--space-1);
+  border-radius: 0;
+  background: none;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+/* Цвет раздела живёт в точке — самой мелкой детали, какой хватает. */
+.routes__section-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+}
+
+[data-testid='sheets-UNSHIPPED'] .routes__section-title,
+[data-testid='sheets-SHIPPED'] .routes__section-title,
+[data-testid='sheets-DELIVERED'] .routes__section-title {
+  background: none;
+  color: var(--color-text);
+}
+
+[data-testid='sheets-UNSHIPPED'] .routes__section-dot {
+  background: var(--color-warning);
+}
+
+[data-testid='sheets-SHIPPED'] .routes__section-dot {
+  background: var(--color-accent);
+}
+
+[data-testid='sheets-DELIVERED'] .routes__section-dot {
+  background: var(--color-success);
+}
+
+.routes__section-count {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Подпись уходит к правому краю: она поясняет раздел, а не продолжает имя. */
+.routes__section-hint {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+}
+
+/*
+ * Лоток раздела вдавлен, карточки внутри подняты.
+ *
+ * Так видно, что листы лежат В разделе, а не просто идут за его названием:
+ * граница раздела читается без единой линии.
+ */
+.routes__section {
+  gap: var(--space-2);
+}
+
+.routes__section .routes__day {
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.routes__section .routes__day-toggle {
+  padding: 0 var(--space-2);
+  border-radius: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.routes__section .routes__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Лист — поднятая плитка, а не строка таблицы. */
+.routes__list-item.sheets__item {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+/* Лист без курьера отмечен фоном: он один в разделе требует действия. */
+.routes__list-item.sheets__item--needs-courier {
+  background: var(--row-warn);
+}
+
+.sheets__item .routes__number {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Поле курьера вдавлено: это ввод, а не действие. */
+.sheets__item .routes__sheet-courier {
+  width: 260px;
+  max-width: 100%;
+  margin-top: 0;
+}
+
+.sheets__item .routes__actions button {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* Отбор листов — одна строка: дата, «Все дни», поиск. */
+.routes__sheet-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.routes__sheet-filters [data-testid='sheets-date'] {
+  flex: none;
+  width: 170px;
+}
+
+.routes__sheet-filters [data-testid='sheets-search'] {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.routes__sheet-filters button {
+  flex: none;
+  min-height: 36px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/*
+ * Состав листа — вдавленный лоток внутри поднятой карточки.
+ *
+ * Прежде это была коробка в рамке с волосяными линиями между строками:
+ * рамка спорила с карточкой, в которой лежала, а линии дробили и без того
+ * короткий список. Углубление говорит «внутри» одним приёмом.
+ */
+.sheets__orders {
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.sheets__order {
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+  font-size: var(--font-size-sm);
+}
+
+.sheets__order + .sheets__order {
+  border-top: 0;
+}
+
+/* Номер остановки — тот же синий кружок, что и в черновике маршрута. */
+.sheets__order-position {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-align: center;
+}
+
+.sheets__order-number {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.sheets__order-interval,
+.sheets__order-address {
+  color: var(--color-text-muted);
+}
+
+/* «состав» / «скрыть» — тихое слово рядом со счётчиком заказов. */
+.sheets__item-toggle-text {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Отмена отгрузки — красное слово на обычной плитке, без красной заливки. */
+.sheets__item .routes__actions .btn--danger {
+  background: var(--surface-raised);
+  color: var(--color-error);
+  box-shadow: var(--shadow-out);
+}
+
+.sheets__item .routes__actions .btn--danger:hover:not(:disabled) {
+  box-shadow: var(--shadow-in);
+}
+
+/*
+ * Курьер листа — вдавленная плитка: это поле, а не действие над листом.
+ *
+ * Слово «выбрать» / «сменить» стоит в самой плитке: без него плитка выглядит
+ * подписью и не выдаёт, что по ней можно нажать.
+ */
+.routes__courier-pill {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  box-shadow: var(--shadow-in);
+  cursor: pointer;
+}
+
+/* Незаполненное поле выделено тоном: этот лист один требует действия. */
+.routes__courier-pill--empty {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.routes__courier-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.routes__courier-pill-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routes__courier-pill-action {
+  flex: none;
+  color: var(--color-accent-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+/* Окно маршрутного листа шире обычного: это документ, а не форма. */
+.sheet-modal {
+  width: min(920px, 96vw);
+  max-width: none;
+}
+
+/*
+ * На бумаге окно перестаёт быть окном.
+ *
+ * Печатается сам лист во всю ширину страницы: рамка, тень и поля окна
+ * на бумаге означали бы пустую колонку по краю, а служебные кнопки —
+ * строку, которой на листе не место.
+ */
+@media print {
+  .sheet-modal {
+    position: static;
+    display: block;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .sheet-modal::backdrop {
+    display: none;
+  }
+
+  .sheet-modal .modal__header,
+  .sheet-modal .modal__footer {
+    display: none;
+  }
+
+  .sheet-modal .modal__body {
+    padding: 0;
+    overflow: visible;
+  }
 }

@@ -25,12 +25,34 @@
   box-sizing: border-box;
 }
 
+/*
+ * Выбор вида тарифа говорит на языке соседних полей.
+ *
+ * Он оставался белым прямоугольником в рамке рядом с вдавленными полями
+ * ставки и дат — в одной строке это читалось как чужой элемент. Рост
+ * не меняется: он задан сеткой строки и общий у всех полей формы.
+ */
 .finance__select {
-  padding: 0 8px;
-  border: 1px solid var(--log-border);
-  border-radius: var(--log-radius-field);
-  background: var(--log-surface);
-  font-size: var(--log-font-md);
+  padding: 0 var(--space-6) 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  box-shadow: var(--shadow-in);
+  /* Стрелка своя: у браузерной нет общего вида на разных системах. */
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position:
+    right 18px center,
+    right 13px center;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
 }
 
 .finance__state {

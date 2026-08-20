@@ -36,6 +36,7 @@ import {
   showsShipButton,
   isDayOpen,
   needsCancelWarning,
+  SECTION_HINTS,
   SECTION_TITLES,
   SHEET_SECTIONS,
   shipBlockedReason,
@@ -118,8 +119,13 @@ function SheetOrders({
           >
             {item.order.number}
           </button>
-          <span className="sheets__order-address">{item.order.address ?? '—'}</span>
+          {/*
+            Время стоит между номером и адресом: остановка читается как
+            «этот заказ, к этому часу, сюда». Адрес идёт последним — он
+            длиннее всех и забирает остаток строки.
+          */}
           <span className="sheets__order-interval muted">{stopInterval(item.order.interval)}</span>
+          <span className="sheets__order-address">{item.order.address ?? '—'}</span>
           {delivered.has(item.order.number) && (
             <span className="sheets__order-state">Доставлен</span>
           )}
@@ -129,16 +135,34 @@ function SheetOrders({
   );
 }
 
+/** Имя курьера с телефоном, если он есть в загруженном списке. */
+function courierLabel(
+  courier: { id: string; fullName: string },
+  options: readonly { id: string; phone: string | null }[],
+): string {
+  const phone = options.find((item) => item.id === courier.id)?.phone ?? null;
+  return phone === null ? courier.fullName : `${courier.fullName} · ${phone}`;
+}
+
 export function RouteSheetsScreen(): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const today = moscowToday();
 
-  const [date, setDate] = useState('');
+  /*
+   * По умолчанию — сегодняшний день, как в «Сделках» и «Маршрутизации».
+   *
+   * Пустая дата означала «все дни»: экран открывался списком за всю историю,
+   * и сегодняшние листы приходилось искать среди прошлых. Кнопка «Все дни»
+   * рядом возвращает прежний вид одним нажатием.
+   */
+  const [date, setDate] = useState(moscowToday());
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  /** Лист, у которого открыт выбор курьера. `null` — все показывают плитку. */
+  const [courierOpenId, setCourierOpenId] = useState<string | null>(null);
   /** Заказ, открытый в окне: логист правит его адрес, интервал и точку. */
   const [orderWindowId, setOrderWindowId] = useState<string | null>(null);
   const [openedDays, setOpenedDays] = useState<ReadonlySet<string>>(new Set());
@@ -292,29 +316,38 @@ export function RouteSheetsScreen(): React.JSX.Element {
 
   return (
     <section className="stack">
+      {/*
+        Отбор одной строкой.
+
+        Подписи «День» и «Поиск» занимали по строке каждая и повторяли то,
+        что и так видно: в поле даты стоит дата, в поле поиска — подсказка.
+        Освободившееся место ушло списку. Доступные имена полей остались
+        на месте: их читают с экрана, даже когда подписи не видно.
+      */}
       <div className="no-print routes__sheet-filters">
-        <Field label="День" hint="Пусто — все дни">
-          {(props) => (
-            <TextInput
-              {...props}
-              type="date"
-              value={date}
-              data-testid="sheets-date"
-              onChange={(event) => setDate(event.target.value)}
-            />
-          )}
-        </Field>
-        <Field label="Поиск" hint="Номер листа, номер заказа, имя или телефон курьера">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={search}
-              placeholder="Например, R-12 или Иванов"
-              data-testid="sheets-search"
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          )}
-        </Field>
+        <TextInput
+          type="date"
+          value={date}
+          aria-label="День"
+          data-testid="sheets-date"
+          onChange={(event) => setDate(event.target.value)}
+        />
+        {/* Пустая дата — все дни. Кнопка называет это словами, а не подписью под полем. */}
+        <Button
+          variant="secondary"
+          disabled={date === ''}
+          data-testid="sheets-all-days"
+          onClick={() => setDate('')}
+        >
+          Все дни
+        </Button>
+        <TextInput
+          value={search}
+          aria-label="Поиск"
+          placeholder="Номер листа, номер заказа, имя или телефон курьера"
+          data-testid="sheets-search"
+          onChange={(event) => setSearch(event.target.value)}
+        />
       </div>
 
       {/*
@@ -346,8 +379,11 @@ export function RouteSheetsScreen(): React.JSX.Element {
         return (
           <section key={section} className="routes__section" data-testid={`sheets-${section}`}>
             <h3 className="routes__section-title">
+              {/* Точка состояния: раздел опознаётся цветом раньше, чем прочитан. */}
+              <span className="routes__section-dot" aria-hidden="true" />
               {SECTION_TITLES[section]}{' '}
-              <span className="muted text-sm">({query.data?.total ?? 0})</span>
+              <span className="routes__section-count">{query.data?.total ?? 0}</span>
+              <span className="routes__section-hint">{SECTION_HINTS[section]}</span>
             </h3>
 
             {query.isPending ? (
@@ -378,7 +414,16 @@ export function RouteSheetsScreen(): React.JSX.Element {
                         {day.sheets.map((sheet) => (
                           <li
                             key={sheet.id}
-                            className="routes__list-item sheets__item"
+                            /*
+                              Лист без курьера отмечен фоном: в разделе он один
+                              требует действия, и искать его глазами по пустому
+                              полю курьера — лишняя работа.
+                            */
+                            className={
+                              section === 'UNSHIPPED' && sheet.courier === null
+                                ? 'routes__list-item sheets__item sheets__item--needs-courier'
+                                : 'routes__list-item sheets__item'
+                            }
                             data-testid="sheet-row"
                             data-sheet-number={sheet.number}
                             data-expanded={expandedId === sheet.id ? 'true' : 'false'}
@@ -411,12 +456,19 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     }
                                   </StatusBadge>
                                   <span className="muted text-sm">
-                                    заказов: {sheet.totalOrders}
+                                    заказов {sheet.totalOrders}
                                     {sheet.deliveredOrders > 0
-                                      ? ` · доставлено: ${sheet.deliveredOrders}`
+                                      ? ` · доставлено ${sheet.deliveredOrders}`
                                       : ''}
                                   </span>
-                                  <span className="sheets__item-chevron" aria-hidden="true" />
+                                  {/*
+                                    Слово вместо стрелки: стрелка не называет,
+                                    что именно раскроется, и в ряду с другими
+                                    значками читается как украшение.
+                                  */}
+                                  <span className="sheets__item-toggle-text">
+                                    {expandedId === sheet.id ? 'скрыть' : 'состав'}
+                                  </span>
                                 </button>
                                 {/*
                                 Курьер выбирается прямо в листе тем же контролом,
@@ -429,28 +481,72 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     className="routes__sheet-courier"
                                     data-testid="sheet-courier"
                                   >
-                                    <CourierCombobox
-                                      options={couriers.data?.items ?? []}
-                                      value={
-                                        sheet.courier === null
-                                          ? null
-                                          : ((couriers.data?.items ?? []).find(
-                                              (item) => item.id === sheet.courier?.id,
-                                            ) ?? {
-                                              id: sheet.courier.id,
-                                              fullName: sheet.courier.fullName,
-                                              phone: null,
-                                            })
-                                      }
-                                      disabled={busy}
-                                      testId="sheet-courier-combobox"
-                                      onChange={(courier) =>
-                                        assignCourier.mutate({
-                                          sheet,
-                                          courierUserId: courier === null ? null : courier.id,
-                                        })
-                                      }
-                                    />
+                                    {/*
+                                      Сначала ответ, потом инструмент.
+
+                                      Раскрытый список занимал строку у каждого
+                                      листа, даже когда курьера не меняют,
+                                      а главный вопрос — назначен он или нет —
+                                      приходилось вычитывать из поля ввода.
+                                      Плитка отвечает сразу, выбор открывается
+                                      по требованию.
+                                    */}
+                                    {courierOpenId === sheet.id ? (
+                                      <CourierCombobox
+                                        options={couriers.data?.items ?? []}
+                                        value={
+                                          sheet.courier === null
+                                            ? null
+                                            : ((couriers.data?.items ?? []).find(
+                                                (item) => item.id === sheet.courier?.id,
+                                              ) ?? {
+                                                id: sheet.courier.id,
+                                                fullName: sheet.courier.fullName,
+                                                phone: null,
+                                              })
+                                        }
+                                        disabled={busy}
+                                        testId="sheet-courier-combobox"
+                                        onChange={(courier) => {
+                                          assignCourier.mutate({
+                                            sheet,
+                                            courierUserId: courier === null ? null : courier.id,
+                                          });
+                                          setCourierOpenId(null);
+                                        }}
+                                      />
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        className={
+                                          sheet.courier === null
+                                            ? 'routes__courier-pill routes__courier-pill--empty'
+                                            : 'routes__courier-pill'
+                                        }
+                                        disabled={busy}
+                                        aria-expanded={false}
+                                        data-testid="sheet-courier-pick"
+                                        onClick={() => setCourierOpenId(sheet.id)}
+                                      >
+                                        <span className="routes__courier-pill-name">
+                                          {/*
+                                            Телефон берётся из загруженного
+                                            списка: в самом листе его нет,
+                                            а по нему курьера и зовут. Нет
+                                            в списке — показываем одно имя.
+                                          */}
+                                          {sheet.courier === null
+                                            ? 'Курьер не назначен'
+                                            : courierLabel(
+                                                sheet.courier,
+                                                couriers.data?.items ?? [],
+                                              )}
+                                        </span>
+                                        <span className="routes__courier-pill-action">
+                                          {sheet.courier === null ? 'выбрать' : 'сменить'}
+                                        </span>
+                                      </button>
+                                    )}
                                   </div>
                                 ) : (
                                   <div className="muted text-sm" data-testid="sheet-courier">
@@ -490,8 +586,22 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     </Button>
                                   </>
                                 )}
+                                {/*
+                                  Вход в маршрутный лист.
+
+                                  Кнопка убиралась как лишняя, но за ней стоит
+                                  единственная в продукте печатная форма листа:
+                                  без неё курьеру нечего взять с собой на бумаге.
+                                */}
+                                <Button
+                                  data-testid="sheet-open"
+                                  onClick={() => setOpenId(sheet.id)}
+                                >
+                                  Открыть лист
+                                </Button>
                                 {section === 'SHIPPED' && (
                                   <Button
+                                    variant="danger"
                                     disabled={busy}
                                     data-testid="sheet-cancel-shipment"
                                     onClick={() => {
@@ -503,12 +613,6 @@ export function RouteSheetsScreen(): React.JSX.Element {
                                     Отменить отгрузку
                                   </Button>
                                 )}
-                                <Button
-                                  data-testid="sheet-open"
-                                  onClick={() => setOpenId(sheet.id)}
-                                >
-                                  Открыть лист
-                                </Button>
                               </div>
                             </div>
 
@@ -643,7 +747,20 @@ export function RouteSheetsScreen(): React.JSX.Element {
         )}
       </Modal>
 
-      {openId !== null && (
+      {/*
+        Лист открывается отдельным окном.
+
+        Прежде он дорисовывался под всем списком: чтобы его увидеть, нужно было
+        прокрутить мимо всех остальных листов, и связь с той строкой, которую
+        открыли, терялась.
+      */}
+      <Modal
+        open={openId !== null}
+        title="Маршрутный лист"
+        className="sheet-modal"
+        testId="sheet-window"
+        onClose={() => setOpenId(null)}
+      >
         <>
           {sheetCard.isPending ? (
             <LoadingState title="Готовим маршрутный лист…" />
@@ -716,7 +833,7 @@ export function RouteSheetsScreen(): React.JSX.Element {
             </article>
           )}
         </>
-      )}
+      </Modal>
 
       {/* Окно заказа: одно и то же на всех вкладках. */}
       {orderWindowId !== null && (

@@ -32,6 +32,17 @@ const DealsMapCanvas = lazy(() =>
   import('./DealsMapCanvas').then((module) => ({ default: module.DealsMapCanvas })),
 );
 
+/**
+ * Форма слова «заказ» после числа в родительном падеже.
+ *
+ * «У 1 заказов» читается как опечатка и подрывает доверие к самому числу,
+ * поэтому счётчик согласуется с ним, а не обходится безличным «шт.».
+ */
+function ordersWord(count: number): string {
+  const tail = count % 100;
+  return tail % 10 === 1 && tail !== 11 ? 'заказа' : 'заказов';
+}
+
 export type DealPoint = MapPoint;
 
 interface MapResponse {
@@ -44,6 +55,19 @@ interface DealsMapProps {
   selected: readonly string[];
   /** Отдаёт саму точку: пригодность берётся из неё, а не из списка. */
   onToggle: (point: MapPoint) => void;
+  /** Левая панель скрыта — карта занимает всю ширину. */
+  listHidden: boolean;
+  onToggleList: () => void;
+  /**
+   * Сколько заказов дня осталось без подтверждённой координаты.
+   *
+   * Число считает список — тем же серверным отбором, что и карта. Карта его
+   * только называет: пустая карта без причины выглядит как поломка, а не как
+   * незаконченная работа с адресами.
+   */
+  withoutPoint: number;
+  /** Увести логиста к первому заказу, адрес которого и чинится. */
+  onFixAddresses: () => void;
 }
 
 /**
@@ -117,7 +141,15 @@ export function splitForMap(
   };
 }
 
-export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React.JSX.Element {
+export function DealsMap({
+  scopeKey,
+  selected,
+  onToggle,
+  listHidden,
+  onToggleList,
+  withoutPoint,
+  onFixAddresses,
+}: DealsMapProps): React.JSX.Element {
   const { client } = useAuth();
   /*
    * По умолчанию точки показываются ПООТДЕЛЬНОСТИ.
@@ -248,6 +280,94 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
         где он работает, а не серый прямоугольник. Сообщение об отсутствии
         координат лежит поверх карты и её не заменяет.
       */}
+      {/*
+        Шапка карты — настоящая строка над холстом, а не контролы поверх него.
+
+        Плавающие панели закрывали ту часть карты, на которую и смотрят: точки
+        в верхней трети оказывались под счётчиком и полями времени. Теперь
+        сверху то, что описывает карту, ниже — чем управлять её показом, а сам
+        холст начинается там, где заканчивается управление.
+      */}
+      <div className="deals-map__head">
+        <div className="deals-map__head-row">
+          <span className="deals-map__head-count" data-testid="deals-map-head-count">
+            На карте: {points.length}
+            {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
+            {refreshing && (
+              <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
+                {' '}
+                Обновляем…
+              </span>
+            )}
+          </span>
+          <span className="deals-map__head-hint">Фильтр времени — только для карты</span>
+          <div className="deals-map__head-time">
+            {/*
+          Счётчик и его пояснения занимают постоянное место: иначе поля времени
+          и кнопка группировки прыгали бы при каждом фоновом обновлении.
+        */}
+            {/*
+          Два простых поля времени. Ничего не пересчитывают и никуда
+          не отправляются: только сужают то, что показано на карте.
+        */}
+            {/*
+              Подписи «От» и «До» скрыты от глаз, но не от программы чтения.
+              
+              Между двумя полями времени и так стоит тире — оно называет
+              диапазон короче любого слова, а два слова рядом с узкими полями
+              занимали больше места, чем сами поля. Без подписи поле осталось
+              бы безымянным для того, кто его не видит, поэтому текст никуда
+              не делся — он только перестал печататься.
+            */}
+            <label className="deals-map__time">
+              <span className="visually-hidden">Время от</span>
+              <input
+                type="time"
+                value={from}
+                data-testid="deals-map-from"
+                onChange={(event) => setFrom(event.target.value)}
+              />
+            </label>
+            <span className="deals-map__time-dash" aria-hidden="true">
+              –
+            </span>
+            <label className="deals-map__time">
+              <span className="visually-hidden">Время до</span>
+              <input
+                type="time"
+                value={to}
+                data-testid="deals-map-to"
+                onChange={(event) => setTo(event.target.value)}
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="deals-map__head-row deals-map__head-row--actions">
+          <button
+            type="button"
+            className="deals-map__panel-toggle deals-map__panel-toggle--accent"
+            aria-expanded={!listHidden}
+            aria-controls="deals-column"
+            data-testid="deals-toggle-list"
+            onClick={onToggleList}
+          >
+            {listHidden ? 'Показать список' : 'Скрыть список'}
+          </button>
+          <button
+            type="button"
+            className="deals__link deals-map__zoom"
+            data-testid="deals-map-zoom"
+            // Разделять нечего, пока точек нет: кнопка не должна обещать
+            // действие, которое ничего не изменит.
+            disabled={empty}
+            onClick={() => setZoomedOut((value) => !value)}
+          >
+            {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
+          </button>
+        </div>
+      </div>
+
       <div className="deals-map__surface">
         {/*
           Управление картой лежит ПОВЕРХ холста.
@@ -263,88 +383,14 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
           время и группировка. Обе строки лежат ПОВЕРХ холста и высоту у карты
           не отнимают.
         */}
-        <div className="deals-map__overlay deals-map__overlay--top">
-          <div className="deals-map__panel deals-map__panel--info">
-            <span className="deals-map__head-count" data-testid="deals-map-head-count">
-              На карте: {points.length}
-              {hidden > 0 && <span className="deals-map__muted"> · скрыто фильтром: {hidden}</span>}
-              {refreshing && (
-                <span className="deals-map__refreshing" data-testid="deals-map-refreshing">
-                  {' '}
-                  Обновляем…
-                </span>
-              )}
-            </span>
-          </div>
+        {/*
+          Состояние подложки — отдельный факт, а не замена подсказке.
 
-          <ul className="deals-map__legend" data-testid="deals-map-legend">
-            <li>
-              <span className="deals-map__dot deals-map__dot--free" /> доступен
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--picked" /> выбран
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--draft" /> в черновике
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--assembled" /> собран
-            </li>
-            <li>
-              <span className="deals-map__dot deals-map__dot--depot" /> склад
-            </li>
-          </ul>
-        </div>
-
-        <div className="deals-map__overlay deals-map__overlay--controls">
-          <div className="deals-map__panel deals-map__panel--controls">
-            {/*
-          Счётчик и его пояснения занимают постоянное место: иначе поля времени
-          и кнопка группировки прыгали бы при каждом фоновом обновлении.
+          Прежде оно вытесняло собой объяснение пустой карты: логист видел
+          «Карта не настроена» и не узнавал ни того, что у заказов дня нет
+          подтверждённых точек, ни того, что с этим делать. Подложка и адреса
+          чинятся разными людьми и в разных местах.
         */}
-            {/*
-          Два простых поля времени. Ничего не пересчитывают и никуда
-          не отправляются: только сужают то, что показано на карте.
-        */}
-            <label className="deals-map__time">
-              От
-              <input
-                type="time"
-                value={from}
-                data-testid="deals-map-from"
-                onChange={(event) => setFrom(event.target.value)}
-              />
-            </label>
-            <label className="deals-map__time">
-              До
-              <input
-                type="time"
-                value={to}
-                data-testid="deals-map-to"
-                onChange={(event) => setTo(event.target.value)}
-              />
-            </label>
-
-            <button
-              type="button"
-              className="deals__link deals-map__zoom"
-              data-testid="deals-map-zoom"
-              // Разделять нечего, пока точек нет: кнопка не должна обещать
-              // действие, которое ничего не изменит.
-              disabled={empty}
-              onClick={() => setZoomedOut((value) => !value)}
-            >
-              {zoomedOut ? 'Показать отдельно' : 'Сгруппировать'}
-            </button>
-          </div>
-
-          {/*
-        Постоянная легенда: без неё цвет и форма ничего не значат. Состояния
-        различаются и цветом, и формой — одного цвета мало тому, кто его
-        не различает.
-      */}
-        </div>
-
         {styleUrl === '' ? (
           <p className="deals-map__notice" role="status" data-testid="deals-map-notice">
             Карта не настроена
@@ -373,12 +419,86 @@ export function DealsMap({ scopeKey, selected, onToggle }: DealsMapProps): React
           </Suspense>
         )}
 
-        {empty && !basemapFailed && styleUrl !== '' && (
-          <p className="deals-map__notice" role="status" data-testid="deals-map-empty">
-            В выбранном дне нет заказов с координатами
-          </p>
+        {/*
+          Пустая карта объясняет себя сама.
+
+          Прежняя строка «нет заказов с координатами» называла следствие и
+          молчала о причине: логист видел серое поле и не знал, сломалось ли
+          что-то, не тот ли выбран день или работа с адресами просто не
+          доделана. Причин ровно три, и они требуют разного, поэтому блок
+          говорит про ту, которая случилась, и даёт к ней действие.
+        */}
+        {empty && (
+          <div className="deals-map__empty" role="status" data-testid="deals-map-empty">
+            <h3 className="deals-map__empty-title">Ни одного заказа на карте</h3>
+            {all.length > 0 ? (
+              <>
+                <p className="deals-map__empty-text">
+                  Точки дня есть — все {all.length} скрыты фильтром времени. Список слева фильтр не
+                  трогает.
+                </p>
+                <button
+                  type="button"
+                  className="deals-map__empty-action"
+                  data-testid="deals-map-empty-action"
+                  onClick={() => {
+                    setFrom('');
+                    setTo('');
+                  }}
+                >
+                  Показать все часы
+                </button>
+              </>
+            ) : withoutPoint > 0 ? (
+              <>
+                <p className="deals-map__empty-text">
+                  На карту попадает только подтверждённая точка. У {withoutPoint}{' '}
+                  {ordersWord(withoutPoint)} дня её нет: адрес не указан, неполон или разошёлся с
+                  МоимСкладом.
+                </p>
+                <button
+                  type="button"
+                  className="deals-map__empty-action deals-map__empty-action--accent"
+                  data-testid="deals-map-empty-action"
+                  onClick={onFixAddresses}
+                >
+                  Исправить адреса · {withoutPoint}
+                </button>
+              </>
+            ) : (
+              <p className="deals-map__empty-text">
+                В выбранном дне заказов нет. Карта остаётся на месте вместе со складом: с него
+                начинается любой маршрут.
+              </p>
+            )}
+          </div>
         )}
       </div>
+
+      {/*
+        Легенда — подпись под картой, а не накладка на ней.
+
+        Поверх холста она закрывала собой нижний край и спорила с точками,
+        которые объясняет: подпись должна стоять рядом с картинкой,
+        а не на ней.
+      */}
+      <ul className="deals-map__legend" data-testid="deals-map-legend">
+        <li>
+          <span className="deals-map__dot deals-map__dot--free" /> доступен
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--picked" /> выбран
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--draft" /> в черновике
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--assembled" /> собран
+        </li>
+        <li>
+          <span className="deals-map__dot deals-map__dot--depot" /> склад
+        </li>
+      </ul>
     </section>
   );
 }

@@ -48,7 +48,8 @@ export interface RouteFlowView {
   version: number;
   deliveryDate: string;
   courier: { id: string; fullName: string } | null;
-  routeCell: { id: string; code: string } | null;
+  /** Маршрутные ячейки листа: их может быть несколько. */
+  routeCells: { id: string; code: string }[];
   issueSession: { id: string; courierUserId: string; state: IssueSessionState } | null;
   orders: RouteFlowOrderView[];
 }
@@ -64,7 +65,7 @@ export interface ScanContext {
     kind: StorageCellKind;
     requiresRelocation: boolean;
   } | null;
-  route: { id: string; number: string; routeCell: { id: string; code: string } | null } | null;
+  route: { id: string; number: string; routeCells: { id: string; code: string }[] } | null;
 }
 
 /** Человеческие названия признаков, блокирующих обычную работу. */
@@ -84,48 +85,19 @@ export const CELL_KIND_LABELS: Record<StorageCellKind, string> = {
   ROUTE: 'Маршрутная',
 };
 
-/**
- * Можно ли выдавать этот заказ прямо сейчас.
- *
- * Заказ без размещения выдавать нечего, помеченный проблемным — нельзя,
- * требующий перемещения — тоже: маршрут менялся уже после комплектования.
- */
-export function issueBlocker(order: RouteFlowOrderView): string | null {
-  if (order.issued) {
-    return null;
-  }
-  if (order.blockedBy.length > 0) {
-    return blockLabel(order.blockedBy[0] ?? '');
-  }
-  if (order.requiresRelocation) {
-    return 'Требуется перемещение';
-  }
-  if (order.cellId === null) {
-    return 'Не принят на склад';
-  }
-  return null;
-}
-
 /** Что показать в колонке «Ячейка»: код либо честное «не принят». */
 export function cellLabel(order: PlacedOrderView): string {
   return order.cellCode ?? 'Не принят';
 }
 
-/** Готов ли маршрут к переводу в активный: все заказы выданы. */
-export function issueProgress(view: RouteFlowView): { issued: number; total: number } {
-  return {
-    issued: view.orders.filter((order) => order.issued).length,
-    total: view.orders.length,
-  };
-}
-
-/** Сколько заказов маршрута уже лежит в его маршрутной ячейке. */
-export function pickProgress(view: RouteFlowView): { picked: number; total: number } {
-  return {
-    picked: view.orders.filter((order) => order.inRouteCell).length,
-    total: view.orders.length,
-  };
-}
+/*
+ * Счётчики комплектования и выдачи здесь больше не считаются.
+ *
+ * Оба экрана показывают серверный прогресс: за одним листом стоят два
+ * кладовщика, и число «внесено N из M» обязано быть одним и тем же на
+ * обоих телефонах. Локальный подсчёт по загруженному списку показывал бы
+ * каждому свою правду до следующего обновления.
+ */
 
 /**
  * Следующий шаг двухсканной операции.
@@ -133,7 +105,7 @@ export function pickProgress(view: RouteFlowView): { picked: number; total: numb
  * До второго скана база не меняется, поэтому интерфейс обязан честно
  * показывать, чего он ждёт: иначе кладовщик решит, что заказ уже принят.
  */
-export type ScanStep = 'ORDER' | 'CELL';
+export type ScanStep = 'ORDER' | 'CELL' | 'ROUTE_CELL';
 
 export function nextStep(orderScanned: boolean): ScanStep {
   return orderScanned ? 'CELL' : 'ORDER';
@@ -142,6 +114,8 @@ export function nextStep(orderScanned: boolean): ScanStep {
 export const SCAN_HINTS: Record<ScanStep, string> = {
   ORDER: 'Отсканируйте QR заказа',
   CELL: 'Теперь отсканируйте QR ячейки',
+  // Сборка ждёт полку листа, а не любую свободную ячейку.
+  ROUTE_CELL: 'Теперь отсканируйте QR маршрутной ячейки',
 };
 
 /**
@@ -180,4 +154,158 @@ export function groupPlacements<T extends { requiresRelocation: boolean; blocked
   }
 
   return { relocation, cancelled, rest };
+}
+
+/**
+ * Полные размеры групп складского списка.
+ *
+ * Приходят с сервера и считаются по всему складу, а не по загруженным
+ * страницам: счётчик у заголовка обязан отвечать на вопрос «сколько таких
+ * коробок на складе», а не «сколько их успело попасть в первую сотню».
+ */
+export interface PlacementGroupTotals {
+  relocation: number;
+  cancelled: number;
+  rest: number;
+}
+
+/**
+ * Ключ строки складского списка.
+ *
+ * Одна коробка — это заказ в КОНКРЕТНОЙ ячейке: один заказ может лежать
+ * разложенным по двум ячейкам, и тогда это две разные строки.
+ */
+function placementKey(item: { orderId: string; cellId: string | null }): string {
+  return `${item.orderId}:${item.cellId ?? ''}`;
+}
+
+/**
+ * Склейка дочитанных страниц складского списка.
+ *
+ * Повтор отбрасывается: склад живёт, и между запросом первой и второй страницы
+ * коробку могут снять с хранения — тогда смещение сдвигается, и одна и та же
+ * строка приходит дважды. Кладовщик увидел бы один заказ дважды и пошёл бы
+ * искать вторую коробку.
+ *
+ * Порядок сохраняется: первым остаётся то вхождение, которое пришло раньше.
+ */
+export function mergePlacementPages<T extends { orderId: string; cellId: string | null }>(
+  pages: readonly { items: T[] }[],
+): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const page of pages) {
+    for (const item of page.items) {
+      const key = placementKey(item);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Смещение следующей страницы или `null`, когда дочитывать нечего.
+ *
+ * Считается по фактически полученным строкам, а не по номеру страницы: если
+ * последняя страница пришла короче запрошенной, дочитывать всё равно нужно
+ * ровно до серверного `total`.
+ */
+export function nextPlacementOffset(page: {
+  items: readonly unknown[];
+  total: number;
+  limit: number;
+  offset: number;
+}): number | null {
+  const loaded = page.offset + page.items.length;
+  return loaded < page.total ? loaded : null;
+}
+
+// --- Доска сборки ------------------------------------------------------------
+
+/**
+ * Стадия заказа в листе. Считает сервер: «готов» — это действующее
+ * размещение в маршрутной ячейке ИМЕННО этого листа.
+ */
+export type RouteOrderStage = 'NOT_ASSEMBLED' | 'AWAITING_INTAKE' | 'IN_STORAGE' | 'READY';
+
+/** Подписи стадий. Текст, значок и цвет различают их вместе, а не поодиночке. */
+export const STAGE_LABELS: Record<RouteOrderStage, string> = {
+  NOT_ASSEMBLED: 'Не собран',
+  AWAITING_INTAKE: 'Ожидает приёмки',
+  IN_STORAGE: 'В хранении',
+  READY: 'Готов',
+};
+
+export const STAGE_TONES: Record<RouteOrderStage, 'neutral' | 'info' | 'warning' | 'success'> = {
+  NOT_ASSEMBLED: 'neutral',
+  AWAITING_INTAKE: 'info',
+  IN_STORAGE: 'warning',
+  READY: 'success',
+};
+
+export interface AssemblyOrderView {
+  orderId: string;
+  orderNumber: string;
+  position: number;
+  startMinute: number | null;
+  endMinute: number | null;
+  cellCode: string | null;
+  cellKind: StorageCellKind | null;
+  stage: RouteOrderStage;
+  requiresRelocation: boolean;
+  cancelled: boolean;
+}
+
+export interface AssemblyRouteView {
+  routeId: string;
+  routeNumber: string;
+  deliveryDate: string;
+  earliestMinute: number | null;
+  courier: { id: string; fullName: string } | null;
+  cells: { id: string; code: string }[];
+  total: number;
+  ready: number;
+  orders: AssemblyOrderView[];
+}
+
+export interface AssemblyBoard {
+  active: AssemblyRouteView[];
+  assembled: AssemblyRouteView[];
+}
+
+// --- Доска выдачи ------------------------------------------------------------
+
+export interface IssueOrderView {
+  orderId: string;
+  orderNumber: string;
+  position: number;
+  cellCode: string | null;
+  ready: boolean;
+  checked: boolean;
+}
+
+export interface IssueRouteView {
+  routeId: string;
+  routeNumber: string;
+  deliveryDate: string;
+  earliestMinute: number | null;
+  total: number;
+  checked: number;
+  sessionOpen: boolean;
+  shippable: boolean;
+  orders: IssueOrderView[];
+}
+
+export interface IssueBoard {
+  couriers: {
+    courierUserId: string;
+    fullName: string;
+    /** Телефон приходит обычным ответом API и в realtime не уходит. */
+    phone: string;
+    routes: IssueRouteView[];
+  }[];
 }

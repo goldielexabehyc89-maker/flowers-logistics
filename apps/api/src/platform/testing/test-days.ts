@@ -71,6 +71,7 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
   'apps/api/src/modules/orders/geo.critical.test.ts': Object.freeze(['2027-02']),
   'apps/api/src/modules/fulfillment/florist.critical.test.ts': Object.freeze(['2027-03']),
   'apps/api/src/modules/pickup/pickup.critical.test.ts': Object.freeze(['2027-06']),
+  'apps/api/src/modules/pickup/pickup-queue.critical.test.ts': Object.freeze(['2028-08']),
   'apps/api/src/modules/orders/deals-scope.critical.test.ts': Object.freeze(['2027-09']),
   'apps/api/src/modules/routing/selection.critical.test.ts': Object.freeze(['2027-10']),
   'apps/api/src/modules/finance/finance.critical.test.ts': Object.freeze(['2028-04']),

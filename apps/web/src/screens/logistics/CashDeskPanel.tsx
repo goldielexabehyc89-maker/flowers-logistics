@@ -204,94 +204,106 @@ export function CashDeskPanel({ from, to }: CashDeskPanelProps): React.JSX.Eleme
 
   return (
     <div className="stack" data-testid="cash-panel">
-      <div className="reports__summary" data-testid="cash-summary">
-        {[
-          ['Наличные в кассах', report.data.summary.cashOnHandMinor],
-          ['Ожидается к сдаче', report.data.summary.expectedFromCouriersMinor],
-          ['Получено от курьеров', report.data.summary.receivedMinor],
-          ['Взято из компании', report.data.summary.takenMinor],
-          ['Выдано курьерам', report.data.summary.issuedMinor],
-          ['Сдано в компанию', report.data.summary.handedMinor],
-        ].map(([label, value]) => (
-          <div key={label} className="reports__cell">
-            <span className="reports__cell-label">{label}</span>
-            <span className="reports__cell-value">{money(value ?? '0')}</span>
-          </div>
-        ))}
-        <div className="reports__cell reports__cell--total">
-          <span className="reports__cell-label">Остаток на конец</span>
-          <span className="reports__cell-value" data-testid="cash-closing">
+      {/*
+        Остаток отдельно от слагаемых, действия — рядом с ним.
+
+        Семь одинаковых плиток не отвечали на главный вопрос кассы: сколько
+        сейчас в ней денег. Остаток стоит крупно слева, под ним — две операции,
+        которые его и меняют; показатели периода лежат в своём лотке.
+      */}
+      <div className="reports__totals">
+        <div className="reports__balance" data-testid="cash-balance">
+          <span className="reports__balance-title">Остаток в кассах на конец</span>
+          <span className="reports__balance-value" data-testid="cash-closing">
             {money(report.data.summary.closingMinor)}
           </span>
-          <span className="reports__cell-words">«Ожидается к сдаче» — расчёт, кассу не меняет</span>
+          <span className="reports__balance-words">
+            «Ожидается к сдаче» — расчёт, кассу не меняет.
+          </span>
+          <div className="reports__balance-actions">
+            <Button variant="primary" data-testid="cash-take" onClick={() => openEditor('TAKE')}>
+              Взять из компании
+            </Button>
+            <Button data-testid="cash-hand" onClick={() => openEditor('HAND')}>
+              Сдать в компанию
+            </Button>
+          </div>
+        </div>
+
+        <div className="reports__metrics">
+          <span className="reports__metrics-title">Показатели за период</span>
+          <div className="reports__summary" data-testid="cash-summary">
+            {[
+              ['Наличные в кассах', report.data.summary.cashOnHandMinor],
+              ['Ожидается к сдаче', report.data.summary.expectedFromCouriersMinor],
+              ['Получено от курьеров', report.data.summary.receivedMinor],
+              ['Взято из компании', report.data.summary.takenMinor],
+              ['Выдано курьерам', report.data.summary.issuedMinor],
+              ['Сдано в компанию', report.data.summary.handedMinor],
+            ].map(([label, value]) => (
+              <div key={label} className="reports__cell">
+                <span className="reports__cell-label">{label}</span>
+                <span className="reports__cell-value">{money(value ?? '0')}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
+      {/*
+        Отбор одной строкой. Подписи «Логист», «Вид операции» и «Поиск»
+        занимали по строке каждая и повторяли то, что и так стоит в самих
+        полях. Доступные имена остались на месте.
+      */}
       <div className="reports__filters">
-        <Field label="Логист">
-          {(props) => (
-            <select
-              {...props}
-              className="reports__select"
-              value={logistUserId}
-              data-testid="cash-logist"
-              onChange={(event) => setLogistUserId(event.target.value)}
-            >
-              <option value="">Все кассы</option>
-              {(desks.data?.items ?? []).map((desk) => (
-                <option key={desk.id} value={desk.id}>
-                  {desk.fullName}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-        <Field label="Вид операции">
-          {(props) => (
-            <select
-              {...props}
-              className="reports__select"
-              value={kind}
-              data-testid="cash-kind"
-              onChange={(event) => setKind(event.target.value)}
-            >
-              <option value="">Любой</option>
-              {Object.entries(KIND_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-        <Field label="Поиск" hint="Имя или телефон логиста и курьера">
-          {(props) => (
-            <TextInput
-              {...props}
-              value={search}
-              data-testid="cash-search"
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          )}
-        </Field>
+        <select
+          className="reports__select"
+          value={logistUserId}
+          aria-label="Логист"
+          data-testid="cash-logist"
+          onChange={(event) => setLogistUserId(event.target.value)}
+        >
+          <option value="">Все кассы</option>
+          {(desks.data?.items ?? []).map((desk) => (
+            <option key={desk.id} value={desk.id}>
+              {desk.fullName}
+            </option>
+          ))}
+        </select>
+        <select
+          className="reports__select"
+          value={kind}
+          aria-label="Вид операции"
+          data-testid="cash-kind"
+          onChange={(event) => setKind(event.target.value)}
+        >
+          <option value="">Любая операция</option>
+          {Object.entries(KIND_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <TextInput
+          className="reports__search"
+          value={search}
+          aria-label="Поиск"
+          placeholder="Имя или телефон логиста и курьера"
+          data-testid="cash-search"
+          onChange={(event) => setSearch(event.target.value)}
+        />
       </div>
 
       <div className="reports__actions">
-        <Button variant="primary" data-testid="cash-take" onClick={() => openEditor('TAKE')}>
-          Взять наличные из компании
-        </Button>
-        <Button data-testid="cash-hand" onClick={() => openEditor('HAND')}>
-          Сдать наличные в компанию
-        </Button>
         <a
-          className="reports__link"
+          className="reports__export"
           href={`/api/logistics/reports/cash.xlsx?from=${from}&to=${to}`}
           data-testid="cash-xlsx"
         >
           Выгрузить XLSX
         </a>
         <a
-          className="reports__link"
+          className="reports__export"
           href={`/api/logistics/reports/cash.pdf?from=${from}&to=${to}`}
           data-testid="cash-pdf"
         >

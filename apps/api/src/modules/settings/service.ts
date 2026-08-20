@@ -29,12 +29,14 @@ import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
+import { publishRealtimeEvent } from '../realtime/events.js';
 
 /** Ключи настроек. Значение ключа — часть контракта базы, менять его нельзя. */
 export const SETTING_KEYS = {
   shift: 'planning.shift',
   serviceTime: 'planning.serviceTime',
   manualIssue: 'routing.manualIssue',
+  warehouseManualEntry: 'warehouse.manualEntry',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -152,6 +154,84 @@ export async function saveManualIssue(
     ip: input.ip,
     userAgent: input.userAgent,
   });
+}
+
+/**
+ * Ручной ввод номеров заказов и кодов ячеек на складе.
+ *
+ * Выключен по умолчанию — решение владельца. Набранный руками номер
+ * доказывает только то, что человек его набрал: коробка при этом может
+ * стоять на другой полке. Скан подтверждает, что предмет физически
+ * в руках, поэтому обычный режим работы — камера и аппаратный сканер.
+ *
+ * Настройка не выключает сканер: при выключенном ручном вводе исчезает
+ * только редактируемое поле, а код от аппаратного сканера принимается
+ * по-прежнему — иначе смена останавливалась бы вместе с камерой телефона.
+ */
+export const warehouseManualEntrySchema = z.object({ enabled: z.boolean() });
+
+export type WarehouseManualEntry = z.infer<typeof warehouseManualEntrySchema>;
+
+export const DEFAULT_WAREHOUSE_MANUAL_ENTRY: WarehouseManualEntry = { enabled: false };
+
+export interface WarehouseManualEntrySetting {
+  value: WarehouseManualEntry;
+  version: number;
+}
+
+/**
+ * Текущее состояние ручного ввода.
+ *
+ * Отсутствующая или испорченная запись означает ЗАПРЕТ: настройку никто
+ * не включал, и открывать ручной ввод по умолчанию нельзя.
+ */
+export async function readWarehouseManualEntry(
+  client: Database | TransactionClient,
+): Promise<WarehouseManualEntrySetting> {
+  const current = await readCurrent(client, SETTING_KEYS.warehouseManualEntry);
+  if (current === null) {
+    return { value: DEFAULT_WAREHOUSE_MANUAL_ENTRY, version: 0 };
+  }
+
+  const parsed = warehouseManualEntrySchema.safeParse(current.value);
+  return {
+    value: parsed.success ? parsed.data : DEFAULT_WAREHOUSE_MANUAL_ENTRY,
+    version: current.version,
+  };
+}
+
+export async function saveWarehouseManualEntry(
+  db: Database,
+  actor: AuthenticatedActor,
+  input: {
+    value: WarehouseManualEntry;
+    expectedVersion: number;
+    ip: string | null;
+    userAgent: string | null;
+  },
+): Promise<{ version: number }> {
+  const saved = await writeSetting(db, actor, {
+    key: SETTING_KEYS.warehouseManualEntry,
+    value: { enabled: input.value.enabled },
+    expectedVersion: input.expectedVersion,
+    ip: input.ip,
+    userAgent: input.userAgent,
+  });
+
+  /*
+   * Настройка меняет работу двух рабочих мест сразу.
+   *
+   * Кладовщик и менеджер самовывоза узнают о ней без перезапуска приложения:
+   * иначе выключенный ручной ввод остался бы на экране до конца смены. В
+   * событии только признак — ни автора, ни номера заказа, ни версии.
+   */
+  await publishRealtimeEvent(db, {
+    topic: 'settings.manual_entry_changed',
+    payload: { enabled: input.value.enabled },
+    audienceRoles: ['ADMIN', 'WAREHOUSE', 'MANAGER'],
+  });
+
+  return saved;
 }
 
 export interface ShiftSetting {

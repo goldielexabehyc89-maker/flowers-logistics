@@ -132,6 +132,15 @@ const WAREHOUSE_SCREEN: string[][] = [
   ['warehouse-placements'],
   ['warehouse-routes'],
   ['warehouse-route'],
+  // Доска сборки: подтверждённый лист, назначенная ячейка и переставленная
+  // коробка обязаны появляться у кладовщика сами. Без этого ключа экран
+  // показывал бы вчерашнюю картину до перезагрузки.
+  ['warehouse-assembly'],
+  // Доска выдачи: общий прогресс проверки, смена курьера и отгрузка соседнего
+  // листа обязаны появляться у второго кладовщика сами. Прогресс здесь общий
+  // и серверный — расходиться двум телефонам нельзя.
+  ['warehouse-issue-board'],
+  ['warehouse-returns'],
 ];
 const FLORIST_SCREEN: string[][] = [
   ['florist-queue'],
@@ -146,6 +155,14 @@ const DELIVERY_SCREEN: string[][] = [
   // Обязательство вернуть букет живёт дольше маршрута и обновляется отдельно.
   ['delivery-returns'],
 ];
+/*
+ * Экран выдачи самовывоза.
+ *
+ * Очередь и справочный список выданных перечитываются вместе: заказ уходит
+ * из одного ровно тогда, когда появляется в другом.
+ */
+const PICKUP_SCREEN: string[][] = [['pickup-day'], ['pickup-issued']];
+
 const USERS_SCREEN: string[][] = [
   ['users'],
   ['user-history'],
@@ -187,7 +204,18 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['order-window'],
     ['status'],
   ],
-  'order.scope_changed': [...DEALS_SCREEN, ...ROUTING_SCREEN, ...FLORIST_SCREEN, ['status']],
+  /*
+   * Выход из области — это и блокировка выдачи самовывоза: архивный или
+   * пропавший заказ обязан покраснеть у менеджера до того, как он отдаст
+   * коробку.
+   */
+  'order.scope_changed': [
+    ...DEALS_SCREEN,
+    ...ROUTING_SCREEN,
+    ...FLORIST_SCREEN,
+    ...PICKUP_SCREEN,
+    ['status'],
+  ],
   'order.geo_changed': [...DEALS_SCREEN, ...DELIVERY_SCREEN, ['map-points'], ['order-window']],
   'order.address_changed': [
     ...DEALS_SCREEN,
@@ -228,6 +256,8 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ...FLORIST_SCREEN,
     ...WAREHOUSE_SCREEN,
     ...DELIVERY_SCREEN,
+    // Отменённый заказ уходит из очереди выдачи, снятая отмена возвращает его.
+    ...PICKUP_SCREEN,
     ['logistics-resolutions'],
   ],
 
@@ -254,7 +284,14 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * нечего. Событие `route.updated` приходит и на черновик, но перечитанный
    * ответ сервера остаётся прежним: неподтверждённого листа в производстве нет.
    */
-  'route.updated': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
+  'route.updated': [
+    ...ROUTING_SCREEN,
+    ...DEALS_SCREEN,
+    ...FLORIST_SCREEN,
+    ...WAREHOUSE_SCREEN,
+    // Отгруженный лист появляется у курьера в «Доставках» сам.
+    ...DELIVERY_SCREEN,
+  ],
   'route.conflict_detected': ROUTING_SCREEN,
   'route.confirmed': [...ROUTING_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN, ...WAREHOUSE_SCREEN],
   'route.returned_to_draft': [
@@ -280,8 +317,30 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
 
   // Складские экраны. Размещение меняет и «Собран» в «Сделках».
   'storage_cell.changed': [['storage-cells'], ...WAREHOUSE_SCREEN],
-  'warehouse.placement_changed': [...WAREHOUSE_SCREEN, ...DEALS_SCREEN, ...FLORIST_SCREEN],
-  'warehouse.route_flow_changed': [...WAREHOUSE_SCREEN, ['routes'], ['route'], ['route-sheets']],
+  /*
+   * Размещение коробки видно и менеджеру самовывоза.
+   *
+   * Самовывозный заказ появляется у него в дне ровно тогда, когда склад
+   * положил букет в ячейку: до этого выдавать нечего. Без ключа `pickup-day`
+   * менеджер узнавал бы о готовом заказе только перезагрузкой.
+   */
+  'warehouse.placement_changed': [
+    ...WAREHOUSE_SCREEN,
+    ...DEALS_SCREEN,
+    ...FLORIST_SCREEN,
+    ...PICKUP_SCREEN,
+  ],
+  /*
+   * Ход комплектования и отгрузки. Курьер здесь обязателен: отгруженный лист
+   * появляется у него в «Доставках» сразу, а не после перезагрузки в машине.
+   */
+  'warehouse.route_flow_changed': [
+    ...WAREHOUSE_SCREEN,
+    ...DELIVERY_SCREEN,
+    ['routes'],
+    ['route'],
+    ['route-sheets'],
+  ],
 
   /*
    * Результат доставки — это ещё и деньги: наличные и начисления попадают
@@ -304,7 +363,19 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['operations-report'],
     ['logistics-history'],
   ],
-  'pickup.issued': [['pickup-day'], ['warehouse-placements']],
+  'pickup.issued': [...PICKUP_SCREEN, ['warehouse-placements']],
+  /*
+   * Настройка ручного ввода меняет оба рабочих места сразу: у кладовщика
+   * появляется поле номера, у менеджера — ручная выдача.
+   */
+  'settings.manual_entry_changed': [
+    ...PICKUP_SCREEN,
+    ['warehouse-settings'],
+    ...WAREHOUSE_SCREEN,
+    // И сам экран настроек: переключатель у второго администратора обязан
+    // показывать то же значение, что и у первого.
+    ['planning-settings'],
+  ],
 
   /*
    * Учёт изменился — перечитываются отчёты и балансы.

@@ -9,7 +9,7 @@
 
 import { formatCalendarDate, moscowToday } from '@fl/shared';
 
-export type RouteState = 'DRAFT' | 'CONFIRMED' | 'CANCELLED' | 'ACTIVE';
+export type RouteState = 'DRAFT' | 'CONFIRMED' | 'CANCELLED' | 'ACTIVE' | 'COMPLETED';
 export type VehicleType = 'CAR' | 'FOOT';
 
 export interface RouteOrderView {
@@ -120,6 +120,14 @@ export const ROUTE_STATE_LABELS: Record<RouteState, string> = {
   CANCELLED: 'Отменён',
   /// Заказы физически переданы курьеру: маршрут начался (этап 6.5).
   ACTIVE: 'Передан курьеру',
+  /*
+   * Все заказы получили окончательный результат (этап 6.6).
+   *
+   * Состояние есть в базе с самого этапа, а в подписях его не было: плашка
+   * завершённого маршрута выходила пустой на всех экранах, где состояние
+   * показывают, — и в «Истории», и в «Листах».
+   */
+  COMPLETED: 'Завершён',
 };
 
 /** Причины, по которым маршрут нельзя подтвердить, человеческим языком. */

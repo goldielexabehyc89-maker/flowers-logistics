@@ -29,14 +29,19 @@ h3 {
   font-weight: 600;
 }
 
-/* Заголовок страницы: 20px и жирнее прочих заголовков, но не hero. */
+/*
+ * Заголовки различаются размером, а не насыщенностью.
+ *
+ * Начертания 700 в интерфейсе нет вовсе: на светотеневом фоне жирный текст
+ * читается как ошибка набора, а иерархию и без него держат размер и цвет.
+ */
 h1 {
   font-size: var(--font-size-xl);
-  font-weight: 700;
+  font-weight: 600;
 }
 h2 {
   font-size: var(--font-size-lg);
-  font-weight: 700;
+  font-weight: 600;
 }
 h3 {
   font-size: var(--font-size-md);
@@ -44,10 +49,30 @@ h3 {
 
 p {
   margin: 0 0 var(--space-3);
+  /* Пояснение длиной в монитор не читается: строка ограничивается по символам. */
+  max-width: 66ch;
+  text-wrap: pretty;
 }
 
 a {
-  color: var(--color-accent-hover);
+  color: var(--color-accent-link);
+}
+
+a:hover {
+  color: var(--color-text);
+}
+
+/*
+ * Табличные цифры в числах и времени.
+ *
+ * Пропорциональные цифры разной ширины сдвигают колонку при каждом обновлении:
+ * сумма «11 200» и «99 800» занимают разное место, и строка дёргается на глазах
+ * у человека, который в этот момент её читает.
+ */
+table,
+.mono,
+time {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Заметный фокус обязателен: без него интерфейс недоступен с клавиатуры. */
@@ -119,11 +144,18 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * Карточка выпуклая: она лежит НА полотне, а не вырезана в нём.
+ *
+ * Граница ушла вместе с белой заливкой — на общем фоне её роль выполняет
+ * крупная светотень. Радиус заметно больше прежнего: панель такого размера
+ * с малым скруглением выглядит обрезанной по краю экрана.
+ */
 .card {
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+  border: none;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-out-lg);
   padding: var(--space-4);
 }
 
@@ -227,4 +259,72 @@ a {
 .wh-group__title {
   margin: 0;
   font-size: 15px;
+}
+
+/*
+ * Разделы склада: четыре равные вкладки на всю ширину.
+ *
+ * Равная ширина здесь не про симметрию. Кладовщик переключается между
+ * разделами десятки раз за смену, часто одной рукой и не глядя: кнопки
+ * разной ширины заставляют целиться. Полоса растянута на рабочую область
+ * и не прокручивается вбок — уехавшая за край четвёртая вкладка
+ * означала бы, что о ней просто не узнают.
+ */
+.wh-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+/* Вкладка — поднятая плитка ростом с палец: сюда попадают, не глядя. */
+.wh-tabs__item {
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-md);
+  text-align: center;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+/*
+ * Узкий телефон: четыре названия обязаны поместиться целиком.
+ *
+ * На 320 точках доля вкладки — около 67 пикселей, и «Возвраты» кеглем 15
+ * обрезается по краю. Обрезанное название читается как другое слово,
+ * а нажимать приходится наугад, поэтому кегль уменьшается вместе с полями.
+ */
+@media (max-width: 360px) {
+  .wh-tabs {
+    gap: 2px;
+    padding: 3px;
+  }
+
+  .wh-tabs__item {
+    padding: 6px 2px;
+    font-size: 13px;
+  }
+}
+
+/*
+ * Выбранная вкладка вдавлена и названа акцентом.
+ *
+ * Различие не только цветом: вдавленность видна и тому, кто цвет не различает,
+ * а вес знака подтверждает выбор третьим признаком.
+ */
+.wh-tabs__item--active {
+  border: 0;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
 }

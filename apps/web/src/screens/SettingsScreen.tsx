@@ -14,6 +14,7 @@ import { OutboxFailures } from './OutboxFailures';
 import { PlanningSettings } from './settings/PlanningSettings';
 import { FinanceSettings } from './settings/FinanceSettings';
 import { StorageCells } from './settings/StorageCells';
+import './settings/settings.css';
 import { useAuth } from '../auth/AuthContext';
 import { ErrorState, LoadingState, StatusBadge, type StatusTone } from '../ui/components';
 
@@ -63,6 +64,21 @@ const REQUIRED_SETTINGS = [
   'Подключение карт',
 ];
 
+/**
+ * Разделы страницы для рейла.
+ *
+ * Порядок повторяет порядок секций в разметке: рейл обязан вести туда, куда
+ * обещает, а расхождение заметит только тот, кто уже промахнулся.
+ */
+const SECTIONS: readonly { id: string; title: string }[] = [
+  { id: 'settings-integrations', title: 'Интеграции' },
+  { id: 'settings-planning', title: 'Планирование' },
+  { id: 'settings-finance', title: 'Финансы' },
+  { id: 'settings-cells', title: 'Ячейки' },
+  { id: 'settings-outbox', title: 'Отправка событий' },
+  { id: 'settings-required', title: 'Обязательные настройки' },
+];
+
 export function SettingsScreen(): React.JSX.Element {
   const { client } = useAuth();
   const { data, isLoading, isError, refetch } = useQuery({
@@ -73,74 +89,108 @@ export function SettingsScreen(): React.JSX.Element {
   });
 
   return (
-    <div className="stack">
-      <section className="card stack">
-        <div>
-          <h2>Состояние интеграций</h2>
-          <p className="muted text-sm">
-            Значения только для чтения. Ключи и токены вводит владелец, они хранятся на сервере и
-            никогда не передаются в браузер.
-          </p>
-        </div>
+    <div className="settings">
+      {/*
+       * Рейл разделов.
+       *
+       * Страница настроек длиннее экрана, и до нижних разделов приходилось
+       * прокручивать её целиком, помня, что там вообще есть. Рейл — навигация
+       * по уже существующим разделам, а не новая сущность: ссылки ведут на те
+       * же секции, ничего не сворачивая и не пряча.
+       *
+       * Счётчиков проблем, которые показывает макет, здесь нет: считать их
+       * пришлось бы по данным, которых экран не запрашивает.
+       */}
+      <nav className="settings__rail" aria-label="Разделы настроек">
+        {SECTIONS.map((section) => (
+          <a key={section.id} className="settings__rail-link" href={`#${section.id}`}>
+            {section.title}
+          </a>
+        ))}
+      </nav>
 
-        {isLoading && <LoadingState />}
-        {isError && <ErrorState onRetry={() => void refetch()} />}
-
-        {data !== undefined && (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Интеграция</th>
-                  <th>Состояние</th>
-                  <th>Ожидают отправки</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.integrations.map((integration) => (
-                  <tr key={integration.provider}>
-                    <td>{PROVIDER_LABELS[integration.provider] ?? integration.provider}</td>
-                    <td>
-                      <StatusBadge tone={toneFor(integration.state)}>
-                        {STATE_LABELS[integration.state] ?? integration.state}
-                      </StatusBadge>
-                    </td>
-                    <td>{integration.pendingOperations}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <div className="settings__body stack">
+        <section className="card stack" id="settings-integrations">
+          <div>
+            <h2>Состояние интеграций</h2>
+            <p className="muted text-sm">
+              Значения только для чтения. Ключи и токены вводит владелец, они хранятся на сервере и
+              никогда не передаются в браузер.
+            </p>
           </div>
-        )}
-      </section>
 
-      <PlanningSettings />
+          {isLoading && <LoadingState />}
+          {isError && <ErrorState onRetry={() => void refetch()} />}
 
-      <FinanceSettings />
+          {data !== undefined && (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Интеграция</th>
+                    <th>Состояние</th>
+                    <th>Ожидают отправки</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.integrations.map((integration) => (
+                    <tr key={integration.provider}>
+                      <td>{PROVIDER_LABELS[integration.provider] ?? integration.provider}</td>
+                      <td>
+                        <StatusBadge tone={toneFor(integration.state)}>
+                          {STATE_LABELS[integration.state] ?? integration.state}
+                        </StatusBadge>
+                      </td>
+                      <td>{integration.pendingOperations}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
-      <StorageCells />
-
-      <OutboxFailures />
-
-      <section className="card stack">
-        <div>
-          <h2>Обязательные настройки до начала работы</h2>
-          <p className="muted text-sm">
-            Пока эти настройки не заполнены, данные можно просматривать, но подтверждение и отгрузка
-            маршрутов будут заблокированы.
-          </p>
+        {/*
+         * Якорь ставится обёрткой, а не внутри каждого раздела: разделы —
+         * самостоятельные компоненты, и знать о навигации соседней страницы им
+         * незачем.
+         */}
+        <div id="settings-planning">
+          <PlanningSettings />
         </div>
-        <ul className="text-sm">
-          {REQUIRED_SETTINGS.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-        <p className="text-sm muted">
-          Редактирование появится после read-only исследования МоегоСклада и выбора владельцем
-          картографического провайдера: до этого набор полей неизвестен, и придумывать его означало
-          бы гарантированную переделку.
-        </p>
-      </section>
+
+        <div id="settings-finance">
+          <FinanceSettings />
+        </div>
+
+        <div id="settings-cells">
+          <StorageCells />
+        </div>
+
+        <div id="settings-outbox">
+          <OutboxFailures />
+        </div>
+
+        <section className="card stack" id="settings-required">
+          <div>
+            <h2>Обязательные настройки до начала работы</h2>
+            <p className="muted text-sm">
+              Пока эти настройки не заполнены, данные можно просматривать, но подтверждение и
+              отгрузка маршрутов будут заблокированы.
+            </p>
+          </div>
+          <ul className="text-sm">
+            {REQUIRED_SETTINGS.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+          <p className="text-sm muted">
+            Редактирование появится после read-only исследования МоегоСклада и выбора владельцем
+            картографического провайдера: до этого набор полей неизвестен, и придумывать его
+            означало бы гарантированную переделку.
+          </p>
+        </section>
+      </div>
     </div>
   );
 }

@@ -68,7 +68,7 @@
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-2) var(--space-3);
-  font-weight: 700;
+  font-weight: 600;
   font-size: var(--font-size-lg);
   white-space: nowrap;
   overflow: hidden;
@@ -87,7 +87,7 @@
   width: 28px;
   height: 28px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-end));
+  background: var(--color-accent);
   color: var(--color-text-inverse);
   font-size: var(--font-size-md);
 }
@@ -131,7 +131,7 @@
 }
 
 .shell__link:hover {
-  background: var(--color-surface-hover);
+  box-shadow: var(--shadow-in);
   color: var(--color-text);
 }
 
@@ -140,15 +140,22 @@
  * при боковом свете в цехе и на солнце в машине, и брендовая заливка там
  * различима хуже, чем почти чёрный фон.
  */
+/*
+ * Активный пункт вдавлен и назван акцентом.
+ *
+ * Тёмная заливка выделяла его сильнее, чем сам раздел того стоит: пункт меню
+ * сообщает, где человек находится, и не должен спорить за внимание с данными.
+ */
 .shell__link--active {
-  background: var(--color-selected);
-  color: var(--color-text-inverse);
+  box-shadow: var(--shadow-in);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-link);
   font-weight: 600;
 }
 
 .shell__link--active:hover {
-  background: var(--color-selected);
-  color: var(--color-text-inverse);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-link);
 }
 
 .shell__account {
@@ -184,7 +191,7 @@
 }
 
 .shell__account-name:hover {
-  background: var(--color-surface-hover);
+  box-shadow: var(--shadow-in);
   color: var(--color-text);
 }
 
@@ -279,7 +286,7 @@
   height: 36px;
   padding: 0;
   background: none;
-  border: 1px solid var(--color-border);
+  border: none;
   border-radius: var(--radius-sm);
   color: var(--color-text);
   cursor: pointer;
@@ -287,7 +294,7 @@
 
 .shell__menu-button:hover,
 .shell__drawer-button:hover {
-  background: var(--color-surface-hover);
+  box-shadow: var(--shadow-in);
 }
 
 /* --- Содержимое ------------------------------------------------------------ */
@@ -456,6 +463,113 @@
     padding: var(--content-pad-y) var(--content-pad-x);
   }
 
+  /* --- Рабочее пространство: вся ширина списку и карте --------------------- */
+
+  /*
+   * Колонки меню нет совсем, а не «свёрнута до полосы».
+   *
+   * Даже полоса с иконками отнимает ширину там, где она решает: список сжимается
+   * до таблицы, карта перестаёт быть картой. Меню открывается поверх содержимого
+   * той же кнопкой в верхней строке и закрывается по подложке — то же поведение,
+   * что на телефоне, просто применённое к широкому экрану.
+   */
+  .shell--workspace,
+  .shell--workspace.shell--collapsed,
+  .shell--workspace.shell--single-section {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .shell--workspace .shell__sidebar {
+    display: none;
+  }
+
+  /*
+   * Панель выезжает слева поверх экрана.
+   *
+   * `display: none` в закрытом состоянии убирает её из потока и из обхода
+   * с клавиатуры; выезд рисует `transform`, а не изменение ширины — ширина
+   * пересобирала бы раскладку под меню, чего быть не должно вовсе.
+   */
+  .shell--workspace.shell--drawer-open .shell__sidebar {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: var(--drawer-width);
+    overflow-y: auto;
+    animation: shell-drawer-in 160ms ease-out;
+  }
+
+  @keyframes shell-drawer-in {
+    from {
+      transform: translateX(-100%);
+    }
+
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .shell--workspace.shell--drawer-open .shell__sidebar {
+      animation: none;
+    }
+  }
+
+  /*
+   * Подложка — кнопка, и без явного фона она красится системным фоном кнопки.
+   *
+   * Прежнее правило задавало ей всё, кроме `background` и `border`: непрозрачный
+   * серый прямоугольник ложился поверх всей страницы, и раздел выглядел пустым,
+   * хотя был на месте и жил своей жизнью. Полупрозрачное затемнение обязано
+   * задаваться здесь же, а не наследоваться из мобильного блока — тот отключён
+   * на широком экране.
+   */
+  .shell--workspace.shell--drawer-open .shell__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    border: 0;
+    background: rgb(43 47 58 / 32%);
+  }
+
+  /*
+   * Имя и роль остаются в продукте, но уезжают в меню.
+   *
+   * В верхней строке они стояли рядом с вкладками и отнимали у них ширину,
+   * а нужны раз в смену. В открытом меню они на прежнем месте внизу.
+   */
+  .shell--workspace .shell__topbar-account {
+    display: none;
+  }
+
+  /*
+   * Логистика: вся ширина окна и одинаковые поля у вкладок и содержимого.
+   *
+   * Отступ совпадает с полем верхней строки — иначе вкладки и панели под ними
+   * стояли бы по разным вертикалям, и это видно сразу, хотя разница мелкая.
+   */
+  .shell--logistics .shell__content {
+    padding: var(--space-3) var(--space-4);
+    min-height: 0;
+  }
+
+  .shell--logistics .shell__page {
+    max-width: none;
+  }
+
+  /*
+   * «Активные» тоже занимают всю ширину.
+   *
+   * Это рабочее место курьера, а не текст для чтения: в карточке остановки
+   * стоят адрес, получатель, сумма и два крупных действия, и на большом
+   * экране половина ширины оставалась пустой.
+   */
+  .shell--delivery .shell__page {
+    max-width: none;
+  }
+
   /*
    * Свёрнутое состояние: подписи скрыты, иконки по центру полосы.
    *
@@ -558,12 +672,24 @@
  * текущего. Второй ряд навигации под заголовком отнимал у карты и списка
  * высоту, ничего не добавляя: активная вкладка и есть название раздела.
  */
+/*
+ * Вкладки лежат в одном вдавленном лотке.
+ *
+ * На плоском фоне они читались как отдельные ссылки, разбросанные по строке:
+ * непонятно, где кончается навигация раздела и начинается всё остальное.
+ * Лоток собирает их в один предмет, а вдавленность говорит, что выбирают
+ * внутри него. Границы у лотка нет — её роль выполняет внутренняя светотень.
+ */
 .shell__tabs {
   display: flex;
-  gap: var(--space-1, 4px);
+  gap: var(--space-1);
   align-items: center;
   min-width: 0;
-  /* На узком экране строка прокручивается, а пункты не обрезаются. */
+  padding: 5px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  box-shadow: var(--shadow-in);
+  /* На узком экране строка прокручивается внутри лотка, а не тянет страницу. */
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -585,21 +711,24 @@
   flex: 0 0 auto;
   display: inline-flex;
   flex-direction: row;
-  align-items: baseline;
+  /* По центру, а не по базовой линии: подписи всех вкладок на одной оси. */
+  align-items: center;
   /* Отступ счётчика — расстоянием строки, а не полем самого счётчика. */
-  gap: 6px;
-  min-height: 0;
-  padding: 4px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-2, 8px);
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  /* Невыбранные вкладки не получают собственной подложки: лоток один. */
+  background: transparent;
   color: var(--color-text-muted);
-  font-size: 14px;
+  font-size: var(--font-size-md);
   text-decoration: none;
   white-space: nowrap;
 }
 
-.shell__tabs .shell__tab:hover {
-  background: var(--color-surface-hover);
+.shell__tabs .shell__tab:hover:not(.shell__tab--active) {
+  color: var(--color-text);
 }
 
 /*
@@ -610,18 +739,24 @@
  * показывается тоже — исчезающий счётчик неотличим от несчитающегося.
  */
 .shell__tab-count {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--color-surface-hover);
-  color: var(--color-text);
-  font-size: 12px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-neutral-soft);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 
-/* Активный раздел выглядит выбранной кнопкой, остальные — невыбранными. */
+/*
+ * Активная вкладка приподнята над лотком.
+ *
+ * Она единственная имеет собственную поверхность и тень: остальные — просто
+ * подписи внутри общего углубления. Различается не одним цветом — ещё формой
+ * поверхности и весом подписи.
+ */
 .shell__tabs .shell__tab--active {
-  border-color: var(--color-border);
   background: var(--color-surface);
-  color: var(--color-text);
+  color: var(--color-accent-text);
   font-weight: 600;
+  box-shadow: var(--shadow-out);
 }

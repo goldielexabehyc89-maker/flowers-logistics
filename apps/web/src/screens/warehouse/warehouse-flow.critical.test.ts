@@ -13,15 +13,13 @@ import {
   SCAN_HINTS,
   blockLabel,
   cellLabel,
-  issueBlocker,
-  issueProgress,
+  mergePlacementPages,
+  nextPlacementOffset,
   nextStep,
-  pickProgress,
-  type RouteFlowOrderView,
-  type RouteFlowView,
+  type PlacedOrderView,
 } from './warehouse-flow';
 
-function order(overrides: Partial<RouteFlowOrderView> = {}): RouteFlowOrderView {
+function order(overrides: Partial<PlacedOrderView> = {}): PlacedOrderView {
   return {
     orderId: 'id',
     orderNumber: 'W-1',
@@ -33,24 +31,7 @@ function order(overrides: Partial<RouteFlowOrderView> = {}): RouteFlowOrderView 
     blockedBy: [],
     routeNumber: 'R-1',
     routeId: 'route',
-    position: 1,
-    issued: false,
-    inRouteCell: false,
     ...overrides,
-  };
-}
-
-function view(orders: RouteFlowOrderView[]): RouteFlowView {
-  return {
-    routeId: 'route',
-    routeNumber: 'R-1',
-    state: 'CONFIRMED',
-    version: 1,
-    deliveryDate: '2027-05-04',
-    courier: { id: 'c', fullName: 'Курьер' },
-    routeCell: { id: 'rc', code: 'R-01' },
-    issueSession: null,
-    orders,
   };
 }
 
@@ -69,16 +50,9 @@ describe('состояние заказа на экране', () => {
     expect(cellLabel(order({ cellCode: 'S-07' }))).toBe('S-07');
   });
 
-  it('выдача заблокирована для непринятого, проблемного и требующего перемещения', () => {
-    expect(issueBlocker(order({ cellId: null, cellCode: null }))).toBe('Не принят на склад');
-    expect(issueBlocker(order({ requiresRelocation: true }))).toBe('Требуется перемещение');
-    expect(issueBlocker(order({ blockedBy: ['OUT_OF_SCOPE'] }))).toBe(BLOCK_LABELS['OUT_OF_SCOPE']);
-    expect(issueBlocker(order())).toBeNull();
-    // Уже выданный заказ блокировок не показывает: работа по нему закончена.
-    expect(issueBlocker(order({ issued: true, cellId: null, cellCode: null }))).toBeNull();
-  });
-
-  it('неизвестный признак показывается как есть, а не теряется', () => {
+  it('известный признак называется по-человечески, неизвестный — как есть', () => {
+    expect(blockLabel('OUT_OF_SCOPE')).toBe(BLOCK_LABELS['OUT_OF_SCOPE']);
+    // Признак, которого мы ещё не знаем, теряться не должен.
     expect(blockLabel('НЕЧТО_НОВОЕ')).toBe('НЕЧТО_НОВОЕ');
   });
 
@@ -87,23 +61,68 @@ describe('состояние заказа на экране', () => {
   });
 });
 
-describe('прогресс', () => {
-  it('комплектование считает заказы в маршрутной ячейке', () => {
-    const progress = pickProgress(
-      view([order({ inRouteCell: true }), order({ orderId: 'b', inRouteCell: false })]),
-    );
-    expect(progress).toEqual({ picked: 1, total: 2 });
+describe('дочитывание складского списка', () => {
+  const page = (
+    items: { orderId: string; cellId: string | null }[],
+    meta: {
+      total: number;
+      limit: number;
+      offset: number;
+    },
+  ): {
+    items: { orderId: string; cellId: string | null }[];
+    total: number;
+    limit: number;
+    offset: number;
+  } => ({
+    items,
+    ...meta,
   });
 
-  it('выдача считает выданные заказы', () => {
-    const progress = issueProgress(
-      view([order({ issued: true }), order({ orderId: 'b', issued: false })]),
+  it('склеивает страницы по порядку и не повторяет одну коробку дважды', () => {
+    const first = page(
+      [
+        { orderId: 'a', cellId: 'S-1' },
+        { orderId: 'b', cellId: 'S-2' },
+      ],
+      { total: 3, limit: 2, offset: 0 },
     );
-    expect(progress).toEqual({ issued: 1, total: 2 });
+    // Пока читали вторую страницу, «a» сняли с хранения — смещение сдвинулось,
+    // и «b» пришла второй раз.
+    const second = page(
+      [
+        { orderId: 'b', cellId: 'S-2' },
+        { orderId: 'c', cellId: 'S-3' },
+      ],
+      { total: 3, limit: 2, offset: 2 },
+    );
+
+    expect(mergePlacementPages([first, second]).map((row) => row.orderId)).toEqual(['a', 'b', 'c']);
   });
 
-  it('пустой маршрут не делит на ноль и не выглядит завершённым', () => {
-    expect(issueProgress(view([]))).toEqual({ issued: 0, total: 0 });
-    expect(pickProgress(view([]))).toEqual({ picked: 0, total: 0 });
+  it('один заказ в двух ячейках — это две разные коробки', () => {
+    const only = page(
+      [
+        { orderId: 'a', cellId: 'S-1' },
+        { orderId: 'a', cellId: 'S-2' },
+      ],
+      { total: 2, limit: 100, offset: 0 },
+    );
+
+    expect(mergePlacementPages([only])).toHaveLength(2);
+  });
+
+  it('дочитывает ровно до серверного total и потом останавливается', () => {
+    expect(nextPlacementOffset({ items: new Array(100), total: 101, limit: 100, offset: 0 })).toBe(
+      100,
+    );
+    expect(nextPlacementOffset({ items: new Array(1), total: 101, limit: 100, offset: 100 })).toBe(
+      null,
+    );
+    // Короткая страница не повод остановиться: считается по полученным строкам.
+    expect(nextPlacementOffset({ items: new Array(40), total: 101, limit: 100, offset: 0 })).toBe(
+      40,
+    );
+    expect(nextPlacementOffset({ items: [], total: 0, limit: 100, offset: 0 })).toBe(null);
   });
 });

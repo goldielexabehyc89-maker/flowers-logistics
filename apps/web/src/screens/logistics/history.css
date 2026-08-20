@@ -1,15 +1,17 @@
 /*
- * «История»: плотный журнал без карточек и без карты.
+ * «История» и «Отчёты» занимают всю ширину рабочего места.
  *
- * Ширина ограничена: это перечень строк, а не рабочее место с картой — на всю
- * ширину монитора строки растягивать незачем, читать их станет труднее.
+ * Прежде ширина была ограничена как у перечня строк. Но здесь не перечень:
+ * в «Истории» четыре колонки и раскрытый маршрут с двумя панелями, в отчётах
+ * тринадцать колонок расчёта. На ограниченной ширине они сжимались
+ * и обрезались, пока справа стояло пустое поле в треть экрана.
  */
 .history,
 .reports {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  max-width: 1152px;
+  gap: var(--space-3);
+  max-width: none;
 }
 
 /*
@@ -49,13 +51,19 @@
   line-height: 16px;
 }
 
-/* Одна высота у всех полей ввода строки отбора. */
+/*
+ * Одна высота у всех полей строки отбора.
+ *
+ * Тридцать два пикселя достались от прежнего оформления, где поля были ниже.
+ * Сейчас строка собрана из плиток в 36, и правило по элементу перебивало
+ * класс контрола: поле курьера оставалось ниже соседей.
+ */
 .history__filters input,
 .history__filters select,
 .reports__filters input,
 .reports__filters select {
-  height: 32px;
-  min-height: 32px;
+  height: 36px;
+  min-height: 36px;
   box-sizing: border-box;
 }
 
@@ -68,6 +76,20 @@
   border-radius: var(--log-radius-field);
   background: var(--log-surface);
   font-size: var(--log-font-md);
+}
+
+/*
+ * На телефоне список отбора возвращается к 16px.
+ *
+ * Ниже шестнадцати iOS приближает страницу при фокусе, и отчёт уезжает вбок.
+ * Общее правило задано по элементу, а здесь размер назначен классом — класс
+ * сильнее, поэтому исключение живёт рядом с самим правилом.
+ */
+@media (pointer: coarse), (max-width: 640px) {
+  .history__select,
+  .reports__select {
+    font-size: 16px;
+  }
 }
 
 .history__day {
@@ -270,4 +292,432 @@
   color: var(--log-text-strong);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   История: панель отбора, лоток дня, строка маршрута
+   ========================================================================== */
+
+.history__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+/* Готовые периоды: выбранный вдавлен, остальные подняты. */
+.history__periods {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+}
+
+.history__period {
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.history__period--on {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+.history__range {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* Все поля отбора одного роста: разнобой читается как сбой вёрстки. */
+.history__range input,
+.history__filters .history__search {
+  min-height: 36px;
+}
+
+.history__range input {
+  width: 150px;
+}
+
+.history__range-dash {
+  color: var(--color-text-muted);
+}
+
+.history__filters .history__select {
+  flex: none;
+}
+
+/* Поиск занимает всю ширину: он длиннее любого другого отбора. */
+.history__filters .history__search {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.history__day-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 0 var(--space-1);
+}
+
+.history__day-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.history__day-summary {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Деньги дня — поднятая панель: это отдельная запись, а не часть списка. */
+.history__money {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.history__money-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.history__tray {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+/*
+ * Колонки одинаковы во всех строках.
+ *
+ * Ширины не зависят от содержимого: каждая строка — своя сетка, и иначе
+ * длинный номер сдвигал бы соседние колонки относительно шапки.
+ */
+.history__head,
+.history__row-head {
+  display: grid;
+  gap: var(--space-1) var(--space-3);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr) minmax(0, 0.9fr) 190px;
+  align-items: center;
+}
+
+.history__head {
+  padding: 2px var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.history__head-last {
+  text-align: right;
+}
+
+.history__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__row {
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.history__row-head {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history__cell {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.history__cell--route {
+  flex-wrap: wrap;
+}
+
+.history__number {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.history__cell--last {
+  justify-content: flex-end;
+}
+
+/* Полоса исхода: зелёное доставлено, красное нет, остаток — ещё не известно. */
+.history__bar {
+  display: flex;
+  overflow: hidden;
+  flex: none;
+  width: 56px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.history__bar-ok {
+  background: var(--color-success);
+}
+
+.history__bar-fail {
+  background: var(--color-error);
+}
+
+/* ==========================================================================
+   Раскрытый маршрут: состав и хронология рядом
+   ========================================================================== */
+
+/*
+ * Две панели в ряд, а не одна под другой.
+ *
+ * Состав отвечает «что везли», хронология — «что с этим делали», и разбирают
+ * их вместе: столбцом вторая уезжала под сгиб, и приходилось прокручивать
+ * туда-обратно между вопросом и ответом.
+ */
+.history__details {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 var(--space-2) var(--space-2);
+  border-top: 0;
+}
+
+.history__details .history__block {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+}
+
+.history__block-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+/* Линий между строками нет: список короткий, дробить его нечем. */
+.history__order,
+.history__event {
+  gap: var(--space-2);
+  padding: 3px 0;
+  border-bottom: 0;
+  font-size: var(--font-size-sm);
+}
+
+.history__position {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.history__order-number {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.history__order-interval,
+.history__event-time,
+.history__event-actor {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.history__order-address {
+  flex: 1 1 200px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Время — узкий столбец: в нём только часы и минуты. */
+.history__event-time {
+  width: 48px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history__event-label {
+  flex: 0 1 auto;
+  color: var(--color-text);
+}
+
+.history__event-actor {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.history__event-reason {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Плашки исхода по размеру своего текста. */
+.history__order > .badge {
+  align-self: center;
+}
+
+/* Узкое окно: панели встают одна под другой — рядом им уже не хватает места. */
+@media (max-width: 1100px) {
+  .history__details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * Раскрытие не меняет цвет карточки.
+ *
+ * Прежнее правило красило раскрытую строку в белое и обводило синим —
+ * язык рамок, от которого экран уже отказался. Раскрытая карточка остаётся
+ * той же поверхностью и просто становится выше, а «внутри» показывают
+ * вдавленные панели состава и хронологии.
+ */
+.history__row[data-expanded='true'] {
+  border: 0;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+/*
+ * Списки отбора говорят на языке полей ввода.
+ *
+ * Они оставались обведёнными прямоугольниками браузера по умолчанию: рядом
+ * с вдавленными полями даты и поиска это читалось как чужой элемент,
+ * попавший на экран из другого интерфейса.
+ */
+.history__filters .history__select {
+  height: auto;
+  min-height: 36px;
+  padding: 0 var(--space-6) 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  box-shadow: var(--shadow-in);
+  /* Стрелка своя: у браузерной нет общего вида на разных системах. */
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position:
+    right 18px center,
+    right 13px center;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+}
+
+/*
+ * Ширина по содержимому, но с потолком.
+ *
+ * Список подбирает ширину по самому длинному пункту, а среди курьеров
+ * попадаются длинные имена: без потолка один список занимал строку целиком
+ * и выталкивал соседний на следующую.
+ */
+.history__filters .history__select {
+  width: auto;
+  max-width: 200px;
+}
+
+/* Денежная операция: время, название, сумма, кто — в одну строку. */
+.history__payment {
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 3px 0;
+  border-bottom: 0;
+  font-size: var(--font-size-sm);
+}
+
+.history__payment .history__event-label {
+  flex: 0 1 auto;
+}
+
+.history__payment-amount {
+  flex: none;
+  color: var(--color-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Список операций не имеет собственной поверхности.
+ *
+ * У него оставались рамка и почти белый фон от прежнего оформления: внутри
+ * панели «Деньги за день» это выглядело коробкой в коробке, а белое пятно
+ * спорило с полотном, на котором лежит вся страница.
+ */
+.history__payments {
+  gap: var(--space-1);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* «Отменена» — плашка у правого края: операция есть, но силы не имеет. */
+.history__payment .history__tag {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
+/* Поле курьера в строке отбора не растягивается на всю ширину. */
+.history__courier {
+  flex: none;
+  width: 230px;
 }

@@ -17,7 +17,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import {
   Flower2,
@@ -39,7 +39,6 @@ import { useAuth } from '../auth/AuthContext';
 import {
   LOGISTICS_TABS,
   isLogisticsPath,
-  isWideLayout,
   splitMobileNavigation,
   visibleSections,
 } from '../navigation/navigation';
@@ -70,32 +69,6 @@ const SECTION_ICONS: Readonly<Record<string, LucideIcon>> = {
   settings: Settings,
 };
 
-/**
- * Ключ сохранённого состояния меню.
- *
- * Состояние живёт в браузере, а не в профиле: это привычка на конкретном
- * устройстве, а не свойство сотрудника. На большом мониторе меню держат
- * раскрытым, на ноутбуке — свёрнутым, и один и тот же человек ожидает разного.
- */
-const SIDEBAR_STORAGE_KEY = 'fl.sidebar.collapsed';
-
-function readCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1';
-  } catch {
-    // Приватный режим и заблокированное хранилище — не повод не открыть меню.
-    return false;
-  }
-}
-
-function writeCollapsed(collapsed: boolean): void {
-  try {
-    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0');
-  } catch {
-    // Настройка не сохранилась — интерфейс всё равно обязан работать.
-  }
-}
-
 export function AppShell(): React.JSX.Element {
   const { user, client, logout, logoutEverywhere } = useAuth();
   const location = useLocation();
@@ -108,7 +81,6 @@ export function AppShell(): React.JSX.Element {
    * остаётся полосой с иконками: полное исчезновение оставляло бы человека без
    * ориентира, где он находится.
    */
-  const [collapsed, setCollapsed] = useState(readCollapsed);
   /**
    * Открыт ли drawer на телефоне.
    *
@@ -158,7 +130,14 @@ export function AppShell(): React.JSX.Element {
   // Карты и крупные рабочие таблицы занимают всю ширину; обычная страница
   // остаётся колонкой. Решение принимается по адресу, а не экраном: иначе
   // каждый раздел договаривался бы о ширине сам.
-  const wide = isWideLayout(location.pathname);
+  /*
+   * Отдельного «узкого» варианта страницы больше нет.
+   *
+   * Ограничение ширины придумывалось, когда меню занимало колонку: без него
+   * строка данных растягивалась во весь монитор. Меню колонки больше не
+   * занимает, и каждый экран рисуется в своей полной рабочей ширине —
+   * два варианта одной страницы означали бы две разные вёрстки одной работы.
+   */
 
   // Внутри «Логистики» заголовок страницы называет ОТКРЫТУЮ ВКЛАДКУ, а не
   // раздел: человек находится в «Сделках», и заголовок «Логистика» ничего
@@ -178,6 +157,46 @@ export function AppShell(): React.JSX.Element {
     setDrawerOpen(false);
   }, [location.pathname]);
 
+  /*
+   * Фон не прокручивается, пока меню открыто.
+   *
+   * Иначе колесо под открытым меню уводит страницу, и человек, закрыв его,
+   * оказывается не там, где был. Прежнее значение возвращается при закрытии,
+   * а не затирается пустой строкой: страница могла быть заблокирована и по
+   * другой причине — например, открытым модальным окном.
+   */
+  useEffect(() => {
+    if (!drawerOpen) {
+      return undefined;
+    }
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [drawerOpen]);
+
+  /*
+   * После закрытия фокус возвращается на кнопку меню.
+   *
+   * Меню открывают и с клавиатуры; закрыв его по Escape, человек иначе
+   * оказывался бы в начале страницы и заново шёл табом до места, где был.
+   */
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (drawerOpen) {
+      // Фокус уходит в меню: иначе клавиатура остаётся снаружи, и Tab водит
+      // по экрану, который в этот момент не принимает нажатия.
+      const first = sidebarRef.current?.querySelector<HTMLElement>('a, button');
+      first?.focus();
+    } else if (wasOpenRef.current) {
+      menuButtonRef.current?.focus();
+    }
+    wasOpenRef.current = drawerOpen;
+  }, [drawerOpen]);
+
   // Escape закрывает overlay. Это доступность, а не новый смысл: без клавиатуры
   // выход из меню оставался бы только мышью.
   useEffect(() => {
@@ -193,26 +212,50 @@ export function AppShell(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, [drawerOpen]);
 
-  function toggleCollapsed(): void {
-    setCollapsed((current) => {
-      const next = !current;
-      writeCollapsed(next);
-      return next;
-    });
-  }
+  /*
+   * Свёрнутого состояния колонки больше нет — меню всегда наложение.
+   *
+   * Прежний признак «свёрнуто» хранился между сеансами и означал ширину
+   * колонки. Колонки нет, хранить нечего: меню открыто ровно столько,
+   * сколько им пользуются.
+   */
+  const navShown = drawerOpen;
+  const menuLabel = navShown ? 'Закрыть меню' : 'Открыть меню';
 
   return (
     <div
       className={[
         'shell',
-        collapsed ? 'shell--collapsed' : null,
         drawerOpen ? 'shell--drawer-open' : null,
         singleSection ? 'shell--single-section' : null,
+        /*
+         * Меню — временное наложение, а не колонка. Везде и всегда.
+         *
+         * Постоянная панель отнимала у работы около трёхсот пикселей ровно
+         * там, где ширина и решает, а её появление сдвигало и пересобирало
+         * раскладку: список сжимался, карта уходила в адаптивный режим,
+         * раскрытые карточки схлопывались. Теперь экран не знает о состоянии
+         * меню вовсе — оно выезжает поверх и уезжает, ничего под собой
+         * не трогая.
+         */
+        'shell--workspace',
+        /*
+         * Логистика работает во всю ширину окна.
+         *
+         * Ограничение `--page-max-width` придумано для страниц, которые читают
+         * сверху вниз: строка данных во весь монитор читается хуже, чем та же
+         * строка в колонке. Но список с картой и таблица маршрутных листов —
+         * не текст: им ширина и нужна, а поля по бокам просто отнимали её.
+         * Прочие рабочие места ограничение сохраняют.
+         */
+        isLogisticsPath(location.pathname) ? 'shell--logistics' : null,
+        // «Активные» — тоже рабочее место, а не текст: ширина ему нужна.
+        location.pathname.startsWith('/active') ? 'shell--delivery' : null,
       ]
         .filter((name) => name !== null)
         .join(' ')}
     >
-      <aside className="shell__sidebar" id="shell-sidebar">
+      <aside className="shell__sidebar" id="shell-sidebar" ref={sidebarRef}>
         <div className="shell__brand">
           <span className="shell__brand-mark" aria-hidden>
             Л
@@ -233,6 +276,15 @@ export function AppShell(): React.JSX.Element {
                     // В свёрнутом состоянии подпись скрыта, и подсказка остаётся
                     // единственным способом узнать раздел, не разворачивая меню.
                     title={section.title}
+                    /*
+                     * Меню закрывается по самому выбору, а не только по смене
+                     * адреса.
+                     *
+                     * Выбор раздела, на котором уже находишься, адрес не меняет:
+                     * меню оставалось открытым и закрывало собой экран, ради
+                     * которого его и открыли.
+                     */
+                    onClick={() => setDrawerOpen(false)}
                   >
                     {Icon !== undefined && (
                       <Icon className="shell__link-icon" size={ICON_SIZE} aria-hidden />
@@ -320,16 +372,17 @@ export function AppShell(): React.JSX.Element {
         <button
           type="button"
           className="shell__menu-button"
-          aria-expanded={!collapsed}
+          ref={menuButtonRef}
+          aria-expanded={navShown}
           aria-controls="shell-sidebar"
-          aria-label={collapsed ? 'Показать меню' : 'Свернуть меню'}
-          title={collapsed ? 'Показать меню' : 'Свернуть меню'}
-          onClick={toggleCollapsed}
+          aria-label={menuLabel}
+          title={menuLabel}
+          onClick={() => setDrawerOpen((open) => !open)}
         >
-          {collapsed ? (
-            <PanelLeftOpen size={ICON_SIZE} aria-hidden />
-          ) : (
+          {navShown ? (
             <PanelLeftClose size={ICON_SIZE} aria-hidden />
+          ) : (
+            <PanelLeftOpen size={ICON_SIZE} aria-hidden />
           )}
         </button>
         {/*
@@ -369,14 +422,24 @@ export function AppShell(): React.JSX.Element {
         )}
         <div className="shell__topbar-right">
           <ConnectionIndicator client={client} realtime={realtime} />
-          <Button variant="ghost" onClick={() => setAccountOpen(true)}>
+          {/*
+           * Имя открывает карточку учётной записи. В рабочем пространстве
+           * кнопка скрыта стилями: она стояла рядом с вкладками и отнимала у
+           * них ширину, а нужна раз в смену. Там же тот же вход — в меню,
+           * которое открывает кнопка слева.
+           */}
+          <Button
+            variant="ghost"
+            className="shell__topbar-account"
+            onClick={() => setAccountOpen(true)}
+          >
             {user?.fullName ?? 'Пользователь'}
           </Button>
         </div>
       </header>
 
       <main className="shell__content">
-        <div className={wide ? 'shell__page shell__page--wide' : 'shell__page'}>
+        <div className="shell__page">
           <Outlet />
         </div>
       </main>

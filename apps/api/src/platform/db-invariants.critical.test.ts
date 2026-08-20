@@ -288,4 +288,205 @@ describe('инварианты базы данных', () => {
       expect(constraint[0]?.definition).toContain('fulfillmentInScope');
     });
   });
+
+  /*
+   * Складская выдача: отметки проверки и привязки маршрутных полок.
+   *
+   * Оба инварианта держит база, а не приложение. Приложение можно обойти
+   * вторым процессом, прямым запросом или будущей правкой — полка, занятая
+   * двумя листами сразу, и вторая действующая отметка на тот же заказ
+   * означают разъехавшийся счётчик и коробки, уехавшие дважды.
+   */
+  describe('инварианты выдачи маршрутного листа', () => {
+    async function createRoute(createdById: string, courierUserId: string): Promise<string> {
+      const route = await db.deliveryRoute.create({
+        data: {
+          number: `INV-${process.hrtime.bigint() % 1_000_000n}`,
+          deliveryDate: new Date('2028-02-02T00:00:00.000Z'),
+          state: 'CONFIRMED',
+          vehicleType: 'CAR',
+          createdById,
+          courierUserId,
+        },
+        select: { id: true },
+      });
+      return route.id;
+    }
+
+    async function createOrder(): Promise<string> {
+      const order = await db.deliveryOrder.create({
+        data: {
+          externalId: randomUUID(),
+          externalName: `INVO-${process.hrtime.bigint() % 1_000_000n}`,
+          externalUpdated: new Date(),
+          inScope: true,
+        },
+        select: { id: true },
+      });
+      return order.id;
+    }
+
+    async function createCell(createdById: string): Promise<string> {
+      const code = `INVC-${process.hrtime.bigint() % 1_000_000n}`;
+      const cell = await db.storageCell.create({
+        data: { code, normalizedCode: code, kind: 'ROUTE', createdById },
+        select: { id: true },
+      });
+      return cell.id;
+    }
+
+    async function createSession(routeId: string, userId: string): Promise<string> {
+      const session = await db.routeIssueSession.create({
+        data: {
+          routeId,
+          courierUserId: userId,
+          state: 'OPEN',
+          openKey: routeId,
+          confirmedById: userId,
+        },
+        select: { id: true },
+      });
+      return session.id;
+    }
+
+    it('второй действующей отметки на тот же заказ не существует', async () => {
+      const user = await createUser();
+      const routeId = await createRoute(user, user);
+      const sessionId = await createSession(routeId, user);
+      const orderId = await createOrder();
+
+      await db.routeIssueCheck.create({ data: { sessionId, orderId, checkedById: user } });
+
+      await expect(
+        db.routeIssueCheck.create({ data: { sessionId, orderId, checkedById: user } }),
+      ).rejects.toThrow();
+    });
+
+    it('снятая отметка освобождает место для новой', async () => {
+      const user = await createUser();
+      const routeId = await createRoute(user, user);
+      const sessionId = await createSession(routeId, user);
+      const orderId = await createOrder();
+
+      const first = await db.routeIssueCheck.create({
+        data: { sessionId, orderId, checkedById: user },
+        select: { id: true },
+      });
+      await db.routeIssueCheck.update({
+        where: { id: first.id },
+        data: { clearedAt: new Date(), clearedById: user },
+      });
+
+      // Сброс закрывает отметку, а не стирает: после него лист вносят заново.
+      const second = await db.routeIssueCheck.create({
+        data: { sessionId, orderId, checkedById: user },
+        select: { id: true },
+      });
+      expect(second.id).not.toBe(first.id);
+    });
+
+    it('снятие отметки без автора база не принимает', async () => {
+      const user = await createUser();
+      const routeId = await createRoute(user, user);
+      const sessionId = await createSession(routeId, user);
+      const orderId = await createOrder();
+
+      const check = await db.routeIssueCheck.create({
+        data: { sessionId, orderId, checkedById: user },
+        select: { id: true },
+      });
+
+      // Кто сбросил проверку — это ответ на вопрос «почему счётчик обнулился».
+      await expect(
+        db.routeIssueCheck.update({ where: { id: check.id }, data: { clearedAt: new Date() } }),
+      ).rejects.toThrow();
+    });
+
+    it('отметку нельзя удалить: история внесения не переписывается', async () => {
+      const user = await createUser();
+      const routeId = await createRoute(user, user);
+      const sessionId = await createSession(routeId, user);
+      const orderId = await createOrder();
+
+      const check = await db.routeIssueCheck.create({
+        data: { sessionId, orderId, checkedById: user },
+        select: { id: true },
+      });
+
+      await expect(db.routeIssueCheck.delete({ where: { id: check.id } })).rejects.toThrow();
+    });
+
+    it('одна полка не может принадлежать двум листам сразу', async () => {
+      const user = await createUser();
+      const cellId = await createCell(user);
+      const first = await createRoute(user, user);
+      const second = await createRoute(user, user);
+
+      await db.routeCellBinding.create({
+        data: { routeId: first, cellId, cellKind: 'ROUTE', boundById: user },
+      });
+
+      await expect(
+        db.routeCellBinding.create({
+          data: { routeId: second, cellId, cellKind: 'ROUTE', boundById: user },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('одну полку нельзя привязать к листу дважды', async () => {
+      const user = await createUser();
+      const cellId = await createCell(user);
+      const routeId = await createRoute(user, user);
+
+      await db.routeCellBinding.create({
+        data: { routeId, cellId, cellKind: 'ROUTE', boundById: user },
+      });
+
+      await expect(
+        db.routeCellBinding.create({
+          data: { routeId, cellId, cellKind: 'ROUTE', boundById: user },
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('у листа может быть НЕСКОЛЬКО полок одновременно', async () => {
+      const user = await createUser();
+      const routeId = await createRoute(user, user);
+      const first = await createCell(user);
+      const second = await createCell(user);
+
+      await db.routeCellBinding.create({
+        data: { routeId, cellId: first, cellKind: 'ROUTE', boundById: user },
+      });
+      await db.routeCellBinding.create({
+        data: { routeId, cellId: second, cellKind: 'ROUTE', boundById: user },
+      });
+
+      // Ровно то, ради чего снималось прежнее ограничение: коробки одного
+      // листа физически не помещаются на одну полку.
+      expect(await db.routeCellBinding.count({ where: { routeId, releasedAt: null } })).toBe(2);
+    });
+
+    it('освобождённая полка достаётся другому листу', async () => {
+      const user = await createUser();
+      const cellId = await createCell(user);
+      const first = await createRoute(user, user);
+      const second = await createRoute(user, user);
+
+      const binding = await db.routeCellBinding.create({
+        data: { routeId: first, cellId, cellKind: 'ROUTE', boundById: user },
+        select: { id: true },
+      });
+      await db.routeCellBinding.update({
+        where: { id: binding.id },
+        data: { releasedAt: new Date(), releasedById: user },
+      });
+
+      const moved = await db.routeCellBinding.create({
+        data: { routeId: second, cellId, cellKind: 'ROUTE', boundById: user },
+        select: { routeId: true },
+      });
+      expect(moved.routeId).toBe(second);
+    });
+  });
 });

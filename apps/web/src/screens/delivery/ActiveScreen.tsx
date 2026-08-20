@@ -20,10 +20,8 @@ import {
   Button,
   EmptyState,
   ErrorState,
-  Field,
   LoadingState,
   Modal,
-  Select,
   StatusBadge,
 } from '../../ui/components';
 import {
@@ -44,6 +42,7 @@ import {
   type FailureReasonView,
 } from './delivery-flow';
 import './delivery.css';
+import { formatDate } from '../routing/routing';
 
 const ACTIVE_KEY = ['delivery-active'];
 const RETURNS_KEY = ['delivery-returns'];
@@ -89,7 +88,15 @@ function ReturnsBlock({
 
   return (
     <section className="delivery__returns" data-testid="delivery-returns">
-      <h3 className="delivery__returns-title">Вернуть на склад</h3>
+      {/*
+        Счётчик в заголовке и пояснение один раз на весь блок.
+
+        Пояснение повторялось у каждой строки — три одинаковых предложения
+        подряд, — а сколько всего заказов за курьером, приходилось считать
+        глазами.
+      */}
+      <h3 className="delivery__returns-title">Вернуть на склад · {items.length}</h3>
+      <p className="delivery__returns-note">Пока склад не принял заказ, он числится за вами.</p>
       <ul className="delivery__returns-list">
         {items.map((item) => (
           <li key={item.returnId} className="delivery__return" data-order-number={item.orderNumber}>
@@ -103,9 +110,6 @@ function ReturnsBlock({
                 {RETURN_STATE_LABELS[item.state] ?? item.state}
               </span>
             </div>
-            <p className="delivery__return-note">
-              Передайте заказ кладовщику: пока склад его не принял, он числится за вами.
-            </p>
             {item.state === 'WITH_COURIER' && (
               <Button
                 variant="ghost"
@@ -273,29 +277,64 @@ export function ActiveScreen(): React.JSX.Element {
 
   return (
     <div className="delivery">
+      {/*
+        Итог дня стоит первым: сколько осталось везти и сколько вернуть.
+
+        Прежде это приходилось складывать глазами по карточкам, а курьер
+        смотрит в экран на ходу и спрашивает у него ровно два числа.
+      */}
+      <div className="delivery__summary" data-testid="delivery-summary">
+        <span className="delivery__summary-left">
+          Осталось {allRoutes.reduce((sum, route) => sum + remainingOf(route), 0)} из{' '}
+          {allRoutes.reduce((sum, route) => sum + route.orders.length, 0)}
+        </span>
+        {returnItems.length > 0 && (
+          <span className="delivery__summary-returns">возвратов {returnItems.length}</span>
+        )}
+      </div>
+
       <ReturnsBlock
         items={returnItems}
         busy={departing.isPending}
         onDeparting={(orderId) => departing.mutate(orderId)}
       />
-      <div className="delivery__filters">
-        <Field label="Маршрут">
-          {(fieldProps) => (
-            <Select
-              {...fieldProps}
-              value={routeFilter}
-              onChange={(event) => setRouteFilter(event.target.value)}
+      {/*
+        Маршруты выбираются плитками, а не списком.
+
+        Их два-три за смену, и открывать список ради двух пунктов — лишнее
+        движение на ходу. Плитки видны сразу и нажимаются пальцем.
+      */}
+      {allRoutes.length > 1 && (
+        <div className="delivery__filters" role="group" aria-label="Маршрут">
+          <button
+            type="button"
+            className={
+              routeFilter === '' ? 'delivery__filter delivery__filter--on' : 'delivery__filter'
+            }
+            aria-pressed={routeFilter === ''}
+            data-testid="delivery-filter-all"
+            onClick={() => setRouteFilter('')}
+          >
+            Все маршруты
+          </button>
+          {allRoutes.map((route) => (
+            <button
+              key={route.routeId}
+              type="button"
+              className={
+                routeFilter === route.routeId
+                  ? 'delivery__filter delivery__filter--on'
+                  : 'delivery__filter'
+              }
+              aria-pressed={routeFilter === route.routeId}
+              data-route-number={route.number}
+              onClick={() => setRouteFilter(route.routeId)}
             >
-              <option value="">Все маршруты</option>
-              {allRoutes.map((route) => (
-                <option key={route.routeId} value={route.routeId}>
-                  {route.number}
-                </option>
-              ))}
-            </Select>
-          )}
-        </Field>
-      </div>
+              {route.number}
+            </button>
+          ))}
+        </div>
+      )}
 
       {routes.map((route) => (
         <section
@@ -309,8 +348,12 @@ export function ActiveScreen(): React.JSX.Element {
           <header className="delivery__route-head">
             <span className="delivery__route-title">{route.number}</span>
             <span className="delivery__route-meta">
-              {route.deliveryDate} · осталось {remainingOf(route)} из {route.orders.length}
+              {formatDate(route.deliveryDate)}
               {route.courier === null ? '' : ` · ${route.courier.fullName}`}
+            </span>
+            {/* Остаток по маршруту — акцентом: это то, ради чего экран открыт. */}
+            <span className="delivery__route-left">
+              осталось {remainingOf(route)} из {route.orders.length}
             </span>
           </header>
 

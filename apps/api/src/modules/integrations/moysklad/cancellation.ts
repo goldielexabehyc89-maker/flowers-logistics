@@ -103,12 +103,14 @@ export async function applyCancellation(
    * Событие видят все, кто показывает заказ.
    *
    * Отменённый заказ обязан покраснеть у флориста, склада и логиста без
-   * перезагрузки: собирать и везти его больше нельзя.
+   * перезагрузки: собирать и везти его больше нельзя. Менеджер самовывоза
+   * здесь не лишний — он стоит у прилавка и отдал бы коробку, которой уже
+   * не существует.
    */
   await publishRealtimeEvent(tx, {
     topic: 'order.cancellation_changed',
     payload: { orderId: input.orderId, cancelled: input.cancelled },
-    audienceRoles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE', 'COURIER'],
+    audienceRoles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE', 'COURIER', 'MANAGER'],
   });
 
   return true;
