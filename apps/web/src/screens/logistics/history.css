@@ -336,6 +336,12 @@
   align-items: center;
 }
 
+/* Все поля отбора одного роста: разнобой читается как сбой вёрстки. */
+.history__range input,
+.history__filters .history__search {
+  min-height: 36px;
+}
+
 .history__range input {
   width: 150px;
 }
@@ -346,8 +352,6 @@
 
 .history__filters .history__select {
   flex: none;
-  width: 190px;
-  min-height: 36px;
 }
 
 /* Поиск занимает всю ширину: он длиннее любого другого отбора. */
@@ -599,4 +603,62 @@
   .history__details {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/*
+ * Раскрытие не меняет цвет карточки.
+ *
+ * Прежнее правило красило раскрытую строку в белое и обводило синим —
+ * язык рамок, от которого экран уже отказался. Раскрытая карточка остаётся
+ * той же поверхностью и просто становится выше, а «внутри» показывают
+ * вдавленные панели состава и хронологии.
+ */
+.history__row[data-expanded='true'] {
+  border: 0;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+/*
+ * Списки отбора говорят на языке полей ввода.
+ *
+ * Они оставались обведёнными прямоугольниками браузера по умолчанию: рядом
+ * с вдавленными полями даты и поиска это читалось как чужой элемент,
+ * попавший на экран из другого интерфейса.
+ */
+.history__filters .history__select {
+  height: auto;
+  min-height: 36px;
+  padding: 0 var(--space-6) 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-md);
+  box-shadow: var(--shadow-in);
+  /* Стрелка своя: у браузерной нет общего вида на разных системах. */
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position:
+    right 18px center,
+    right 13px center;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+}
+
+/*
+ * Ширина по содержимому, но с потолком.
+ *
+ * Список подбирает ширину по самому длинному пункту, а среди курьеров
+ * попадаются длинные имена: без потолка один список занимал строку целиком
+ * и выталкивал соседний на следующую.
+ */
+.history__filters .history__select {
+  width: auto;
+  max-width: 200px;
 }
