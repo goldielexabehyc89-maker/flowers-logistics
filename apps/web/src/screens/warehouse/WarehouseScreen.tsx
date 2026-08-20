@@ -137,6 +137,8 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const [orderInput, setOrderInput] = useState('');
   const [cellInput, setCellInput] = useState('');
   const [scannedOrder, setScannedOrder] = useState<string | null>(null);
+  /** Открыто ли окно сканирования возврата. */
+  const [scanning, setScanning] = useState(false);
 
   const returns = useQuery({
     queryKey: ['warehouse-returns'],
@@ -178,6 +180,20 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
     },
   });
 
+  if (scanning) {
+    return (
+      <ScannerScreen
+        chain="RECEIVE"
+        operation="Приёмка возврата"
+        onIntent={returnIntentHandler(client, async () => {
+          await queryClient.invalidateQueries({ queryKey: ['warehouse-returns'] });
+          await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+        })}
+        onClose={() => setScanning(false)}
+      />
+    );
+  }
+
   return (
     <>
       <div className="card stack">
@@ -186,6 +202,24 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
           Заказ, который курьер не смог доставить. Кладётся в обычную ячейку хранения — маршрутная
           означала бы «готов к выдаче».
         </p>
+
+        {/* Камера — такой же способ ввода, как и в приёмке: кнопка во всю
+            ширину карточки, целиться в неё не нужно. */}
+        <div className="wh-scan">
+          <Button
+            variant="primary"
+            className="wh-scan__button"
+            data-testid="wh-return-camera"
+            onClick={() => {
+              setScannedOrder(null);
+              setCellInput('');
+              setOrderInput('');
+              setScanning(true);
+            }}
+          >
+            Сканировать заказ
+          </Button>
+        </div>
 
         {scannedOrder === null ? (
           manualEntry ? (
@@ -404,6 +438,52 @@ function useApiError(): (error: unknown, fallback: string) => void {
  * Догадываться по коду ячейки нельзя — обе дороги законны, и решает их
  * тот, кто держит коробку.
  */
+/**
+ * Сканирование приёмки возврата: заказ, затем ячейка хранения.
+ *
+ * Цепочка та же, что у обычной приёмки, — различается только операция,
+ * которой пара отправляется на сервер. Маршрутная ячейка возврату не нужна:
+ * она означала бы «готов к выдаче», а вернувшийся букет к выдаче не готов.
+ */
+function returnIntentHandler(
+  client: ReturnType<typeof useAuth>['client'],
+  onAccepted: () => Promise<void>,
+): (intent: ScanIntent) => Promise<ScanEvent> {
+  return async (intent) => {
+    try {
+      if (intent.kind === 'resolveOrder') {
+        const context = await client.get<ScanContext>(
+          `/api/warehouse/scan/order?number=${encodeURIComponent(intent.code)}`,
+        );
+        return { type: 'orderResolved', orderNumber: context.orderNumber };
+      }
+
+      if (intent.kind === 'submitPair') {
+        const result = await client.post<{
+          orderNumber: string;
+          cellCode: string;
+          cancelled: boolean;
+          unchanged: boolean;
+        }>('/api/warehouse/returns/accept', {
+          orderNumber: intent.orderNumber,
+          cellCode: intent.cellCode,
+        });
+        await onAccepted();
+        return {
+          type: 'succeeded',
+          text: result.cancelled
+            ? `Возврат ${result.orderNumber} принят в ячейку ${result.cellCode}. Заказ отменён — не выдавать`
+            : `Возврат ${result.orderNumber} принят в ячейку ${result.cellCode}`,
+          final: true,
+        };
+      }
+      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
+    } catch (error) {
+      return { type: 'failed', text: failureText(error, 'Не удалось принять возврат.') };
+    }
+  };
+}
+
 function receiveIntentHandler(
   client: ReturnType<typeof useAuth>['client'],
   onPlaced: () => Promise<void>,
@@ -654,10 +734,12 @@ function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
         <h3>Приёмка</h3>
 
         {/* Камера — третий способ ввода, а не замена: аппаратный сканер
-            и ручной ввод ниже остаются рабочими. */}
-        <div className="row">
+            и ручной ввод ниже остаются рабочими. Кнопка во всю ширину
+            карточки: целиться в неё не нужно. */}
+        <div className="wh-scan">
           <Button
             variant="primary"
+            className="wh-scan__button"
             data-testid="wh-scan-camera"
             onClick={() => {
               setScanned(null);
