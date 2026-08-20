@@ -3762,7 +3762,7 @@ test('«Сделки» на большом экране: доли, своя пр
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await expect(page.getByTestId('deals-workspace')).toBeVisible();
 
-  // 1. Доли колонок: список — четверть с небольшим, карта — остальное.
+  // 1. Доли колонок: список — заметно меньшая доля, карта — остальное.
   const body = await page.getByTestId('deals-body').boundingBox();
   const column = await page.getByTestId('deals-column').boundingBox();
   const mapColumn = await page.getByTestId('deals-map-column').boundingBox();
@@ -3774,12 +3774,13 @@ test('«Сделки» на большом экране: доли, своя пр
   const columnWidth = column?.width ?? 0;
   const mapWidth = mapColumn?.width ?? 0;
 
-  expect(columnWidth).toBeGreaterThanOrEqual(360);
-  expect(columnWidth).toBeLessThanOrEqual(440);
-  expect(columnWidth / bodyWidth).toBeGreaterThanOrEqual(0.25);
-  expect(columnWidth / bodyWidth).toBeLessThanOrEqual(0.3);
-  expect(mapWidth / bodyWidth).toBeGreaterThanOrEqual(0.68);
-  expect(mapWidth / bodyWidth).toBeLessThanOrEqual(0.75);
+  // Утверждённая раскладка: список — clamp(460px, 38%, 760px), карта — остаток.
+  expect(columnWidth).toBeGreaterThanOrEqual(460);
+  expect(columnWidth).toBeLessThanOrEqual(760);
+  expect(columnWidth / bodyWidth).toBeGreaterThanOrEqual(0.34);
+  expect(columnWidth / bodyWidth).toBeLessThanOrEqual(0.42);
+  expect(mapWidth / bodyWidth).toBeGreaterThanOrEqual(0.56);
+  expect(mapWidth / bodyWidth).toBeLessThanOrEqual(0.65);
 
   // 2. Карта видна целиком и занимает рабочую высоту, а не полосу сверху.
   const surface = await page.getByTestId('deals-map-canvas').boundingBox();
@@ -3807,10 +3808,13 @@ test('«Сделки» на большом экране: доли, своя пр
   expect(mapAfter?.y).toBe(mapBefore?.y);
   expect(filtersAfter?.y).toBe(filtersBefore?.y);
 
-  // 4. Пустого выбора нет — нет и панели: она не занимает высоту зря.
-  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  // 4. Панель закреплена всегда: набор действий виден до первого выбора,
+  // а недоступность показана состоянием кнопок, а не их отсутствием.
+  await expect(page.getByTestId('deals-summary')).toBeVisible();
+  await expect(page.getByTestId('deals-manual-draft')).toBeDisabled();
+  await expect(page.getByTestId('deals-auto-plan')).toBeDisabled();
 
-  // Появляется после первого выбранного заказа.
+  // С первым выбранным заказом действия становятся доступны.
   await page
     .locator('[data-testid="deal-card"][data-order-number="E2E-РАБ-2"]')
     .getByTestId('deal-pick')
@@ -3833,15 +3837,20 @@ test('«Сделки» на большом экране: доли, своя пр
   });
   expect(insideScroll).toBe(false);
 
-  // Обе кнопки одной ширины и во всю ширину панели: это два равноправных исхода.
+  // Действия стоят одной строкой и не переносятся: ряд держится целиком.
   const manual = await page.getByTestId('deals-manual-draft').boundingBox();
   const auto = await page.getByTestId('deals-auto-plan').boundingBox();
-  expect(Math.round(manual?.width ?? 0)).toBe(Math.round(auto?.width ?? 0));
-  expect((manual?.width ?? 0) / columnWidth).toBeGreaterThan(0.8);
+  expect(manual?.y).toBe(auto?.y);
+  expect(Math.round(manual?.height ?? 0)).toBe(Math.round(auto?.height ?? 0));
+  expect(manual?.width ?? 0).toBeGreaterThan(60);
+  expect(auto?.width ?? 0).toBeGreaterThan(60);
+  expect((manual?.width ?? 0) + (auto?.width ?? 0)).toBeLessThanOrEqual(columnWidth);
 
-  // Снятие всего выбора снова убирает панель.
+  // Снятие всего выбора снова закрывает действия, панель при этом остаётся.
   await page.getByTestId('deals-clear').click();
-  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  await expect(page.getByTestId('deals-summary')).toBeVisible();
+  await expect(page.getByTestId('deals-manual-draft')).toBeDisabled();
+  await expect(page.getByTestId('deals-auto-plan')).toBeDisabled();
 
   // 5. Счётчик называет и общее число, и заказы без координат.
   await expect(page.getByTestId('deals-total')).toContainText('Заказов: 40');
@@ -3906,8 +3915,10 @@ test('«Сделки» на большом экране: доли, своя пр
   // Панели начинаются и заканчиваются на одних линиях.
   expect(Math.abs(leftBox.y - rightBox.y)).toBeLessThanOrEqual(1);
   expect(Math.abs(leftBox.y + leftBox.h - (rightBox.y + rightBox.h))).toBeLessThanOrEqual(1);
-  // Между ними ровно одна граница: зазора нет.
-  expect(Math.abs(rightBox.x - leftEdge)).toBeLessThanOrEqual(1);
+  // Между ними ровно один шаг сетки (--space-3): панели разделяет промежуток
+  // и собственная тень каждой, общей рамки вокруг нет.
+  expect(rightBox.x - leftEdge).toBeGreaterThanOrEqual(11);
+  expect(rightBox.x - leftEdge).toBeLessThanOrEqual(13);
 
   // Всё управление списком — внутри левой панели.
   for (const selector of [
@@ -3924,28 +3935,37 @@ test('«Сделки» на большом экране: доли, своя пр
     expect(box.y).toBeGreaterThanOrEqual(leftBox.y - 1);
   }
 
-  // Сверху — что показано, ниже — чем это менять; обе строки поверх холста.
+  // Шапка карты держится одной строкой: слева — что показано, справа — чем менять.
   const infoRow = await boxOf('[data-testid="deals-map-head-count"]');
   const controlRow = await boxOf('[data-testid="deals-map-from"]');
-  expect(infoRow.y).toBeLessThan(controlRow.y);
+  expect(infoRow.x + infoRow.w).toBeLessThanOrEqual(controlRow.x);
+  const headOneRow =
+    infoRow.y < controlRow.y + controlRow.h && controlRow.y < infoRow.y + infoRow.h;
+  expect(headOneRow).toBe(true);
 
-  // Контролы карты лежат ПОВЕРХ холста, а не полосой над ним.
+  // Шапка — над холстом, легенда — подписью под ним: холст ничем не перекрыт.
   const canvas = await boxOf('[data-testid="deals-map-canvas"]');
   for (const selector of [
     '[data-testid="deals-map-head-count"]',
     '[data-testid="deals-map-from"]',
-    '[data-testid="deals-map-zoom"]',
-    '[data-testid="deals-map-legend"]',
   ]) {
     const box = await boxOf(selector);
-    expect(box.y).toBeGreaterThanOrEqual(canvas.y - 1);
-    expect(box.y + box.h).toBeLessThanOrEqual(canvas.y + canvas.h + 1);
+    expect(box.y + box.h).toBeLessThanOrEqual(canvas.y + 1);
   }
+  const legend = await boxOf('[data-testid="deals-map-legend"]');
+  expect(legend.y).toBeGreaterThanOrEqual(canvas.y + canvas.h - 1);
+  // Масштаб — во второй строке шапки, холст ничем не перекрыт.
+  const zoom = await boxOf('[data-testid="deals-map-zoom"]');
+  expect(zoom.y + zoom.h).toBeLessThanOrEqual(canvas.y + 1);
 
-  // Карта — фон всей правой панели.
-  expect(Math.abs(canvas.y - rightBox.y)).toBeLessThanOrEqual(1);
-  expect(Math.abs(canvas.x - rightBox.x)).toBeLessThanOrEqual(1);
-  expect(Math.abs(canvas.h - rightBox.h)).toBeLessThanOrEqual(2);
+  // Холст лежит внутри панели с равными полями и занимает её основную высоту.
+  const insetLeft = canvas.x - rightBox.x;
+  const insetRight = rightBox.x + rightBox.w - (canvas.x + canvas.w);
+  expect(insetLeft).toBeGreaterThanOrEqual(0);
+  expect(insetLeft).toBeLessThanOrEqual(20);
+  expect(Math.abs(insetLeft - insetRight)).toBeLessThanOrEqual(1);
+  expect(canvas.h / rightBox.h).toBeGreaterThanOrEqual(0.6);
+  expect(canvas.y + canvas.h).toBeLessThanOrEqual(rightBox.y + rightBox.h + 1);
 
   // 7а. Плотность списка: сколько сделок видно в начале списка без прокрутки.
   await scroll.evaluate((element: { scrollTop: number }) => {
@@ -3987,8 +4007,15 @@ test('«Сделки» на большом экране: доли, своя пр
     return { window: area?.getBoundingClientRect().height ?? 0 };
   });
   expect(geometry.window).toBeGreaterThan(600);
-  // Владелец принял плотность 10–12 карточек на 1600×900.
-  expect(visibleCards).toBeGreaterThanOrEqual(10);
+  /*
+   * Плотность принятой карточки: на 1600×900 в окно списка помещается 5 карточек.
+   * Прежние 10–12 относились к карточке вдвое ниже; нынешняя высота — 102 px,
+   * у карточек с дополнительной строкой — 150 px. Верхняя граница высоты стоит
+   * рядом, чтобы дальнейший рост карточки падал заметно, а не тихо.
+   */
+  expect(visibleCards).toBeGreaterThanOrEqual(5);
+  const cardHeight = (await page.getByTestId('deal-card').first().boundingBox())?.height ?? 0;
+  expect(cardHeight).toBeLessThanOrEqual(160);
 
   // 8. Переключатель группировки назван действием, а не масштабом.
   await expect(page.getByTestId('deals-map-zoom')).toHaveText(/Показать отдельно|Сгруппировать/);
@@ -4037,7 +4064,8 @@ test('«Сделки» на большом экране: доли, своя пр
   await expect(page.getByTestId('deals-selected-count')).toContainText('Выбрано: 39');
   await expect(selectAll).toHaveText('Снять все');
   await selectAll.click();
-  await expect(page.getByTestId('deals-summary')).toHaveCount(0);
+  await expect(page.getByTestId('deals-manual-draft')).toBeDisabled();
+  await expect(page.getByTestId('deals-auto-plan')).toBeDisabled();
   await expect(selectAll).toHaveText('Выбрать все');
 
   // 9а. Комментарий раскрывается доступной иконкой, а не отдельной строкой.
@@ -4407,35 +4435,44 @@ test('маршрутизация: линия идёт от склада и ме�
    * половины, а служебная строка лежит внутри полотна, а не над ним.
    */
   await page.setViewportSize({ width: 1600, height: 900 });
-  const [list, mapPanel, surface, overlay] = await Promise.all([
+  const [list, mapPanel, surface, header] = await Promise.all([
     page.getByTestId('routing-drafts').boundingBox(),
     page.getByTestId('routing-map-panel').boundingBox(),
     page.getByTestId('routing-map-surface').boundingBox(),
-    page.locator('.routes__map-overlay').boundingBox(),
+    page.locator('.routes__map-header').boundingBox(),
   ]);
 
   expect(Math.abs((list?.y ?? 0) - (mapPanel?.y ?? -1))).toBeLessThanOrEqual(1);
   expect(Math.abs((list?.height ?? 0) - (mapPanel?.height ?? -1))).toBeLessThanOrEqual(1);
-  // Зазора между половинами нет: правая начинается там, где кончилась левая.
-  expect(Math.abs((list?.x ?? 0) + (list?.width ?? 0) - (mapPanel?.x ?? -1))).toBeLessThanOrEqual(
-    1,
-  );
-  expect(list?.width ?? 0).toBeGreaterThanOrEqual(360);
-  expect(list?.width ?? 0).toBeLessThanOrEqual(440);
+  /*
+   * Та же геометрия, что в «Сделках»: список — clamp(460px, 38%, 760px),
+   * между половинами ровно один шаг сетки (--space-3).
+   */
+  const routesGap = (mapPanel?.x ?? 0) - ((list?.x ?? 0) + (list?.width ?? 0));
+  expect(routesGap).toBeGreaterThanOrEqual(11);
+  expect(routesGap).toBeLessThanOrEqual(13);
+  expect(list?.width ?? 0).toBeGreaterThanOrEqual(460);
+  expect(list?.width ?? 0).toBeLessThanOrEqual(760);
 
   expect(surface?.height ?? 0).toBeGreaterThan(400);
   expect((surface?.y ?? 0) + (surface?.height ?? 0)).toBeLessThanOrEqual(901);
-  expect(overlay?.y ?? 0).toBeGreaterThanOrEqual(surface?.y ?? 0);
-  expect((overlay?.y ?? 0) + (overlay?.height ?? 0)).toBeLessThanOrEqual(
-    (surface?.y ?? 0) + (surface?.height ?? 0),
-  );
+  // Шапка карты стоит НАД холстом и его не перекрывает.
+  expect((header?.y ?? 0) + (header?.height ?? 0)).toBeLessThanOrEqual((surface?.y ?? 0) + 1);
 
-  // 7. Свёрнутый черновик — одна строка без скрытого пустого тела.
-  await page.locator('.routes__draft[data-expanded="true"] .routes__draft-head').click();
+  /*
+   * 7. Свёрнутый черновик — только шапка по макету: номер, состояние,
+   * «дата · машина · остановок N» и ряд блокировки. Остановки при этом
+   * убраны из разметки, а не спрятаны высотой, — поэтому карточка
+   * заметно ниже развёрнутой.
+   */
+  const expandedDraft = page.locator('.routes__draft[data-expanded="true"]').first();
+  const expandedHeight = (await expandedDraft.boundingBox())?.height ?? 0;
+  await expandedDraft.locator('.routes__draft-head').click();
   const collapsed = page.locator('.routes__draft[data-expanded="false"]').first();
   await expect(collapsed).toBeVisible();
   await expect(collapsed.locator('.routes__card')).toHaveCount(0);
-  expect((await collapsed.boundingBox())?.height ?? 0).toBeLessThanOrEqual(48);
+  const collapsedHeight = (await collapsed.boundingBox())?.height ?? 0;
+  expect(collapsedHeight).toBeLessThan(expandedHeight / 2);
 });
 
 /**
@@ -4490,10 +4527,10 @@ test('маршрутные листы: разделы, курьер, ручна�
   const sheet = unshipped.locator('[data-testid="sheet-row"]').first();
   await expect(sheet).toBeVisible();
   /*
-   * Курьер не назначен — поле комбобокса пусто и подсказывает это плейсхолдером;
-   * текста внутри узла у поля ввода нет, проверяется именно значение.
+   * Курьер в листе показан таблеткой: пока его нет, она прямо это и говорит.
+   * Поле с подсказками открывается по нажатию на таблетку, а не висит всегда.
    */
-  await expect(sheet.getByTestId('sheet-courier-combobox-field')).toHaveValue('');
+  await expect(sheet.getByTestId('sheet-courier-pick')).toHaveText(/Курьер не назначен/);
   await expect(sheet.getByTestId('sheet-ship')).toBeDisabled();
 
   /*
@@ -4534,11 +4571,15 @@ test('маршрутные листы: разделы, курьер, ручна�
    * своего, и жёсткая привязка к конкретному телефону доказывала бы лишь
    * порядок сценариев.
    */
+  await sheet.getByTestId('sheet-courier-pick').click();
   await sheet.getByTestId('sheet-courier-combobox-field').click();
-  const options = sheet.getByTestId('sheet-courier-combobox-option');
+  // Список подсказок выносится порталом, чтобы не обрезаться прокруткой листа,
+  // поэтому ищется на странице, а не внутри строки.
+  const options = page.getByTestId('sheet-courier-combobox-option');
   await expect(options.first()).toBeVisible();
   await options.first().click();
-  await expect(sheet.getByTestId('sheet-courier-combobox-field')).not.toHaveValue('');
+  // Выбор закрывает поле и возвращает таблетку — уже с именем курьера.
+  await expect(sheet.getByTestId('sheet-courier-pick')).not.toHaveText(/Курьер не назначен/);
 
   // 5. После назначения ручная отгрузка проходит.
   await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
@@ -4812,9 +4853,11 @@ test('история и отчёты: тариф, доставка, расчёт
    * «Первый в списке» здесь не годится: соседние сценарии заводят своих
    * курьеров, и маршрут достался бы чужому — экран курьера оказался бы пуст.
    */
+  await sheet.getByTestId('sheet-courier-pick').click();
   await sheet.getByTestId('sheet-courier-combobox-field').fill(courier.phone);
-  await expect(sheet.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
-  await sheet.getByTestId('sheet-courier-combobox-option').first().click();
+  // Подсказки выносятся порталом: ищутся на странице, а не внутри строки.
+  await expect(page.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
+  await page.getByTestId('sheet-courier-combobox-option').first().click();
   await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
   const sheetNumber = (await sheet.getAttribute('data-sheet-number')) ?? '';
   await sheet.getByTestId('sheet-ship').click();
@@ -5237,7 +5280,7 @@ test('маршрутизация: точка дня без номера и пу�
   expect(Math.abs(afterPan.dy)).toBeLessThanOrEqual(1);
 
   // Обновление данных списка отметку не двигает.
-  await page.getByRole('button', { name: 'Обновить список' }).click();
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   const afterRefresh = await drift();
   expect(afterRefresh.lat).toBe(start.lat);
   expect(Math.abs(afterRefresh.dx)).toBeLessThanOrEqual(1);
@@ -5306,7 +5349,7 @@ test('маршрутизация: точка дня без номера и пу�
   expect(again.status()).toBe(200);
   expect(((await again.json()) as { number: string }).number).toBe(emptyNumber);
 
-  await page.getByRole('button', { name: 'Обновить список' }).click();
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   await expect(page.locator('.routes__draft')).toHaveCount(draftsBefore + 2);
 
   await page.locator('.routes__card').getByRole('button', { name: 'Отменить маршрут' }).click();
@@ -5544,8 +5587,9 @@ test('настройки: переключатель ручной отгрузк
     // Кнопка есть; без курьера она недоступна и объясняет причину.
     const ship = anySheet.getByTestId('sheet-ship');
     await expect(ship).toHaveCount(1);
-    const courier = await anySheet.getByTestId('sheet-courier-combobox-field').inputValue();
-    if (courier === '') {
+    // Назначен ли курьер, видно по таблетке: поле открывается только по нажатию.
+    const courier = await anySheet.getByTestId('sheet-courier-pick').innerText();
+    if (courier.includes('Курьер не назначен')) {
       await expect(ship).toBeDisabled();
       await expect(ship).toHaveAttribute('title', /курьера/i);
     } else {
@@ -5655,9 +5699,13 @@ test('два сеанса: подтверждение листа доходит 
   ).toHaveCount(1, { timeout: 25_000 });
 
   // Флорист увидел заказ листа в очереди — приоритет задаёт именно лист.
-  await expect(floristPage.getByTestId('florist-queue')).toContainText(orderNumber, {
-    timeout: 25_000,
-  });
+  /*
+   * Очередь разбита на группы (маршрут, затем без маршрута), поэтому списков
+   * несколько: заказ ищется по всем сразу и должен встретиться ровно в одной.
+   */
+  await expect(
+    floristPage.locator('[data-testid="florist-queue"]').filter({ hasText: orderNumber }),
+  ).toHaveCount(1, { timeout: 25_000 });
 
   /*
    * Возврат листа в черновик убирает его из складской работы так же сразу.
@@ -7509,12 +7557,21 @@ test('«Сделки»: список курьеров не обрезан, сп�
   expect(count).toBeGreaterThan(0);
 
   const last = options.nth(count - 1);
-  const lastBox = await last.boundingBox();
   const viewport = page.viewportSize();
-  expect(lastBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  // Последний вариант виден целиком: раньше его срезала нижняя граница окна.
-  expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(viewport!.height);
+  /*
+   * Список считает себе высоту по свободному месту и прокручивается сам,
+   * поэтому в окно он помещается целиком, а до последнего варианта человек
+   * докручивается. Проверяется и то и другое: и что список не свисает за
+   * нижнюю границу, и что последний вариант после прокрутки виден полностью.
+   */
+  const listBox = await page.getByTestId('create-route-courier-list').boundingBox();
+  expect(listBox).not.toBeNull();
+  expect(listBox!.y + listBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
+  await last.scrollIntoViewIfNeeded();
+  const lastBox = await last.boundingBox();
+  expect(lastBox).not.toBeNull();
+  expect(lastBox!.y + lastBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
 
   const label = (await last.textContent()) ?? '';
   await last.click();
@@ -7600,27 +7657,49 @@ test('маршрутизация: свёрнутый черновик, исто�
   await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
   await expect(page.getByTestId('routing-drafts')).toBeVisible();
 
-  // Свой пустой черновик: он создаётся раскрытым.
+  /*
+   * Свой пустой черновик: он создаётся раскрытым и единственным раскрытым.
+   *
+   * Дальше сценарий держится за его НОМЕР, а не за место в списке: в общей
+   * базе черновиков много, порядок в списке меняется, и `.first()` уводил бы
+   * проверки на чужой черновик.
+   */
   await page.getByTestId('routing-add-draft').click();
-  const draft = page.locator('.routes__draft').first();
-  await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
+  const opened = page.locator('.routes__draft[data-expanded="true"]');
+  await expect(opened).toHaveCount(1);
+  const draftNumber = (await opened.getAttribute('data-draft-number')) ?? '';
+  expect(draftNumber).not.toBe('');
+  const draft = page.locator(`.routes__draft[data-draft-number="${draftNumber}"]`);
 
   // --- Свёрнутое состояние не прячет тело, а не имеет его ------------------
+  const expandedHeight = (await draft.boundingBox())?.height ?? 0;
   await draft.locator('.routes__draft-head').click();
   await expect(draft).toHaveAttribute('data-expanded', 'false');
   // Ни курьера, ни действий, ни истории: содержимое удалено, а не скрыто.
   await expect(draft.locator('.routes__card')).toHaveCount(0);
   await expect(draft.getByText('История маршрута')).toHaveCount(0);
+  /*
+   * Свёрнутая карточка по макету — шапка плюс строка блокировки, а не одна
+   * строка: важно, что тело действительно удалено, поэтому высота
+   * сравнивается с развёрнутой, а не с давним числом в пикселях.
+   */
   const collapsedHeight = (await draft.boundingBox())?.height ?? 0;
-  expect(collapsedHeight).toBeLessThan(80);
+  expect(collapsedHeight).toBeLessThan(expandedHeight / 2);
 
   // --- История раскрывается внутри карточки --------------------------------
   await draft.locator('.routes__draft-head').click();
   await expect(draft).toHaveAttribute('data-expanded', 'true');
-  const history = draft.getByText('История маршрута');
+  /*
+   * История раскрывается кнопкой нижнего ряда и до нажатия не занимает
+   * строку: раскрытое состояние объявлено через aria-expanded.
+   */
+  const history = draft.getByTestId('route-history-toggle');
   await expect(history).toBeVisible();
+  await expect(history).toHaveAttribute('aria-expanded', 'false');
+  await expect(draft.locator('.routes__history')).toHaveCount(0);
   await history.click();
-  await expect(draft.locator('.routes__history[open]')).toHaveCount(1);
+  await expect(history).toHaveAttribute('aria-expanded', 'true');
+  await expect(draft.locator('.routes__history')).toHaveCount(1);
 
   // --- Скрытие списка расширяет карту --------------------------------------
   const mapBefore = (await page.getByTestId('routing-map-panel').boundingBox())?.width ?? 0;
@@ -7636,7 +7715,7 @@ test('маршрутизация: свёрнутый черновик, исто�
   // Раскрытый черновик и его раскрытая история пережили скрытие: панель
   // убирается из сетки, но не размонтируется.
   await expect(page.locator('.routes__draft[data-expanded="true"]')).toHaveCount(1);
-  await expect(draft.locator('.routes__history[open]')).toHaveCount(1);
+  await expect(draft.locator('.routes__history')).toHaveCount(1);
 
   expect(
     await page.evaluate(
