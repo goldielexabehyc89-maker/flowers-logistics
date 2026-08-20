@@ -249,6 +249,8 @@ export function AppShell(): React.JSX.Element {
          * Прочие рабочие места ограничение сохраняют.
          */
         isLogisticsPath(location.pathname) ? 'shell--logistics' : null,
+        // «Активные» — тоже рабочее место, а не текст: ширина ему нужна.
+        location.pathname.startsWith('/active') ? 'shell--delivery' : null,
       ]
         .filter((name) => name !== null)
         .join(' ')}

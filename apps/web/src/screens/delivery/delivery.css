@@ -6,11 +6,18 @@
  * растянутый на весь монитор список доставок читается хуже, а не лучше.
  */
 
+/*
+ * Экран занимает всю ширину рабочего места.
+ *
+ * Ограничение в 720 писалось под телефон, но на телефоне ширину задаёт само
+ * окно, а на большом экране оно оставляло две трети пустыми — при том, что
+ * в карточке остановки есть и адрес, и получатель, и сумма.
+ */
 .delivery {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 720px;
+  gap: var(--space-3);
+  max-width: none;
 }
 
 .delivery__filters {
@@ -306,4 +313,246 @@
   font-size: 18px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   «Активные»: сводка дня, выбор маршрута, карточка остановки
+   ========================================================================== */
+
+/* Итог дня: сколько осталось везти и сколько вернуть. */
+.delivery__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: baseline;
+  justify-content: flex-end;
+  padding: 0 var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.delivery__summary-returns {
+  color: var(--color-error);
+}
+
+/* Маршруты — плитки: выбранная вдавлена и названа акцентом. */
+.delivery__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.delivery__filter {
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-md);
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.delivery__filter--on {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+/*
+ * Карточка маршрута без цветной полосы сбоку.
+ *
+ * Полоса красила маршрут в случайный цвет и ничего им не сообщала: маршрутов
+ * у курьера два-три, и различает он их по номеру, который стоит первым.
+ */
+.delivery__route {
+  border: 0;
+  border-left: 0;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+.delivery__route-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  background: none;
+}
+
+.delivery__route-title {
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.delivery__route-meta {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+/* Остаток по маршруту — то, ради чего экран открыт. */
+.delivery__route-left {
+  margin-left: auto;
+  color: var(--color-accent-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Возвраты: тон вместо рамки.
+ *
+ * Красная рамка обводила блок, хотя внутри уже есть красный тон подложки:
+ * два способа сказать одно и то же спорят друг с другом.
+ */
+.delivery__returns {
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--row-danger);
+  box-shadow: var(--shadow-out);
+}
+
+.delivery__returns-title {
+  color: var(--color-error);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.delivery__returns-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+/* Строка возврата: номер, состояние, действие справа. */
+.delivery__return {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2) 0;
+  border: 0;
+}
+
+.delivery__return + .delivery__return {
+  border-top: 1px solid rgb(176 37 37 / 14%);
+}
+
+.delivery__return-head {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--space-2);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.delivery__return-state {
+  color: var(--color-error);
+  font-size: var(--font-size-md);
+}
+
+.delivery__return .btn {
+  margin-left: auto;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-error);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: var(--shadow-out);
+}
+
+/*
+ * Остановка — плитка, а не строка между линиями.
+ *
+ * Курьер смотрит в экран на ходу и держит коробку: ему нужна одна заметная
+ * карточка на остановку, а не сплошной список, разделённый волосяными
+ * линиями. Опоздание красит саму плитку, а не добавляет ещё одну линию.
+ */
+.delivery__orders {
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.delivery__order {
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-top: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-out);
+}
+
+.delivery__order--late {
+  background: var(--row-danger);
+}
+
+.delivery__order--done {
+  background: var(--surface-inactive);
+  box-shadow: var(--shadow-in);
+  opacity: 1;
+}
+
+.delivery__order-number {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.delivery__order-line,
+.delivery__order-muted {
+  font-size: var(--font-size-md);
+}
+
+.delivery__order-muted {
+  color: var(--color-text-muted);
+}
+
+/* Сумма к получению — самое крупное на карточке: ошибиться в ней дороже всего. */
+.delivery__cash {
+  color: var(--color-text);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.delivery__address-link {
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+}
+
+.delivery__warning,
+.delivery__cancelled {
+  font-size: var(--font-size-md);
+}
+
+/* Действия крупные: в них попадают пальцем, стоя у двери. */
+.delivery__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.delivery__actions .btn {
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-md);
+  font-weight: 600;
 }
