@@ -422,3 +422,40 @@
   background: var(--color-surface);
   color: var(--color-error);
 }
+
+/*
+ * Заголовок группы очереди: чей это лист и сколько в нём осталось.
+ *
+ * Оформление карточек не меняется — добавляется только подпись над ними,
+ * чтобы соседние строки читались как один лист, а не как случайное соседство.
+ */
+.florist__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Счётчик стоит рядом с названием — как в заголовках разделов на других экранах. */
+.florist__group-head {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: flex-start;
+  padding: 0 var(--space-1);
+}
+
+.florist__group-title {
+  flex: none;
+}
+
+.florist__group-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.florist__group-count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}

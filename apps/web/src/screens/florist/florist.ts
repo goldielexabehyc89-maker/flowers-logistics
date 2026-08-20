@@ -348,3 +348,31 @@ export function routeLabel(item: QueueItemView): string | null {
     ? `Маршрут ${item.route.number}`
     : `Маршрут ${item.route.number}, остановка ${item.route.position}`;
 }
+
+/**
+ * Очередь, разложенная по листам.
+ *
+ * Порядок строк уже задал сервер: заказы подтверждённых листов идут первыми,
+ * листы — по времени первой остановки, внутри листа — по остановкам. Здесь
+ * соседние строки одного листа лишь собираются в группу, порядок не меняется:
+ * пересортировка на клиенте разошлась бы с постраничной загрузкой.
+ */
+export function groupQueueByRoute(
+  items: readonly QueueItemView[],
+): { key: string; route: { id: string; number: string } | null; items: QueueItemView[] }[] {
+  const groups: {
+    key: string;
+    route: { id: string; number: string } | null;
+    items: QueueItemView[];
+  }[] = [];
+  for (const item of items) {
+    const key = item.route === null ? 'none' : item.route.id;
+    const last = groups[groups.length - 1];
+    if (last !== undefined && last.key === key) {
+      last.items.push(item);
+      continue;
+    }
+    groups.push({ key, route: item.route, items: [item] });
+  }
+  return groups;
+}

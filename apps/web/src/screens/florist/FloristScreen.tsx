@@ -70,6 +70,7 @@ import {
   nextPageOffset,
   pageSummary,
   printStateLabel,
+  groupQueueByRoute,
   processLabel,
   routeLabel,
   type FloristOption,
@@ -667,11 +668,36 @@ export function FloristScreen(): React.JSX.Element {
         />
       )}
 
-      {tab !== 'print' && queueQuery.isSuccess && queueItems.length > 0 && (
-        <ul className="florist__list" data-testid="florist-queue">
-          {queueItems.map((item) => queueRow(item))}
-        </ul>
-      )}
+      {/*
+        Очередь разбита по листам.
+
+        Заказ подтверждённого листа собирают не сам по себе: пока не собран
+        последний, лист не уедет. Общий список этого не показывал — заказы
+        одного листа стояли подряд, но ничем не были связаны, и флорист
+        не видел, сколько ему осталось до отгрузки. Порядок групп задаёт
+        сервер: раньше время первой остановки — выше лист.
+      */}
+      {tab !== 'print' &&
+        queueQuery.isSuccess &&
+        queueItems.length > 0 &&
+        groupQueueByRoute(queueItems).map((group) => (
+          <section
+            key={group.key}
+            className="florist__group"
+            data-testid="florist-queue-group"
+            data-route-number={group.route?.number}
+          >
+            <div className="florist__group-head">
+              <h3 className="florist__group-title">
+                {group.route === null ? 'Без маршрута' : `Маршрут ${group.route.number}`}
+              </h3>
+              <span className="florist__group-count">{group.items.length}</span>
+            </div>
+            <ul className="florist__list" data-testid="florist-queue">
+              {group.items.map((item) => queueRow(item))}
+            </ul>
+          </section>
+        ))}
 
       {/*
        * Продолжение показывается ЧИСЛАМИ, а не намёком.
