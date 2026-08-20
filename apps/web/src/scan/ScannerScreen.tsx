@@ -78,6 +78,19 @@ export function ScannerScreen({
     return intent;
   }, []);
 
+  /*
+   * Свежий обработчик держится в ссылке, а не в зависимостях.
+   *
+   * Вызывающие экраны передают `onIntent` новой функцией на каждую отрисовку.
+   * Пока он входил в зависимости, вместе с ним менялся и `dispatch`, а от него
+   * зависит запуск камеры: любая перерисовка останавливала поток и открывала
+   * новый. Человек видел моргание кадра, а браузер мог заново спросить
+   * разрешение. Через ссылку вызывается всегда последний обработчик,
+   * но личность `dispatch` больше не меняется.
+   */
+  const onIntentRef = useRef(onIntent);
+  onIntentRef.current = onIntent;
+
   /** Один вход для всех событий: и камеры, и кнопок. */
   const dispatch = useCallback(
     async (event: ScanEvent): Promise<void> => {
@@ -85,10 +98,10 @@ export function ScannerScreen({
       if (intent.kind === 'none') {
         return;
       }
-      const outcome = await onIntent(intent);
+      const outcome = await onIntentRef.current(intent);
       apply(outcome);
     },
-    [apply, onIntent],
+    [apply],
   );
 
   const stopCamera = useCallback((): void => {
