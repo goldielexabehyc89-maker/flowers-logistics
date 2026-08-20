@@ -51,13 +51,19 @@
   line-height: 16px;
 }
 
-/* Одна высота у всех полей ввода строки отбора. */
+/*
+ * Одна высота у всех полей строки отбора.
+ *
+ * Тридцать два пикселя достались от прежнего оформления, где поля были ниже.
+ * Сейчас строка собрана из плиток в 36, и правило по элементу перебивало
+ * класс контрола: поле курьера оставалось ниже соседей.
+ */
 .history__filters input,
 .history__filters select,
 .reports__filters input,
 .reports__filters select {
-  height: 32px;
-  min-height: 32px;
+  height: 36px;
+  min-height: 36px;
   box-sizing: border-box;
 }
 
