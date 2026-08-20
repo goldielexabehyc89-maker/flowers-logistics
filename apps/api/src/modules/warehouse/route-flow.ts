@@ -1388,6 +1388,14 @@ export async function shipRoute(
         sessionId: session.id,
         now,
       });
+
+      /*
+       * Опустевшая полка освобождается той же доменной операцией, что и при
+       * обычном переносе. Для ячейки хранения это ничего не делает — за ней
+       * привязки нет, — но правило одно на все места ухода коробки, и ради
+       * одного исключения его заводить не за что.
+       */
+      await releaseEmptyRouteBinding(tx, actor, placement.cellId, now);
     }
 
     await activateRouteWithinTransaction(tx, route, actor, context, now, {
@@ -1410,11 +1418,19 @@ export async function shipRoute(
 }
 
 /**
- * Заказ готов к передаче курьеру: коробка стоит в ячейке ЭТОГО листа.
+ * Заказ готов к передаче курьеру: коробка стоит на складе и доступна ЭТОМУ листу.
+ *
+ * Годятся два места: маршрутная ячейка этого листа и обычное хранение. Лист
+ * отгружается целиком и проверяется заказ за заказом, поэтому нести коробку
+ * можно и прямо с полки хранения — перекладывать её на маршрутную полку
+ * ради самого перекладывания незачем. Пометка «требуется перемещение» стоит
+ * ровно на таких коробках и выдаче больше не мешает.
+ *
+ * Чужая маршрутная ячейка по-прежнему отвергается: это полка другого курьера,
+ * и коробка с неё уедет не туда.
  *
  * Размещение берётся `FOR UPDATE`: между проверкой и выдачей его не должны
- * переставить. Чужая маршрутная ячейка готовностью не считается — это полка
- * другого курьера.
+ * переставить.
  */
 async function assertReadyForIssue(
   tx: TransactionClient,
@@ -1424,9 +1440,36 @@ async function assertReadyForIssue(
 ): Promise<{ id: string; cellId: string }> {
   await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
 
-  const rows = await tx.$queryRaw<{ id: string; cellId: string; requiresRelocation: boolean }[]>`
-    SELECT "id", "cellId", "requiresRelocation" FROM "OrderPlacement"
-    WHERE "orderId" = ${orderId}::uuid AND "releasedAt" IS NULL FOR UPDATE
+  /*
+   * Отмена перечитывается ПОД ЗАМКОМ.
+   *
+   * Признаки заказа читаются выше по ходу выдачи ещё без замка, и между тем
+   * чтением и этой строкой отмена успевает записаться. Раньше такой заказ
+   * ловила пометка «требуется перемещение», которую отмена ставит на
+   * маршрутную полку, — но коробке в хранении её никто не ставит, а выдавать
+   * из хранения теперь можно. Поэтому отмена спрашивается ещё раз и там,
+   * где ответ уже не изменится.
+   */
+  const fresh = await tx.deliveryOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { externalName: true, cancelledInSource: true, cancelledByLogistAt: true },
+  });
+  if (fresh.cancelledInSource || fresh.cancelledByLogistAt !== null) {
+    throw new AppError('CONFLICT', {
+      message: 'order cancelled',
+      publicMessage: `Заказ ${fresh.externalName} отменён — не выдавать.`,
+      conflict: { kind: 'ORDER_BLOCKED', orderIds: [orderId] },
+    });
+  }
+
+  const rows = await tx.$queryRaw<
+    { id: string; cellId: string; kind: string; requiresRelocation: boolean }[]
+  >`
+    SELECT p."id", p."cellId", p."requiresRelocation", c."kind"::text AS "kind"
+    FROM "OrderPlacement" p
+    JOIN "StorageCell" c ON c."id" = p."cellId"
+    WHERE p."orderId" = ${orderId}::uuid AND p."releasedAt" IS NULL
+    FOR UPDATE OF p
   `;
   const placement = rows[0] ?? null;
 
@@ -1437,24 +1480,37 @@ async function assertReadyForIssue(
       conflict: { kind: 'ORDER_NOT_PLACED', orderIds: [orderId] },
     });
   }
-  if (placement.requiresRelocation) {
+
+  /*
+   * Пометка «требуется перемещение» значит РАЗНОЕ на разных полках.
+   *
+   * В хранении её ставят при обычной приёмке коробки, которую ждёт маршрут, —
+   * это и есть отгрузка из хранения, и мешать ей нечему. В маршрутной ячейке
+   * её ставят там, где что-то пошло не так: состав листа изменился после
+   * комплектования или заказ отменили в источнике. Такую коробку выдавать
+   * нельзя — она и была тем предохранителем, который ловит отмену, дошедшую
+   * одновременно с отгрузкой.
+   */
+  if (placement.kind !== 'STORAGE' && placement.requiresRelocation) {
     throw new AppError('CONFLICT', {
       message: 'placement requires relocation',
-      publicMessage: 'Заказ требует перемещения: маршрут менялся после комплектования.',
+      publicMessage: 'Заказ требует перемещения: маршрут или заказ менялись после комплектования.',
       conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', orderIds: [orderId] },
     });
   }
 
-  const binding = await tx.routeCellBinding.findFirst({
-    where: { routeId, cellId: placement.cellId, releasedAt: null },
-    select: { id: true },
-  });
-  if (binding === null) {
-    throw new AppError('CONFLICT', {
-      message: 'order is not in a route cell of this route',
-      publicMessage: 'Заказ не стоит в маршрутной ячейке этого листа.',
-      conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', routeNumber, orderIds: [orderId] },
+  if (placement.kind !== 'STORAGE') {
+    const binding = await tx.routeCellBinding.findFirst({
+      where: { routeId, cellId: placement.cellId, releasedAt: null },
+      select: { id: true },
     });
+    if (binding === null) {
+      throw new AppError('CONFLICT', {
+        message: 'order is in a route cell of another route',
+        publicMessage: 'Заказ стоит в маршрутной ячейке другого листа.',
+        conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', routeNumber, orderIds: [orderId] },
+      });
+    }
   }
 
   return { id: placement.id, cellId: placement.cellId };

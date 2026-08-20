@@ -23,7 +23,13 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from './service.js';
 import { receiveOrder, type FlowDeps } from './placement.js';
 import { bindRouteCell, pickOrderToRouteCell } from './route-flow.js';
-import { compareRoutes, isAssembled, readAssemblyBoard } from './assembly-board.js';
+import {
+  compareRoutes,
+  isAssembled,
+  isRelocatable,
+  issueReadiness,
+  readAssemblyBoard,
+} from './assembly-board.js';
 
 let ctx: TestContext;
 let flow: FlowDeps;
@@ -112,10 +118,18 @@ async function seedRoute(
 async function boardRoute(routeId: string) {
   const board = await readAssemblyBoard(ctx.db);
   const inActive = board.active.find((route) => route.routeId === routeId);
+  const inRelocatable = board.relocatable.find((route) => route.routeId === routeId);
   const inAssembled = board.assembled.find((route) => route.routeId === routeId);
+
+  // Лист обязан лежать РОВНО в одной группе: две группы читались бы как два
+  // разных листа, и кладовщик пошёл бы собирать один и тот же дважды.
+  const found = [inActive, inRelocatable, inAssembled].filter((route) => route !== undefined);
+  expect(found).toHaveLength(1);
+
   return {
-    route: inActive ?? inAssembled ?? null,
-    group: inActive === undefined ? 'assembled' : 'active',
+    route: inActive ?? inRelocatable ?? inAssembled ?? null,
+    group:
+      inActive !== undefined ? 'active' : inRelocatable !== undefined ? 'relocatable' : 'assembled',
   };
 }
 
@@ -514,5 +528,173 @@ describe('доска сборки', () => {
     // Коробки стоят на полках: спрятать лист — потерять их.
     expect(found.route).not.toBeNull();
     expect(found.group).toBe('active');
+  });
+});
+
+it('все коробки в хранении — лист попадает в «Можно переносить»', async () => {
+  const keeper = await actorFor(['WAREHOUSE']);
+  const first = await seedOrder();
+  const second = await seedOrder();
+  const route = await seedRoute([first.id, second.id]);
+  const storage = await seedCell('STORAGE');
+
+  for (const order of [first, second]) {
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: order.number, cellCode: storage.code },
+      CONTEXT,
+    );
+  }
+
+  const found = await boardRoute(route.id);
+  expect(found.group).toBe('relocatable');
+  expect(found.route?.orders.every((order) => order.stage === 'IN_STORAGE')).toBe(true);
+});
+
+it('смесь хранения и маршрутной ячейки — тоже «Можно переносить»', async () => {
+  const keeper = await actorFor(['WAREHOUSE']);
+  const stored = await seedOrder();
+  const picked = await seedOrder();
+  const route = await seedRoute([stored.id, picked.id]);
+  const storage = await seedCell('STORAGE');
+  const routeCell = await seedCell('ROUTE');
+
+  await receiveOrder(flow, keeper, { orderNumber: stored.number, cellCode: storage.code }, CONTEXT);
+  await receiveOrder(flow, keeper, { orderNumber: picked.number, cellCode: storage.code }, CONTEXT);
+  await bindRouteCell(flow, keeper, route.id, { cellCode: routeCell.code }, CONTEXT);
+  await pickOrderToRouteCell(
+    flow,
+    keeper,
+    route.id,
+    { orderNumber: picked.number, cellCode: routeCell.code },
+    CONTEXT,
+  );
+
+  const found = await boardRoute(route.id);
+  expect(found.group).toBe('relocatable');
+});
+
+it('один заказ без размещения оставляет лист в активных', async () => {
+  const keeper = await actorFor(['WAREHOUSE']);
+  const stored = await seedOrder();
+  const missing = await seedOrder();
+  const route = await seedRoute([stored.id, missing.id]);
+  const storage = await seedCell('STORAGE');
+
+  await receiveOrder(flow, keeper, { orderNumber: stored.number, cellCode: storage.code }, CONTEXT);
+
+  const found = await boardRoute(route.id);
+  expect(found.group).toBe('active');
+});
+
+it('перенос последней коробки уводит лист из «Можно переносить» в «Собранные»', async () => {
+  const keeper = await actorFor(['WAREHOUSE']);
+  const order = await seedOrder();
+  const route = await seedRoute([order.id]);
+  const storage = await seedCell('STORAGE');
+  const routeCell = await seedCell('ROUTE');
+
+  await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
+  expect((await boardRoute(route.id)).group).toBe('relocatable');
+
+  await bindRouteCell(flow, keeper, route.id, { cellCode: routeCell.code }, CONTEXT);
+  await pickOrderToRouteCell(
+    flow,
+    keeper,
+    route.id,
+    { orderNumber: order.number, cellCode: routeCell.code },
+    CONTEXT,
+  );
+
+  expect((await boardRoute(route.id)).group).toBe('assembled');
+});
+
+it('чужая маршрутная полка переносом не считается', () => {
+  // Стадия «в хранении» одна на два случая, и тип ячейки их различает.
+  expect(
+    isRelocatable({
+      total: 1,
+      orders: [
+        { stage: 'IN_STORAGE', cellKind: 'ROUTE', requiresRelocation: true, cancelled: false },
+      ],
+    }),
+  ).toBe(false);
+  expect(
+    isRelocatable({
+      total: 1,
+      orders: [
+        { stage: 'IN_STORAGE', cellKind: 'STORAGE', requiresRelocation: true, cancelled: false },
+      ],
+    }),
+  ).toBe(true);
+});
+
+it('отменённый заказ выводит лист из «Можно переносить»', () => {
+  expect(
+    isRelocatable({
+      total: 2,
+      orders: [
+        { stage: 'IN_STORAGE', cellKind: 'STORAGE', requiresRelocation: true, cancelled: false },
+        { stage: 'READY', cellKind: 'ROUTE', requiresRelocation: false, cancelled: true },
+      ],
+    }),
+  ).toBe(false);
+});
+
+it('пустой лист и полностью собранный в перенос не попадают', () => {
+  expect(isRelocatable({ total: 0, orders: [] })).toBe(false);
+  expect(
+    isRelocatable({
+      total: 1,
+      orders: [{ stage: 'READY', cellKind: 'ROUTE', requiresRelocation: false, cancelled: false }],
+    }),
+  ).toBe(false);
+});
+
+describe('готовность листа к выдаче', () => {
+  /*
+   * Состояние считает сервер по полному составу. Два положительных значения
+   * различаются не правом отгрузить, а тем, где стоят коробки: «собран»
+   * означает, что ходить по хранению не придётся.
+   */
+  it('все коробки в хранении — «Можно выдать»', () => {
+    expect(
+      issueReadiness([
+        { ready: true, inRouteCell: false },
+        { ready: true, inRouteCell: false },
+      ]),
+    ).toBe('CAN_ISSUE');
+  });
+
+  it('смесь хранения и маршрутных ячеек — «Можно выдать»', () => {
+    expect(
+      issueReadiness([
+        { ready: true, inRouteCell: true },
+        { ready: true, inRouteCell: false },
+      ]),
+    ).toBe('CAN_ISSUE');
+  });
+
+  it('все коробки в ячейках листа — «Собран — можно выдавать»', () => {
+    expect(
+      issueReadiness([
+        { ready: true, inRouteCell: true },
+        { ready: true, inRouteCell: true },
+      ]),
+    ).toBe('ASSEMBLED');
+  });
+
+  it('один заказ без размещения снимает оба положительных состояния', () => {
+    expect(
+      issueReadiness([
+        { ready: true, inRouteCell: true },
+        { ready: false, inRouteCell: false },
+      ]),
+    ).toBe('NOT_READY');
+  });
+
+  it('пустой лист готовым не бывает', () => {
+    expect(issueReadiness([])).toBe('NOT_READY');
   });
 });

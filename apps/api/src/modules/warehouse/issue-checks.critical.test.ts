@@ -22,7 +22,7 @@ import type { AuthenticatedActor } from '../auth/guards.js';
 import type { Role } from '@fl/shared';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from './service.js';
-import { receiveOrder, type FlowDeps } from './placement.js';
+import { receiveOrder, withdrawOrder, type FlowDeps } from './placement.js';
 import {
   bindRouteCell,
   checkOrderForIssue,
@@ -167,6 +167,88 @@ async function seedReadyRoute(orderCount = 2): Promise<{
   };
 }
 
+/**
+ * Лист, часть коробок которого осталась в ячейке хранения.
+ *
+ * Именно та смесь, ради которой отгрузка из хранения и вводилась: половина
+ * коробок перенесена на маршрутную полку, половина стоит там, куда её
+ * приняли.
+ */
+async function seedMixedRoute(
+  inStorage: number,
+  inRouteCell: number,
+): Promise<{
+  routeId: string;
+  orders: { id: string; number: string }[];
+  storageCellId: string;
+  routeCellId: string;
+  keeper: AuthenticatedActor;
+  courier: AuthenticatedActor;
+}> {
+  const keeper = await actorFor(['WAREHOUSE']);
+  const admin = await actorFor(['ADMIN']);
+  const courier = await seedCourier();
+
+  const orders: { id: string; number: string }[] = [];
+  for (let index = 0; index < inStorage + inRouteCell; index += 1) {
+    orders.push(await seedOrder());
+  }
+
+  const route = await ctx.db.deliveryRoute.create({
+    data: {
+      number: unique('MIX'),
+      deliveryDate: toDateColumn(DAY),
+      state: 'CONFIRMED',
+      vehicleType: 'CAR',
+      createdById: admin.userId,
+      courierUserId: courier.userId,
+    },
+    select: { id: true },
+  });
+
+  let position = 1;
+  for (const order of orders) {
+    await ctx.db.routeOrder.create({
+      data: { routeId: route.id, orderId: order.id, position, addedById: admin.userId },
+    });
+    position += 1;
+  }
+
+  const storage = await seedCell('STORAGE');
+  const routeCell = await seedCell('ROUTE');
+  await bindRouteCell(flow, keeper, route.id, { cellCode: routeCell.code }, CONTEXT);
+
+  orders.forEach(() => undefined);
+  for (const [index, order] of orders.entries()) {
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: order.number, cellCode: storage.code },
+      CONTEXT,
+    );
+    if (index >= inStorage) {
+      await pickOrderToRouteCell(
+        flow,
+        keeper,
+        route.id,
+        { orderNumber: order.number, cellCode: routeCell.code },
+        CONTEXT,
+      );
+    }
+  }
+
+  await confirmCourier(flow, keeper, route.id, { courierUserId: courier.userId }, CONTEXT);
+
+  return {
+    routeId: route.id,
+    orders,
+    storageCellId: storage.id,
+    routeCellId: routeCell.id,
+    keeper,
+    courier,
+  };
+}
+
 async function activePlacementCell(orderId: string): Promise<string | null> {
   const row = await ctx.db.orderPlacement.findFirst({
     where: { orderId, releasedAt: null },
@@ -289,12 +371,17 @@ describe('внесение заказа в лист', () => {
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
   });
 
-  it('коробку из чужой ячейки внести нельзя', async () => {
+  it('коробку, унесённую обратно в хранение, внести МОЖНО', async () => {
+    /*
+     * Прежде это было отказом: выдача требовала маршрутной ячейки листа.
+     * Лист всё равно проверяется заказ за заказом и уезжает целиком, поэтому
+     * коробку берут с той полки, где она стоит, — перекладывать её ради
+     * перекладывания незачем.
+     */
     const route = await seedReadyRoute(1);
     const only = route.orders[0]!;
     const storage = await seedCell('STORAGE');
 
-    // Кладовщик унёс коробку обратно в хранение.
     await receiveOrder(
       flow,
       route.keeper,
@@ -302,9 +389,14 @@ describe('внесение заказа в лист', () => {
       CONTEXT,
     );
 
-    await expect(
-      checkOrderForIssue(flow, route.keeper, route.routeId, { orderNumber: only.number }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION' } });
+    const progress = await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: only.number },
+      CONTEXT,
+    );
+    expect(progress.checked).toBe(1);
   });
 });
 
@@ -546,11 +638,34 @@ describe('отгрузка листа', () => {
       CONTEXT,
     );
 
-    const storage = await seedCell('STORAGE');
+    /*
+     * Переставили на полку ЧУЖОГО листа — это по-прежнему отказ: коробка
+     * стоит в очереди другого курьера и уедет не туда. Перенос в обычное
+     * хранение отгрузку больше не отменяет и проверяется отдельно.
+     */
+    const admin = await actorFor(['ADMIN']);
+    const foreignRoute = await ctx.db.deliveryRoute.create({
+      data: {
+        number: unique('FRT'),
+        deliveryDate: toDateColumn(DAY),
+        state: 'CONFIRMED',
+        vehicleType: 'CAR',
+        createdById: admin.userId,
+      },
+      select: { id: true },
+    });
+    const foreignCell = await seedCell('ROUTE');
+    await bindRouteCell(
+      flow,
+      route.keeper,
+      foreignRoute.id,
+      { cellCode: foreignCell.code },
+      CONTEXT,
+    );
     await receiveOrder(
       flow,
       route.keeper,
-      { orderNumber: only.number, cellCode: storage.code },
+      { orderNumber: only.number, cellCode: foreignCell.code, allowRouteCell: true },
       CONTEXT,
     );
 
@@ -562,6 +677,30 @@ describe('отгрузка листа', () => {
       select: { state: true },
     });
     expect(stored.state).toBe('CONFIRMED');
+  });
+
+  it('перенос коробки в хранение после проверки отгрузку не отменяет', async () => {
+    const route = await seedReadyRoute(1);
+    const only = route.orders[0]!;
+    await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: only.number },
+      CONTEXT,
+    );
+
+    const storage = await seedCell('STORAGE');
+    await receiveOrder(
+      flow,
+      route.keeper,
+      { orderNumber: only.number, cellCode: storage.code },
+      CONTEXT,
+    );
+
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(1);
+    expect(await activePlacementCell(only.id)).toBeNull();
   });
 
   it('замороженный курьер отгрузку не получает', async () => {
@@ -637,5 +776,175 @@ describe('отгрузка листа', () => {
     expect(serialized).not.toContain('синтетический получатель');
     // Номера заказа в событиях тоже нет: клиент перечитывает список сам.
     expect(JSON.stringify(events)).not.toContain(route.orders[0]!.number);
+  });
+});
+
+describe('отгрузка прямо из хранения', () => {
+  /*
+   * Перекладывать коробку на маршрутную полку ради самого перекладывания
+   * незачем: лист всё равно проверяется заказ за заказом и уезжает целиком.
+   * Раньше выдача требовала, чтобы каждая коробка стояла в ячейке листа,
+   * и кладовщик носил их дважды.
+   */
+  it('лист со смесью хранения и маршрутной ячейки выдаётся целиком', async () => {
+    const route = await seedMixedRoute(2, 1);
+
+    for (const order of route.orders) {
+      await checkOrderForIssue(
+        flow,
+        route.keeper,
+        route.routeId,
+        { orderNumber: order.number },
+        CONTEXT,
+      );
+    }
+
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(3);
+
+    // Ни одной коробки на полках: освобождены размещения обоих видов.
+    for (const order of route.orders) {
+      expect(await activePlacementCell(order.id)).toBeNull();
+    }
+
+    // Опустевшая маршрутная полка отдана обратно.
+    const binding = await ctx.db.routeCellBinding.findFirst({
+      where: { routeId: route.routeId, releasedAt: null },
+      select: { id: true },
+    });
+    expect(binding).toBeNull();
+
+    const stored = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.routeId },
+      select: { state: true },
+    });
+    expect(stored.state).toBe('ACTIVE');
+  });
+
+  it('лист целиком из хранения тоже выдаётся', async () => {
+    const route = await seedMixedRoute(2, 0);
+
+    for (const order of route.orders) {
+      await checkOrderForIssue(
+        flow,
+        route.keeper,
+        route.routeId,
+        { orderNumber: order.number },
+        CONTEXT,
+      );
+    }
+
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(2);
+    for (const order of route.orders) {
+      expect(await activePlacementCell(order.id)).toBeNull();
+    }
+  });
+
+  it('повтор финала по-прежнему идемпотентен', async () => {
+    const route = await seedMixedRoute(1, 0);
+    await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: route.orders[0]!.number },
+      CONTEXT,
+    );
+
+    await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    const repeat = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+
+    expect(repeat.unchanged).toBe(true);
+    const issued = await ctx.db.orderPlacement.count({
+      where: { orderId: route.orders[0]!.id, releaseReason: 'ISSUED_TO_COURIER' },
+    });
+    expect(issued).toBe(1);
+  });
+
+  it('снятая с хранения коробка отменяет всю отгрузку', async () => {
+    const route = await seedMixedRoute(2, 0);
+    for (const order of route.orders) {
+      await checkOrderForIssue(
+        flow,
+        route.keeper,
+        route.routeId,
+        { orderNumber: order.number },
+        CONTEXT,
+      );
+    }
+
+    // Коробку унесли между проверкой и финалом: выдавать нечего.
+    await withdrawOrder(
+      flow,
+      route.keeper,
+      { orderNumber: route.orders[1]!.number, reason: 'REASSEMBLY' },
+      CONTEXT,
+    );
+
+    await expect(shipRoute(flow, route.keeper, route.routeId, CONTEXT)).rejects.toMatchObject({
+      conflict: { kind: 'ORDER_NOT_PLACED' },
+    });
+
+    // Откат целиком: первая коробка осталась на полке, лист не уехал.
+    expect(await activePlacementCell(route.orders[0]!.id)).not.toBeNull();
+    const stored = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.routeId },
+      select: { state: true },
+    });
+    expect(stored.state).toBe('CONFIRMED');
+  });
+
+  it('чужая маршрутная полка выдачу по-прежнему не проходит', async () => {
+    const route = await seedMixedRoute(1, 0);
+    const foreignAdmin = await actorFor(['ADMIN']);
+    const foreignOrder = await seedOrder();
+    const foreignRoute = await ctx.db.deliveryRoute.create({
+      data: {
+        number: unique('FRT'),
+        deliveryDate: toDateColumn(DAY),
+        state: 'CONFIRMED',
+        vehicleType: 'CAR',
+        createdById: foreignAdmin.userId,
+      },
+      select: { id: true },
+    });
+    await ctx.db.routeOrder.create({
+      data: {
+        routeId: foreignRoute.id,
+        orderId: foreignOrder.id,
+        position: 1,
+        addedById: foreignAdmin.userId,
+      },
+    });
+    const foreignCell = await seedCell('ROUTE');
+    await bindRouteCell(
+      flow,
+      route.keeper,
+      foreignRoute.id,
+      { cellCode: foreignCell.code },
+      CONTEXT,
+    );
+
+    // Коробку нашего листа переставили на полку чужого курьера.
+    await receiveOrder(
+      flow,
+      route.keeper,
+      {
+        orderNumber: route.orders[0]!.number,
+        cellCode: foreignCell.code,
+        allowRouteCell: true,
+      },
+      CONTEXT,
+    );
+
+    await expect(
+      checkOrderForIssue(
+        flow,
+        route.keeper,
+        route.routeId,
+        { orderNumber: route.orders[0]!.number },
+        CONTEXT,
+      ),
+    ).rejects.toMatchObject({ conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION' } });
   });
 });

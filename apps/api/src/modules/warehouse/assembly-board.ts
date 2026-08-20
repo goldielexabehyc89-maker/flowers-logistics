@@ -63,6 +63,16 @@ export interface AssemblyRouteView {
 export interface AssemblyBoard {
   /** Листы, которым ещё нужна складская работа. */
   active: AssemblyRouteView[];
+  /**
+   * Листы, у которых собрано всё, но часть коробок ещё в хранении.
+   *
+   * Это очередь готовой работы: идти нужно не к флористу и не за недостающей
+   * коробкой, а к полке хранения — перенести. Отдельная группа существует
+   * потому, что раньше такой лист лежал среди тех, где чего-то не хватает,
+   * и отличить «нечего нести» от «есть что нести» можно было только раскрыв
+   * каждый лист по очереди.
+   */
+  relocatable: AssemblyRouteView[];
   /** Полностью собранные листы: все действующие заказы в ячейках листа. */
   assembled: AssemblyRouteView[];
 }
@@ -161,9 +171,21 @@ export async function readAssemblyBoard(db: Database): Promise<AssemblyBoard> {
 
   const sorted = [...views].sort(compareRoutes);
 
+  /*
+   * Группы считает сервер и по ПОЛНОМУ набору листов.
+   *
+   * Три состояния взаимоисключающие по построению: «собран» требует, чтобы
+   * в хранении не осталось ни одного заказа, «можно переносить» — чтобы
+   * остался хотя бы один. Лист, не попавший ни в одну, остаётся активным.
+   */
+  const relocatable = sorted.filter(isRelocatable);
+  const assembled = sorted.filter(isAssembled);
+  const moved = new Set([...relocatable, ...assembled]);
+
   return {
-    active: sorted.filter((route) => !isAssembled(route)),
-    assembled: sorted.filter(isAssembled),
+    active: sorted.filter((route) => !moved.has(route)),
+    relocatable,
+    assembled,
   };
 }
 
@@ -187,6 +209,52 @@ export function isAssembled(route: {
   return route.orders.every(
     (order) => order.stage === 'READY' && !order.requiresRelocation && !order.cancelled,
   );
+}
+
+/**
+ * Можно ли лист просто перенести на маршрутные полки.
+ *
+ * Условие ровно одно и физическое: КАЖДАЯ коробка листа уже стоит на складе,
+ * и хотя бы одна из них стоит в хранении. Тогда кладовщику нечего ждать —
+ * вся работа сводится к переносу.
+ *
+ * Отменённый заказ выводит лист отсюда: он требует решения логиста, а не
+ * переноса, и обещать «можно нести» про лист, который нельзя везти, нельзя.
+ *
+ * Пометка «требуется перемещение» здесь НЕ помеха: её ставят ровно тогда,
+ * когда коробка легла в хранение, а действующий лист её ждёт, — то есть это
+ * и есть признак этой группы, а не признак поломки.
+ */
+export function isRelocatable(route: {
+  total: number;
+  orders: readonly {
+    stage: RouteOrderStage;
+    cellKind: $Enums.StorageCellKind | null;
+    requiresRelocation: boolean;
+    cancelled: boolean;
+  }[];
+}): boolean {
+  if (route.total === 0) {
+    return false;
+  }
+  if (route.orders.some((order) => order.cancelled)) {
+    return false;
+  }
+
+  /*
+   * Годятся ровно два места: ячейка ЭТОГО листа и обычное хранение.
+   *
+   * Стадия «в хранении» одна на два разных случая — своя полка хранения
+   * и чужая маршрутная полка, — поэтому одной её мало. Коробка на полке
+   * другого курьера переносом не решается: сначала надо разобраться, как
+   * она туда попала, и такой лист остаётся среди активных.
+   */
+  const movable = route.orders.every(
+    (order) =>
+      (order.stage === 'READY' && !order.requiresRelocation) ||
+      (order.stage === 'IN_STORAGE' && order.cellKind === 'STORAGE'),
+  );
+  return movable && route.orders.some((order) => order.stage === 'IN_STORAGE');
 }
 
 /**
@@ -235,11 +303,39 @@ export interface IssueOrderView {
   orderId: string;
   orderNumber: string;
   position: number;
+  /**
+   * Ячейка, в которой коробка лежит СЕЙЧАС: маршрутная или хранения.
+   *
+   * Раньше показывалась только маршрутная, а коробка в хранении выглядела
+   * как «нет ячейки» и подписывалась «Не готов». Кладовщик шёл искать её
+   * наугад, хотя полка известна. `null` остаётся ровно для одного случая —
+   * действующего размещения нет вовсе.
+   */
   cellCode: string | null;
+  /** Тип ячейки считает сервер: восстанавливать его по коду на клиенте нельзя. */
+  cellKind: $Enums.StorageCellKind | null;
   ready: boolean;
+  /** Коробка стоит в маршрутной ячейке ИМЕННО этого листа. */
+  inRouteCell: boolean;
   /** Заказ уже внесён в лист текущей проверкой. */
   checked: boolean;
 }
+
+/**
+ * Готовность листа к выдаче одним словом.
+ *
+ * Два положительных состояния различаются не правом отгрузить — оно у них
+ * одинаковое, — а тем, где сейчас стоят коробки. Кладовщику это решает,
+ * идти ли ему по полкам хранения: «собран» означает, что всё уже на своей
+ * маршрутной полке и собирать по складу нечего.
+ */
+export type IssueReadiness =
+  /** Все коробки на своих маршрутных полках. */
+  | 'ASSEMBLED'
+  /** Все коробки на складе, часть — в хранении. */
+  | 'CAN_ISSUE'
+  /** Чего-то не хватает: не собран, не размещён, отменён. */
+  | 'NOT_READY';
 
 export interface IssueRouteView {
   routeId: string;
@@ -250,8 +346,10 @@ export interface IssueRouteView {
   checked: number;
   /** Открыта ли сессия выдачи: до неё вносить заказы нельзя. */
   sessionOpen: boolean;
-  /** Лист готов к отгрузке: все заказы стоят в его ячейках и не отменены. */
+  /** Лист готов к отгрузке: каждый заказ на складе и не отменён. */
   shippable: boolean;
+  /** Состояние считает СЕРВЕР по полному составу; клиент только показывает. */
+  readiness: IssueReadiness;
   orders: IssueOrderView[];
 }
 
@@ -261,6 +359,20 @@ export interface IssueCourierView {
   /** Телефон приходит обычным авторизованным ответом и в realtime не уходит. */
   phone: string;
   routes: IssueRouteView[];
+}
+
+/**
+ * Состояние готовности листа по полному составу заказов.
+ *
+ * Пустой лист готовым не бывает: везти нечего.
+ */
+export function issueReadiness(
+  orders: readonly { ready: boolean; inRouteCell: boolean }[],
+): IssueReadiness {
+  if (orders.length === 0 || !orders.every((order) => order.ready)) {
+    return 'NOT_READY';
+  }
+  return orders.every((order) => order.inRouteCell) ? 'ASSEMBLED' : 'CAN_ISSUE';
 }
 
 /**
@@ -302,7 +414,7 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
                 where: { releasedAt: null },
                 select: {
                   requiresRelocation: true,
-                  cell: { select: { id: true, code: true } },
+                  cell: { select: { id: true, code: true, kind: true } },
                 },
                 take: 1,
               },
@@ -329,19 +441,36 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
       const order = participation.order;
       const placement = order.placements[0] ?? null;
       const cancelled = order.cancelledInSource || order.cancelledByLogistAt !== null;
+      /*
+       * Готовность к выдаче.
+       *
+       * Коробка годится, если она лежит либо в ячейке ЭТОГО листа, либо
+       * в обычном хранении: лист отгружается целиком, и нести его можно
+       * и с полки хранения. Чужая маршрутная ячейка по-прежнему готовностью
+       * не считается — это полка другого курьера, и коробка уедет с ним.
+       */
+      const ownCell = placement !== null && cellIds.has(placement.cell.id);
+      const storageCell = placement !== null && placement.cell.kind === 'STORAGE';
+      /*
+       * Пометка «требуется перемещение» на МАРШРУТНОЙ полке означает, что
+       * после комплектования что-то изменилось: состав листа или сам заказ.
+       * В хранении та же пометка стоит на любой коробке, которую ждёт
+       * маршрут, и готовности не мешает — иначе отгрузить из хранения было
+       * бы нельзя вовсе.
+       */
+      const brokenRouteCell = ownCell && placement.requiresRelocation;
       const ready =
-        placement !== null &&
-        cellIds.has(placement.cell.id) &&
-        !placement.requiresRelocation &&
-        !cancelled;
+        placement !== null && (storageCell || ownCell) && !brokenRouteCell && !cancelled;
 
       return {
         orderId: order.id,
         orderNumber: order.externalName,
         position: participation.position,
-        // Ячейки может не быть вовсе — тогда лист отгрузить нельзя.
-        cellCode: placement !== null && cellIds.has(placement.cell.id) ? placement.cell.code : null,
+        // Ячейки нет только тогда, когда нет действующего размещения.
+        cellCode: placement?.cell.code ?? null,
+        cellKind: placement?.cell.kind ?? null,
         ready,
+        inRouteCell: ownCell,
         checked: checkedIds.has(order.id),
       };
     });
@@ -361,11 +490,12 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
       /*
        * Готовность считает СЕРВЕР и пересчитывает каждый раз.
        *
-       * Отгрузить можно только лист, у которого все действующие заказы
-       * стоят в его маршрутных ячейках, не отменены и не требуют
-       * перемещения. Пустой лист не отгружается: везти нечего.
+       * Отгрузить можно только лист, у которого каждый действующий заказ
+       * стоит на складе — в ячейке этого листа или в хранении — и не отменён.
+       * Пустой лист не отгружается: везти нечего.
        */
       shippable: orders.length > 0 && orders.every((order) => order.ready),
+      readiness: issueReadiness(orders),
       orders,
     };
 

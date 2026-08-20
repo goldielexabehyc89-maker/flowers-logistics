@@ -39,6 +39,16 @@ import {
 /** Сколько показывать успешное уведомление. Прочитать успевают, ждать — нет. */
 export const SUCCESS_NOTICE_MS = 1400;
 
+/**
+ * То же для складского варианта с отдельным окном.
+ *
+ * Окно перекрывает кадр целиком, и глазу нужно чуть больше времени, чем
+ * подписи под камерой: сначала найти окно, потом прочитать. Константа своя,
+ * потому что у самовывоза поведение прежнее и менять его этим заданием
+ * не разрешено.
+ */
+export const SUCCESS_WINDOW_MS = 1500;
+
 export interface ScannerScreenProps {
   chain: ScanChain;
   /** Что именно происходит: «Приёмка», «Лист R-12» и подобное. */
@@ -56,6 +66,15 @@ export interface ScannerScreenProps {
    */
   onIntent: (intent: ScanIntent) => Promise<ScanEvent>;
   onClose: () => void;
+  /**
+   * Показывать исход отдельным окном поверх кадра.
+   *
+   * Складской вариант. Под камерой подпись терялась: человек смотрит в кадр,
+   * а результат появлялся ниже рамки, и о неудаче он узнавал, только когда
+   * ничего не происходило дальше. Самовывоз остаётся на прежнем поведении,
+   * поэтому это выбор вызывающего экрана, а не общее правило.
+   */
+  resultWindow?: boolean;
 }
 
 export function ScannerScreen({
@@ -64,12 +83,22 @@ export function ScannerScreen({
   expectedCell,
   onIntent,
   onClose,
+  resultWindow = false,
 }: ScannerScreenProps): React.JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null);
   const sessionRef = useRef<CameraSession | null>(null);
   const stateRef = useRef<ScanState>(initialState(chain));
   const [state, setState] = useState<ScanState>(stateRef.current);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  /*
+   * Счётчик попыток запустить камеру.
+   *
+   * «Повторить» в окне отказа обязано именно перезапускать поток, а не просто
+   * убирать сообщение: разрешение могли выдать в системных настройках, камеру
+   * могли освободить из другого приложения. Смена счётчика перезапускает
+   * эффект — другого способа начать поток заново у него нет.
+   */
+  const [cameraAttempt, setCameraAttempt] = useState(0);
 
   const apply = useCallback((event: ScanEvent): ScanIntent => {
     const { state: next, intent } = reduce(stateRef.current, event);
@@ -143,7 +172,14 @@ export function ScannerScreen({
       cancelled = true;
       stopCamera();
     };
-  }, [dispatch, stopCamera]);
+  }, [dispatch, stopCamera, cameraAttempt]);
+
+  /** Повторный запуск камеры после технического отказа. */
+  const retryCamera = useCallback((): void => {
+    stopCamera();
+    setCameraError(null);
+    setCameraAttempt((attempt) => attempt + 1);
+  }, [stopCamera]);
 
   // Успешное уведомление закрывается само. Константа проверена тестом:
   // «мигнуло и исчезло» и «висит до нажатия» одинаково плохи.
@@ -153,10 +189,10 @@ export function ScannerScreen({
     }
     const timer = window.setTimeout(
       () => void dispatch({ type: 'noticeExpired' }),
-      SUCCESS_NOTICE_MS,
+      resultWindow ? SUCCESS_WINDOW_MS : SUCCESS_NOTICE_MS,
     );
     return () => window.clearTimeout(timer);
-  }, [state.notice, dispatch]);
+  }, [state.notice, dispatch, resultWindow]);
 
   // Цепочка завершена: камера гаснет и экран закрывается.
   useEffect(() => {
@@ -178,6 +214,17 @@ export function ScannerScreen({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [stopCamera, onClose]);
+
+  /*
+   * Что показывает окно исхода.
+   *
+   * Технический отказ камеры показывается тем же окном отказа, что и
+   * непринятый код: для человека это одно и то же событие — «сейчас
+   * отсканировать не получилось», — и разные способы сообщить об этом
+   * заставляли бы разбираться, куда смотреть.
+   */
+  const result = state.notice;
+  const resultKind = cameraError !== null ? 'error' : (result?.kind ?? 'error');
 
   const hint = useMemo(() => stepHint(state), [state]);
   const title = useMemo(() => scanTitle(state, expectedCell ?? null), [state, expectedCell]);
@@ -223,7 +270,12 @@ export function ScannerScreen({
           </button>
         </header>
 
-        {cameraError === null ? (
+        {/*
+          Кадр остаётся на месте и при отказе камеры, когда исход показывается
+          окном: окно накрывает рамку, и подменять её ещё и текстом значило бы
+          показать одну ошибку дважды в двух местах.
+        */}
+        {cameraError === null || resultWindow ? (
           <div className="scanner__frame">
             <video
               ref={videoRef}
@@ -234,6 +286,77 @@ export function ScannerScreen({
             />
             {/* Рамка считывания: показывает, куда наводить, и ничего не решает. */}
             <span className="scanner__reticle" aria-hidden="true" />
+
+            {/*
+              Исход сканирования — отдельное окно поверх кадра.
+
+              Оно центрировано и перекрывает рамку намеренно: человек смотрит
+              в кадр, и результат обязан оказаться там, куда уже направлен
+              взгляд. Успех уходит сам, отказ ждёт решения.
+            */}
+            {resultWindow && (result !== null || cameraError !== null) && (
+              <div className="scan-result" role="alert" data-testid="scan-result">
+                <div
+                  className={
+                    resultKind === 'success'
+                      ? 'scan-result__window scan-result__window--success'
+                      : 'scan-result__window scan-result__window--error'
+                  }
+                  /* Признак исхода один и тот же в обоих вариантах: окно и
+                     подпись под камерой отличаются местом, а не смыслом. */
+                  data-testid={resultKind === 'success' ? 'scan-success' : 'scan-error'}
+                >
+                  <span className="scan-result__icon" aria-hidden="true">
+                    {resultKind === 'success' ? '✓' : '✕'}
+                  </span>
+
+                  <p className="scan-result__text" data-testid="scan-result-text">
+                    {cameraError ?? result?.text}
+                  </p>
+
+                  {result?.scanned !== undefined && (
+                    <p className="scan-result__line" data-testid="scan-error-scanned">
+                      Распознано: <b>{result.scanned}</b>
+                    </p>
+                  )}
+                  {result?.expected !== undefined && (
+                    <p className="scan-result__line" data-testid="scan-error-expected">
+                      Ожидалось: <b>{result.expected}</b>
+                    </p>
+                  )}
+
+                  {resultKind === 'success' ? (
+                    <p className="scan-result__line">Закроется само</p>
+                  ) : (
+                    <div className="scan-result__actions">
+                      <Button
+                        variant="primary"
+                        data-testid="scan-retry"
+                        onClick={() => {
+                          if (cameraError !== null) {
+                            retryCamera();
+                            return;
+                          }
+                          void dispatch({ type: 'retry' });
+                        }}
+                      >
+                        Повторить
+                      </Button>
+                      <Button
+                        data-testid="scan-error-cancel"
+                        onClick={() => {
+                          stopCamera();
+                          void dispatch({ type: 'cancel' });
+                          onClose();
+                        }}
+                      >
+                        Отмена
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <p className="scanner__failure" role="alert" data-testid="scan-camera-error">
@@ -254,7 +377,7 @@ export function ScannerScreen({
         {/* Результат читается программой чтения с экрана: ни цвет, ни звук
           не являются единственным способом узнать исход. */}
         <div aria-live="assertive" className="scanner__live">
-          {state.notice !== null && (
+          {!resultWindow && state.notice !== null && (
             <div
               className={`scanner__notice scanner__notice--${state.notice.kind}`}
               data-testid={state.notice.kind === 'success' ? 'scan-success' : 'scan-error'}

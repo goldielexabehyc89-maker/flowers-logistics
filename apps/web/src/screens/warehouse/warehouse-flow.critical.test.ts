@@ -13,6 +13,7 @@ import {
   SCAN_HINTS,
   blockLabel,
   cellLabel,
+  issueCellLabel,
   mergePlacementPages,
   nextPlacementOffset,
   nextStep,
@@ -124,5 +125,17 @@ describe('дочитывание складского списка', () => {
       40,
     );
     expect(nextPlacementOffset({ items: [], total: 0, limit: 100, offset: 0 })).toBe(null);
+  });
+});
+
+describe('ячейка заказа в листе выдачи', () => {
+  it('маршрутную полку показывает кодом, полку хранения — с подписью', () => {
+    expect(issueCellLabel({ cellCode: 'R-01', cellKind: 'ROUTE' })).toBe('R-01');
+    // Подпись нужна: идти за коробкой придётся не к маршрутной полке.
+    expect(issueCellLabel({ cellCode: 'S-14', cellKind: 'STORAGE' })).toBe('S-14 · хранение');
+  });
+
+  it('прочерк остаётся только для заказа без размещения', () => {
+    expect(issueCellLabel({ cellCode: null, cellKind: null })).toBe('—');
   });
 });

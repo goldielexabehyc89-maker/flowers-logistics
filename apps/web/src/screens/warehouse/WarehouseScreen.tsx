@@ -202,6 +202,7 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   if (scanning) {
     return (
       <ScannerScreen
+        resultWindow
         chain="RECEIVE"
         operation="Приёмка возврата"
         onIntent={returnIntentHandler(client, async () => {
@@ -755,6 +756,7 @@ function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   if (scanning) {
     return (
       <ScannerScreen
+        resultWindow
         chain="RECEIVE"
         operation="Приёмка на склад"
         onIntent={receiveIntentHandler(client, async () => {
