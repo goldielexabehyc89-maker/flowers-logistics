@@ -110,10 +110,10 @@ export function WarehouseScreen(): React.JSX.Element {
         ))}
       </nav>
 
-      {tab === 'storage' && <StorageTab />}
+      {tab === 'storage' && <StorageTab manualEntry={manualEntry} />}
       {tab === 'picking' && <AssemblyTab manualEntry={manualEntry} />}
       {tab === 'issue' && <IssueTab manualEntry={manualEntry} />}
-      {tab === 'returns' && <ReturnsTab />}
+      {tab === 'returns' && <ReturnsTab manualEntry={manualEntry} />}
     </section>
   );
 }
@@ -128,7 +128,7 @@ export function WarehouseScreen(): React.JSX.Element {
  *
  * Пара «заказ + ячейка» уходит одним запросом: приёмки без ячейки не бывает.
  */
-function ReturnsTab(): React.JSX.Element {
+function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
@@ -188,21 +188,27 @@ function ReturnsTab(): React.JSX.Element {
         </p>
 
         {scannedOrder === null ? (
-          <ScanField
-            label="Заказ"
-            hint={SCAN_HINTS.ORDER}
-            value={orderInput}
-            onChange={setOrderInput}
-            onSubmit={() => {
-              const number = orderInput.trim();
-              if (number !== '') {
-                setScannedOrder(number);
-              }
-            }}
-            autoFocus
-            testId="wh-return-order"
-            disabled={accept.isPending}
-          />
+          manualEntry ? (
+            <ScanField
+              label="Заказ"
+              hint={SCAN_HINTS.ORDER}
+              value={orderInput}
+              onChange={setOrderInput}
+              onSubmit={() => {
+                const number = orderInput.trim();
+                if (number !== '') {
+                  setScannedOrder(number);
+                }
+              }}
+              autoFocus
+              testId="wh-return-order"
+              disabled={accept.isPending}
+            />
+          ) : (
+            <p className="muted text-sm" data-testid="wh-return-manual-off">
+              Ручной ввод выключен администратором. Отсканируйте заказ.
+            </p>
+          )
         ) : (
           <div className="stack">
             <div className="row">
@@ -220,20 +226,22 @@ function ReturnsTab(): React.JSX.Element {
                 Другой заказ
               </Button>
             </div>
-            <ScanField
-              label="Ячейка хранения"
-              hint={SCAN_HINTS.CELL}
-              value={cellInput}
-              onChange={setCellInput}
-              onSubmit={() => {
-                if (cellInput.trim() !== '') {
-                  accept.mutate({ orderNumber: scannedOrder, cellCode: cellInput });
-                }
-              }}
-              autoFocus
-              testId="wh-return-cell"
-              disabled={accept.isPending}
-            />
+            {manualEntry && (
+              <ScanField
+                label="Ячейка хранения"
+                hint={SCAN_HINTS.CELL}
+                value={cellInput}
+                onChange={setCellInput}
+                onSubmit={() => {
+                  if (cellInput.trim() !== '') {
+                    accept.mutate({ orderNumber: scannedOrder, cellCode: cellInput });
+                  }
+                }}
+                autoFocus
+                testId="wh-return-cell"
+                disabled={accept.isPending}
+              />
+            )}
           </div>
         )}
       </div>
@@ -494,7 +502,12 @@ function receiveIntentHandler(
 
 // --- Вкладка «Склад» ---------------------------------------------------------
 
-function StorageTab(): React.JSX.Element {
+/** Разрешён ли ручной ввод. Решение администратора, не экрана. */
+interface ManualEntryProps {
+  manualEntry: boolean;
+}
+
+function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
@@ -657,16 +670,28 @@ function StorageTab(): React.JSX.Element {
         </div>
 
         {scanned === null ? (
-          <ScanField
-            label="Заказ"
-            hint={SCAN_HINTS.ORDER}
-            value={orderInput}
-            onChange={setOrderInput}
-            onSubmit={() => orderInput.trim() !== '' && lookup.mutate(orderInput)}
-            autoFocus
-            testId="wh-scan-order"
-            disabled={lookup.isPending}
-          />
+          /*
+           * Ручной ввод убран администратором — остаётся сканирование.
+           *
+           * Поле не выключается, а исчезает: выключенное поле обещает работу,
+           * которой в этом контуре нет, и кладовщик пробует в него набирать.
+           */
+          manualEntry ? (
+            <ScanField
+              label="Заказ"
+              hint={SCAN_HINTS.ORDER}
+              value={orderInput}
+              onChange={setOrderInput}
+              onSubmit={() => orderInput.trim() !== '' && lookup.mutate(orderInput)}
+              autoFocus
+              testId="wh-scan-order"
+              disabled={lookup.isPending}
+            />
+          ) : (
+            <p className="muted text-sm" data-testid="wh-manual-off">
+              Ручной ввод выключен администратором. Отсканируйте заказ.
+            </p>
+          )
         ) : (
           <div className="stack">
             <div className="row">
@@ -737,16 +762,22 @@ function StorageTab(): React.JSX.Element {
                   </p>
                 )}
 
-                <ScanField
-                  label="Ячейка"
-                  hint={choice === 'ASSEMBLY' ? SCAN_HINTS.ROUTE_CELL : SCAN_HINTS.CELL}
-                  value={cellInput}
-                  onChange={setCellInput}
-                  onSubmit={() => submitCell()}
-                  autoFocus
-                  testId="wh-scan-cell"
-                  disabled={receive.isPending || pick.isPending}
-                />
+                {manualEntry ? (
+                  <ScanField
+                    label="Ячейка"
+                    hint={choice === 'ASSEMBLY' ? SCAN_HINTS.ROUTE_CELL : SCAN_HINTS.CELL}
+                    value={cellInput}
+                    onChange={setCellInput}
+                    onSubmit={() => submitCell()}
+                    autoFocus
+                    testId="wh-scan-cell"
+                    disabled={receive.isPending || pick.isPending}
+                  />
+                ) : (
+                  <p className="muted text-sm">
+                    Ручной ввод выключен администратором. Отсканируйте ячейку.
+                  </p>
+                )}
 
                 <div className="row">
                   <Button
