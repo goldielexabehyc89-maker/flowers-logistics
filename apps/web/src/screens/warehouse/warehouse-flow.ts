@@ -91,20 +91,25 @@ export function cellLabel(order: PlacedOrderView): string {
 }
 
 /**
- * Ячейка заказа в листе выдачи.
+ * Ячейка заказа в строке листа.
  *
- * Показывается ФАКТИЧЕСКОЕ место коробки, и у хранения оно подписано: идти
- * за ней придётся не к маршрутной полке. Прочерк остаётся ровно для одного
- * случая — действующего размещения нет, коробки на складе нет вовсе.
+ * Показывается ФАКТИЧЕСКОЕ место коробки вместе с видом полки: идти за ней
+ * придётся либо к маршрутной, либо в хранение, и одного кода для этого мало.
+ * Скобки не украшение — подпись стоит вплотную к статусу и без них читалась
+ * бы как часть его текста. Прочерк остаётся ровно для одного случая:
+ * действующего размещения нет, коробки на складе нет вовсе.
+ *
+ * Формат один на «Выдачу» и «Сборку»: две записи одного и того же заставляли
+ * бы сверять, одна ли это полка.
  */
 export function issueCellLabel(order: {
   cellCode: string | null;
   cellKind: StorageCellKind | null;
 }): string {
-  if (order.cellCode === null) {
+  if (order.cellCode === null || order.cellKind === null) {
     return '—';
   }
-  return order.cellKind === 'STORAGE' ? `${order.cellCode} · хранение` : order.cellCode;
+  return `(${order.cellCode} · ${CELL_KIND_LABELS[order.cellKind]})`;
 }
 
 /*
@@ -345,6 +350,8 @@ export interface IssueBoard {
     fullName: string;
     /** Телефон приходит обычным ответом API и в realtime не уходит. */
     phone: string;
+    /** Сколько листов курьера готовы к выдаче: считает сервер. */
+    readyRoutes: number;
     routes: IssueRouteView[];
   }[];
 }

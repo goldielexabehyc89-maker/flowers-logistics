@@ -2160,7 +2160,8 @@ test('склад: развилка «сборка или хранение», с�
     `[data-testid="assembly-route"][data-route-number="${routeNumber}"]`,
   );
   await expect(routeCard.getByTestId('assembly-route-cells')).toContainText(routeCell);
-  await expect(routeCard).toContainText('готово 1');
+  // Короткая строка: сколько заказов в листе и сколько из них готово.
+  await expect(routeCard.getByTestId('assembly-route-counts')).toHaveText('2 (1 из 2)');
 
   /*
    * 4. Выдача: три уровня и отдельная кнопка у каждого листа.
@@ -2184,6 +2185,26 @@ test('склад: развилка «сборка или хранение», с�
   await expect(readiness).toHaveAttribute('data-readiness', 'CAN_ISSUE');
   await expect(readiness).toContainText('Можно выдать');
 
+  /*
+   * Шапка курьера отвечает, подходить ли к нему: сколько листов готово
+   * и сколько их всего. Счётчики стоят справа, стрелки у самих листов нет —
+   * карточка раскрывается шапкой.
+   */
+  await expect(page.getByTestId('issue-courier-ready').first()).toHaveText(/^\(\d+\)$/);
+  await expect(page.locator('.wh-group__count--sunken').first()).toBeVisible();
+  await expect(issueRoute.getByTestId('issue-route-toggle')).toHaveCount(0);
+
+  // Строка под номером листа короткая: сколько заказов и сколько внесено.
+  await expect(issueRoute.getByTestId('issue-route-counts')).toHaveText(/^\d+ \(\d+ из \d+\)$/);
+
+  // Соседние листы курьера разделены измеримым промежутком.
+  const cards = page.locator('[data-testid="issue-route"]');
+  if ((await cards.count()) > 1) {
+    const first = await cards.nth(0).boundingBox();
+    const second = await cards.nth(1).boundingBox();
+    expect((second?.y ?? 0) - ((first?.y ?? 0) + (first?.height ?? 0))).toBeGreaterThanOrEqual(8);
+  }
+
   // Третий уровень: заказы листа раскрываются отдельно и по шапке целиком.
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
   const issueHead = issueRoute.getByTestId('issue-route-head');
@@ -2193,11 +2214,14 @@ test('склад: развилка «сборка или хранение», с�
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
   await issueHead.locator('.muted').first().click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
-  await issueRoute.getByTestId('issue-route-toggle').click();
+  await issueHead.locator('.muted').first().click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
 
   // Ячейка каждого заказа названа, «Не готов» у стоящей коробки не появляется.
-  await expect(issueRoute.getByTestId('issue-order-cell').first()).not.toHaveText('—');
+  // Ячейка стоит в скобках вплотную к статусу: код и вид полки вместе.
+  await expect(issueRoute.getByTestId('issue-order-cell').first()).toHaveText(
+    /^\(.+ · (Хранение|Маршрутная)\)$/,
+  );
   // Коробка в хранении больше не подписывается «Не готов»: полка известна.
   await expect(issueRoute.locator('.wh-route__badges', { hasText: 'Не готов' })).toHaveCount(0);
 
@@ -2272,7 +2296,8 @@ test('склад: развилка «сборка или хранение», с�
   await page.getByTestId('issue-ship-close').click();
   await page.getByTestId('wh-tab-picking').click();
   await expect(routeCard.getByTestId('assembly-route-cells')).toContainText(routeCell);
-  await expect(routeCard).toContainText('готово 1');
+  // Короткая строка: сколько заказов в листе и сколько из них готово.
+  await expect(routeCard.getByTestId('assembly-route-counts')).toHaveText('2 (1 из 2)');
 
   // 7. Первую коробку переносят из хранения в ячейку листа — теперь полка известна.
   await page.getByTestId('wh-tab-storage').click();
@@ -6401,7 +6426,8 @@ test('выдача: три уровня, отгрузка одного лист�
   // Уехал ровно один лист: соседний остался на месте и не тронут.
   await expect(assembledRoute).toHaveCount(0);
   await expect(emptyRoute).toBeVisible();
-  await expect(emptyRoute).toContainText('внесено 0 из 2');
+  // Соседний лист не тронут: ни один его заказ не внесён.
+  await expect(emptyRoute.getByTestId('issue-route-counts')).toHaveText('2 (0 из 2)');
 });
 
 /*
@@ -6468,9 +6494,56 @@ test('сборка: лист уходит в «Собранные» и возв�
     'true',
   );
   await expect(page.getByTestId('assembly-relocatable-count')).not.toHaveText('0');
-  const relocatableBox = await page.getByTestId('assembly-relocatable').boundingBox();
-  const activeBox = await page.getByTestId('assembly-active').boundingBox();
-  expect(relocatableBox?.y ?? 0).toBeLessThan(activeBox?.y ?? 0);
+
+  /*
+   * Порядок групп: «Можно переносить» всегда выше остальных.
+   *
+   * Это очередь готовой работы, и она обязана попадаться на глаза первой.
+   * Сравниваются только те группы, которые сейчас есть на доске: пустая
+   * группа не показывается вовсе.
+   */
+  const groupTop = async (id: string): Promise<number | null> => {
+    const group = page.getByTestId(`assembly-${id}`);
+    if ((await group.count()) === 0) {
+      return null;
+    }
+    return (await group.boundingBox())?.y ?? null;
+  };
+  const relocatableTop = await groupTop('relocatable');
+  expect(relocatableTop).not.toBeNull();
+  for (const id of ['active', 'assembled']) {
+    const top = await groupTop(id);
+    if (top !== null) {
+      expect(top, id).toBeGreaterThan(relocatableTop!);
+    }
+  }
+
+  // У каждой группы своя точка, заголовок и вдавленный счётчик.
+  await expect(page.getByTestId('assembly-relocatable-toggle')).toContainText('Можно переносить');
+  await expect(page.locator('.wh-group__dot--ready')).toBeVisible();
+  await expect(page.getByTestId('assembly-relocatable-count')).toHaveClass(
+    /wh-group__count--sunken/,
+  );
+
+  /*
+   * Листы, которым чего-то не хватает, собраны в свою группу с янтарной точкой.
+   *
+   * Раньше они лежали общим списком без заголовка, и понять, почему лист здесь,
+   * можно было только раскрыв его.
+   */
+  const notAssembled = page.getByTestId('assembly-active');
+  if ((await notAssembled.count()) > 0) {
+    await expect(page.getByTestId('assembly-active-toggle')).toContainText('Не всё собрано');
+    await expect(page.locator('.wh-group__dot--waiting')).toBeVisible();
+  }
+
+  // Стрелки у самих карточек нет: раскрывает шапка целиком.
+  await expect(page.locator('[data-testid="assembly-route-toggle"]')).toHaveCount(0);
+
+  // Строка под номером листа короткая: сколько заказов и сколько готово.
+  await expect(page.getByTestId('assembly-route-counts').first()).toHaveText(
+    /^\d+ \(\d+ из \d+\)$/,
+  );
 });
 
 /*
@@ -6714,6 +6787,16 @@ test('сборка: последовательная проверка, пауз�
   await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
 
   /*
+   * Пока проверено не всё, сканирование доступно, а полоса не зелёная.
+   * Ячейка в строке заказа стоит в скобках вплотную к статусу.
+   */
+  await expect(page.getByTestId('assembly-check-scan')).toBeEnabled();
+  await expect(page.locator('.wh-check__bar--done')).toHaveCount(0);
+  await expect(page.getByTestId('assembly-check-cell').first()).toHaveText(
+    /^(—|\(.+ · (Хранение|Маршрутная)\))$/,
+  );
+
+  /*
    * «Готово» закрывает окно и ничего не завершает.
    *
    * Третья коробка лежит в обычном хранении, поэтому лист не собран — но и
@@ -6735,6 +6818,16 @@ test('сборка: последовательная проверка, пауз�
   await page.getByTestId('wh-tab-picking').click();
   await card.getByTestId('assembly-route-number').click();
   await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
+
+  /*
+   * Пока проверено не всё, сканирование доступно, а полоса не зелёная.
+   * Ячейка в строке заказа стоит в скобках вплотную к статусу.
+   */
+  await expect(page.getByTestId('assembly-check-scan')).toBeEnabled();
+  await expect(page.locator('.wh-check__bar--done')).toHaveCount(0);
+  await expect(page.getByTestId('assembly-check-cell').first()).toHaveText(
+    /^(—|\(.+ · (Хранение|Маршрутная)\))$/,
+  );
 
   // Последняя коробка переносится парой «заказ + ячейка».
   await page.getByTestId('assembly-check-manual-order').fill(missing);
@@ -6845,7 +6938,7 @@ test('склад на пяти размерах: вкладки, окна, дл�
     await expect(route).toContainText(longRoute);
     expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
 
-    await route.getByTestId('issue-route-toggle').click();
+    await route.getByTestId('issue-route-head').locator('.muted').first().click();
     await expect(route.locator('.wh-route__order')).toHaveCount(1);
     expect(await overflow(), `раскрытые заказы ${label}`).toBeLessThanOrEqual(1);
 
@@ -7101,12 +7194,10 @@ test('два сеанса: ячейка, «Требуется перемещен
    */
   const head = card.getByTestId('assembly-route-head');
   await expect(head).toHaveAttribute('aria-expanded', 'false');
-  await expect(card.getByTestId('assembly-route-toggle')).toHaveText('▸');
 
   // Нажатие мимо кнопок — по строке с датой и числом заказов.
   await head.locator('.muted').first().click();
   await expect(head).toHaveAttribute('aria-expanded', 'true');
-  await expect(card.getByTestId('assembly-route-toggle')).toHaveText('▾');
   await expect(card).toHaveAttribute('data-expanded', 'true');
 
   // Повторное нажатие сворачивает.
@@ -7131,7 +7222,7 @@ test('два сеанса: ячейка, «Требуется перемещен
   await watcher.getByTestId('scan-close').click();
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
-  await card.getByTestId('assembly-route-toggle').click();
+  await card.getByTestId('assembly-route-head').locator('.muted').first().click();
 
   await login(worker, stand['кладовщик'] ?? '', stand['пин'] ?? '');
 
@@ -7161,7 +7252,10 @@ test('два сеанса: ячейка, «Требуется перемещен
    * ждать нечего, остался перенос, и лист стоит в очереди готовой работы.
    */
   const stored = card.locator('.wh-route__order', { hasText: second });
-  await expect(stored).toContainText('Требуется перемещение');
+  // Отдельной пометки больше нет: про хранение говорят ячейка и стадия.
+  await expect(stored).not.toContainText('Требуется перемещение');
+  await expect(stored).toContainText('Хранение');
+  await expect(stored).toContainText('В хранении');
   await expect(
     watcher.getByTestId('assembly-relocatable').locator(`[data-route-number="${route}"]`),
   ).toBeVisible();

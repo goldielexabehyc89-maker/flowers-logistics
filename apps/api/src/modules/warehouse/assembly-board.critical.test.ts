@@ -29,6 +29,7 @@ import {
   isRelocatable,
   issueReadiness,
   readAssemblyBoard,
+  readIssueBoard,
 } from './assembly-board.js';
 
 let ctx: TestContext;
@@ -91,7 +92,7 @@ async function seedOrder(
 
 async function seedRoute(
   orderIds: string[],
-  options: { day?: string } = {},
+  options: { day?: string; courierId?: string } = {},
 ): Promise<{ id: string; number: string }> {
   const creator = await actorFor(['ADMIN']);
   const route = await ctx.db.deliveryRoute.create({
@@ -101,6 +102,8 @@ async function seedRoute(
       state: 'CONFIRMED',
       vehicleType: 'CAR',
       createdById: creator.userId,
+      // Курьер нужен доске выдачи: лист без него на ней не появляется.
+      ...(options.courierId === undefined ? {} : { courierUserId: options.courierId }),
     },
     select: { id: true, number: true },
   });
@@ -696,5 +699,60 @@ describe('готовность листа к выдаче', () => {
 
   it('пустой лист готовым не бывает', () => {
     expect(issueReadiness([])).toBe('NOT_READY');
+  });
+});
+
+describe('счётчик готовых листов курьера', () => {
+  /*
+   * Кладовщик смотрит на это число, чтобы решить, подходить ли к курьеру.
+   * Считается оно по полному набору листов и включает ОБА положительных
+   * состояния: право отгрузить у них одинаковое.
+   */
+  it('считает и «Можно выдать», и «Собран — можно выдавать»', async () => {
+    const keeper = await actorFor(['WAREHOUSE']);
+    const courier = await actorFor(['COURIER']);
+
+    // Лист целиком на маршрутной полке — «Собран».
+    const assembledOrder = await seedOrder();
+    const assembledRoute = await seedRoute([assembledOrder.id], { courierId: courier.userId });
+    const storage = await seedCell('STORAGE');
+    const routeCell = await seedCell('ROUTE');
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: assembledOrder.number, cellCode: storage.code },
+      CONTEXT,
+    );
+    await bindRouteCell(flow, keeper, assembledRoute.id, { cellCode: routeCell.code }, CONTEXT);
+    await pickOrderToRouteCell(
+      flow,
+      keeper,
+      assembledRoute.id,
+      { orderNumber: assembledOrder.number, cellCode: routeCell.code },
+      CONTEXT,
+    );
+
+    // Лист в хранении — «Можно выдать».
+    const storedOrder = await seedOrder();
+    await seedRoute([storedOrder.id], { courierId: courier.userId });
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: storedOrder.number, cellCode: storage.code },
+      CONTEXT,
+    );
+
+    // Лист без коробки — не готов.
+    const emptyOrder = await seedOrder();
+    await seedRoute([emptyOrder.id], { courierId: courier.userId });
+
+    const board = await readIssueBoard(ctx.db);
+    const view = board.find((item) => item.courierUserId === courier.userId);
+    expect(view).toBeDefined();
+    expect(view!.routes).toHaveLength(3);
+    expect(view!.readyRoutes).toBe(2);
+
+    const states = view!.routes.map((route) => route.readiness).sort();
+    expect(states).toEqual(['ASSEMBLED', 'CAN_ISSUE', 'NOT_READY']);
   });
 });

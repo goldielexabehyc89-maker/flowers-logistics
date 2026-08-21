@@ -20,9 +20,9 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
-  CELL_KIND_LABELS,
   STAGE_LABELS,
   STAGE_TONES,
+  issueCellLabel,
   type AssemblyBoard,
   type AssemblyRouteView,
 } from './warehouse-flow';
@@ -43,8 +43,10 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
   const [openRouteId, setOpenRouteId] = useState<string | null>(null);
   const [assembledOpen, setAssembledOpen] = useState(false);
   // Очередь готовой работы открыта сразу; собранные листы — нет, их только
-  // сверяют. Разное значение по умолчанию здесь и есть смысл двух групп.
+  // сверяют. Разное значение по умолчанию здесь и есть смысл групп.
   const [relocatableOpen, setRelocatableOpen] = useState(true);
+  // Листы, которым чего-то не хватает, тоже открыты: это основная работа дня.
+  const [activeOpen, setActiveOpen] = useState(true);
   /** Лист, для которого открыто окно последовательной проверки. */
   const [checkingRouteId, setCheckingRouteId] = useState<string | null>(null);
   /** Что сейчас сканируется: быстрый заказ или дополнительная ячейка листа. */
@@ -110,103 +112,51 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
       )}
 
       {/*
-        «Можно переносить» стоит ВЫШЕ обычных активных листов и раскрыта.
+        Три группы в одном порядке и с одинаковым устройством.
 
-        Это очередь готовой работы: в таком листе ничего не ждут — все коробки
-        уже на складе, и остаётся отнести их на маршрутную полку. Держать её
-        свёрнутой значило бы прятать то, чем кладовщик может заняться прямо
-        сейчас. Сами листы внутри свёрнуты, как и везде на доске.
+        Сверху — «Можно переносить»: в таких листах ничего не ждут, все коробки
+        уже на складе, и остаётся отнести их на маршрутную полку. Это очередь
+        готовой работы, поэтому она раскрыта. Ниже — листы, которым чего-то не
+        хватает, и в самом низу собранные: их только сверяют.
       */}
-      {relocatable.length > 0 && (
-        <div className="stack" data-testid="assembly-relocatable">
-          <button
-            type="button"
-            className="wh-group__toggle"
-            aria-expanded={relocatableOpen}
-            data-testid="assembly-relocatable-toggle"
-            onClick={() => setRelocatableOpen((open) => !open)}
-          >
-            <span>Можно переносить</span>
-            <span className="wh-group__count" data-testid="assembly-relocatable-count">
-              {relocatable.length}
-            </span>
-            <span aria-hidden="true">{relocatableOpen ? '▾' : '▸'}</span>
-          </button>
+      <RouteGroup
+        id="relocatable"
+        title="Можно переносить"
+        tone="ready"
+        routes={relocatable}
+        open={relocatableOpen}
+        onToggle={() => setRelocatableOpen((open) => !open)}
+        openRouteId={openRouteId}
+        onToggleRoute={setOpenRouteId}
+        onCheck={setCheckingRouteId}
+        onAddCell={setScanning}
+      />
 
-          {relocatableOpen &&
-            relocatable.map((route) => (
-              <RouteCard
-                key={route.routeId}
-                route={route}
-                expanded={route.routeId === openRouteId}
-                onToggle={() =>
-                  setOpenRouteId(route.routeId === openRouteId ? null : route.routeId)
-                }
-                onCheck={() => setCheckingRouteId(route.routeId)}
-                onAddCell={() =>
-                  setScanning({
-                    kind: 'cell',
-                    routeId: route.routeId,
-                    routeNumber: route.routeNumber,
-                  })
-                }
-              />
-            ))}
-        </div>
-      )}
+      <RouteGroup
+        id="active"
+        title="Не всё собрано"
+        tone="waiting"
+        routes={active}
+        open={activeOpen}
+        onToggle={() => setActiveOpen((open) => !open)}
+        openRouteId={openRouteId}
+        onToggleRoute={setOpenRouteId}
+        onCheck={setCheckingRouteId}
+        onAddCell={setScanning}
+      />
 
-      <div className="stack" data-testid="assembly-active">
-        {active.map((route) => (
-          <RouteCard
-            key={route.routeId}
-            route={route}
-            expanded={route.routeId === openRouteId}
-            onToggle={() => setOpenRouteId(route.routeId === openRouteId ? null : route.routeId)}
-            onCheck={() => setCheckingRouteId(route.routeId)}
-            onAddCell={() =>
-              setScanning({ kind: 'cell', routeId: route.routeId, routeNumber: route.routeNumber })
-            }
-          />
-        ))}
-      </div>
-
-      {assembled.length > 0 && (
-        <div className="stack" data-testid="assembly-assembled">
-          <button
-            type="button"
-            className="wh-group__toggle"
-            aria-expanded={assembledOpen}
-            data-testid="assembly-assembled-toggle"
-            onClick={() => setAssembledOpen((open) => !open)}
-          >
-            <span>Собранные</span>
-            <span className="wh-group__count" data-testid="assembly-assembled-count">
-              {assembled.length}
-            </span>
-            <span aria-hidden="true">{assembledOpen ? '▾' : '▸'}</span>
-          </button>
-
-          {assembledOpen &&
-            assembled.map((route) => (
-              <RouteCard
-                key={route.routeId}
-                route={route}
-                expanded={route.routeId === openRouteId}
-                onToggle={() =>
-                  setOpenRouteId(route.routeId === openRouteId ? null : route.routeId)
-                }
-                onCheck={() => setCheckingRouteId(route.routeId)}
-                onAddCell={() =>
-                  setScanning({
-                    kind: 'cell',
-                    routeId: route.routeId,
-                    routeNumber: route.routeNumber,
-                  })
-                }
-              />
-            ))}
-        </div>
-      )}
+      <RouteGroup
+        id="assembled"
+        title="Собранные"
+        tone="done"
+        routes={assembled}
+        open={assembledOpen}
+        onToggle={() => setAssembledOpen((open) => !open)}
+        openRouteId={openRouteId}
+        onToggleRoute={setOpenRouteId}
+        onCheck={setCheckingRouteId}
+        onAddCell={setScanning}
+      />
 
       {checkingRouteId !== null && (
         <RouteCheckDialog
@@ -275,6 +225,83 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
  * раскрывает состав. Разные действия у разных мест намеренно: иначе
  * попытка посмотреть состав каждый раз запускала бы проверку.
  */
+/** Цвет точки группы: он же и есть её смысл. */
+type GroupTone = 'ready' | 'waiting' | 'done';
+
+/**
+ * Группа маршрутных листов на доске сборки.
+ *
+ * Три группы устроены одинаково и различаются только заголовком, цветом
+ * точки и тем, раскрыты ли по умолчанию. Пока каждая была написана отдельно,
+ * правка одной молча расходилась с двумя другими.
+ *
+ * Пустая группа не показывается: заголовок с нулём занимает строку и обещает
+ * работу, которой нет.
+ */
+function RouteGroup({
+  id,
+  title,
+  tone,
+  routes,
+  open,
+  onToggle,
+  openRouteId,
+  onToggleRoute,
+  onCheck,
+  onAddCell,
+}: {
+  id: string;
+  title: string;
+  tone: GroupTone;
+  routes: AssemblyRouteView[];
+  open: boolean;
+  onToggle: () => void;
+  openRouteId: string | null;
+  onToggleRoute: (routeId: string | null) => void;
+  onCheck: (routeId: string) => void;
+  onAddCell: (input: { kind: 'cell'; routeId: string; routeNumber: string }) => void;
+}): React.JSX.Element | null {
+  if (routes.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="stack wh-group" data-testid={`assembly-${id}`}>
+      <button
+        type="button"
+        className="wh-group__toggle"
+        aria-expanded={open}
+        data-testid={`assembly-${id}-toggle`}
+        onClick={onToggle}
+      >
+        <span className={`wh-group__dot wh-group__dot--${tone}`} aria-hidden="true" />
+        <span className="wh-group__title">{title}</span>
+        <span
+          className="wh-group__count wh-group__count--sunken"
+          data-testid={`assembly-${id}-count`}
+        >
+          {routes.length}
+        </span>
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+
+      {open &&
+        routes.map((route) => (
+          <RouteCard
+            key={route.routeId}
+            route={route}
+            expanded={route.routeId === openRouteId}
+            onToggle={() => onToggleRoute(route.routeId === openRouteId ? null : route.routeId)}
+            onCheck={() => onCheck(route.routeId)}
+            onAddCell={() =>
+              onAddCell({ kind: 'cell', routeId: route.routeId, routeNumber: route.routeNumber })
+            }
+          />
+        ))}
+    </div>
+  );
+}
+
 function RouteCard({
   route,
   expanded,
@@ -328,10 +355,12 @@ function RouteCard({
           >
             {route.routeNumber}
           </button>
-          <div className="muted text-sm">
-            {route.deliveryDate}
-            {route.earliestMinute === null ? '' : ` · ${minutes(route.earliestMinute)}`} ·{' '}
-            {route.total} заказов · готово {route.ready}
+          {/*
+            Короткая строка вместо перечисления: дата уже стоит в номере листа,
+            а «сколько готово из скольких» читается из скобок.
+          */}
+          <div className="muted text-sm" data-testid="assembly-route-counts">
+            {route.total} ({route.ready} из {route.total})
           </div>
         </div>
 
@@ -357,10 +386,6 @@ function RouteCard({
             + Ячейка
           </Button>
         </div>
-
-        <span className="wh-route__toggle" aria-hidden="true" data-testid="assembly-route-toggle">
-          {expanded ? '▾' : '▸'}
-        </span>
       </header>
 
       {expanded && (
@@ -379,18 +404,22 @@ function RouteCard({
                   ? 'время не задано'
                   : `${minutes(order.startMinute)}–${minutes(order.endMinute)}`}
               </span>
-              <span className="muted text-sm">
-                {order.cellCode === null
-                  ? '—'
-                  : `${order.cellCode} · ${CELL_KIND_LABELS[order.cellKind ?? 'STORAGE']}`}
+              {/*
+                Ячейка вплотную к статусу и в скобках — тот же вид, что
+                в «Выдаче»: вместе они отвечают, где коробка и что с ней.
+              */}
+              <span className="wh-route__cell-note" data-testid="assembly-order-cell">
+                {issueCellLabel(order)}
               </span>
               <span className="wh-route__badges">
                 <StatusBadge tone={STAGE_TONES[order.stage]}>
                   {STAGE_LABELS[order.stage]}
                 </StatusBadge>
-                {order.requiresRelocation && (
-                  <StatusBadge tone="warning">Требуется перемещение</StatusBadge>
-                )}
+                {/*
+                  Отдельной пометки «требуется перемещение» больше нет: про
+                  коробку в хранении уже сказали и ячейка, и стадия, а третья
+                  подпись о том же занимала строку и спорила с ними за взгляд.
+                */}
                 {order.cancelled && <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>}
               </span>
             </li>
@@ -466,6 +495,7 @@ function RouteCheckDialog({
   }
 
   const checked = route.ready;
+  const allChecked = route.total > 0 && checked >= route.total;
 
   return (
     <div className="scanner-backdrop" role="presentation" onClick={onClose}>
@@ -493,8 +523,9 @@ function RouteCheckDialog({
         <p className="wh-check__progress" data-testid="assembly-check-progress">
           Проверено: {checked} из {route.total}
         </p>
+        {/* Полная полоса зеленеет: «проверено всё» видно раньше, чем прочитано. */}
         <div
-          className="wh-check__bar"
+          className={allChecked ? 'wh-check__bar wh-check__bar--done' : 'wh-check__bar'}
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={route.total}
@@ -503,10 +534,15 @@ function RouteCheckDialog({
           <span style={{ width: `${route.total === 0 ? 0 : (checked / route.total) * 100}%` }} />
         </div>
 
+        {/*
+          Все коробки на своих полках — сканировать нечего, и кнопка гаснет.
+          Живая кнопка здесь предлагала бы работу, которой не осталось.
+        */}
         <Button
           variant="primary"
           className="wh-scan__button"
           data-testid="assembly-check-scan"
+          disabled={allChecked}
           onClick={() => setScanning(true)}
         >
           Сканировать заказ
@@ -559,10 +595,8 @@ function RouteCheckDialog({
             >
               <span className="wh-route__position">{order.position}</span>
               <span className="wh-route__order-number">{order.orderNumber}</span>
-              <span className="muted text-sm">
-                {order.cellCode === null
-                  ? '—'
-                  : `${order.cellCode} · ${CELL_KIND_LABELS[order.cellKind ?? 'STORAGE']}`}
+              <span className="wh-route__cell-note" data-testid="assembly-check-cell">
+                {issueCellLabel(order)}
               </span>
               <StatusBadge tone={order.stage === 'READY' ? 'success' : 'neutral'}>
                 {order.stage === 'READY' ? 'Проверен' : 'Ожидает'}

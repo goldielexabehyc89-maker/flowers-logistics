@@ -358,6 +358,14 @@ export interface IssueCourierView {
   fullName: string;
   /** Телефон приходит обычным авторизованным ответом и в realtime не уходит. */
   phone: string;
+  /**
+   * Сколько листов курьера готовы к выдаче прямо сейчас.
+   *
+   * Считает сервер по полному набору листов курьера, а не интерфейс по
+   * загруженным строкам: кладовщик по этому числу решает, подходить ли
+   * к курьеру вообще, и «сколько успело загрузиться» — не тот ответ.
+   */
+  readyRoutes: number;
   routes: IssueRouteView[];
 }
 
@@ -505,6 +513,7 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
         courierUserId: courier.id,
         fullName: courier.fullName,
         phone: courier.phone,
+        readyRoutes: 0,
         routes: [view],
       });
     } else {
@@ -515,6 +524,8 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
   const couriers = [...byCourier.values()];
   for (const courier of couriers) {
     courier.routes.sort(compareRoutes);
+    // Готов — это оба положительных состояния: право отгрузить у них одно.
+    courier.readyRoutes = courier.routes.filter((route) => route.readiness !== 'NOT_READY').length;
   }
   // Курьеры по имени: список короткий, и алфавит здесь понятнее любого
   // другого порядка.
