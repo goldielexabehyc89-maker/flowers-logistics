@@ -676,6 +676,87 @@ body:has(.scanner-backdrop) {
   background: #000;
 }
 
+/*
+ * Окно исхода сканирования.
+ *
+ * Отдельное окно поверх кадра, а не подпись под ним. Кладовщик смотрит
+ * в рамку считывания, и результат обязан появиться там же: подпись ниже
+ * камеры он замечал только тогда, когда переставало происходить что-либо
+ * ещё. Окно накрывает кадр и центрируется по нему.
+ */
+.scan-result {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3);
+  /* Кадр под окном приглушается: он больше не то, на что нужно смотреть. */
+  background: rgb(43 47 58 / 45%);
+}
+
+.scan-result__window {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 100%;
+  max-width: 420px;
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-out);
+}
+
+.scan-result__window--success {
+  background: var(--color-success-soft);
+}
+
+.scan-result__window--error {
+  background: var(--color-error-soft);
+}
+
+/* Значок отвечает на вопрос «получилось или нет» раньше, чем прочитан текст. */
+.scan-result__icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.scan-result__window--success .scan-result__icon {
+  color: var(--color-success);
+}
+
+.scan-result__window--error .scan-result__icon {
+  color: var(--color-error);
+}
+
+.scan-result__text {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.scan-result__line {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.scan-result__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+/*
+ * Кнопки делят строку поровну.
+ *
+ * «Повторить» и «Отмена» — два равноправных исхода разговора, и разная
+ * ширина подсказывала бы, что одно из них правильнее.
+ */
+.scan-result__actions .btn {
+  flex: 1 1 0;
+}
+
 .scanner__video {
   width: 100%;
   height: 100%;

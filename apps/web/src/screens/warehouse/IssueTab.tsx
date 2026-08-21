@@ -17,7 +17,12 @@ import { useToast } from '../../ui/ToastProvider';
 import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
-import type { IssueBoard, IssueRouteView } from './warehouse-flow';
+import {
+  ISSUE_READINESS_LABELS,
+  issueCellLabel,
+  type IssueBoard,
+  type IssueRouteView,
+} from './warehouse-flow';
 import './warehouse.css';
 
 const BOARD_KEY = ['warehouse-issue-board'];
@@ -82,37 +87,67 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                   data-testid="issue-route"
                   data-route-number={route.routeNumber}
                 >
-                  <header className="wh-route__head">
+                  {/*
+                    Шапка раскрывает карточку целиком.
+
+                    Стрелка остаётся указателем состояния, но целиться в неё
+                    пальцем на телефоне неудобно, а свободного места в шапке
+                    много. Роль и клавиши заданы явно: шапка — это не кнопка
+                    по разметке, и без них она осталась бы недоступной с
+                    клавиатуры.
+                  */}
+                  <header
+                    className="wh-route__head wh-route__head--clickable"
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={route.routeId === openRoute}
+                    data-testid="issue-route-head"
+                    onClick={() => setOpenRoute(route.routeId === openRoute ? null : route.routeId)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setOpenRoute(route.routeId === openRoute ? null : route.routeId);
+                      }
+                    }}
+                  >
                     <div className="wh-route__main">
-                      <strong>{route.routeNumber}</strong>
+                      <strong className="wh-route__number-text">{route.routeNumber}</strong>
                       <div className="muted text-sm">
                         {route.deliveryDate} · {route.total} заказов · внесено {route.checked} из{' '}
                         {route.total}
                       </div>
+                      {route.readiness !== 'NOT_READY' && (
+                        <span data-testid="issue-route-readiness" data-readiness={route.readiness}>
+                          <StatusBadge tone={route.readiness === 'ASSEMBLED' ? 'success' : 'info'}>
+                            {ISSUE_READINESS_LABELS[route.readiness]}
+                          </StatusBadge>
+                        </span>
+                      )}
                     </div>
 
+                    {/*
+                      Самостоятельные кнопки внутри шапки не переключают
+                      раскрытие: нажатие «Отгрузить» — это отгрузка, а не
+                      просьба показать состав.
+                    */}
                     <Button
                       variant="primary"
                       data-testid="issue-ship"
-                      onClick={() => setShipping(route)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setShipping(route);
+                      }}
                     >
                       Отгрузить
                     </Button>
 
-                    <button
-                      type="button"
+                    <span
                       className="wh-route__toggle"
-                      aria-expanded={route.routeId === openRoute}
-                      aria-label={
-                        route.routeId === openRoute ? 'Свернуть заказы' : 'Показать заказы'
-                      }
+                      aria-hidden="true"
                       data-testid="issue-route-toggle"
-                      onClick={() =>
-                        setOpenRoute(route.routeId === openRoute ? null : route.routeId)
-                      }
                     >
                       {route.routeId === openRoute ? '▾' : '▸'}
-                    </button>
+                    </span>
                   </header>
 
                   {route.routeId === openRoute && (
@@ -125,8 +160,14 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                         >
                           <span className="wh-route__position">{order.position}</span>
                           <span className="wh-route__order-number">{order.orderNumber}</span>
-                          {/* Ячейки нет — такой лист отгрузить нельзя. */}
-                          <span className="muted text-sm">{order.cellCode ?? '—'}</span>
+                          {/*
+                            Фактическая полка коробки: маршрутная или хранения.
+                            Прочерк — только когда размещения нет вовсе, и тогда
+                            же лист отгрузить нельзя.
+                          */}
+                          <span className="muted text-sm" data-testid="issue-order-cell">
+                            {issueCellLabel(order)}
+                          </span>
                           <span className="wh-route__badges">
                             <StatusBadge tone={order.ready ? 'success' : 'warning'}>
                               {order.ready ? 'Готов' : 'Не готов'}
@@ -361,7 +402,9 @@ function ShipDialog({
             >
               <span className="wh-route__position">{order.position}</span>
               <span className="wh-route__order-number">{order.orderNumber}</span>
-              <span className="muted text-sm">{order.cellCode ?? '—'}</span>
+              <span className="muted text-sm" data-testid="issue-check-cell">
+                {issueCellLabel(order)}
+              </span>
               <StatusBadge tone={order.checked ? 'success' : 'neutral'}>
                 {order.checked ? 'Проверен' : 'Ожидает'}
               </StatusBadge>
@@ -386,6 +429,7 @@ function ShipDialog({
 
         {scanning && (
           <ScannerScreen
+            resultWindow
             chain="ISSUE"
             operation={`Отгрузка ${current.routeNumber}`}
             onIntent={async (intent: ScanIntent): Promise<ScanEvent> => {
@@ -413,7 +457,15 @@ function ShipDialog({
                     ? `Заказ ${result.orderNumber} уже внесён`
                     : `Заказ ${result.orderNumber} внесён`,
                   progress: { done: result.checked, total: result.total },
-                  final: false,
+                  /*
+                   * Заказ проверен — окно сканирования закрывается.
+                   *
+                   * Возврат к списку обязателен: человек должен увидеть
+                   * обновлённый прогресс и новое состояние строки, а не гадать,
+                   * засчиталась ли проверка. Следующий заказ сканируется
+                   * отдельным нажатием — камера сама не открывается.
+                   */
+                  final: true,
                 };
               } catch (error: unknown) {
                 return {

@@ -90,6 +90,23 @@ export function cellLabel(order: PlacedOrderView): string {
   return order.cellCode ?? 'Не принят';
 }
 
+/**
+ * Ячейка заказа в листе выдачи.
+ *
+ * Показывается ФАКТИЧЕСКОЕ место коробки, и у хранения оно подписано: идти
+ * за ней придётся не к маршрутной полке. Прочерк остаётся ровно для одного
+ * случая — действующего размещения нет, коробки на складе нет вовсе.
+ */
+export function issueCellLabel(order: {
+  cellCode: string | null;
+  cellKind: StorageCellKind | null;
+}): string {
+  if (order.cellCode === null) {
+    return '—';
+  }
+  return order.cellKind === 'STORAGE' ? `${order.cellCode} · хранение` : order.cellCode;
+}
+
 /*
  * Счётчики комплектования и выдачи здесь больше не считаются.
  *
@@ -274,6 +291,8 @@ export interface AssemblyRouteView {
 
 export interface AssemblyBoard {
   active: AssemblyRouteView[];
+  /** Собрано всё, но часть коробок ещё в хранении: остался только перенос. */
+  relocatable: AssemblyRouteView[];
   assembled: AssemblyRouteView[];
 }
 
@@ -283,10 +302,29 @@ export interface IssueOrderView {
   orderId: string;
   orderNumber: string;
   position: number;
+  /** Ячейка, в которой коробка лежит сейчас: маршрутная или хранения. */
   cellCode: string | null;
+  /** Тип ячейки приходит с сервера и по коду не угадывается. */
+  cellKind: StorageCellKind | null;
   ready: boolean;
+  /** Коробка стоит в маршрутной ячейке именно этого листа. */
+  inRouteCell: boolean;
   checked: boolean;
 }
+
+/** Готовность листа к выдаче: считает сервер, клиент только показывает. */
+export type IssueReadiness = 'ASSEMBLED' | 'CAN_ISSUE' | 'NOT_READY';
+
+/**
+ * Подписи готовности.
+ *
+ * Два положительных состояния различаются не правом отгрузить, а тем, где
+ * стоят коробки: «собран» означает, что по складу ходить не придётся.
+ */
+export const ISSUE_READINESS_LABELS: Record<Exclude<IssueReadiness, 'NOT_READY'>, string> = {
+  ASSEMBLED: 'Собран — можно выдавать',
+  CAN_ISSUE: 'Можно выдать',
+};
 
 export interface IssueRouteView {
   routeId: string;
@@ -297,6 +335,7 @@ export interface IssueRouteView {
   checked: number;
   sessionOpen: boolean;
   shippable: boolean;
+  readiness: IssueReadiness;
   orders: IssueOrderView[];
 }
 

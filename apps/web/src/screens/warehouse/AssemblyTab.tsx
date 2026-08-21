@@ -19,7 +19,13 @@ import { useToast } from '../../ui/ToastProvider';
 import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
-import { CELL_KIND_LABELS, STAGE_LABELS, STAGE_TONES, type AssemblyBoard } from './warehouse-flow';
+import {
+  CELL_KIND_LABELS,
+  STAGE_LABELS,
+  STAGE_TONES,
+  type AssemblyBoard,
+  type AssemblyRouteView,
+} from './warehouse-flow';
 import './warehouse.css';
 
 interface Props {
@@ -36,6 +42,9 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
 
   const [openRouteId, setOpenRouteId] = useState<string | null>(null);
   const [assembledOpen, setAssembledOpen] = useState(false);
+  // Очередь готовой работы открыта сразу; собранные листы — нет, их только
+  // сверяют. Разное значение по умолчанию здесь и есть смысл двух групп.
+  const [relocatableOpen, setRelocatableOpen] = useState(true);
   /** Лист, для которого открыто окно последовательной проверки. */
   const [checkingRouteId, setCheckingRouteId] = useState<string | null>(null);
   /** Что сейчас сканируется: быстрый заказ или дополнительная ячейка листа. */
@@ -77,7 +86,7 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
     return <ErrorState title="Не удалось загрузить листы" onRetry={() => void board.refetch()} />;
   }
 
-  const { active, assembled } = board.data;
+  const { active, relocatable, assembled } = board.data;
 
   return (
     <>
@@ -93,11 +102,57 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
         </Button>
       </div>
 
-      {active.length === 0 && assembled.length === 0 && (
+      {active.length === 0 && relocatable.length === 0 && assembled.length === 0 && (
         <EmptyState
           title="Листов для сборки нет"
           description="Подтверждённые маршрутные листы появятся здесь автоматически."
         />
+      )}
+
+      {/*
+        «Можно переносить» стоит ВЫШЕ обычных активных листов и раскрыта.
+
+        Это очередь готовой работы: в таком листе ничего не ждут — все коробки
+        уже на складе, и остаётся отнести их на маршрутную полку. Держать её
+        свёрнутой значило бы прятать то, чем кладовщик может заняться прямо
+        сейчас. Сами листы внутри свёрнуты, как и везде на доске.
+      */}
+      {relocatable.length > 0 && (
+        <div className="stack" data-testid="assembly-relocatable">
+          <button
+            type="button"
+            className="wh-group__toggle"
+            aria-expanded={relocatableOpen}
+            data-testid="assembly-relocatable-toggle"
+            onClick={() => setRelocatableOpen((open) => !open)}
+          >
+            <span>Можно переносить</span>
+            <span className="wh-group__count" data-testid="assembly-relocatable-count">
+              {relocatable.length}
+            </span>
+            <span aria-hidden="true">{relocatableOpen ? '▾' : '▸'}</span>
+          </button>
+
+          {relocatableOpen &&
+            relocatable.map((route) => (
+              <RouteCard
+                key={route.routeId}
+                route={route}
+                expanded={route.routeId === openRouteId}
+                onToggle={() =>
+                  setOpenRouteId(route.routeId === openRouteId ? null : route.routeId)
+                }
+                onCheck={() => setCheckingRouteId(route.routeId)}
+                onAddCell={() =>
+                  setScanning({
+                    kind: 'cell',
+                    routeId: route.routeId,
+                    routeNumber: route.routeNumber,
+                  })
+                }
+              />
+            ))}
+        </div>
       )}
 
       <div className="stack" data-testid="assembly-active">
@@ -166,6 +221,7 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
 
       {scanning?.kind === 'quick' && (
         <ScannerScreen
+          resultWindow
           chain="PICK"
           operation="Сборка"
           onIntent={quickPickHandler(client, refresh)}
@@ -178,6 +234,7 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
 
       {scanning?.kind === 'cell' && (
         <ScannerScreen
+          resultWindow
           chain="CELL_ONLY"
           operation={`Лист ${scanning.routeNumber}`}
           onIntent={async (intent: ScanIntent): Promise<ScanEvent> => {
@@ -238,13 +295,36 @@ function RouteCard({
       data-route-number={route.routeNumber}
       data-expanded={expanded ? 'true' : 'false'}
     >
-      <header className="wh-route__head">
+      {/*
+        Шапка раскрывает карточку целиком — как и в «Выдаче».
+
+        Стрелка остаётся указателем состояния: целиться в неё пальцем неудобно,
+        а свободного места в шапке много. Номер листа и «+ Ячейка» — свои
+        действия, и раскрытие они не переключают.
+      */}
+      <header
+        className="wh-route__head wh-route__head--clickable"
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        data-testid="assembly-route-head"
+        onClick={onToggle}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onToggle();
+          }
+        }}
+      >
         <div className="wh-route__main">
           <button
             type="button"
             className="wh-route__number"
             data-testid="assembly-route-number"
-            onClick={onCheck}
+            onClick={(event) => {
+              event.stopPropagation();
+              onCheck();
+            }}
           >
             {route.routeNumber}
           </button>
@@ -266,21 +346,21 @@ function RouteCard({
               </span>
             ))
           )}
-          <Button variant="ghost" data-testid="assembly-add-cell" onClick={onAddCell}>
+          <Button
+            variant="ghost"
+            data-testid="assembly-add-cell"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAddCell();
+            }}
+          >
             + Ячейка
           </Button>
         </div>
 
-        <button
-          type="button"
-          className="wh-route__toggle"
-          aria-expanded={expanded}
-          aria-label={expanded ? 'Свернуть состав' : 'Показать состав'}
-          data-testid="assembly-route-toggle"
-          onClick={onToggle}
-        >
+        <span className="wh-route__toggle" aria-hidden="true" data-testid="assembly-route-toggle">
           {expanded ? '▾' : '▸'}
-        </button>
+        </span>
       </header>
 
       {expanded && (
@@ -348,11 +428,20 @@ function RouteCheckDialog({
     queryFn: () => client.get<AssemblyBoard>('/api/warehouse/assembly'),
   });
 
+  /*
+   * Лист ищется во ВСЕХ группах доски.
+   *
+   * Групп три, и перечислять их по памяти опасно: стоит появиться новой,
+   * как окно проверки молча перестаёт находить лист и открывается пустым.
+   * Поэтому список собирается из всех значений ответа, а не из выбранных
+   * вручную полей.
+   */
   const route =
     board.data === undefined
       ? null
-      : ([...board.data.active, ...board.data.assembled].find((item) => item.routeId === routeId) ??
-        null);
+      : ((Object.values(board.data) as AssemblyRouteView[][])
+          .flat()
+          .find((item) => item.routeId === routeId) ?? null);
 
   const pick = useMutation({
     mutationFn: (input: { orderNumber: string; cellCode: string }) =>
@@ -493,6 +582,7 @@ function RouteCheckDialog({
 
         {scanning && (
           <ScannerScreen
+            resultWindow
             chain="PICK"
             operation={`Лист ${route.routeNumber}`}
             expectedCell={route.cells[0]?.code ?? null}
@@ -612,7 +702,14 @@ function routePickHandler(
           type: 'succeeded',
           text: `Заказ ${result.orderNumber} в ячейке ${result.cellCode}: ${result.picked} из ${result.total}`,
           progress: { done: result.picked, total: result.total },
-          final: false,
+          /*
+           * Заказ перенесён — окно сканирования закрывается.
+           *
+           * Список с прогрессом остаётся под ним и виден сразу: он не
+           * размонтируется, поэтому прокрутка сохраняется. Следующий заказ
+           * сканируется новым нажатием «Сканировать заказ».
+           */
+          final: true,
         };
       } catch (error: unknown) {
         return {

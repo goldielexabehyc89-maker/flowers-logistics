@@ -2173,12 +2173,37 @@ test('склад: развилка «сборка или хранение», с�
   const issueRoute = await openIssueRoute(page, routeNumber);
   await expect(issueRoute).toBeVisible();
 
-  // Третий уровень: заказы листа раскрываются отдельно.
+  /*
+   * Состояние листа считает сервер и называет словами.
+   *
+   * Здесь смесь: одна коробка в хранении, вторая на маршрутной полке. Лист
+   * отгружается целиком, но по складу ещё придётся пройти — значит «можно
+   * выдать», а не более точное «собран».
+   */
+  const readiness = issueRoute.getByTestId('issue-route-readiness');
+  await expect(readiness).toHaveAttribute('data-readiness', 'CAN_ISSUE');
+  await expect(readiness).toContainText('Можно выдать');
+
+  // Третий уровень: заказы листа раскрываются отдельно и по шапке целиком.
+  await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
+  const issueHead = issueRoute.getByTestId('issue-route-head');
+  await expect(issueHead).toHaveAttribute('aria-expanded', 'false');
+  await issueHead.locator('.muted').first().click();
+  await expect(issueHead).toHaveAttribute('aria-expanded', 'true');
+  await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
+  await issueHead.locator('.muted').first().click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
   await issueRoute.getByTestId('issue-route-toggle').click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
 
+  // Ячейка каждого заказа названа, «Не готов» у стоящей коробки не появляется.
+  await expect(issueRoute.getByTestId('issue-order-cell').first()).not.toHaveText('—');
+  // Коробка в хранении больше не подписывается «Не готов»: полка известна.
+  await expect(issueRoute.locator('.wh-route__badges', { hasText: 'Не готов' })).toHaveCount(0);
+
+  // «Отгрузить» — своё действие: раскрытие оно не переключает.
   await issueRoute.getByTestId('issue-ship').click();
+  await expect(issueHead).toHaveAttribute('aria-expanded', 'true');
   const ship = page.getByTestId('issue-ship-dialog');
   await expect(ship).toBeVisible();
 
@@ -3276,6 +3301,157 @@ test('самовывоз: флорист собрал → склад приня�
 });
 
 /**
+ * Исход складского сканирования — отдельное окно поверх кадра.
+ *
+ * Раньше результат появлялся подписью под камерой: человек смотрит в рамку
+ * считывания, и об отказе узнавал только по тому, что дальше ничего не
+ * происходит. Проверяется именно это — где окно, сколько живёт успех, ждёт ли
+ * отказ решения и одинаково ли ведёт себя технический отказ камеры.
+ */
+test('склад: исход сканирования показывается окном поверх камеры', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const storageCell = requiredEnv('E2E_WH_STORAGE_CELL');
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Двойник камеры с двумя режимами: обычным и «камера не запускается».
+  await page.addInitScript(() => {
+    interface FakeCameraGlobals {
+      __flCameraAdapter?: unknown;
+      __flCameraRunning?: boolean;
+      __flCameraFails?: boolean;
+      __flScan?: (code: string) => void;
+      __flClear?: () => void;
+    }
+    const scope = globalThis as unknown as FakeCameraGlobals;
+
+    const queue: string[] = [];
+    let onCode: ((code: string) => void) | null = null;
+    let onEmpty: (() => void) | null = null;
+    let running = false;
+
+    const pump = (): void => {
+      if (!running) {
+        return;
+      }
+      const next = queue[0];
+      if (next === undefined) {
+        onEmpty?.();
+      } else {
+        onCode?.(next);
+      }
+      setTimeout(pump, 40);
+    };
+
+    scope.__flCameraAdapter = {
+      start: (
+        _video: unknown,
+        events: { onCode: (code: string) => void; onEmptyFrame: () => void },
+      ) => {
+        if (scope.__flCameraFails === true) {
+          // Тот же класс отказа, что у запрещённого доступа: поток не открылся.
+          return Promise.reject(new Error('camera failed'));
+        }
+        onCode = events.onCode;
+        onEmpty = events.onEmptyFrame;
+        running = true;
+        scope.__flCameraRunning = true;
+        setTimeout(pump, 40);
+        return Promise.resolve({
+          stop: () => {
+            running = false;
+            onCode = null;
+            onEmpty = null;
+            scope.__flCameraRunning = false;
+          },
+        });
+      },
+    };
+
+    scope.__flScan = (code: string) => {
+      queue.push(code);
+    };
+    scope.__flClear = () => {
+      queue.length = 0;
+    };
+  });
+
+  const scan = async (code: string): Promise<void> => {
+    await page.evaluate((value) => {
+      (globalThis as unknown as { __flScan: (code: string) => void }).__flScan(value);
+    }, code);
+  };
+  const clearFrame = (): Promise<void> =>
+    page.evaluate(() => {
+      (globalThis as unknown as { __flClear: () => void }).__flClear();
+    });
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Склад');
+  await page.getByTestId('wh-scan-camera').click();
+
+  /*
+   * 1. Отказ: окно лежит ПОВЕРХ кадра, а не под ним.
+   *
+   * Ячейка хранения вместо заказа — понятный человеку случай «не тот предмет».
+   */
+  await scan(storageCell);
+  const error = page.getByTestId('scan-error');
+  await expect(error).toBeVisible();
+  await clearFrame();
+
+  const videoBox = await page.getByTestId('scan-video').boundingBox();
+  const errorBox = await error.boundingBox();
+  expect(videoBox).not.toBeNull();
+  expect(errorBox).not.toBeNull();
+  // Центр окна лежит внутри кадра: подпись под камерой этого не давала.
+  const centerY = errorBox!.y + errorBox!.height / 2;
+  expect(centerY).toBeGreaterThanOrEqual(videoBox!.y);
+  expect(centerY).toBeLessThanOrEqual(videoBox!.y + videoBox!.height);
+
+  // Что распознано и что ожидалось — обе строки на месте.
+  await expect(page.getByTestId('scan-error-scanned')).toContainText(storageCell);
+  await expect(page.getByTestId('scan-error-expected')).toContainText('заказа');
+
+  // 2. Отказ сам не закрывается: он ждёт решения человека.
+  await page.waitForTimeout(2500);
+  await expect(error).toBeVisible();
+  await expect(page.getByTestId('scan-retry')).toBeVisible();
+  await expect(page.getByTestId('scan-error-cancel')).toBeVisible();
+
+  // 3. «Отмена» закрывает сканер и возвращает на рабочий экран.
+  await page.getByTestId('scan-error-cancel').click();
+  await expect(page.getByTestId('scan-video')).toHaveCount(0);
+  await expect(page.getByTestId('wh-scan-camera')).toBeVisible();
+
+  /*
+   * 4. Технический отказ камеры показывается тем же окном.
+   *
+   * Для человека это одно событие — «отсканировать сейчас не получилось», —
+   * и разные способы сообщить о нём заставляли бы искать, куда смотреть.
+   */
+  await page.evaluate(() => {
+    (globalThis as unknown as { __flCameraFails: boolean }).__flCameraFails = true;
+  });
+  await page.getByTestId('wh-scan-camera').click();
+  await expect(page.getByTestId('scan-error')).toBeVisible();
+  await expect(page.getByTestId('scan-retry')).toBeVisible();
+  await expect(page.getByTestId('scan-error-cancel')).toBeVisible();
+
+  // «Повторить» пробует запустить камеру заново: разрешение могли выдать.
+  await page.evaluate(() => {
+    (globalThis as unknown as { __flCameraFails: boolean }).__flCameraFails = false;
+  });
+  await page.getByTestId('scan-retry').click();
+  await expect(page.getByTestId('scan-error')).toHaveCount(0);
+  await expect(page.getByTestId('scan-hint')).toBeVisible();
+
+  await page.getByTestId('scan-close').click();
+});
+
+/**
  * Камера склада с подменённым адаптером.
  *
  * Настоящего устройства и разрешения в CI нет, а проводку «кнопка → шаг →
@@ -3510,20 +3686,31 @@ test('склад с камеры: окно, промежуточный успе�
   await scan(firstOrder, async () => {
     await expect(success).toContainText(`Заказ ${firstOrder} внесён`);
   });
-  // Камера не закрылась между заказами: курьер стоит рядом.
-  expect(await cameraRunning()).toBe(true);
-  await expect(page.getByTestId('scan-progress')).toHaveText('1 из 2');
 
+  /*
+   * Заказ проверен — сканер закрывается и возвращает к списку.
+   *
+   * Так человек видит обновлённый прогресс и новое состояние строки, а не
+   * гадает, засчиталась ли проверка. Следующий заказ сканируется отдельным
+   * нажатием: камера сама не открывается.
+   */
+  await expect(page.getByTestId('scan-video')).toHaveCount(0);
+  expect(await cameraRunning()).toBe(false);
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 2');
+
+  // Повтор того же заказа честно называется повтором и прогресс не двигает.
+  await page.getByTestId('issue-scan').click();
   await scan(firstOrder, async () => {
     await expect(success).toContainText('уже внесён');
   });
-  await expect(page.getByTestId('scan-progress')).toHaveText('1 из 2');
+  await expect(page.getByTestId('scan-video')).toHaveCount(0);
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 2');
 
+  await page.getByTestId('issue-scan').click();
   await scan(secondOrder, async () => {
     await expect(success).toContainText(`Заказ ${secondOrder} внесён`);
   });
-  await expect(page.getByTestId('scan-progress')).toHaveText('2 из 2');
-  await page.getByTestId('scan-cancel').click();
+  await expect(page.getByTestId('scan-video')).toHaveCount(0);
   expect(await cameraRunning()).toBe(false);
 
   await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 2 из 2');
@@ -6263,9 +6450,27 @@ test('сборка: лист уходит в «Собранные» и возв�
   await expect(page.locator('.toast-region')).toContainText(movedOrder);
 
   await page.getByTestId('wh-tab-picking').click();
+  /*
+   * Лист уходит из «Собранных» — но не к тем, где чего-то не хватает.
+   *
+   * Все коробки на складе, одна вернулась в хранение: остался ровно перенос,
+   * и лист попадает в очередь готовой работы «Можно переносить».
+   */
   await expect(
-    page.getByTestId('assembly-active').locator(`[data-route-number="${assembled}"]`),
+    page.getByTestId('assembly-assembled').locator(`[data-route-number="${assembled}"]`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId('assembly-relocatable').locator(`[data-route-number="${assembled}"]`),
   ).toBeVisible();
+  // Группа готовой работы раскрыта сразу и стоит выше обычных активных листов.
+  await expect(page.getByTestId('assembly-relocatable-toggle')).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
+  await expect(page.getByTestId('assembly-relocatable-count')).not.toHaveText('0');
+  const relocatableBox = await page.getByTestId('assembly-relocatable').boundingBox();
+  const activeBox = await page.getByTestId('assembly-active').boundingBox();
+  expect(relocatableBox?.y ?? 0).toBeLessThan(activeBox?.y ?? 0);
 });
 
 /*
@@ -6509,14 +6714,20 @@ test('сборка: последовательная проверка, пауз�
   await expect(page.getByTestId('assembly-check-progress')).toHaveText('Проверено: 2 из 3');
 
   /*
-   * «Готово» закрывает окно и ничего не завершает: третья коробка лежит
-   * в обычном хранении, и лист остаётся среди активных.
+   * «Готово» закрывает окно и ничего не завершает.
+   *
+   * Третья коробка лежит в обычном хранении, поэтому лист не собран — но и
+   * не ждёт ничего со стороны: все коробки на складе, остался перенос.
+   * Такой лист стоит в очереди готовой работы, а не среди «Собранных».
    */
   await page.getByTestId('assembly-check-done').click();
   await expect(page.getByTestId('assembly-check')).toHaveCount(0);
   await expect(
-    page.getByTestId('assembly-active').locator(`[data-route-number="${partial}"]`),
+    page.getByTestId('assembly-relocatable').locator(`[data-route-number="${partial}"]`),
   ).toBeVisible();
+  await expect(
+    page.getByTestId('assembly-assembled').locator(`[data-route-number="${partial}"]`),
+  ).toHaveCount(0);
 
   // Пауза: уходим на другую вкладку и возвращаемся — прогресс не потерян.
   await page.getByTestId('wh-tab-storage').click();
@@ -6744,10 +6955,18 @@ test('камера: отказ, отсутствие устройства, об�
   await denyCamera(deniedPage, 'NotAllowedError');
   await login(deniedPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
   await deniedPage.getByTestId('wh-scan-camera').click();
-  await expect(deniedPage.getByTestId('scan-camera-error')).toContainText('Доступ к камере');
+  /*
+   * Технический отказ камеры показывается тем же окном, что и непринятый код.
+   *
+   * Для человека это одно событие — «отсканировать сейчас не получилось», —
+   * и отдельная подпись под кадром заставляла бы искать, куда смотреть.
+   */
+  const deniedResult = deniedPage.getByTestId('scan-error');
+  await expect(deniedResult).toContainText('Доступ к камере');
   // Подсказка называет обходные пути, а не техническую причину.
-  await expect(deniedPage.getByTestId('scan-camera-error')).toContainText('сканер');
-  await deniedPage.getByTestId('scan-cancel').click();
+  await expect(deniedResult).toContainText('сканер');
+  await expect(deniedPage.getByTestId('scan-retry')).toBeVisible();
+  await deniedPage.getByTestId('scan-error-cancel').click();
 
   // Аппаратный сканер работает: пара сканов доводится до конца без камеры.
   await deniedPage.getByTestId('wh-scan-order').fill(order);
@@ -6763,7 +6982,7 @@ test('камера: отказ, отсутствие устройства, об�
   await denyCamera(absentPage, 'NotFoundError');
   await login(absentPage, stand['кладовщик'] ?? '', stand['пин'] ?? '');
   await absentPage.getByTestId('wh-scan-camera').click();
-  await expect(absentPage.getByTestId('scan-camera-error')).toContainText('Камера не найдена');
+  await expect(absentPage.getByTestId('scan-error')).toContainText('Камера не найдена');
   await absentPage.getByTestId('scan-close').click();
   await expect(absentPage.getByTestId('wh-scan-order')).toBeVisible();
   await absent.close();
@@ -6873,6 +7092,45 @@ test('два сеанса: ячейка, «Требуется перемещен
   await watcher.getByTestId('wh-tab-picking').click();
   const card = watcher.locator(`[data-testid="assembly-route"][data-route-number="${route}"]`);
   await expect(card.getByTestId('assembly-route-cells')).toContainText('без ячейки');
+
+  /*
+   * Карточка раскрывается нажатием на любое свободное место шапки.
+   *
+   * Стрелка осталась указателем состояния: попасть в значок 32 на 32 точки
+   * пальцем на телефоне трудно, а свободного места в шапке много.
+   */
+  const head = card.getByTestId('assembly-route-head');
+  await expect(head).toHaveAttribute('aria-expanded', 'false');
+  await expect(card.getByTestId('assembly-route-toggle')).toHaveText('▸');
+
+  // Нажатие мимо кнопок — по строке с датой и числом заказов.
+  await head.locator('.muted').first().click();
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
+  await expect(card.getByTestId('assembly-route-toggle')).toHaveText('▾');
+  await expect(card).toHaveAttribute('data-expanded', 'true');
+
+  // Повторное нажатие сворачивает.
+  await head.locator('.muted').first().click();
+  await expect(head).toHaveAttribute('aria-expanded', 'false');
+
+  // Клавиатура делает то же самое.
+  await head.focus();
+  await head.press('Enter');
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
+  await head.press(' ');
+  await expect(head).toHaveAttribute('aria-expanded', 'false');
+
+  /*
+   * Самостоятельные кнопки шапки раскрытие не переключают.
+   *
+   * «+ Ячейка» открывает сканирование полки, а не состав листа: иначе
+   * каждое такое нажатие ещё и разворачивало бы карточку под окном.
+   */
+  await card.getByTestId('assembly-add-cell').click();
+  await expect(watcher.getByTestId('scan-video')).toBeVisible();
+  await watcher.getByTestId('scan-close').click();
+  await expect(head).toHaveAttribute('aria-expanded', 'false');
+
   await card.getByTestId('assembly-route-toggle').click();
 
   await login(worker, stand['кладовщик'] ?? '', stand['пин'] ?? '');
@@ -6896,11 +7154,16 @@ test('два сеанса: ячейка, «Требуется перемещен
   await worker.getByTestId('wh-place').click();
   await expect(worker.locator('.toast-region')).toContainText(second);
 
-  // Второй сеанс видит и коробку в хранении, и её пометку.
+  /*
+   * Второй сеанс видит и коробку в хранении, и её пометку.
+   *
+   * Обе коробки листа теперь на складе, одна из них в хранении — значит
+   * ждать нечего, остался перенос, и лист стоит в очереди готовой работы.
+   */
   const stored = card.locator('.wh-route__order', { hasText: second });
   await expect(stored).toContainText('Требуется перемещение');
   await expect(
-    watcher.getByTestId('assembly-active').locator(`[data-route-number="${route}"]`),
+    watcher.getByTestId('assembly-relocatable').locator(`[data-route-number="${route}"]`),
   ).toBeVisible();
 
   // 3. Коробку доносят до полки листа — лист собран целиком.
