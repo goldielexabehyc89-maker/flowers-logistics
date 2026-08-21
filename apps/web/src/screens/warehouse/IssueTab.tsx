@@ -64,18 +64,30 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
             data-testid="issue-courier"
             data-courier={courier.fullName}
           >
+            {/*
+              Шапка курьера отвечает на один вопрос: подходить ли к нему сейчас.
+              Поэтому справа стоят два числа — сколько листов готово к выдаче
+              и сколько их всего, — а имя и телефон занимают левую колонку.
+            */}
             <button
               type="button"
-              className="wh-group__toggle"
+              className="wh-group__toggle wh-courier__head"
               aria-expanded={courier.courierUserId === openCourier}
               data-testid="issue-courier-toggle"
               onClick={() =>
                 setOpenCourier(courier.courierUserId === openCourier ? null : courier.courierUserId)
               }
             >
-              <span>{courier.fullName}</span>
-              <span className="muted text-sm">{courier.phone}</span>
-              <span className="wh-group__count">{courier.routes.length}</span>
+              <span className="wh-courier__main">
+                <span className="wh-courier__name">{courier.fullName}</span>
+                <span className="muted text-sm">{courier.phone}</span>
+              </span>
+              <span className="wh-courier__ready" data-testid="issue-courier-ready">
+                ({courier.readyRoutes})
+              </span>
+              <span className="wh-group__count wh-group__count--sunken">
+                {courier.routes.length}
+              </span>
               <span aria-hidden="true">{courier.courierUserId === openCourier ? '▾' : '▸'}</span>
             </button>
 
@@ -112,9 +124,12 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                   >
                     <div className="wh-route__main">
                       <strong className="wh-route__number-text">{route.routeNumber}</strong>
-                      <div className="muted text-sm">
-                        {route.deliveryDate} · {route.total} заказов · внесено {route.checked} из{' '}
-                        {route.total}
+                      {/*
+                        Короткая строка вместо перечисления: дата листа уже
+                        стоит в его номере, а «внесено» читается из скобок.
+                      */}
+                      <div className="muted text-sm" data-testid="issue-route-counts">
+                        {route.total} ({route.checked} из {route.total})
                       </div>
                       {route.readiness !== 'NOT_READY' && (
                         <span data-testid="issue-route-readiness" data-readiness={route.readiness}>
@@ -140,14 +155,6 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                     >
                       Отгрузить
                     </Button>
-
-                    <span
-                      className="wh-route__toggle"
-                      aria-hidden="true"
-                      data-testid="issue-route-toggle"
-                    >
-                      {route.routeId === openRoute ? '▾' : '▸'}
-                    </span>
                   </header>
 
                   {route.routeId === openRoute && (
@@ -165,7 +172,11 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                             Прочерк — только когда размещения нет вовсе, и тогда
                             же лист отгрузить нельзя.
                           */}
-                          <span className="muted text-sm" data-testid="issue-order-cell">
+                          {/*
+                            Ячейка стоит вплотную к статусу и в скобках: вместе
+                            они и есть ответ «где коробка и можно ли её брать».
+                          */}
+                          <span className="wh-route__cell-note" data-testid="issue-order-cell">
                             {issueCellLabel(order)}
                           </span>
                           <span className="wh-route__badges">
@@ -342,8 +353,9 @@ function ShipDialog({
         <p className="wh-check__progress" data-testid="issue-progress">
           Внесено: {current.checked} из {current.total}
         </p>
+        {/* Полная полоса зеленеет: «внесено всё» видно раньше, чем прочитано. */}
         <div
-          className="wh-check__bar"
+          className={allChecked ? 'wh-check__bar wh-check__bar--done' : 'wh-check__bar'}
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={current.total}
@@ -357,10 +369,16 @@ function ShipDialog({
         </div>
 
         {current.sessionOpen && (
+          /*
+            Когда внесены все заказы, сканировать больше нечего: кнопка гаснет,
+            и единственным доступным действием остаётся отгрузка. Живая кнопка
+            здесь предлагала бы работу, которой нет.
+          */
           <Button
             variant="primary"
             className="wh-scan__button"
             data-testid="issue-scan"
+            disabled={allChecked}
             onClick={() => setScanning(true)}
           >
             Сканировать заказ

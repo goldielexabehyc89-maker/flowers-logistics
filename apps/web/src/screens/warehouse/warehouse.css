@@ -74,17 +74,6 @@
   font-weight: 600;
 }
 
-.wh-route__toggle {
-  flex: none;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  font-size: 14px;
-  cursor: pointer;
-}
-
 .wh-route__orders,
 .wh-check__list {
   display: grid;
@@ -164,9 +153,19 @@
   overflow: hidden;
 }
 
+/*
+ * Заполнение полосы: цвет отвечает не за красоту, а за состояние.
+ *
+ * Пока внесено не всё — цвет действия: работа идёт. Полная полоса зеленеет,
+ * и «можно отгружать» видно раньше, чем прочитано число.
+ */
 .wh-check__bar span {
   display: block;
   height: 100%;
+  background: var(--color-accent);
+}
+
+.wh-check__bar--done span {
   background: var(--color-success);
 }
 
@@ -181,6 +180,101 @@
   padding: var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
+}
+
+/*
+ * Группа листов на доске: заголовок с точкой, счётчиком и стрелкой.
+ *
+ * Точка отвечает на вопрос «что это за очередь» раньше, чем прочитан
+ * заголовок: синяя — работа, которую можно делать прямо сейчас, янтарная —
+ * та, где чего-то ждут, зелёная — уже сделанная.
+ */
+.wh-group__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.wh-group__dot--ready {
+  background: var(--color-accent);
+}
+
+.wh-group__dot--waiting {
+  background: var(--color-warning);
+}
+
+.wh-group__dot--done {
+  background: var(--color-success);
+}
+
+/* Заголовок забирает свободное место: счётчик и стрелка уходят вправо. */
+.wh-group .wh-group__title {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+/*
+ * Счётчик вдавлен.
+ *
+ * Приподнятым он читался как кнопка, которую можно нажать, — а это число,
+ * а не действие.
+ */
+.wh-group__count--sunken {
+  min-width: 28px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in);
+  text-align: center;
+}
+
+/* Группы разделены между собой заметнее, чем листы внутри группы. */
+.wh-group + .wh-group {
+  margin-top: var(--space-4);
+}
+
+/* Соседние листы внутри группы — отдельные карточки, а не одна полоса. */
+.wh-group .wh-route + .wh-route {
+  margin-top: var(--space-3);
+}
+
+/*
+ * Шапка курьера: слева имя и телефон, справа два числа.
+ *
+ * Первое — сколько листов готово к выдаче прямо сейчас, второе — сколько их
+ * всего. Кладовщик по первому решает, подходить ли к курьеру вообще.
+ */
+.wh-courier__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wh-courier__name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.wh-courier__ready {
+  flex: none;
+  color: var(--color-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Ячейка стоит вплотную к статусу.
+ *
+ * Свободное место забирает она, а не значки статуса: тогда пара «где лежит —
+ * что с ней» держится вместе у правого края и читается одним движением глаз.
+ */
+.wh-route__cell-note {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 /*
@@ -218,13 +312,6 @@
  */
 .wh-route__number-text {
   overflow-wrap: anywhere;
-}
-
-/* Стрелка больше не кнопка: она ничего не нажимает и не ловит фокус. */
-.wh-route__toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .wh-check__close {
