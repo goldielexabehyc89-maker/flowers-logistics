@@ -8443,8 +8443,21 @@ test('флорист: ближайшие самовывозы стоят пер�
   await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toHaveCount(0, {
     timeout: 90_000,
   });
-  // Сам заказ на экране остался: он отменён, а не потерян.
-  await expect(floristPage.locator('.florist__row', { hasText: soonNumber })).toBeVisible();
+
+  /*
+   * Заказ не потерян — он потерял приоритет.
+   *
+   * Искать его в общем списке бессмысленно: без приоритета он уходит вниз,
+   * за границу загруженной страницы, и «не видно» там ничего не доказывает.
+   * Поиск по номеру спрашивает СЕРВЕР обо всей очереди — и заказ находится,
+   * но уже вне приоритетной группы.
+   */
+  await floristPage.getByTestId('florist-search').fill(soonNumber);
+  await expect(floristPage.locator('.florist__row', { hasText: soonNumber })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toHaveCount(0);
+  await floristPage.getByTestId('florist-search').fill('');
 
   const restored = await request.post('/api/testing/source-cancellation', {
     headers,
