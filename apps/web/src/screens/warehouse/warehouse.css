@@ -74,12 +74,22 @@
   font-weight: 600;
 }
 
+/*
+ * Заказы листа лежат в углублении.
+ *
+ * Три уровня вложенности различаются не рамками, а глубиной: общая панель
+ * утоплена, лист приподнят над ней, его заказы снова утоплены. Так видно,
+ * что чему принадлежит, без единой линии.
+ */
 .wh-route__orders,
 .wh-check__list {
   display: grid;
-  gap: 4px;
+  gap: var(--space-2);
   margin: var(--space-2) 0 0;
-  padding: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
   list-style: none;
 }
 
@@ -89,10 +99,11 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  padding: 6px var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
   background: var(--color-surface);
+  box-shadow: var(--shadow-out);
 }
 
 .wh-route__position {
@@ -191,30 +202,51 @@
 }
 
 /*
- * Утопленная подложка для списка карточек.
+ * Общая панель группы и курьера — утопленная.
  *
- * Тот же приём, что у таблиц на вкладке «Склад»: список лежит в углублении,
- * а его строки приподняты над ним. Без подложки карточки висели прямо на
- * холсте, и три вкладки одного рабочего места выглядели как три разных
- * приложения.
+ * Она держит заголовок и список листов и сама лежит в холсте, а не над ним:
+ * приподнятая панель поверх приподнятых карточек давала два одинаковых
+ * уровня подряд, и принадлежность приходилось угадывать по отступам.
  */
-.wh-well {
+.wh-group,
+.wh-issue__courier {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-2);
+  padding: var(--space-3);
   border-radius: var(--radius-xl);
   background: var(--surface-sunken);
   box-shadow: var(--shadow-in-lg);
 }
 
+/* Список листов внутри общей панели: только промежуток, своей поверхности нет. */
+.wh-well {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
 /*
- * Карточка внутри углубления — приподнятая полоса, а не отдельная панель.
+ * Заголовок лежит прямо на утопленной панели.
+ *
+ * Своя поверхность делала бы из него ещё один уровень, которого в этой
+ * иерархии нет.
+ */
+.wh-group > .wh-group__toggle,
+.wh-issue__courier > .wh-group__toggle {
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/*
+ * Маршрутный лист — приподнятая панель над углублением.
  *
  * Полный `card` со своим воздухом и большим радиусом спорил бы с подложкой:
  * получилась бы панель в панели.
  */
-.wh-well .wh-route {
+.wh-group .wh-route,
+.wh-issue__courier .wh-route {
   border-radius: var(--radius-lg);
   padding: var(--space-3);
   background: var(--color-surface);

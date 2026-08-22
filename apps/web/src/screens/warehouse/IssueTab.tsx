@@ -60,7 +60,7 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
         {couriers.map((courier) => (
           <article
             key={courier.courierUserId}
-            className="card stack"
+            className="wh-issue__courier"
             data-testid="issue-courier"
             data-courier={courier.fullName}
           >

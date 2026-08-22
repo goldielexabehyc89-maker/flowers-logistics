@@ -266,8 +266,8 @@ function RouteGroup({
   }
 
   return (
-    /* Панель, внутри неё заголовок и утопленный список — как «Сейчас на складе». */
-    <div className="card stack wh-group" data-testid={`assembly-${id}`}>
+    /* Утопленная панель: заголовок и приподнятые листы внутри неё. */
+    <div className="wh-group" data-testid={`assembly-${id}`}>
       <button
         type="button"
         className="wh-group__toggle"
