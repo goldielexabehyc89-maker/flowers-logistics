@@ -53,8 +53,10 @@ export interface PlacementGroupTotals {
   relocation: number;
   /** Отменённые, которые всё ещё физически стоят на полке. */
   cancelled: number;
-  /** Обычное хранение. */
-  rest: number;
+  /** Спокойно лежат в ячейке хранения. */
+  storage: number;
+  /** Стоят в маршрутной ячейке. */
+  route: number;
 }
 
 /**
@@ -88,7 +90,7 @@ export async function listPlacedOrders(
     OR: [{ cancelledInSource: true }, { cancelledByLogistAt: { not: null } }],
   };
 
-  const [rows, total, relocationTotal, cancelledTotal] = await Promise.all([
+  const [rows, total, relocationTotal, cancelledTotal, routeTotal] = await Promise.all([
     db.orderPlacement.findMany({
       where,
       orderBy: [{ placedAt: 'desc' }, { id: 'desc' }],
@@ -120,6 +122,14 @@ export async function listPlacedOrders(
     db.orderPlacement.count({
       where: { ...where, requiresRelocation: false, order: cancelledOrder },
     }),
+    db.orderPlacement.count({
+      where: {
+        ...where,
+        requiresRelocation: false,
+        NOT: { order: cancelledOrder },
+        cell: { kind: 'ROUTE' },
+      },
+    }),
   ]);
 
   const items = rows.map((row) => {
@@ -146,7 +156,10 @@ export async function listPlacedOrders(
   const groupTotals: PlacementGroupTotals = {
     relocation: relocationTotal,
     cancelled: cancelledTotal,
-    rest: total - relocationTotal - cancelledTotal,
+    route: routeTotal,
+    // Остаток — обычное хранение: считать его отдельным запросом незачем,
+    // четыре группы покрывают весь набор без пересечений.
+    storage: total - relocationTotal - cancelledTotal - routeTotal,
   };
 
   return { items, total, limit: input.limit, offset: input.offset, groupTotals };

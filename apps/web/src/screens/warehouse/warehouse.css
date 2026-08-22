@@ -202,6 +202,169 @@
 }
 
 /*
+ * Складская группа: заголовок в углублении, список под ним.
+ *
+ * Тот же приём, что на досках сборки и выдачи: общая панель утоплена, а её
+ * содержимое приподнято. Заголовок с номером группы и счётчиком лежит прямо
+ * на ней и своей поверхности не имеет.
+ */
+.wh-plate {
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.wh-plate > .wh-group__toggle {
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/* Несворачиваемый заголовок ведёт себя как строка, а не как кнопка. */
+.wh-group__toggle--static {
+  cursor: default;
+}
+
+/*
+ * Карточка размещения на телефоне.
+ *
+ * Две строки и четыре угла: сверху слева номер заказа, сверху справа вид
+ * полки, снизу слева маршрутный лист, снизу справа её номер. Кладовщик
+ * держит телефон одной рукой и ищет глазами угол, а не строку в столбце.
+ *
+ * Поверхность карточки несёт смысл: тёплая — коробку надо перенести,
+ * зелёная — она на своей маршрутной полке, спокойная — просто лежит,
+ * красноватая — заказ отменён. Значения из макета рабочего места.
+ */
+@media (max-width: 767px) {
+  .warehouse .table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-2);
+    align-items: center;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 14px;
+    background: var(--surface-raised);
+    box-shadow:
+      3px 3px 8px rgb(150 160 182 / 45%),
+      -2px -2px 6px rgb(255 255 255 / 88%);
+  }
+
+  .warehouse .table tr[data-kind='relocation'] {
+    background: var(--row-move);
+    box-shadow:
+      3px 3px 8px rgb(175 160 140 / 45%),
+      -2px -2px 6px rgb(255 255 255 / 85%);
+  }
+
+  .warehouse .table tr[data-kind='route'] {
+    background: var(--row-ready);
+    box-shadow:
+      3px 3px 8px rgb(150 172 155 / 40%),
+      -2px -2px 6px rgb(255 255 255 / 85%);
+  }
+
+  .warehouse .table tr[data-kind='cancelled'] {
+    background: var(--row-danger);
+    box-shadow:
+      3px 3px 8px rgb(180 150 155 / 45%),
+      -2px -2px 6px rgb(255 255 255 / 85%);
+  }
+
+  .warehouse .table td {
+    display: block;
+    padding: 0;
+  }
+
+  /* Номер заказа: занимает строку и не разрывает карточку длиной. */
+  .warehouse .table td.wh-placement__order {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    font-size: 15px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Вид полки — таблетка справа сверху, цвет по смыслу группы. */
+  .warehouse .table td.wh-placement__kind {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    box-shadow:
+      inset 2px 2px 4px rgb(163 172 191 / 40%),
+      inset -2px -2px 4px rgb(255 255 255 / 72%);
+  }
+
+  .warehouse .table tr[data-kind='relocation'] td.wh-placement__kind {
+    background: #efe0c9;
+    color: var(--color-warning);
+    box-shadow: none;
+  }
+
+  .warehouse .table tr[data-kind='route'] td.wh-placement__kind {
+    background: var(--color-success-soft);
+    color: var(--color-success);
+    box-shadow: none;
+  }
+
+  .warehouse .table tr[data-kind='cancelled'] td.wh-placement__kind {
+    background: var(--color-error-soft);
+    color: var(--color-error);
+    box-shadow: none;
+  }
+
+  /* Маршрутный лист — приглушённая строка снизу слева. */
+  .warehouse .table td.wh-placement__route {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Номер ячейки — вдавленная таблетка снизу справа. */
+  .warehouse .table td.wh-placement__cell {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    box-shadow:
+      inset 2px 2px 5px rgb(163 172 191 / 45%),
+      inset -2px -2px 5px rgb(255 255 255 / 78%);
+  }
+
+  /* Пометки и действия занимают всю ширину под углами. */
+  .warehouse .table td:not([class*='wh-placement__']) {
+    grid-column: 1 / -1;
+  }
+}
+
+/*
  * Общая панель группы и курьера — утопленная.
  *
  * Она держит заголовок и список листов и сама лежит в холсте, а не над ним:
@@ -267,8 +430,22 @@
   border-radius: 999px;
 }
 
-.wh-group__dot--ready {
-  background: var(--color-accent);
+.wh-group__dot--ready,
+.wh-group__dot--route {
+  background: var(--dot-ready);
+}
+
+/* Складские группы: тот же смысл, что у поверхностей карточек. */
+.wh-group__dot--relocation {
+  background: var(--dot-move);
+}
+
+.wh-group__dot--cancelled {
+  background: var(--color-error);
+}
+
+.wh-group__dot--storage {
+  background: var(--dot-quiet);
 }
 
 .wh-group__dot--waiting {
@@ -292,12 +469,19 @@
  * а не действие.
  */
 .wh-group__count--sunken {
-  min-width: 28px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--surface-sunken);
-  box-shadow: var(--shadow-in);
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 11px;
+  background: var(--color-surface);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  box-shadow:
+    inset 3px 3px 6px rgb(163 172 191 / 45%),
+    inset -3px -3px 6px rgb(255 255 255 / 78%);
 }
 
 /* Группы разделены между собой заметнее, чем листы внутри группы. */

@@ -1038,9 +1038,19 @@ describe('складской список читается целиком, а н
     // Счётчики считают ВЕСЬ склад, а не загруженную страницу.
     expect(first.groupTotals.relocation).toBe(seeded.relocation);
     expect(first.groupTotals.cancelled).toBe(seeded.cancelled);
-    expect(first.groupTotals.rest).toBe(PAGE + 1 - seeded.relocation - seeded.cancelled);
+    /*
+     * Обычное хранение и маршрутные ячейки считаются раздельно: это разные
+     * полки и разная работа. Вместе с двумя первыми группами они обязаны
+     * покрывать весь склад без пересечений и без остатка.
+     */
+    expect(first.groupTotals.storage + first.groupTotals.route).toBe(
+      PAGE + 1 - seeded.relocation - seeded.cancelled,
+    );
     expect(
-      first.groupTotals.relocation + first.groupTotals.cancelled + first.groupTotals.rest,
+      first.groupTotals.relocation +
+        first.groupTotals.cancelled +
+        first.groupTotals.storage +
+        first.groupTotals.route,
     ).toBe(first.total);
 
     const second = await listPlacedOrders(ctx.db, { cellId: cell.id, limit: PAGE, offset: PAGE });
@@ -1071,7 +1081,10 @@ describe('складской список читается целиком, а н
     expect(after.total).toBe(before.total - 1);
     expect(after.items.map((row) => row.orderId)).not.toContain(victim!.orderId);
     expect(
-      after.groupTotals.relocation + after.groupTotals.cancelled + after.groupTotals.rest,
+      after.groupTotals.relocation +
+        after.groupTotals.cancelled +
+        after.groupTotals.storage +
+        after.groupTotals.route,
     ).toBe(after.total);
   });
 

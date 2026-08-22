@@ -1034,58 +1034,139 @@ function PlacementGroups({
 
   return (
     <div className="stack">
-      {groups.relocation.length > 0 && (
-        <div className="stack" data-testid="wh-group-relocation">
-          <h4 className="wh-group__title">
-            Требуется перемещение · {totals?.relocation ?? groups.relocation.length}
-          </h4>
-          <PlacementTable items={groups.relocation} />
-        </div>
-      )}
+      {/*
+        Четыре группы одного склада, каждая со своим смыслом:
+        что мешает работе, что ждёт решения, что просто лежит и что уже
+        собрано под курьера. Раньше две последние шли одним безымянным
+        списком, и тип полки приходилось читать у каждой строки.
+      */}
+      <PlacementGroup
+        id="relocation"
+        title="Требует перемещения"
+        count={totals?.relocation ?? groups.relocation.length}
+        items={groups.relocation}
+      />
 
-      {groups.cancelled.length > 0 && (
-        <div className="stack" data-testid="wh-group-cancelled">
-          {/*
-            Одна строка высотой с обычную: свёрнутая группа не должна
-            выглядеть весомее самих заказов.
-          */}
-          <button
-            type="button"
-            className="wh-group__toggle"
-            data-testid="wh-group-cancelled-toggle"
-            aria-expanded={cancelledOpen}
-            onClick={() => setCancelledOpen((open) => !open)}
-          >
-            <span>Отменённые</span>
-            <span className="wh-group__count" data-testid="wh-group-cancelled-count">
-              {totals?.cancelled ?? groups.cancelled.length}
-            </span>
-            <span aria-hidden="true">{cancelledOpen ? '▾' : '▸'}</span>
-          </button>
+      <PlacementGroup
+        id="cancelled"
+        title="Отменённые"
+        count={totals?.cancelled ?? groups.cancelled.length}
+        items={groups.cancelled}
+        // Отменённые свёрнуты по умолчанию: их бывает много, и разворачивать
+        // ими весь экран при каждом открытии склада незачем.
+        collapsible
+        open={cancelledOpen}
+        onToggle={() => setCancelledOpen((open) => !open)}
+        onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
+        busy={withdraw.isPending}
+      />
 
-          {cancelledOpen && (
-            <PlacementTable
-              items={groups.cancelled}
-              onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
-              busy={withdraw.isPending}
-            />
-          )}
-        </div>
-      )}
+      <PlacementGroup
+        id="storage"
+        title="В хранении"
+        count={totals?.storage ?? groups.storage.length}
+        items={groups.storage}
+      />
 
-      {groups.rest.length > 0 && <PlacementTable items={groups.rest} />}
+      <PlacementGroup
+        id="route"
+        title="В маршрутных ячейках"
+        count={totals?.route ?? groups.route.length}
+        items={groups.route}
+      />
 
       {more}
     </div>
   );
 }
 
+/**
+ * Группа складского списка.
+ *
+ * Заголовок лежит в углублении и держит счётчик: он отвечает на вопрос
+ * «сколько таких коробок на складе», а не «сколько их видно сейчас».
+ * Пустая группа не показывается — заголовок с нулём обещает работу,
+ * которой нет.
+ */
+function PlacementGroup({
+  id,
+  title,
+  count,
+  items,
+  collapsible = false,
+  open = true,
+  onToggle,
+  onWithdraw,
+  busy,
+}: {
+  id: string;
+  title: string;
+  count: number;
+  items: PlacedOrderView[];
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: () => void;
+  onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
+  busy?: boolean;
+}): React.JSX.Element | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="stack wh-plate" data-testid={`wh-group-${id}`}>
+      {collapsible ? (
+        <button
+          type="button"
+          className="wh-group__toggle"
+          aria-expanded={open}
+          data-testid={`wh-group-${id}-toggle`}
+          onClick={onToggle}
+        >
+          <span className={`wh-group__dot wh-group__dot--${id}`} aria-hidden="true" />
+          <span className="wh-group__title">{title}</span>
+          <span
+            className="wh-group__count wh-group__count--sunken"
+            data-testid={`wh-group-${id}-count`}
+          >
+            {count}
+          </span>
+          <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        </button>
+      ) : (
+        <div className="wh-group__toggle wh-group__toggle--static">
+          <span className={`wh-group__dot wh-group__dot--${id}`} aria-hidden="true" />
+          <span className="wh-group__title">{title}</span>
+          <span
+            className="wh-group__count wh-group__count--sunken"
+            data-testid={`wh-group-${id}-count`}
+          >
+            {count}
+          </span>
+        </div>
+      )}
+
+      {open && (
+        <PlacementTable
+          items={items}
+          kind={id}
+          {...(onWithdraw === undefined ? {} : { onWithdraw })}
+          {...(busy === undefined ? {} : { busy })}
+        />
+      )}
+    </div>
+  );
+}
+
 function PlacementTable({
   items,
+  kind,
   onWithdraw,
   busy,
 }: {
   items: PlacedOrderView[];
+  /** Вид группы: на телефоне он задаёт поверхность карточки. */
+  kind: string;
   onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
   busy?: boolean;
 }): React.JSX.Element {
@@ -1095,24 +1176,30 @@ function PlacementTable({
         <thead>
           <tr>
             <th>Заказ</th>
-            <th>Ячейка</th>
             <th>Тип</th>
             <th>Маршрут</th>
+            <th>Ячейка</th>
             <th>Пометки</th>
             {onWithdraw !== undefined && <th>Снять с хранения</th>}
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
-            <tr key={item.orderId} data-testid="wh-placement-row">
-              <td>
+            /*
+              Порядок ячеек здесь же задаёт раскладку на телефоне: строка
+              превращается в карточку с четырьмя углами — заказ и вид полки
+              сверху, маршрутный лист и номер ячейки снизу. Значения по углам
+              читаются одним взглядом, а столбиком их пришлось бы перебирать.
+            */
+            <tr key={item.orderId} data-testid="wh-placement-row" data-kind={kind}>
+              <td className="wh-placement__order">
                 <strong>{item.orderNumber}</strong>
               </td>
-              <td>{cellLabel(item)}</td>
-              <td className="muted">
+              <td className="wh-placement__kind muted">
                 {item.cellKind === null ? '—' : CELL_KIND_LABELS[item.cellKind]}
               </td>
-              <td className="muted">{item.routeNumber ?? '—'}</td>
+              <td className="wh-placement__route muted">{item.routeNumber ?? '—'}</td>
+              <td className="wh-placement__cell">{cellLabel(item)}</td>
               <td>
                 {item.requiresRelocation && <StatusBadge tone="warning">Переместить</StatusBadge>}
                 {item.blockedBy.map((flag) => (

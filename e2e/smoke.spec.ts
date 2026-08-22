@@ -3070,6 +3070,68 @@ test('склад: «Требуется перемещение» и «Отмен�
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expect(cancelledGroup).toContainText(cancelled);
 
+  /*
+   * Четыре группы одного склада, и каждая названа.
+   *
+   * Прежде спокойное хранение и маршрутные ячейки шли одним безымянным
+   * списком, и тип полки приходилось читать у каждой строки.
+   */
+  for (const [id, title] of [
+    ['relocation', 'Требует перемещения'],
+    ['cancelled', 'Отменённые'],
+    ['storage', 'В хранении'],
+    ['route', 'В маршрутных ячейках'],
+  ] as [string, string][]) {
+    const group = page.getByTestId(`wh-group-${id}`);
+    if ((await group.count()) > 0) {
+      await expect(group, id).toContainText(title);
+      // Счётчик приходит с сервера и считает весь склад, а не загруженное.
+      await expect(page.getByTestId(`wh-group-${id}-count`), id).toHaveText(/^\d+$/);
+    }
+  }
+
+  /*
+   * На телефоне строка становится карточкой с четырьмя углами: заказ и вид
+   * полки сверху, маршрутный лист и номер ячейки снизу.
+   */
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('[data-testid="wh-placement-row"]').first()).toBeVisible();
+  const cornerBox = async (cls: string): Promise<{ x: number; y: number }> => {
+    const box = await page
+      .locator(`[data-testid="wh-placement-row"] .${cls}`)
+      .first()
+      .boundingBox();
+    /*
+     * Берётся СЕРЕДИНА, а не верхний край: таблетка ниже строки текста и
+     * центрируется по ней, поэтому верхние края у соседей по строке разные,
+     * хотя стоят они на одном уровне.
+     */
+    return {
+      x: Math.round(box?.x ?? 0),
+      y: Math.round((box?.y ?? 0) + (box?.height ?? 0) / 2),
+    };
+  };
+  const corners = {
+    order: await cornerBox('wh-placement__order'),
+    kind: await cornerBox('wh-placement__kind'),
+    route: await cornerBox('wh-placement__route'),
+    cell: await cornerBox('wh-placement__cell'),
+  };
+  // Верхняя пара выше нижней, левая пара левее правой.
+  expect(corners.order.y).toBeLessThan(corners.route.y);
+  expect(corners.kind.y).toBeLessThan(corners.cell.y);
+  expect(corners.order.x).toBeLessThan(corners.kind.x);
+  expect(corners.route.x).toBeLessThan(corners.cell.x);
+  // Верхние углы на одной линии, нижние — тоже.
+  expect(Math.abs(corners.order.y - corners.kind.y)).toBeLessThanOrEqual(3);
+  expect(Math.abs(corners.route.y - corners.cell.y)).toBeLessThanOrEqual(3);
+  expect(
+    await page.evaluate(
+      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
+    ),
+  ).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 1280, height: 900 });
+
   // Ровно два выхода у отменённого букета, свободного текста нет.
   const row = cancelledGroup.locator(`tr:has-text("${cancelled}")`);
   await expect(row.getByTestId('wh-withdraw-reassembly')).toBeVisible();
@@ -8067,8 +8129,19 @@ test('оболочка: меню выезжает поверх экрана и �
       'document.documentElement.scrollWidth - document.documentElement.clientWidth',
     ),
   ).toBeLessThanOrEqual(0);
-  // Выбор не сброшен: меню ничего под собой не пересоздаёт.
-  await expect(page.getByTestId('deals-selected-count')).toHaveText(selected ?? '');
+  /*
+   * Выбор не сброшен: меню ничего под собой не пересоздаёт.
+   *
+   * Уменьшиться выбор вправе ровно по одной причине — заказ стал недоступен
+   * из-за чужого действия, и тогда экран об этом СКАЗАЛ. Тихая потеря выбора
+   * и сброс в ноль по-прежнему валят проверку.
+   */
+  const chosen = (text: string | null): number => Number(/\d+/.exec(text ?? '')?.[0] ?? '0');
+  const after = await page.getByTestId('deals-selected-count').textContent();
+  expect(chosen(after)).toBeGreaterThan(0);
+  if (chosen(after) !== chosen(selected)) {
+    await expect(page.getByTestId('deals-notice')).toContainText('Из выбора снято заказов');
+  }
 
   // Выбор раздела выполняет обычный переход и закрывает панель.
   await page.locator('#shell-sidebar').getByRole('link', { name: 'Настройки' }).click();
