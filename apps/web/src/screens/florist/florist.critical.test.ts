@@ -13,7 +13,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   QUEUE_PAGE_SIZE,
+  QUEUE_POLL_MS,
   availableActions,
+  groupQueueByRoute,
+  queueGroupTitle,
   formatInterval,
   formatQuantity,
   latestJob,
@@ -321,5 +324,61 @@ describe('страницы очереди', () => {
   it('клиент просит ровно столько, сколько сервер отдаёт по умолчанию', () => {
     // Разойдись эти числа — «Загрузить ещё» пропускала бы или повторяла строки.
     expect(QUEUE_PAGE_SIZE).toBe(50);
+  });
+});
+
+describe('группы очереди', () => {
+  function row(overrides: Partial<QueueItemView> & { id: string }): QueueItemView {
+    return {
+      number: overrides.id,
+      deliveryDate: '2027-03-10',
+      startMinute: 600,
+      endMinute: 840,
+      overdue: false,
+      processState: 'NEW',
+      assignee: null,
+      route: null,
+      hasPrintForm: false,
+      changedSinceClaim: false,
+      ...overrides,
+    };
+  }
+
+  it('ближайшие самовывозы идут своей группой над маршрутными листами', () => {
+    const route = { id: 'r1', number: 'МЛ-1', position: 1 };
+    const groups = groupQueueByRoute([
+      row({ id: 'p1', pickupSoon: true }),
+      row({ id: 'p2', pickupSoon: true }),
+      row({ id: 'r-a', route }),
+      row({ id: 'plain' }),
+    ]);
+
+    expect(groups.map((group) => group.kind)).toEqual(['pickup-soon', 'route', 'none']);
+    expect(groups[0]?.items.map((item) => item.id)).toEqual(['p1', 'p2']);
+    expect(queueGroupTitle(groups[0]!)).toBe('Ближайшие самовывозы');
+    expect(queueGroupTitle(groups[1]!)).toBe('Маршрут МЛ-1');
+    expect(queueGroupTitle(groups[2]!)).toBe('Без маршрута');
+  });
+
+  it('заказ приоритетной группы не повторяется в маршрутной', () => {
+    // Самовывоз может числиться и в подтверждённом листе. Показать его дважды
+    // значило бы предложить собрать один букет два раза.
+    const route = { id: 'r1', number: 'МЛ-1', position: 2 };
+    const groups = groupQueueByRoute([
+      row({ id: 'pickup', pickupSoon: true, route }),
+      row({ id: 'other', route }),
+    ]);
+
+    expect(groups.map((group) => group.kind)).toEqual(['pickup-soon', 'route']);
+    const shown = groups.flatMap((group) => group.items.map((item) => item.id));
+    expect(shown).toEqual(['pickup', 'other']);
+    expect(new Set(shown).size).toBe(shown.length);
+  });
+
+  it('очередь перезапрашивается сама: порог наступает от хода времени', () => {
+    // Момент «осталось меньше часа» не сопровождается ничьим действием, и
+    // realtime о нём молчит. Без опроса заказ поднялся бы только по F5.
+    expect(QUEUE_POLL_MS).toBeGreaterThan(0);
+    expect(QUEUE_POLL_MS).toBeLessThanOrEqual(60_000);
   });
 });

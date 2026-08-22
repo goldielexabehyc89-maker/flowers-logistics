@@ -8314,3 +8314,143 @@ test('маршрутизация на телефоне: список, карта
 
   await context.close();
 });
+
+/*
+ * Приоритет ближайших самовывозов.
+ *
+ * Проверяется то, ради чего группа заведена: заказ, до которого остался
+ * меньше часа, стоит первым и не ждёт F5. Точность самого порога доказана
+ * серверными проверками (`pickup-priority.critical.test.ts`) — здесь важно,
+ * что признак доходит до экрана, что группа обновляется сама и что ни
+ * фильтр, ни узкий экран её не ломают.
+ */
+test('флорист: ближайшие самовывозы стоят первой группой и обновляются без F5', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  const soonNumber = process.env['E2E_PICKUP_SOON'] ?? '';
+  const laterNumber = process.env['E2E_PICKUP_LATER'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    soonNumber === '' || laterNumber === '',
+    'не переданы фикстуры приоритета самовывоза (E2E_PICKUP_SOON/E2E_PICKUP_LATER)',
+  );
+
+  const FLORIST_PIN = '4816';
+
+  // 1. Администратор заводит флориста этой проверки.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Сотрудники и курьеры');
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Флорист приоритета');
+  const floristPhone = uniquePhone();
+  await page.getByLabel('Телефон').fill(floristPhone);
+  await page.getByRole('checkbox', { name: 'Флорист' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+  const floristCode = (await page.locator('.one-time-code').innerText()).trim();
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // Телефон: узкая раскладка проверяется вместе с остальным, а не отдельно.
+  const floristContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const floristPage = await floristContext.newPage();
+  await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
+
+  const groups = floristPage.locator('[data-testid="florist-queue-group"]');
+  const pickupGroup = floristPage.locator('[data-group-kind="pickup-soon"]');
+
+  // 2. Группа существует, стоит ПЕРВОЙ и содержит только ближайший самовывоз.
+  await expect(pickupGroup).toBeVisible();
+  await expect(pickupGroup).toContainText('Ближайшие самовывозы');
+  await expect(pickupGroup).toContainText(soonNumber);
+  await expect(groups.first()).toHaveAttribute('data-group-kind', 'pickup-soon');
+  // Самовывоз, до которого ещё пять часов, приоритета не получает.
+  await expect(pickupGroup).not.toContainText(laterNumber);
+
+  // Счётчик заголовка равен числу строк группы: он не декоративный.
+  const shown = await pickupGroup.locator('.florist__row').count();
+  await expect(pickupGroup.locator('.florist__group-count')).toHaveText(String(shown));
+
+  // 3. Узкий экран: горизонтального выезда нет ни у страницы, ни у группы.
+  const overflow = await floristPage.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const group = scope.document.querySelector('[data-group-kind="pickup-soon"]');
+    return {
+      page: scope.document.documentElement.scrollWidth - scope.document.documentElement.clientWidth,
+      group: group === null ? 0 : group.scrollWidth - group.clientWidth,
+    };
+  });
+  expect(overflow.page).toBeLessThanOrEqual(0);
+  expect(overflow.group).toBeLessThanOrEqual(0);
+
+  /*
+   * 4. Очередь перезапрашивается САМА.
+   *
+   * Момент «осталось меньше часа» наступает от хода времени: никто ничего
+   * не нажимает, и события realtime не происходит. Проверяется именно это —
+   * запрос без единого действия человека.
+   */
+  await floristPage.waitForRequest((candidate) => candidate.url().includes('/api/florist/queue'), {
+    timeout: 90_000,
+  });
+
+  // 5. Введённый фильтр опрос не сбрасывает.
+  await floristPage.getByTestId('florist-search').fill(soonNumber);
+  await expect(pickupGroup).toContainText(soonNumber);
+  await floristPage.waitForRequest((candidate) => candidate.url().includes('/api/florist/queue'), {
+    timeout: 90_000,
+  });
+  await expect(floristPage.getByTestId('florist-search')).toHaveValue(soonNumber);
+  await expect(pickupGroup).toContainText(soonNumber);
+  await floristPage.getByTestId('florist-search').fill('');
+
+  /*
+   * 6. Отмена доходит без F5.
+   *
+   * Отменённый заказ из очереди не исчезает — собирать его нельзя, и это
+   * видно прямо в строке. Но приоритета он лишается: покупателя, за которым
+   * никто не придёт, вперёд не пропускают.
+   */
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  const cancelled = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: soonNumber, cancelled: true },
+  });
+  expect(cancelled.status(), await cancelled.text()).toBe(200);
+
+  await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toHaveCount(0, {
+    timeout: 90_000,
+  });
+  // Сам заказ на экране остался: он отменён, а не потерян.
+  await expect(floristPage.locator('.florist__row', { hasText: soonNumber })).toBeVisible();
+
+  const restored = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: soonNumber, cancelled: false },
+  });
+  expect(restored.status()).toBe(200);
+  await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toContainText(soonNumber, {
+    timeout: 90_000,
+  });
+
+  await floristContext.close();
+});

@@ -63,6 +63,7 @@ import {
 import { OrderCardPanel } from './OrderCardPanel';
 import {
   QUEUE_PAGE_SIZE,
+  QUEUE_POLL_MS,
   formatDay,
   formatInterval,
   latestJob,
@@ -71,6 +72,7 @@ import {
   pageSummary,
   printStateLabel,
   groupQueueByRoute,
+  queueGroupTitle,
   processLabel,
   routeLabel,
   type FloristOption,
@@ -180,6 +182,19 @@ export function FloristScreen(): React.JSX.Element {
     initialPageParam: 0,
     getNextPageParam: (last: QueueResponse) => nextPageOffset(last) ?? undefined,
     enabled: tab !== 'print',
+    /*
+     * Короткий опрос очереди — из-за хода времени, а не из-за событий.
+     *
+     * Момент «до самовывоза осталось меньше часа» не сопровождается ничьим
+     * действием: никто ничего не менял, менять нечего, и realtime молчит по
+     * существу. Обновляется ровно этот запрос: страница не перезагружается,
+     * раскрытые группы и введённые фильтры живут в состоянии экрана и опросом
+     * не затрагиваются, а догруженные страницы обновляются на месте.
+     */
+    refetchInterval: QUEUE_POLL_MS,
+    // В фоновой вкладке опрос не идёт: смотреть на неё некому, а при возврате
+    // react-query перезапросит список сам.
+    refetchIntervalInBackground: false,
   });
 
   const printQuery = useInfiniteQuery({
@@ -685,12 +700,11 @@ export function FloristScreen(): React.JSX.Element {
             key={group.key}
             className="florist__group"
             data-testid="florist-queue-group"
+            data-group-kind={group.kind}
             data-route-number={group.route?.number}
           >
             <div className="florist__group-head">
-              <h3 className="florist__group-title">
-                {group.route === null ? 'Без маршрута' : `Маршрут ${group.route.number}`}
-              </h3>
+              <h3 className="florist__group-title">{queueGroupTitle(group)}</h3>
               <span className="florist__group-count">{group.items.length}</span>
             </div>
             <ul className="florist__list" data-testid="florist-queue">

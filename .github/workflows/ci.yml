@@ -507,6 +507,8 @@ jobs:
           {
             echo "order=$(get 'заказ самовывоза')"
             echo "cell=$(get 'ячейка самовывоза')"
+            echo "soon=$(get 'ближайший самовывоз')"
+            echo "later=$(get 'дальний самовывоз')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Создать фикстуру возвратов и отмен
@@ -576,6 +578,8 @@ jobs:
           E2E_WH_CAM_ORDER_2: ${{ steps.seed-warehouse-camera.outputs.order2 }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
+          E2E_PICKUP_SOON: ${{ steps.seed-pickup.outputs.soon }}
+          E2E_PICKUP_LATER: ${{ steps.seed-pickup.outputs.later }}
         run: npm run test:e2e
 
       # Playwright сохраняет снимок страницы момента отказа рядом с результатами,

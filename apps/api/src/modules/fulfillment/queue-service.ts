@@ -46,6 +46,7 @@
  */
 
 import { moscowToday, shiftCalendarDate } from '@fl/shared';
+import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import type { Database } from '../../platform/db.js';
 import type { OrderFulfillmentProcessState } from '../../generated/prisma/enums.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
@@ -56,9 +57,11 @@ import {
   type PageInfo,
   type PageRequest,
 } from './paging.js';
+import { isPickupMethod } from '../pickup/views.js';
 import {
   effectiveMinutes,
   isOverdue,
+  isPickupSoon,
   moscowMinuteOfDay,
   routeFirstStopMinute,
   sortQueue,
@@ -114,6 +117,14 @@ export interface QueueItem {
   changedSinceClaim: boolean;
   /** Заказ отменён: собирать его нельзя, и это видно прямо в очереди. */
   cancelled: boolean;
+  /**
+   * Ближайший самовывоз: до начала интервала меньше часа.
+   *
+   * Признак считает СЕРВЕР по полному набору очереди. Клиент им только
+   * группирует строки и не выводит его заново из подписей: подпись — текст,
+   * а принадлежность к приоритету — состояние.
+   */
+  pickupSoon: boolean;
 }
 
 export interface QueueResult extends PageInfo {
@@ -194,6 +205,9 @@ function orderSelect() {
     manualIntervalEndMinute: true,
     fulfillmentProcessState: true,
     fulfillmentAssignedAt: true,
+    // Способ получения нужен приоритету самовывоза: он определяется точным
+    // справочником МоегоСклада, а не текстом названия.
+    deliveryMethodId: true,
     cancelledInSource: true,
     cancelledByLogistAt: true,
     fulfillmentAssignee: { select: { id: true, fullName: true } },
@@ -319,6 +333,19 @@ function dateCondition(date: string | null, includePast: boolean) {
         deliveryDate: { lt: column },
         fulfillmentProcessState: { in: [...PAST_UNFINISHED_STATES] },
       },
+      /*
+       * Самовывозы следующего дня — только ради приоритета «меньше часа».
+       *
+       * Заказ на 00:30 наступает через двадцать девять минут после 23:31, но
+       * лежит уже в завтрашнем дне: без этой ветки он появился бы на экране
+       * только в полночь, когда собирать его поздно. Лишние строки отсекаются
+       * в памяти сразу после расчёта признака — в списке остаются только те,
+       * что действительно попали в ближайший час.
+       */
+      {
+        deliveryDate: toDateColumn(shiftCalendarDate(date, 1)),
+        deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup,
+      },
     ],
   };
 }
@@ -436,19 +463,42 @@ export async function readQueue(
 
   const routes = await readRoutes(db, rows);
 
-  const queueOrders: QueueOrder[] = rows.map((row) => {
+  /*
+   * Признак ближайшего самовывоза считается здесь, до сортировки и до
+   * страницы: приоритет обязан определяться по ПОЛНОМУ набору очереди, иначе
+   * заказ за границей загруженной страницы никогда не поднялся бы наверх.
+   */
+  const withNextDayPickups = !mine && query.day === 'today';
+  const queueOrders: QueueOrder[] = [];
+  for (const row of rows) {
     const minutes = effectiveMinutes(row);
+    const deliveryDate = row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate);
+    const pickupSoon = isPickupSoon(
+      {
+        pickup: isPickupMethod(row),
+        cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
+        deliveryDate,
+        startMinute: minutes.startMinute,
+      },
+      now,
+    );
+    // Завтрашний самовывоз, до которого ещё больше часа, в сегодняшнем дне
+    // не показывается: выборка взяла его только ради проверки порога.
+    if (withNextDayPickups && !pickupSoon && deliveryDate !== null && deliveryDate > date) {
+      continue;
+    }
     const participation = row.routeOrders[0];
-    return {
+    queueOrders.push({
       id: row.id,
       externalName: row.externalName,
-      deliveryDate: row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate),
+      deliveryDate,
       startMinute: minutes.startMinute,
       endMinute: minutes.endMinute,
       route: participation === undefined ? null : (routes.get(participation.route.id) ?? null),
       routePosition: participation?.position ?? null,
-    };
-  });
+      pickupSoon,
+    });
+  }
 
   const byId = new Map(rows.map((row) => [row.id, row]));
   // Порядок считается по ПОЛНОЙ выборке, и только потом берётся страница:
@@ -474,6 +524,7 @@ export async function readQueue(
         row,
         { startMinute: entry.startMinute, endMinute: entry.endMinute },
         context,
+        entry.pickupSoon,
       );
     }),
   };
@@ -522,7 +573,9 @@ async function readAssembledPage(
     search: input.search,
     assembledTotal: input.total,
     ...pageInfo(input.page, input.total, rows.length),
-    items: rows.map((row) => toQueueItem(row, effectiveMinutes(row), input.context)),
+    // Собранный заказ в приоритетную группу не входит: работа по нему
+    // закончена, и поднимать его наверх незачем.
+    items: rows.map((row) => toQueueItem(row, effectiveMinutes(row), input.context, false)),
   };
 }
 
@@ -544,6 +597,7 @@ function toQueueItem(
   },
   minutes: { startMinute: number | null; endMinute: number | null },
   context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number },
+  pickupSoon: boolean,
 ): QueueItem {
   const participation = row.routeOrders[0];
   return {
@@ -579,6 +633,7 @@ function toQueueItem(
     // Отменённый заказ остаётся в списке, но собирать его нельзя: исчезнувший
     // из очереди заказ выглядит как потерянный, а не как отменённый.
     cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
+    pickupSoon,
   };
 }
 
