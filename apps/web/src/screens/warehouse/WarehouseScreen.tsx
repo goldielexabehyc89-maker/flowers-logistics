@@ -1199,9 +1199,30 @@ function PlacementTable({
                 {item.cellKind === null ? '—' : CELL_KIND_LABELS[item.cellKind]}
               </td>
               <td className="wh-placement__route muted">{item.routeNumber ?? '—'}</td>
-              <td className="wh-placement__cell">{cellLabel(item)}</td>
-              <td>
-                {item.requiresRelocation && <StatusBadge tone="warning">Переместить</StatusBadge>}
+              {/*
+                Полка показана таблеткой только когда она есть. «Не принят» —
+                это отсутствие полки, а не её номер, и заливка приравнивала бы
+                одно к другому.
+              */}
+              <td
+                className={
+                  item.cellCode === null
+                    ? 'wh-placement__cell wh-placement__cell--none'
+                    : 'wh-placement__cell'
+                }
+              >
+                {cellLabel(item)}
+              </td>
+              {/*
+                Пометки — настоящие предупреждения и живут отдельной ячейкой:
+                на телефоне она становится третьей строкой и только тогда,
+                когда предупреждение есть.
+
+                Значка «Переместить» здесь больше нет: про перенос уже сказали
+                заголовок группы, её точка и тёплый цвет карточки, а четвёртое
+                повторение отнимало строку у того, что говорится один раз.
+              */}
+              <td className="wh-placement__flags">
                 {item.blockedBy.map((flag) => (
                   <StatusBadge key={flag} tone="error">
                     {blockLabel(flag)}

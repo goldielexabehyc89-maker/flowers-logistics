@@ -18,6 +18,7 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
+  CELL_KIND_LABELS,
   ISSUE_READINESS_LABELS,
   issueCellLabel,
   type IssueBoard,
@@ -126,28 +127,32 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                         }
                       }}
                     >
-                      <div className="wh-route__main">
-                        <strong className="wh-route__number-text">{route.routeNumber}</strong>
-                        {/*
+                      {/*
+                        Четыре угла, как в «Сборке»: номер, готовность, счёт
+                        заказов и действие. Одна длинная строка на телефоне
+                        читалась по слогам, углы — двумя движениями глаз.
+                      */}
+                      <strong className="wh-route__number-text">{route.routeNumber}</strong>
+
+                      {route.readiness !== 'NOT_READY' && (
+                        <span
+                          className="wh-route__readiness"
+                          data-testid="issue-route-readiness"
+                          data-readiness={route.readiness}
+                        >
+                          <StatusBadge tone={route.readiness === 'ASSEMBLED' ? 'success' : 'info'}>
+                            {ISSUE_READINESS_LABELS[route.readiness]}
+                          </StatusBadge>
+                        </span>
+                      )}
+
+                      {/*
                         Короткая строка вместо перечисления: дата листа уже
                         стоит в его номере, а «внесено» читается из скобок.
                       */}
-                        <div className="muted text-sm" data-testid="issue-route-counts">
-                          {route.total} ({route.checked} из {route.total})
-                        </div>
-                        {route.readiness !== 'NOT_READY' && (
-                          <span
-                            data-testid="issue-route-readiness"
-                            data-readiness={route.readiness}
-                          >
-                            <StatusBadge
-                              tone={route.readiness === 'ASSEMBLED' ? 'success' : 'info'}
-                            >
-                              {ISSUE_READINESS_LABELS[route.readiness]}
-                            </StatusBadge>
-                          </span>
-                        )}
-                      </div>
+                      <span className="wh-route__counts" data-testid="issue-route-counts">
+                        {route.total} ({route.checked} из {route.total})
+                      </span>
 
                       {/*
                       Самостоятельные кнопки внутри шапки не переключают
@@ -156,6 +161,7 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                     */}
                       <Button
                         variant="primary"
+                        className="wh-route__ship"
                         data-testid="issue-ship"
                         onClick={(event) => {
                           event.stopPropagation();
@@ -185,8 +191,20 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                             Ячейка стоит вплотную к статусу и в скобках: вместе
                             они и есть ответ «где коробка и можно ли её брать».
                           */}
-                            <span className="wh-route__cell-note" data-testid="issue-order-cell">
-                              {issueCellLabel(order)}
+                            <span className="wh-route__note" data-testid="issue-order-note">
+                              {order.cellKind === null
+                                ? 'Нет размещения'
+                                : CELL_KIND_LABELS[order.cellKind]}
+                            </span>
+                            <span
+                              className={
+                                order.cellCode === null
+                                  ? 'wh-route__cellnum wh-route__cellnum--none'
+                                  : 'wh-route__cellnum'
+                              }
+                              data-testid="issue-order-cell"
+                            >
+                              {order.cellCode ?? 'без ячейки'}
                             </span>
                             <span className="wh-route__badges">
                               <StatusBadge tone={order.ready ? 'success' : 'warning'}>

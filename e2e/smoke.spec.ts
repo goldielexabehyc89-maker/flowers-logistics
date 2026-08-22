@@ -3125,11 +3125,58 @@ test('склад: «Требуется перемещение» и «Отмен�
   // Верхние углы на одной линии, нижние — тоже.
   expect(Math.abs(corners.order.y - corners.kind.y)).toBeLessThanOrEqual(3);
   expect(Math.abs(corners.route.y - corners.cell.y)).toBeLessThanOrEqual(3);
-  expect(
-    await page.evaluate(
-      'document.documentElement.scrollWidth - document.documentElement.clientWidth',
-    ),
-  ).toBeLessThanOrEqual(1);
+  /*
+   * Карточка помещается по ширине на КАЖДОМ уровне.
+   *
+   * Страница может не выезжать, а прокрутка при этом жить внутри обёртки
+   * таблицы — именно так и было: строка требовала себе всю ширину дважды.
+   * Поэтому проверяется вся цепочка, а не только документ.
+   */
+  const overflows = await page.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const doc = scope.document;
+    const width = (selector: string): number => {
+      const el = doc.querySelector(selector);
+      return el === null ? 0 : el.scrollWidth - el.clientWidth;
+    };
+    return {
+      page: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+      plate: width('[data-testid="wh-placement-row"]'),
+      wrap: width('.warehouse .table-wrap'),
+    };
+  });
+  expect(overflows.page, 'страница').toBeLessThanOrEqual(1);
+  expect(overflows.wrap, 'обёртка таблицы').toBeLessThanOrEqual(1);
+  expect(overflows.plate, 'строка').toBeLessThanOrEqual(1);
+
+  /*
+   * Пометка «Переместить» убрана: про перенос уже сказали заголовок группы,
+   * её точка и тёплый цвет карточки.
+   */
+  await expect(relocation).not.toContainText('Переместить');
+
+  // Вид полки и номер ячейки — таблетки с заливкой, а не голый текст.
+  const fill = (selector: string): Promise<string> =>
+    page.evaluate((value: string) => {
+      const scope = globalThis as unknown as {
+        document: { querySelector: (s: string) => unknown };
+        getComputedStyle: (node: unknown) => { backgroundColor: string };
+      };
+      const node = scope.document.querySelector(value);
+      return node === null ? 'нет элемента' : scope.getComputedStyle(node).backgroundColor;
+    }, selector);
+  expect(await fill('[data-testid="wh-placement-row"] .wh-placement__kind')).not.toBe(
+    'rgba(0, 0, 0, 0)',
+  );
+  expect(await fill('[data-testid="wh-placement-row"] .wh-placement__cell')).not.toBe(
+    'rgba(0, 0, 0, 0)',
+  );
+
   await page.setViewportSize({ width: 1280, height: 900 });
 
   // Ровно два выхода у отменённого букета, свободного текста нет.

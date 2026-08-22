@@ -20,6 +20,7 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
+  CELL_KIND_LABELS,
   STAGE_LABELS,
   STAGE_TONES,
   issueCellLabel,
@@ -225,6 +226,12 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
  * раскрывает состав. Разные действия у разных мест намеренно: иначе
  * попытка посмотреть состав каждый раз запускала бы проверку.
  */
+/** `2026-08-17` → `17.08`: в таблетке нужен день, а не машинный формат. */
+function routeDay(date: string): string {
+  const parts = date.split('-');
+  return parts.length === 3 ? `${parts[2]}.${parts[1]}` : date;
+}
+
 /** Цвет точки группы: он же и есть её смысл. */
 type GroupTone = 'ready' | 'waiting' | 'done';
 
@@ -293,6 +300,7 @@ function RouteGroup({
             <RouteCard
               key={route.routeId}
               route={route}
+              tone={tone}
               expanded={route.routeId === openRouteId}
               onToggle={() => onToggleRoute(route.routeId === openRouteId ? null : route.routeId)}
               onCheck={() => onCheck(route.routeId)}
@@ -309,12 +317,14 @@ function RouteGroup({
 
 function RouteCard({
   route,
+  tone,
   expanded,
   onToggle,
   onCheck,
   onAddCell,
 }: {
   route: AssemblyBoard['active'][number];
+  tone: GroupTone;
   expanded: boolean;
   onToggle: () => void;
   onCheck: () => void;
@@ -324,6 +334,7 @@ function RouteCard({
     <article
       className="card wh-route"
       data-testid="assembly-route"
+      data-tone={tone}
       data-route-number={route.routeNumber}
       data-expanded={expanded ? 'true' : 'false'}
     >
@@ -348,31 +359,36 @@ function RouteCard({
           }
         }}
       >
-        <div className="wh-route__main">
-          <button
-            type="button"
-            className="wh-route__number"
-            data-testid="assembly-route-number"
-            onClick={(event) => {
-              event.stopPropagation();
-              onCheck();
-            }}
-          >
-            {route.routeNumber}
-          </button>
-          {/*
-            Короткая строка вместо перечисления: дата уже стоит в номере листа,
-            а «сколько готово из скольких» читается из скобок.
-          */}
-          <div className="muted text-sm" data-testid="assembly-route-counts">
-            {route.total} ({route.ready} из {route.total})
-          </div>
-        </div>
+        <button
+          type="button"
+          className="wh-route__number"
+          data-testid="assembly-route-number"
+          onClick={(event) => {
+            event.stopPropagation();
+            onCheck();
+          }}
+        >
+          {route.routeNumber}
+        </button>
 
-        {/* Ячейки справа: одна по центру, несколько — столбиком. */}
-        <div className="wh-route__cells" data-testid="assembly-route-cells">
+        {/*
+          День и время листа — таблеткой справа сверху: в номере стоит дата
+          постановки, а работать кладовщику по дню доставки.
+        */}
+        <span className="wh-route__date" data-testid="assembly-route-date">
+          {routeDay(route.deliveryDate)}
+          {route.earliestMinute === null ? '' : ` · ${minutes(route.earliestMinute)}`}
+        </span>
+
+        {/* Сколько заказов в листе и сколько из них готово. */}
+        <span className="wh-route__counts" data-testid="assembly-route-counts">
+          {route.total} ({route.ready} из {route.total})
+        </span>
+
+        {/* Полки листа — справа снизу, на месте номера ячейки у заказа. */}
+        <span className="wh-route__cells" data-testid="assembly-route-cells">
           {route.cells.length === 0 ? (
-            <span className="muted text-sm">без ячейки</span>
+            <span className="wh-route__cells-none">без ячейки</span>
           ) : (
             route.cells.map((cell) => (
               <span key={cell.id} className="wh-route__cell">
@@ -380,19 +396,26 @@ function RouteCard({
               </span>
             ))
           )}
-          <Button
-            variant="ghost"
-            data-testid="assembly-add-cell"
-            onClick={(event) => {
-              event.stopPropagation();
-              onAddCell();
-            }}
-          >
-            + Ячейка
-          </Button>
-        </div>
+        </span>
       </header>
 
+      {expanded && (
+        /*
+          «+ Ячейка» живёт в раскрытой карточке: свёрнутая остаётся ровно двумя
+          строками, как в макете, и кнопка не отнимает у них место.
+        */
+        <Button
+          variant="ghost"
+          className="wh-route__add-cell"
+          data-testid="assembly-add-cell"
+          onClick={(event) => {
+            event.stopPropagation();
+            onAddCell();
+          }}
+        >
+          + Ячейка
+        </Button>
+      )}
       {expanded && (
         <ul className="wh-route__orders">
           {route.orders.map((order) => (
@@ -413,8 +436,22 @@ function RouteCard({
                 Ячейка вплотную к статусу и в скобках — тот же вид, что
                 в «Выдаче»: вместе они отвечают, где коробка и что с ней.
               */}
-              <span className="wh-route__cell-note" data-testid="assembly-order-cell">
-                {issueCellLabel(order)}
+              {/*
+                Вид полки и её номер стоят раздельно: слева внизу «Хранение»
+                или «Маршрутная», справа — сам номер, как в макете.
+              */}
+              <span className="wh-route__note" data-testid="assembly-order-note">
+                {order.cellKind === null ? 'Не собран' : CELL_KIND_LABELS[order.cellKind]}
+              </span>
+              <span
+                className={
+                  order.cellCode === null
+                    ? 'wh-route__cellnum wh-route__cellnum--none'
+                    : 'wh-route__cellnum'
+                }
+                data-testid="assembly-order-cell"
+              >
+                {order.cellCode ?? 'без ячейки'}
               </span>
               <span className="wh-route__badges">
                 <StatusBadge tone={STAGE_TONES[order.stage]}>
