@@ -18,7 +18,6 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
-  CELL_KIND_LABELS,
   ISSUE_READINESS_LABELS,
   issueCellLabel,
   type IssueBoard,
@@ -27,6 +26,32 @@ import {
 import './warehouse.css';
 
 const BOARD_KEY = ['warehouse-issue-board'];
+
+/**
+ * Стрелка состояния группы.
+ *
+ * Она не кнопка: нажимается вся строка заголовка, а стрелка лишь показывает,
+ * раскрыт список или свёрнут. Поворот делает CSS — чтобы состояние читалось
+ * одним значком, а не двумя разными символами.
+ */
+function GroupChevron({ open }: { open: boolean }): React.JSX.Element {
+  return (
+    <span className="wh-group__chevron" data-open={open ? 'true' : 'false'} aria-hidden="true">
+      <svg
+        width="12"
+        height="8"
+        viewBox="0 0 12 8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M1 1.5 6 6.5l5-5" />
+      </svg>
+    </span>
+  );
+}
 
 export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.Element {
   const { client } = useAuth();
@@ -89,7 +114,7 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
               <span className="wh-group__count wh-group__count--sunken">
                 {courier.routes.length}
               </span>
-              <span aria-hidden="true">{courier.courierUserId === openCourier ? '▾' : '▸'}</span>
+              <GroupChevron open={courier.courierUserId === openCourier} />
             </button>
 
             {courier.courierUserId === openCourier && (
@@ -191,11 +216,6 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                             Ячейка стоит вплотную к статусу и в скобках: вместе
                             они и есть ответ «где коробка и можно ли её брать».
                           */}
-                            <span className="wh-route__note" data-testid="issue-order-note">
-                              {order.cellKind === null
-                                ? 'Нет размещения'
-                                : CELL_KIND_LABELS[order.cellKind]}
-                            </span>
                             <span
                               className={
                                 order.cellCode === null

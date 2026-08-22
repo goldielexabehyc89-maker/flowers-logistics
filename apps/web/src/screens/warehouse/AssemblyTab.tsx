@@ -20,7 +20,6 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
-  CELL_KIND_LABELS,
   STAGE_LABELS,
   STAGE_TONES,
   issueCellLabel,
@@ -226,6 +225,32 @@ export function AssemblyTab({ manualEntry }: Props): React.JSX.Element {
  * раскрывает состав. Разные действия у разных мест намеренно: иначе
  * попытка посмотреть состав каждый раз запускала бы проверку.
  */
+/**
+ * Стрелка состояния группы.
+ *
+ * Она не кнопка: нажимается вся строка заголовка, а стрелка лишь показывает,
+ * раскрыт список или свёрнут. Поворот делает CSS — чтобы состояние читалось
+ * одним значком, а не двумя разными символами.
+ */
+function GroupChevron({ open }: { open: boolean }): React.JSX.Element {
+  return (
+    <span className="wh-group__chevron" data-open={open ? 'true' : 'false'} aria-hidden="true">
+      <svg
+        width="12"
+        height="8"
+        viewBox="0 0 12 8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M1 1.5 6 6.5l5-5" />
+      </svg>
+    </span>
+  );
+}
+
 /** `2026-08-17` → `17.08`: в таблетке нужен день, а не машинный формат. */
 function routeDay(date: string): string {
   const parts = date.split('-');
@@ -290,7 +315,7 @@ function RouteGroup({
         >
           {routes.length}
         </span>
-        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <GroupChevron open={open} />
       </button>
 
       {open && (
@@ -436,13 +461,6 @@ function RouteCard({
                 Ячейка вплотную к статусу и в скобках — тот же вид, что
                 в «Выдаче»: вместе они отвечают, где коробка и что с ней.
               */}
-              {/*
-                Вид полки и её номер стоят раздельно: слева внизу «Хранение»
-                или «Маршрутная», справа — сам номер, как в макете.
-              */}
-              <span className="wh-route__note" data-testid="assembly-order-note">
-                {order.cellKind === null ? 'Не собран' : CELL_KIND_LABELS[order.cellKind]}
-              </span>
               <span
                 className={
                   order.cellCode === null

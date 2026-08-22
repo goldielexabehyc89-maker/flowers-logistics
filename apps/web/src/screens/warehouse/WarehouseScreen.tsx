@@ -1010,9 +1010,15 @@ function PlacementGroups({
   const reportError = useApiError();
   const queryClient = useQueryClient();
   const { client } = useAuth();
-  // Отменённые свёрнуты по умолчанию: их бывает много, и разворачивать ими
-  // весь экран при каждом открытии склада незачем.
-  const [cancelledOpen, setCancelledOpen] = useState(false);
+  /*
+   * Свернуть можно любую группу.
+   *
+   * Отменённые закрыты сразу: их бывает много, и разворачивать ими весь экран
+   * при каждом открытии склада незачем. Остальные открыты, но кладовщик
+   * убирает лишнее сам — на телефоне четыре списка подряд не помещаются.
+   */
+  const [closed, setClosed] = useState<Record<string, boolean>>({ cancelled: true });
+  const toggle = (id: string): void => setClosed((prev) => ({ ...prev, [id]: prev[id] !== true }));
 
   const withdraw = useMutation({
     mutationFn: (input: { orderNumber: string; reason: 'REASSEMBLY' | 'WRITE_OFF' }) =>
@@ -1045,6 +1051,8 @@ function PlacementGroups({
         title="Требует перемещения"
         count={totals?.relocation ?? groups.relocation.length}
         items={groups.relocation}
+        open={closed.relocation !== true}
+        onToggle={() => toggle('relocation')}
       />
 
       <PlacementGroup
@@ -1052,11 +1060,8 @@ function PlacementGroups({
         title="Отменённые"
         count={totals?.cancelled ?? groups.cancelled.length}
         items={groups.cancelled}
-        // Отменённые свёрнуты по умолчанию: их бывает много, и разворачивать
-        // ими весь экран при каждом открытии склада незачем.
-        collapsible
-        open={cancelledOpen}
-        onToggle={() => setCancelledOpen((open) => !open)}
+        open={closed.cancelled !== true}
+        onToggle={() => toggle('cancelled')}
         onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
         busy={withdraw.isPending}
       />
@@ -1066,6 +1071,8 @@ function PlacementGroups({
         title="В хранении"
         count={totals?.storage ?? groups.storage.length}
         items={groups.storage}
+        open={closed.storage !== true}
+        onToggle={() => toggle('storage')}
       />
 
       <PlacementGroup
@@ -1073,10 +1080,38 @@ function PlacementGroups({
         title="В маршрутных ячейках"
         count={totals?.route ?? groups.route.length}
         items={groups.route}
+        open={closed.route !== true}
+        onToggle={() => toggle('route')}
       />
 
       {more}
     </div>
+  );
+}
+
+/**
+ * Стрелка состояния группы.
+ *
+ * Она не кнопка: нажимается вся строка заголовка, а стрелка лишь показывает,
+ * раскрыт список или свёрнут. Поворот делает CSS — чтобы состояние читалось
+ * одним значком, а не двумя разными символами.
+ */
+function GroupChevron({ open }: { open: boolean }): React.JSX.Element {
+  return (
+    <span className="wh-group__chevron" data-open={open ? 'true' : 'false'} aria-hidden="true">
+      <svg
+        width="12"
+        height="8"
+        viewBox="0 0 12 8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M1 1.5 6 6.5l5-5" />
+      </svg>
+    </span>
   );
 }
 
@@ -1093,7 +1128,6 @@ function PlacementGroup({
   title,
   count,
   items,
-  collapsible = false,
   open = true,
   onToggle,
   onWithdraw,
@@ -1103,7 +1137,6 @@ function PlacementGroup({
   title: string;
   count: number;
   items: PlacedOrderView[];
-  collapsible?: boolean;
   open?: boolean;
   onToggle?: () => void;
   onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
@@ -1115,36 +1148,23 @@ function PlacementGroup({
 
   return (
     <div className="stack wh-plate" data-testid={`wh-group-${id}`}>
-      {collapsible ? (
-        <button
-          type="button"
-          className="wh-group__toggle"
-          aria-expanded={open}
-          data-testid={`wh-group-${id}-toggle`}
-          onClick={onToggle}
+      <button
+        type="button"
+        className="wh-group__toggle"
+        aria-expanded={open}
+        data-testid={`wh-group-${id}-toggle`}
+        onClick={onToggle}
+      >
+        <span className={`wh-group__dot wh-group__dot--${id}`} aria-hidden="true" />
+        <span className="wh-group__title">{title}</span>
+        <span
+          className="wh-group__count wh-group__count--sunken"
+          data-testid={`wh-group-${id}-count`}
         >
-          <span className={`wh-group__dot wh-group__dot--${id}`} aria-hidden="true" />
-          <span className="wh-group__title">{title}</span>
-          <span
-            className="wh-group__count wh-group__count--sunken"
-            data-testid={`wh-group-${id}-count`}
-          >
-            {count}
-          </span>
-          <span aria-hidden="true">{open ? '▾' : '▸'}</span>
-        </button>
-      ) : (
-        <div className="wh-group__toggle wh-group__toggle--static">
-          <span className={`wh-group__dot wh-group__dot--${id}`} aria-hidden="true" />
-          <span className="wh-group__title">{title}</span>
-          <span
-            className="wh-group__count wh-group__count--sunken"
-            data-testid={`wh-group-${id}-count`}
-          >
-            {count}
-          </span>
-        </div>
-      )}
+          {count}
+        </span>
+        <GroupChevron open={open} />
+      </button>
 
       {open && (
         <PlacementTable
