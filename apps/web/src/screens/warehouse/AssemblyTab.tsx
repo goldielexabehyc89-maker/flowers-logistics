@@ -266,7 +266,8 @@ function RouteGroup({
   }
 
   return (
-    <div className="stack wh-group" data-testid={`assembly-${id}`}>
+    /* Панель, внутри неё заголовок и утопленный список — как «Сейчас на складе». */
+    <div className="card stack wh-group" data-testid={`assembly-${id}`}>
       <button
         type="button"
         className="wh-group__toggle"
@@ -285,19 +286,23 @@ function RouteGroup({
         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
       </button>
 
-      {open &&
-        routes.map((route) => (
-          <RouteCard
-            key={route.routeId}
-            route={route}
-            expanded={route.routeId === openRouteId}
-            onToggle={() => onToggleRoute(route.routeId === openRouteId ? null : route.routeId)}
-            onCheck={() => onCheck(route.routeId)}
-            onAddCell={() =>
-              onAddCell({ kind: 'cell', routeId: route.routeId, routeNumber: route.routeNumber })
-            }
-          />
-        ))}
+      {open && (
+        /* Список лежит в углублении, как таблицы на вкладке «Склад». */
+        <div className="wh-well">
+          {routes.map((route) => (
+            <RouteCard
+              key={route.routeId}
+              route={route}
+              expanded={route.routeId === openRouteId}
+              onToggle={() => onToggleRoute(route.routeId === openRouteId ? null : route.routeId)}
+              onCheck={() => onCheck(route.routeId)}
+              onAddCell={() =>
+                onAddCell({ kind: 'cell', routeId: route.routeId, routeNumber: route.routeNumber })
+              }
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

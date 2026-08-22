@@ -91,15 +91,17 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
               <span aria-hidden="true">{courier.courierUserId === openCourier ? '▾' : '▸'}</span>
             </button>
 
-            {courier.courierUserId === openCourier &&
-              courier.routes.map((route) => (
-                <div
-                  key={route.routeId}
-                  className="wh-route wh-issue__route"
-                  data-testid="issue-route"
-                  data-route-number={route.routeNumber}
-                >
-                  {/*
+            {courier.courierUserId === openCourier && (
+              /* Список листов лежит в углублении, как таблицы на «Складе». */
+              <div className="wh-well">
+                {courier.routes.map((route) => (
+                  <div
+                    key={route.routeId}
+                    className="wh-route wh-issue__route"
+                    data-testid="issue-route"
+                    data-route-number={route.routeNumber}
+                  >
+                    {/*
                     Шапка раскрывает карточку целиком.
 
                     Стрелка остаётся указателем состояния, но целиться в неё
@@ -108,89 +110,98 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                     по разметке, и без них она осталась бы недоступной с
                     клавиатуры.
                   */}
-                  <header
-                    className="wh-route__head wh-route__head--clickable"
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={route.routeId === openRoute}
-                    data-testid="issue-route-head"
-                    onClick={() => setOpenRoute(route.routeId === openRoute ? null : route.routeId)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setOpenRoute(route.routeId === openRoute ? null : route.routeId);
+                    <header
+                      className="wh-route__head wh-route__head--clickable"
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={route.routeId === openRoute}
+                      data-testid="issue-route-head"
+                      onClick={() =>
+                        setOpenRoute(route.routeId === openRoute ? null : route.routeId)
                       }
-                    }}
-                  >
-                    <div className="wh-route__main">
-                      <strong className="wh-route__number-text">{route.routeNumber}</strong>
-                      {/*
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setOpenRoute(route.routeId === openRoute ? null : route.routeId);
+                        }
+                      }}
+                    >
+                      <div className="wh-route__main">
+                        <strong className="wh-route__number-text">{route.routeNumber}</strong>
+                        {/*
                         Короткая строка вместо перечисления: дата листа уже
                         стоит в его номере, а «внесено» читается из скобок.
                       */}
-                      <div className="muted text-sm" data-testid="issue-route-counts">
-                        {route.total} ({route.checked} из {route.total})
+                        <div className="muted text-sm" data-testid="issue-route-counts">
+                          {route.total} ({route.checked} из {route.total})
+                        </div>
+                        {route.readiness !== 'NOT_READY' && (
+                          <span
+                            data-testid="issue-route-readiness"
+                            data-readiness={route.readiness}
+                          >
+                            <StatusBadge
+                              tone={route.readiness === 'ASSEMBLED' ? 'success' : 'info'}
+                            >
+                              {ISSUE_READINESS_LABELS[route.readiness]}
+                            </StatusBadge>
+                          </span>
+                        )}
                       </div>
-                      {route.readiness !== 'NOT_READY' && (
-                        <span data-testid="issue-route-readiness" data-readiness={route.readiness}>
-                          <StatusBadge tone={route.readiness === 'ASSEMBLED' ? 'success' : 'info'}>
-                            {ISSUE_READINESS_LABELS[route.readiness]}
-                          </StatusBadge>
-                        </span>
-                      )}
-                    </div>
 
-                    {/*
+                      {/*
                       Самостоятельные кнопки внутри шапки не переключают
                       раскрытие: нажатие «Отгрузить» — это отгрузка, а не
                       просьба показать состав.
                     */}
-                    <Button
-                      variant="primary"
-                      data-testid="issue-ship"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setShipping(route);
-                      }}
-                    >
-                      Отгрузить
-                    </Button>
-                  </header>
+                      <Button
+                        variant="primary"
+                        data-testid="issue-ship"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setShipping(route);
+                        }}
+                      >
+                        Отгрузить
+                      </Button>
+                    </header>
 
-                  {route.routeId === openRoute && (
-                    <ul className="wh-route__orders">
-                      {route.orders.map((order) => (
-                        <li
-                          key={order.orderId}
-                          className="wh-route__order"
-                          data-order-number={order.orderNumber}
-                        >
-                          <span className="wh-route__position">{order.position}</span>
-                          <span className="wh-route__order-number">{order.orderNumber}</span>
-                          {/*
+                    {route.routeId === openRoute && (
+                      <ul className="wh-route__orders">
+                        {route.orders.map((order) => (
+                          <li
+                            key={order.orderId}
+                            className="wh-route__order"
+                            data-order-number={order.orderNumber}
+                          >
+                            <span className="wh-route__position">{order.position}</span>
+                            <span className="wh-route__order-number">{order.orderNumber}</span>
+                            {/*
                             Фактическая полка коробки: маршрутная или хранения.
                             Прочерк — только когда размещения нет вовсе, и тогда
                             же лист отгрузить нельзя.
                           */}
-                          {/*
+                            {/*
                             Ячейка стоит вплотную к статусу и в скобках: вместе
                             они и есть ответ «где коробка и можно ли её брать».
                           */}
-                          <span className="wh-route__cell-note" data-testid="issue-order-cell">
-                            {issueCellLabel(order)}
-                          </span>
-                          <span className="wh-route__badges">
-                            <StatusBadge tone={order.ready ? 'success' : 'warning'}>
-                              {order.ready ? 'Готов' : 'Не готов'}
-                            </StatusBadge>
-                            {order.checked && <StatusBadge tone="info">Внесён</StatusBadge>}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
+                            <span className="wh-route__cell-note" data-testid="issue-order-cell">
+                              {issueCellLabel(order)}
+                            </span>
+                            <span className="wh-route__badges">
+                              <StatusBadge tone={order.ready ? 'success' : 'warning'}>
+                                {order.ready ? 'Готов' : 'Не готов'}
+                              </StatusBadge>
+                              {order.checked && <StatusBadge tone="info">Внесён</StatusBadge>}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </article>
         ))}
       </div>
