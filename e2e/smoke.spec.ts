@@ -2209,19 +2209,18 @@ test('склад: развилка «сборка или хранение», с�
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
   const issueHead = issueRoute.getByTestId('issue-route-head');
   await expect(issueHead).toHaveAttribute('aria-expanded', 'false');
-  await issueHead.locator('.muted').first().click();
+  await issueHead.getByTestId('issue-route-counts').click();
   await expect(issueHead).toHaveAttribute('aria-expanded', 'true');
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
-  await issueHead.locator('.muted').first().click();
+  await issueHead.getByTestId('issue-route-counts').click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
-  await issueHead.locator('.muted').first().click();
+  await issueHead.getByTestId('issue-route-counts').click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
 
   // Ячейка каждого заказа названа, «Не готов» у стоящей коробки не появляется.
-  // Ячейка стоит в скобках вплотную к статусу: код и вид полки вместе.
-  await expect(issueRoute.getByTestId('issue-order-cell').first()).toHaveText(
-    /^\(.+ · (Хранение|Маршрутная)\)$/,
-  );
+  // В строке стоит ТОЛЬКО номер полки: подпись вида убрана по принятому
+  // макету — она расширяла колонку и уводила номер заказа вправо.
+  await expect(issueRoute.getByTestId('issue-order-cell').first()).toHaveText(/^[^()]+$/);
   // Коробка в хранении больше не подписывается «Не готов»: полка известна.
   await expect(issueRoute.locator('.wh-route__badges', { hasText: 'Не готов' })).toHaveCount(0);
 
@@ -3069,6 +3068,115 @@ test('склад: «Требуется перемещение» и «Отмен�
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expect(cancelledGroup).toContainText(cancelled);
+
+  /*
+   * Четыре группы одного склада, и каждая названа.
+   *
+   * Прежде спокойное хранение и маршрутные ячейки шли одним безымянным
+   * списком, и тип полки приходилось читать у каждой строки.
+   */
+  for (const [id, title] of [
+    ['relocation', 'Требует перемещения'],
+    ['cancelled', 'Отменённые'],
+    ['storage', 'В хранении'],
+    ['route', 'В маршрутных ячейках'],
+  ] as [string, string][]) {
+    const group = page.getByTestId(`wh-group-${id}`);
+    if ((await group.count()) > 0) {
+      await expect(group, id).toContainText(title);
+      // Счётчик приходит с сервера и считает весь склад, а не загруженное.
+      await expect(page.getByTestId(`wh-group-${id}-count`), id).toHaveText(/^\d+$/);
+    }
+  }
+
+  /*
+   * На телефоне строка становится карточкой с четырьмя углами: заказ и вид
+   * полки сверху, маршрутный лист и номер ячейки снизу.
+   */
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('[data-testid="wh-placement-row"]').first()).toBeVisible();
+  const cornerBox = async (cls: string): Promise<{ x: number; y: number }> => {
+    const box = await page
+      .locator(`[data-testid="wh-placement-row"] .${cls}`)
+      .first()
+      .boundingBox();
+    /*
+     * Берётся СЕРЕДИНА, а не верхний край: таблетка ниже строки текста и
+     * центрируется по ней, поэтому верхние края у соседей по строке разные,
+     * хотя стоят они на одном уровне.
+     */
+    return {
+      x: Math.round(box?.x ?? 0),
+      y: Math.round((box?.y ?? 0) + (box?.height ?? 0) / 2),
+    };
+  };
+  const corners = {
+    order: await cornerBox('wh-placement__order'),
+    kind: await cornerBox('wh-placement__kind'),
+    route: await cornerBox('wh-placement__route'),
+    cell: await cornerBox('wh-placement__cell'),
+  };
+  // Верхняя пара выше нижней, левая пара левее правой.
+  expect(corners.order.y).toBeLessThan(corners.route.y);
+  expect(corners.kind.y).toBeLessThan(corners.cell.y);
+  expect(corners.order.x).toBeLessThan(corners.kind.x);
+  expect(corners.route.x).toBeLessThan(corners.cell.x);
+  // Верхние углы на одной линии, нижние — тоже.
+  expect(Math.abs(corners.order.y - corners.kind.y)).toBeLessThanOrEqual(3);
+  expect(Math.abs(corners.route.y - corners.cell.y)).toBeLessThanOrEqual(3);
+  /*
+   * Карточка помещается по ширине на КАЖДОМ уровне.
+   *
+   * Страница может не выезжать, а прокрутка при этом жить внутри обёртки
+   * таблицы — именно так и было: строка требовала себе всю ширину дважды.
+   * Поэтому проверяется вся цепочка, а не только документ.
+   */
+  const overflows = await page.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const doc = scope.document;
+    const width = (selector: string): number => {
+      const el = doc.querySelector(selector);
+      return el === null ? 0 : el.scrollWidth - el.clientWidth;
+    };
+    return {
+      page: doc.documentElement.scrollWidth - doc.documentElement.clientWidth,
+      plate: width('[data-testid="wh-placement-row"]'),
+      wrap: width('.warehouse .table-wrap'),
+    };
+  });
+  expect(overflows.page, 'страница').toBeLessThanOrEqual(1);
+  expect(overflows.wrap, 'обёртка таблицы').toBeLessThanOrEqual(1);
+  expect(overflows.plate, 'строка').toBeLessThanOrEqual(1);
+
+  /*
+   * Пометка «Переместить» убрана: про перенос уже сказали заголовок группы,
+   * её точка и тёплый цвет карточки.
+   */
+  await expect(relocation).not.toContainText('Переместить');
+
+  // Вид полки и номер ячейки — таблетки с заливкой, а не голый текст.
+  const fill = (selector: string): Promise<string> =>
+    page.evaluate((value: string) => {
+      const scope = globalThis as unknown as {
+        document: { querySelector: (s: string) => unknown };
+        getComputedStyle: (node: unknown) => { backgroundColor: string };
+      };
+      const node = scope.document.querySelector(value);
+      return node === null ? 'нет элемента' : scope.getComputedStyle(node).backgroundColor;
+    }, selector);
+  expect(await fill('[data-testid="wh-placement-row"] .wh-placement__kind')).not.toBe(
+    'rgba(0, 0, 0, 0)',
+  );
+  expect(await fill('[data-testid="wh-placement-row"] .wh-placement__cell')).not.toBe(
+    'rgba(0, 0, 0, 0)',
+  );
+
+  await page.setViewportSize({ width: 1280, height: 900 });
 
   // Ровно два выхода у отменённого букета, свободного текста нет.
   const row = cancelledGroup.locator(`tr:has-text("${cancelled}")`);
@@ -6938,7 +7046,7 @@ test('склад на пяти размерах: вкладки, окна, дл�
     await expect(route).toContainText(longRoute);
     expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
 
-    await route.getByTestId('issue-route-head').locator('.muted').first().click();
+    await route.getByTestId('issue-route-counts').click();
     await expect(route.locator('.wh-route__order')).toHaveCount(1);
     expect(await overflow(), `раскрытые заказы ${label}`).toBeLessThanOrEqual(1);
 
@@ -7195,13 +7303,13 @@ test('два сеанса: ячейка, «Требуется перемещен
   const head = card.getByTestId('assembly-route-head');
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
-  // Нажатие мимо кнопок — по строке с датой и числом заказов.
-  await head.locator('.muted').first().click();
+  // Нажатие мимо кнопок — по строке с числом заказов.
+  await head.getByTestId('assembly-route-counts').click();
   await expect(head).toHaveAttribute('aria-expanded', 'true');
   await expect(card).toHaveAttribute('data-expanded', 'true');
 
   // Повторное нажатие сворачивает.
-  await head.locator('.muted').first().click();
+  await head.getByTestId('assembly-route-counts').click();
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
   // Клавиатура делает то же самое.
@@ -7212,17 +7320,19 @@ test('два сеанса: ячейка, «Требуется перемещен
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
   /*
-   * Самостоятельные кнопки шапки раскрытие не переключают.
+   * Самостоятельные кнопки карточки раскрытие не переключают.
    *
-   * «+ Ячейка» открывает сканирование полки, а не состав листа: иначе
-   * каждое такое нажатие ещё и разворачивало бы карточку под окном.
+   * «+ Ячейка» стоит в РАСКРЫТОЙ карточке: свёрнутая по принятому макету —
+   * ровно две строки, и кнопка не отнимает у них место. Открывает она
+   * сканирование полки, а не состав листа, поэтому карточка остаётся
+   * раскрытой и после закрытия окна.
    */
+  await head.getByTestId('assembly-route-counts').click();
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
   await card.getByTestId('assembly-add-cell').click();
   await expect(watcher.getByTestId('scan-video')).toBeVisible();
   await watcher.getByTestId('scan-close').click();
-  await expect(head).toHaveAttribute('aria-expanded', 'false');
-
-  await card.getByTestId('assembly-route-head').locator('.muted').first().click();
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
 
   await login(worker, stand['кладовщик'] ?? '', stand['пин'] ?? '');
 
@@ -7254,7 +7364,9 @@ test('два сеанса: ячейка, «Требуется перемещен
   const stored = card.locator('.wh-route__order', { hasText: second });
   // Отдельной пометки больше нет: про хранение говорят ячейка и стадия.
   await expect(stored).not.toContainText('Требуется перемещение');
-  await expect(stored).toContainText('Хранение');
+  // Подпись вида полки из строки убрана: в ней стоит НОМЕР полки, а «где
+  // именно лежит коробка» договаривает стадия.
+  await expect(stored).toContainText(storage);
   await expect(stored).toContainText('В хранении');
   await expect(
     watcher.getByTestId('assembly-relocatable').locator(`[data-route-number="${route}"]`),
@@ -8067,8 +8179,19 @@ test('оболочка: меню выезжает поверх экрана и �
       'document.documentElement.scrollWidth - document.documentElement.clientWidth',
     ),
   ).toBeLessThanOrEqual(0);
-  // Выбор не сброшен: меню ничего под собой не пересоздаёт.
-  await expect(page.getByTestId('deals-selected-count')).toHaveText(selected ?? '');
+  /*
+   * Выбор не сброшен: меню ничего под собой не пересоздаёт.
+   *
+   * Уменьшиться выбор вправе ровно по одной причине — заказ стал недоступен
+   * из-за чужого действия, и тогда экран об этом СКАЗАЛ. Тихая потеря выбора
+   * и сброс в ноль по-прежнему валят проверку.
+   */
+  const chosen = (text: string | null): number => Number(/\d+/.exec(text ?? '')?.[0] ?? '0');
+  const after = await page.getByTestId('deals-selected-count').textContent();
+  expect(chosen(after)).toBeGreaterThan(0);
+  if (chosen(after) !== chosen(selected)) {
+    await expect(page.getByTestId('deals-notice')).toContainText('Из выбора снято заказов');
+  }
 
   // Выбор раздела выполняет обычный переход и закрывает панель.
   await page.locator('#shell-sidebar').getByRole('link', { name: 'Настройки' }).click();
@@ -8193,4 +8316,157 @@ test('маршрутизация на телефоне: список, карта
   ).toBeLessThanOrEqual(0);
 
   await context.close();
+});
+
+/*
+ * Приоритет ближайших самовывозов.
+ *
+ * Проверяется то, ради чего группа заведена: заказ, до которого остался
+ * меньше часа, стоит первым и не ждёт F5. Точность самого порога доказана
+ * серверными проверками (`pickup-priority.critical.test.ts`) — здесь важно,
+ * что признак доходит до экрана, что группа обновляется сама и что ни
+ * фильтр, ни узкий экран её не ломают.
+ */
+test('флорист: ближайшие самовывозы стоят первой группой и обновляются без F5', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  const soonNumber = process.env['E2E_PICKUP_SOON'] ?? '';
+  const laterNumber = process.env['E2E_PICKUP_LATER'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    soonNumber === '' || laterNumber === '',
+    'не переданы фикстуры приоритета самовывоза (E2E_PICKUP_SOON/E2E_PICKUP_LATER)',
+  );
+
+  const FLORIST_PIN = '4816';
+
+  // 1. Администратор заводит флориста этой проверки.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Сотрудники и курьеры');
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Флорист приоритета');
+  const floristPhone = uniquePhone();
+  await page.getByLabel('Телефон').fill(floristPhone);
+  await page.getByRole('checkbox', { name: 'Флорист' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+  const floristCode = (await page.locator('.one-time-code').innerText()).trim();
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // Телефон: узкая раскладка проверяется вместе с остальным, а не отдельно.
+  const floristContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const floristPage = await floristContext.newPage();
+  await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
+
+  const groups = floristPage.locator('[data-testid="florist-queue-group"]');
+  const pickupGroup = floristPage.locator('[data-group-kind="pickup-soon"]');
+
+  // 2. Группа существует, стоит ПЕРВОЙ и содержит только ближайший самовывоз.
+  await expect(pickupGroup).toBeVisible();
+  await expect(pickupGroup).toContainText('Ближайшие самовывозы');
+  await expect(pickupGroup).toContainText(soonNumber);
+  await expect(groups.first()).toHaveAttribute('data-group-kind', 'pickup-soon');
+  // Самовывоз, до которого ещё пять часов, приоритета не получает.
+  await expect(pickupGroup).not.toContainText(laterNumber);
+
+  // Счётчик заголовка равен числу строк группы: он не декоративный.
+  const shown = await pickupGroup.locator('.florist__row').count();
+  await expect(pickupGroup.locator('.florist__group-count')).toHaveText(String(shown));
+
+  // 3. Узкий экран: горизонтального выезда нет ни у страницы, ни у группы.
+  const overflow = await floristPage.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const group = scope.document.querySelector('[data-group-kind="pickup-soon"]');
+    return {
+      page: scope.document.documentElement.scrollWidth - scope.document.documentElement.clientWidth,
+      group: group === null ? 0 : group.scrollWidth - group.clientWidth,
+    };
+  });
+  expect(overflow.page).toBeLessThanOrEqual(0);
+  expect(overflow.group).toBeLessThanOrEqual(0);
+
+  /*
+   * 4. Очередь перезапрашивается САМА.
+   *
+   * Момент «осталось меньше часа» наступает от хода времени: никто ничего
+   * не нажимает, и события realtime не происходит. Проверяется именно это —
+   * запрос без единого действия человека.
+   */
+  await floristPage.waitForRequest((candidate) => candidate.url().includes('/api/florist/queue'), {
+    timeout: 90_000,
+  });
+
+  // 5. Введённый фильтр опрос не сбрасывает.
+  await floristPage.getByTestId('florist-search').fill(soonNumber);
+  await expect(pickupGroup).toContainText(soonNumber);
+  await floristPage.waitForRequest((candidate) => candidate.url().includes('/api/florist/queue'), {
+    timeout: 90_000,
+  });
+  await expect(floristPage.getByTestId('florist-search')).toHaveValue(soonNumber);
+  await expect(pickupGroup).toContainText(soonNumber);
+  await floristPage.getByTestId('florist-search').fill('');
+
+  /*
+   * 6. Отмена доходит без F5.
+   *
+   * Отменённый заказ из очереди не исчезает — собирать его нельзя, и это
+   * видно прямо в строке. Но приоритета он лишается: покупателя, за которым
+   * никто не придёт, вперёд не пропускают.
+   */
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  const cancelled = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: soonNumber, cancelled: true },
+  });
+  expect(cancelled.status(), await cancelled.text()).toBe(200);
+
+  await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toHaveCount(0, {
+    timeout: 90_000,
+  });
+
+  /*
+   * Заказ не потерян — он потерял приоритет.
+   *
+   * Искать его в общем списке бессмысленно: без приоритета он уходит вниз,
+   * за границу загруженной страницы, и «не видно» там ничего не доказывает.
+   * Поиск по номеру спрашивает СЕРВЕР обо всей очереди — и заказ находится,
+   * но уже вне приоритетной группы.
+   */
+  await floristPage.getByTestId('florist-search').fill(soonNumber);
+  await expect(floristPage.locator('.florist__row', { hasText: soonNumber })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toHaveCount(0);
+  await floristPage.getByTestId('florist-search').fill('');
+
+  const restored = await request.post('/api/testing/source-cancellation', {
+    headers,
+    data: { orderNumber: soonNumber, cancelled: false },
+  });
+  expect(restored.status()).toBe(200);
+  await expect(floristPage.locator('[data-group-kind="pickup-soon"]')).toContainText(soonNumber, {
+    timeout: 90_000,
+  });
+
+  await floristContext.close();
 });

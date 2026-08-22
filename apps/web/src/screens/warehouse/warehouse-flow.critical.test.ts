@@ -13,6 +13,7 @@ import {
   SCAN_HINTS,
   blockLabel,
   cellLabel,
+  groupPlacements,
   issueCellLabel,
   mergePlacementPages,
   nextPlacementOffset,
@@ -143,5 +144,46 @@ describe('ячейка заказа в строке листа', () => {
     expect(issueCellLabel({ cellCode: null, cellKind: null })).toBe('—');
     // Полка без вида — это тоже «размещения нет»: гадать по коду нечего.
     expect(issueCellLabel({ cellCode: 'S-14', cellKind: null })).toBe('—');
+  });
+});
+
+describe('группы складского списка', () => {
+  const item = (over: Partial<PlacedOrderView>): PlacedOrderView =>
+    order({ requiresRelocation: false, blockedBy: [], cellKind: 'STORAGE', ...over });
+
+  it('делит склад на четыре непересекающиеся группы', () => {
+    const move = item({ orderNumber: 'A', requiresRelocation: true });
+    const dead = item({ orderNumber: 'B', blockedBy: ['CANCELLED'] });
+    const kept = item({ orderNumber: 'C' });
+    const ready = item({ orderNumber: 'D', cellKind: 'ROUTE' });
+
+    const groups = groupPlacements([move, dead, kept, ready]);
+
+    expect(groups.relocation.map((row) => row.orderNumber)).toEqual(['A']);
+    expect(groups.cancelled.map((row) => row.orderNumber)).toEqual(['B']);
+    expect(groups.storage.map((row) => row.orderNumber)).toEqual(['C']);
+    expect(groups.route.map((row) => row.orderNumber)).toEqual(['D']);
+  });
+
+  it('перемещение и отмена важнее типа полки', () => {
+    /*
+     * Коробка в маршрутной ячейке, которую надо переставить, попадает
+     * в «Требует перемещения», а не в «В маршрутных ячейках»: сначала
+     * решается то, что мешает работе.
+     */
+    const groups = groupPlacements([
+      item({ orderNumber: 'A', cellKind: 'ROUTE', requiresRelocation: true }),
+      item({ orderNumber: 'B', cellKind: 'ROUTE', blockedBy: ['CANCELLED'] }),
+    ]);
+
+    expect(groups.route).toHaveLength(0);
+    expect(groups.relocation.map((row) => row.orderNumber)).toEqual(['A']);
+    expect(groups.cancelled.map((row) => row.orderNumber)).toEqual(['B']);
+  });
+
+  it('коробка без ячейки считается хранением, а не маршрутом', () => {
+    const groups = groupPlacements([item({ orderNumber: 'A', cellKind: null })]);
+    expect(groups.storage).toHaveLength(1);
+    expect(groups.route).toHaveLength(0);
   });
 });

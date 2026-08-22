@@ -422,7 +422,12 @@ export function ScannerScreen({
               <p>
                 Заказ {state.orderNumber} уже входит в МЛ {state.routeChoice.routeNumber}
               </p>
-              <div className="row">
+              {/*
+                Два ответа делят строку поровну. Третьей кнопкой здесь стояла
+                «Отмена» — та же самая, что и внизу окна: две одинаковые кнопки
+                рядом заставляли выбирать между ними, хотя выбора нет.
+              */}
+              <div className="scanner__answers">
                 <Button
                   variant="primary"
                   data-testid="scan-route-assembly"
@@ -436,9 +441,6 @@ export function ScannerScreen({
                 >
                   Всё равно в хранение
                 </Button>
-                <Button data-testid="scan-route-cancel" onClick={close}>
-                  Отмена
-                </Button>
               </div>
             </div>
           )}
@@ -449,7 +451,7 @@ export function ScannerScreen({
                 Это маршрутная ячейка. Положить заказ сразу в маршрутный лист? Отказ вернёт к
                 сканированию другой ячейки.
               </p>
-              <div className="row">
+              <div className="scanner__answers">
                 <Button
                   variant="primary"
                   data-testid="scan-consent-yes"

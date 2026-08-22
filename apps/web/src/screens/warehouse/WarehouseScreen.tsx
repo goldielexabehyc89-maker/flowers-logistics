@@ -158,6 +158,9 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const [scannedOrder, setScannedOrder] = useState<string | null>(null);
   /** Открыто ли окно сканирования возврата. */
   const [scanning, setScanning] = useState(false);
+  // Обе группы открыты: возвратов за смену немного, и прятать их незачем.
+  const [pendingOpen, setPendingOpen] = useState(true);
+  const [acceptedOpen, setAcceptedOpen] = useState(true);
 
   const returns = useQuery({
     queryKey: ['warehouse-returns'],
@@ -300,39 +303,105 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
         )}
       </div>
 
-      <div className="card stack">
-        <h3>Ждут приёмки</h3>
-        {returns.isPending && <LoadingState title="Загружаем возвраты…" />}
-        {returns.isError && (
-          <ErrorState
-            title="Не удалось загрузить возвраты"
-            onRetry={() => void returns.refetch()}
-          />
-        )}
-        {returns.data !== undefined &&
-          (returns.data.pending.length === 0 ? (
-            <EmptyState title="Возвратов нет" />
-          ) : (
-            <ReturnsTable items={returns.data.pending} showCell={false} />
-          ))}
-      </div>
+      {returns.isPending && <LoadingState title="Загружаем возвраты…" />}
+      {returns.isError && (
+        <ErrorState title="Не удалось загрузить возвраты" onRetry={() => void returns.refetch()} />
+      )}
+
+      {/*
+        Возвраты собраны в такие же вдавленные группы, что и складские
+        размещения: тот же заголовок с точкой, счётчиком и стрелкой, те же
+        карточки по четырём углам. Разделы склада кладовщик перебирает
+        подряд, и разная разметка в них стоила бы лишнего взгляда.
+      */}
+      {returns.data !== undefined && returns.data.pending.length === 0 && (
+        <EmptyState title="Возвратов нет" />
+      )}
+
+      {returns.data !== undefined && returns.data.pending.length > 0 && (
+        <ReturnGroup
+          id="pending"
+          title="Ждут приёмки"
+          tone="relocation"
+          items={returns.data.pending}
+          showCell={false}
+          open={pendingOpen}
+          onToggle={() => setPendingOpen((open) => !open)}
+        />
+      )}
 
       {returns.data !== undefined && returns.data.accepted.length > 0 && (
-        <div className="card stack">
-          <h3>Принятые возвраты</h3>
-          <ReturnsTable items={returns.data.accepted} showCell />
-        </div>
+        <ReturnGroup
+          id="accepted"
+          title="Принятые возвраты"
+          tone="route"
+          items={returns.data.accepted}
+          showCell
+          open={acceptedOpen}
+          onToggle={() => setAcceptedOpen((open) => !open)}
+        />
       )}
     </>
+  );
+}
+
+/**
+ * Группа возвратов.
+ *
+ * Устроена как складская: утопленная панель, заголовок с точкой, счётчиком
+ * и стрелкой, внутри — карточки. Свернуть можно любую.
+ */
+function ReturnGroup({
+  id,
+  title,
+  tone,
+  items,
+  showCell,
+  open,
+  onToggle,
+}: {
+  id: string;
+  title: string;
+  tone: string;
+  items: readonly WarehouseReturnView[];
+  showCell: boolean;
+  open: boolean;
+  onToggle: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="stack wh-plate" data-testid={`wh-returns-${id}`}>
+      <button
+        type="button"
+        className="wh-group__toggle"
+        aria-expanded={open}
+        data-testid={`wh-returns-${id}-toggle`}
+        onClick={onToggle}
+      >
+        <span className={`wh-group__dot wh-group__dot--${tone}`} aria-hidden="true" />
+        <span className="wh-group__title">{title}</span>
+        <span
+          className="wh-group__count wh-group__count--sunken"
+          data-testid={`wh-returns-${id}-count`}
+        >
+          {items.length}
+        </span>
+        <GroupChevron open={open} />
+      </button>
+
+      {open && <ReturnsTable items={items} showCell={showCell} kind={id} />}
+    </div>
   );
 }
 
 function ReturnsTable({
   items,
   showCell,
+  kind,
 }: {
   items: readonly WarehouseReturnView[];
   showCell: boolean;
+  /** Смысл группы: от него зависит цвет карточки, как и на «Складе». */
+  kind?: string;
 }): React.JSX.Element {
   return (
     <div className="table-wrap">
@@ -340,32 +409,51 @@ function ReturnsTable({
         <thead>
           <tr>
             <th>Возврат</th>
-            <th>Курьер</th>
-            <th>Причина</th>
             <th>Состояние</th>
-            {showCell && <th>Ячейка</th>}
+            <th>Заказ</th>
+            <th>Ячейка</th>
+            <th>Причина</th>
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
             <tr
               key={item.orderId}
+              data-kind={item.cancelled ? 'cancelled' : kind}
               data-order-number={item.orderNumber}
               data-return-number={item.displayNumber}
             >
-              <td>
+              <td className="wh-placement__order">
                 <strong>{item.displayNumber}</strong>
-                <div className="muted text-sm">заказ {item.orderNumber}</div>
+              </td>
+              <td className="wh-placement__kind muted">
+                {RETURN_STATE_LABELS[item.state] ?? item.state}
+              </td>
+              <td className="wh-placement__route muted">заказ {item.orderNumber}</td>
+              <td
+                className={
+                  showCell && item.cellCode !== null
+                    ? 'wh-placement__cell'
+                    : 'wh-placement__cell wh-placement__cell--none'
+                }
+              >
+                {showCell && item.cellCode !== null ? item.cellCode : 'без ячейки'}
+              </td>
+              {/*
+                Причина и курьер — третья строка: на вопрос «что это за
+                коробка» отвечают углы, а это уже подробности.
+              */}
+              <td className="wh-placement__flags">
+                <span className="wh-return__reason">
+                  {item.reasonName}
+                  {item.courier === null ? '' : ` · ${item.courier}`}
+                </span>
                 {item.cancelled && (
-                  <div data-testid="wh-return-cancelled">
+                  <span data-testid="wh-return-cancelled">
                     <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>
-                  </div>
+                  </span>
                 )}
               </td>
-              <td>{item.courier ?? '—'}</td>
-              <td>{item.reasonName}</td>
-              <td>{RETURN_STATE_LABELS[item.state] ?? item.state}</td>
-              {showCell && <td>{item.cellCode ?? '—'}</td>}
             </tr>
           ))}
         </tbody>
@@ -1010,9 +1098,15 @@ function PlacementGroups({
   const reportError = useApiError();
   const queryClient = useQueryClient();
   const { client } = useAuth();
-  // Отменённые свёрнуты по умолчанию: их бывает много, и разворачивать ими
-  // весь экран при каждом открытии склада незачем.
-  const [cancelledOpen, setCancelledOpen] = useState(false);
+  /*
+   * Свернуть можно любую группу.
+   *
+   * Отменённые закрыты сразу: их бывает много, и разворачивать ими весь экран
+   * при каждом открытии склада незачем. Остальные открыты, но кладовщик
+   * убирает лишнее сам — на телефоне четыре списка подряд не помещаются.
+   */
+  const [closed, setClosed] = useState<Record<string, boolean>>({ cancelled: true });
+  const toggle = (id: string): void => setClosed((prev) => ({ ...prev, [id]: prev[id] !== true }));
 
   const withdraw = useMutation({
     mutationFn: (input: { orderNumber: string; reason: 'REASSEMBLY' | 'WRITE_OFF' }) =>
@@ -1034,58 +1128,153 @@ function PlacementGroups({
 
   return (
     <div className="stack">
-      {groups.relocation.length > 0 && (
-        <div className="stack" data-testid="wh-group-relocation">
-          <h4 className="wh-group__title">
-            Требуется перемещение · {totals?.relocation ?? groups.relocation.length}
-          </h4>
-          <PlacementTable items={groups.relocation} />
-        </div>
-      )}
+      {/*
+        Четыре группы одного склада, каждая со своим смыслом:
+        что мешает работе, что ждёт решения, что просто лежит и что уже
+        собрано под курьера. Раньше две последние шли одним безымянным
+        списком, и тип полки приходилось читать у каждой строки.
+      */}
+      <PlacementGroup
+        id="relocation"
+        title="Требует перемещения"
+        count={totals?.relocation ?? groups.relocation.length}
+        items={groups.relocation}
+        open={closed.relocation !== true}
+        onToggle={() => toggle('relocation')}
+      />
 
-      {groups.cancelled.length > 0 && (
-        <div className="stack" data-testid="wh-group-cancelled">
-          {/*
-            Одна строка высотой с обычную: свёрнутая группа не должна
-            выглядеть весомее самих заказов.
-          */}
-          <button
-            type="button"
-            className="wh-group__toggle"
-            data-testid="wh-group-cancelled-toggle"
-            aria-expanded={cancelledOpen}
-            onClick={() => setCancelledOpen((open) => !open)}
-          >
-            <span>Отменённые</span>
-            <span className="wh-group__count" data-testid="wh-group-cancelled-count">
-              {totals?.cancelled ?? groups.cancelled.length}
-            </span>
-            <span aria-hidden="true">{cancelledOpen ? '▾' : '▸'}</span>
-          </button>
+      <PlacementGroup
+        id="cancelled"
+        title="Отменённые"
+        count={totals?.cancelled ?? groups.cancelled.length}
+        items={groups.cancelled}
+        open={closed.cancelled !== true}
+        onToggle={() => toggle('cancelled')}
+        onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
+        busy={withdraw.isPending}
+      />
 
-          {cancelledOpen && (
-            <PlacementTable
-              items={groups.cancelled}
-              onWithdraw={(orderNumber, reason) => withdraw.mutate({ orderNumber, reason })}
-              busy={withdraw.isPending}
-            />
-          )}
-        </div>
-      )}
+      <PlacementGroup
+        id="storage"
+        title="В хранении"
+        count={totals?.storage ?? groups.storage.length}
+        items={groups.storage}
+        open={closed.storage !== true}
+        onToggle={() => toggle('storage')}
+      />
 
-      {groups.rest.length > 0 && <PlacementTable items={groups.rest} />}
+      <PlacementGroup
+        id="route"
+        title="В маршрутных ячейках"
+        count={totals?.route ?? groups.route.length}
+        items={groups.route}
+        open={closed.route !== true}
+        onToggle={() => toggle('route')}
+      />
 
       {more}
     </div>
   );
 }
 
+/**
+ * Стрелка состояния группы.
+ *
+ * Она не кнопка: нажимается вся строка заголовка, а стрелка лишь показывает,
+ * раскрыт список или свёрнут. Поворот делает CSS — чтобы состояние читалось
+ * одним значком, а не двумя разными символами.
+ */
+function GroupChevron({ open }: { open: boolean }): React.JSX.Element {
+  return (
+    <span className="wh-group__chevron" data-open={open ? 'true' : 'false'} aria-hidden="true">
+      <svg
+        width="12"
+        height="8"
+        viewBox="0 0 12 8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M1 1.5 6 6.5l5-5" />
+      </svg>
+    </span>
+  );
+}
+
+/**
+ * Группа складского списка.
+ *
+ * Заголовок лежит в углублении и держит счётчик: он отвечает на вопрос
+ * «сколько таких коробок на складе», а не «сколько их видно сейчас».
+ * Пустая группа не показывается — заголовок с нулём обещает работу,
+ * которой нет.
+ */
+function PlacementGroup({
+  id,
+  title,
+  count,
+  items,
+  open = true,
+  onToggle,
+  onWithdraw,
+  busy,
+}: {
+  id: string;
+  title: string;
+  count: number;
+  items: PlacedOrderView[];
+  open?: boolean;
+  onToggle?: () => void;
+  onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
+  busy?: boolean;
+}): React.JSX.Element | null {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="stack wh-plate" data-testid={`wh-group-${id}`}>
+      <button
+        type="button"
+        className="wh-group__toggle"
+        aria-expanded={open}
+        data-testid={`wh-group-${id}-toggle`}
+        onClick={onToggle}
+      >
+        <span className={`wh-group__dot wh-group__dot--${id}`} aria-hidden="true" />
+        <span className="wh-group__title">{title}</span>
+        <span
+          className="wh-group__count wh-group__count--sunken"
+          data-testid={`wh-group-${id}-count`}
+        >
+          {count}
+        </span>
+        <GroupChevron open={open} />
+      </button>
+
+      {open && (
+        <PlacementTable
+          items={items}
+          kind={id}
+          {...(onWithdraw === undefined ? {} : { onWithdraw })}
+          {...(busy === undefined ? {} : { busy })}
+        />
+      )}
+    </div>
+  );
+}
+
 function PlacementTable({
   items,
+  kind,
   onWithdraw,
   busy,
 }: {
   items: PlacedOrderView[];
+  /** Вид группы: на телефоне он задаёт поверхность карточки. */
+  kind: string;
   onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
   busy?: boolean;
 }): React.JSX.Element {
@@ -1095,26 +1284,53 @@ function PlacementTable({
         <thead>
           <tr>
             <th>Заказ</th>
-            <th>Ячейка</th>
             <th>Тип</th>
             <th>Маршрут</th>
+            <th>Ячейка</th>
             <th>Пометки</th>
             {onWithdraw !== undefined && <th>Снять с хранения</th>}
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
-            <tr key={item.orderId} data-testid="wh-placement-row">
-              <td>
+            /*
+              Порядок ячеек здесь же задаёт раскладку на телефоне: строка
+              превращается в карточку с четырьмя углами — заказ и вид полки
+              сверху, маршрутный лист и номер ячейки снизу. Значения по углам
+              читаются одним взглядом, а столбиком их пришлось бы перебирать.
+            */
+            <tr key={item.orderId} data-testid="wh-placement-row" data-kind={kind}>
+              <td className="wh-placement__order">
                 <strong>{item.orderNumber}</strong>
               </td>
-              <td>{cellLabel(item)}</td>
-              <td className="muted">
+              <td className="wh-placement__kind muted">
                 {item.cellKind === null ? '—' : CELL_KIND_LABELS[item.cellKind]}
               </td>
-              <td className="muted">{item.routeNumber ?? '—'}</td>
-              <td>
-                {item.requiresRelocation && <StatusBadge tone="warning">Переместить</StatusBadge>}
+              <td className="wh-placement__route muted">{item.routeNumber ?? '—'}</td>
+              {/*
+                Полка показана таблеткой только когда она есть. «Не принят» —
+                это отсутствие полки, а не её номер, и заливка приравнивала бы
+                одно к другому.
+              */}
+              <td
+                className={
+                  item.cellCode === null
+                    ? 'wh-placement__cell wh-placement__cell--none'
+                    : 'wh-placement__cell'
+                }
+              >
+                {cellLabel(item)}
+              </td>
+              {/*
+                Пометки — настоящие предупреждения и живут отдельной ячейкой:
+                на телефоне она становится третьей строкой и только тогда,
+                когда предупреждение есть.
+
+                Значка «Переместить» здесь больше нет: про перенос уже сказали
+                заголовок группы, её точка и тёплый цвет карточки, а четвёртое
+                повторение отнимало строку у того, что говорится один раз.
+              */}
+              <td className="wh-placement__flags">
                 {item.blockedBy.map((flag) => (
                   <StatusBadge key={flag} tone="error">
                     {blockLabel(flag)}
@@ -1128,9 +1344,13 @@ function PlacementTable({
                     или в списание. Третьего смысла нет, а свободный текст
                     потом нельзя посчитать.
                   */}
-                  <div className="row resolutions__actions">
+                  {/*
+                    Обычные кнопки, а не текст: на цветной карточке призрачная
+                    кнопка неотличима от подписи, и нажать её никто не пробует.
+                  */}
+                  <div className="row wh-placement__actions">
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       disabled={busy === true}
                       data-testid="wh-withdraw-reassembly"
                       onClick={() => onWithdraw(item.orderNumber, 'REASSEMBLY')}
@@ -1138,7 +1358,7 @@ function PlacementTable({
                       Передать на пересборку
                     </Button>
                     <Button
-                      variant="ghost"
+                      variant="danger"
                       disabled={busy === true}
                       data-testid="wh-withdraw-write-off"
                       onClick={() => onWithdraw(item.orderNumber, 'WRITE_OFF')}

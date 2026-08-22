@@ -30,6 +30,8 @@
  * стабильный tie-break по номеру заказа.
  */
 
+import { moscowDayRange } from '@fl/shared';
+
 /** Заказ очереди в том виде, в каком его сортируют. */
 export interface QueueOrder {
   id: string;
@@ -49,6 +51,13 @@ export interface QueueOrder {
   route: QueueRoute | null;
   /** Позиция остановки внутри маршрута, начиная с 1. */
   routePosition: number | null;
+  /**
+   * Самовывоз, до начала которого осталось меньше часа.
+   *
+   * Считается сервером по полному набору очереди и по абсолютному моменту, а
+   * не по календарному дню: заказ на 00:30 обязан подняться в 23:31 накануне.
+   */
+  pickupSoon: boolean;
 }
 
 export interface QueueRoute {
@@ -101,6 +110,49 @@ export function effectiveMinutes(order: {
     };
   }
   return { startMinute: null, endMinute: null };
+}
+
+/**
+ * Окно приоритета самовывоза в минутах.
+ *
+ * Ровно час — уже НЕ «ближайший»: условие строгое. Граница выбрана владельцем
+ * и одна на сервер и проверки, чтобы «меньше часа» не разошлось с «не позже
+ * часа» между двумя местами.
+ */
+export const PICKUP_SOON_WINDOW_MINUTES = 60;
+
+/**
+ * Ближайший ли это самовывоз.
+ *
+ * Сравниваются абсолютные моменты, а не минуты внутри дня: до начала интервала
+ * может лежать полночь, и разница «12:00 минус 23:31» внутри суток дала бы
+ * почти сутки вместо пятидесяти девяти минут.
+ *
+ * Начало, которое уже наступило, из группы не выводит. Просроченный самовывоз
+ * ждёт человека у прилавка прямо сейчас — опустить его вниз значит потерять
+ * единственный заказ, у которого срок уже вышел.
+ *
+ * Заказ без распознанного начала интервала в группу не попадает: «когда-нибудь
+ * сегодня» не является ближайшим часом.
+ */
+export function isPickupSoon(
+  order: {
+    /** Способ получения — самовывоз. Определяется точным справочником. */
+    pickup: boolean;
+    cancelled: boolean;
+    deliveryDate: string | null;
+    startMinute: number | null;
+  },
+  now: Date,
+): boolean {
+  if (!order.pickup || order.cancelled) {
+    return false;
+  }
+  if (order.deliveryDate === null || order.startMinute === null) {
+    return false;
+  }
+  const startsAt = moscowDayRange(order.deliveryDate).from.getTime() + order.startMinute * 60_000;
+  return startsAt - now.getTime() < PICKUP_SOON_WINDOW_MINUTES * 60_000;
 }
 
 /**
@@ -179,6 +231,29 @@ function compareUrgency(
 }
 
 /**
+ * Порядок внутри группы ближайших самовывозов.
+ *
+ * Самый ранний сверху по ПОЛНОЙ дате и времени: в группе одновременно бывают
+ * сегодняшний вечерний заказ и завтрашний ночной. Устойчивый добор — по
+ * номеру заказа, чтобы порядок не менялся между двумя одинаковыми запросами.
+ */
+function comparePickupSoon(a: QueueOrder, b: QueueOrder): number {
+  const aDate = a.deliveryDate ?? null;
+  const bDate = b.deliveryDate ?? null;
+  if (aDate !== bDate) {
+    if (aDate === null) return 1;
+    if (bDate === null) return -1;
+    return aDate.localeCompare(bDate);
+  }
+  if (a.startMinute !== b.startMinute) {
+    if (a.startMinute === null) return 1;
+    if (b.startMinute === null) return -1;
+    return a.startMinute - b.startMinute;
+  }
+  return a.externalName.localeCompare(b.externalName, 'ru');
+}
+
+/**
  * Итоговый порядок очереди.
  *
  * Сортировка не мутирует вход: очередь строится заново при каждом запросе,
@@ -190,6 +265,19 @@ export function sortQueue(
   context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number },
 ): QueueOrder[] {
   return [...orders].sort((a, b) => {
+    /*
+     * Ближайшие самовывозы — выше всего остального, включая маршрутные листы.
+     *
+     * За таким заказом человек уже едет или стоит у прилавка, и собрать его
+     * позже некому: курьерский заказ ждёт машину, а самовывоз — покупателя.
+     */
+    if (a.pickupSoon !== b.pickupSoon) {
+      return a.pickupSoon ? -1 : 1;
+    }
+    if (a.pickupSoon && b.pickupSoon) {
+      return comparePickupSoon(a, b);
+    }
+
     const aRoute = a.route;
     const bRoute = b.route;
 

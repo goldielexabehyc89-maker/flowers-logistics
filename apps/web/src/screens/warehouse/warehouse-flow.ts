@@ -151,31 +151,41 @@ export const SCAN_HINTS: Record<ScanStep, string> = {
  *
  * Заказ попадает РОВНО В ОДНУ группу. Дубль в двух группах читался бы как
  * две разные коробки: кладовщик пошёл бы искать вторую.
+ *
+ * Спокойное хранение и маршрутные ячейки разделены: это разные полки и разная
+ * работа. Коробка в маршрутной ячейке уже ждёт курьера, коробка в хранении —
+ * ещё нет, и общий список заставлял бы сверять тип у каждой строки.
  */
 export interface PlacementGroups<T> {
   relocation: T[];
   cancelled: T[];
-  rest: T[];
+  /** Спокойно лежат в ячейке хранения. */
+  storage: T[];
+  /** Стоят в маршрутной ячейке. */
+  route: T[];
 }
 
-export function groupPlacements<T extends { requiresRelocation: boolean; blockedBy: string[] }>(
-  items: readonly T[],
-): PlacementGroups<T> {
+export function groupPlacements<
+  T extends { requiresRelocation: boolean; blockedBy: string[]; cellKind: StorageCellKind | null },
+>(items: readonly T[]): PlacementGroups<T> {
   const relocation: T[] = [];
   const cancelled: T[] = [];
-  const rest: T[] = [];
+  const storage: T[] = [];
+  const route: T[] = [];
 
   for (const item of items) {
     if (item.requiresRelocation) {
       relocation.push(item);
     } else if (item.blockedBy.includes('CANCELLED')) {
       cancelled.push(item);
+    } else if (item.cellKind === 'ROUTE') {
+      route.push(item);
     } else {
-      rest.push(item);
+      storage.push(item);
     }
   }
 
-  return { relocation, cancelled, rest };
+  return { relocation, cancelled, storage, route };
 }
 
 /**
@@ -188,7 +198,8 @@ export function groupPlacements<T extends { requiresRelocation: boolean; blocked
 export interface PlacementGroupTotals {
   relocation: number;
   cancelled: number;
-  rest: number;
+  storage: number;
+  route: number;
 }
 
 /**

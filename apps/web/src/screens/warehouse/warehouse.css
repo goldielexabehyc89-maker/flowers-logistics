@@ -26,10 +26,18 @@
   width: 100%;
 }
 
+/*
+ * Шапка листа — четыре угла, как карточка заказа на «Складе».
+ *
+ * Слева сверху номер, справа сверху день и время, слева снизу счёт заказов,
+ * справа снизу полка. Читается двумя движениями глаз вместо одной длинной
+ * строки, где всё написано подряд.
+ */
 .wh-route__head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-2);
+  gap: 2px var(--space-2);
 }
 
 .wh-route__main {
@@ -39,15 +47,65 @@
 
 /* Номер листа — кнопка: нажатие открывает проверку, а не раскрывает состав. */
 .wh-route__number {
+  grid-column: 1;
+  grid-row: 1;
+  /*
+   * Ширина по тексту, а не по колонке.
+   *
+   * Растянутая на всю колонку кнопка ловила нажатия далеко правее номера, и
+   * вместо раскрытия карточки открывалась проверка листа.
+   */
+  justify-self: start;
+  max-width: 100%;
+  min-width: 0;
   padding: 0;
   border: none;
   background: none;
   color: var(--color-accent-hover);
   font: inherit;
-  font-size: 17px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   text-align: left;
   cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * День и время листа — вдавленная таблетка справа сверху.
+ *
+ * В номере стоит дата постановки листа, а кладовщику нужен день доставки:
+ * повторять номер словами незачем, а срок — единственное, чего в нём нет.
+ */
+.wh-route__date {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  box-shadow:
+    inset 2px 2px 4px rgb(163 172 191 / 38%),
+    inset -2px -2px 4px rgb(255 255 255 / 70%);
+}
+
+/* Сколько заказов в листе и сколько из них готово — слева снизу. */
+.wh-route__counts {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /*
@@ -58,65 +116,264 @@
  * к соседней строке.
  */
 .wh-route__cells {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: end;
   display: flex;
   flex: none;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: center;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 4px;
 }
 
+/* Номер полки — вдавленная таблетка: то же обозначение, что и на «Складе». */
 .wh-route__cell {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--color-surface-hover);
-  font-size: var(--font-size-sm);
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 11px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 13px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  box-shadow:
+    inset 2px 2px 5px rgb(163 172 191 / 45%),
+    inset -2px -2px 5px rgb(255 255 255 / 78%);
 }
 
-.wh-route__orders,
+/* Полки нет — приглушённый текст без заливки: обозначать нечего. */
+.wh-route__cells-none {
+  color: var(--color-text-disabled);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/*
+ * Заказы листа: сам список — просто столбец, углубление у каждой строки.
+ *
+ * Три уровня различаются не рамками, а глубиной: панель группы утоплена,
+ * лист приподнят над ней, заказы снова утоплены. Общая рамка вокруг списка
+ * дала бы четвёртый уровень подряд — и принадлежность пришлось бы угадывать.
+ */
+.wh-route__orders {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/*
+ * Строка заказа — четыре угла, как и шапка листа.
+ *
+ * Слева сверху номер, справа сверху стадия, слева снизу вид полки и время,
+ * справа снизу её номер. Средняя колонка резиновая: длинный номер сжимает
+ * её, а не выталкивает таблетки за край экрана.
+ */
+.wh-route__order {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px var(--space-2);
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--color-surface);
+  box-shadow:
+    inset 3px 3px 6px rgb(163 172 191 / 40%),
+    inset -3px -3px 6px rgb(255 255 255 / 74%);
+}
+
+/*
+ * Окно проверки: тот же список, что и в раскрытой карточке листа.
+ *
+ * Приподнятые строки во вдавленном лотке давали в окне четвёртый уровень
+ * подряд; на доске те же заказы уже утоплены, и одинаковая работа выглядела
+ * по-разному в двух местах.
+ */
 .wh-check__list {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   margin: var(--space-2) 0 0;
   padding: 0;
   list-style: none;
 }
 
-.wh-route__order,
 .wh-check__item {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-2);
-  padding: 6px var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  gap: 2px var(--space-2);
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 12px;
   background: var(--color-surface);
+  box-shadow:
+    inset 3px 3px 6px rgb(163 172 191 / 40%),
+    inset -3px -3px 6px rgb(255 255 255 / 74%);
+}
+
+/* Где коробка — нижняя строка окна, во всю ширину. */
+.wh-check__cell {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wh-route__position {
+  grid-column: 1;
+  grid-row: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border-radius: 999px;
-  background: var(--color-surface-hover);
-  font-size: var(--font-size-sm);
+  background: var(--surface-raised);
+  font-size: 12px;
   font-weight: 600;
+  box-shadow:
+    2px 2px 4px rgb(150 160 182 / 40%),
+    -1px -1px 3px rgb(255 255 255 / 85%);
 }
 
 .wh-route__order-number {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  font-size: 14px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Стадия заказа — правый верхний угол. */
 .wh-route__badges {
+  grid-column: 3;
+  grid-row: 1;
+  justify-self: end;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+/*
+ * Окно доставки — нижняя строка слева, во всю свободную ширину.
+ *
+ * Подпись вида полки отсюда убрана: колонка расширялась под слово
+ * «Маршрутная», и номер заказа в верхней строке уезжал вправо.
+ */
+.wh-route__order > .muted.text-sm {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * Добавочный статус заказа — третья строка во всю ширину.
+ *
+ * В верхней строке он стоял рядом со стадией и отнимал место у номера
+ * заказа: от длинного номера оставалась одна буква с многоточием.
+ */
+.wh-route__extra {
+  grid-column: 1 / -1;
+  grid-row: 3;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-left: auto;
+  margin-top: 2px;
+}
+
+/* Номер полки заказа — та же вдавленная таблетка, что и у листа. */
+.wh-route__cellnum {
+  grid-column: 3;
+  grid-row: 2;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 11px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  box-shadow:
+    inset 2px 2px 5px rgb(163 172 191 / 45%),
+    inset -2px -2px 5px rgb(255 255 255 / 78%);
+}
+
+/*
+ * Полки нет — простой приглушённый текст.
+ *
+ * Правило стоит ПОСЛЕ таблетки намеренно: вес селекторов одинаковый, и
+ * решает порядок. Выше оно молча проигрывало бы.
+ */
+.wh-route__cellnum--none {
+  min-height: 0;
+  padding: 0;
+  background: none;
+  color: var(--color-text-disabled);
+  font-weight: 400;
+  box-shadow: none;
+}
+
+/*
+ * «Выдача»: та же сетка углов, что и в «Сборке».
+ *
+ * Слева сверху номер листа, справа сверху его готовность, слева снизу счёт
+ * заказов, справа снизу «Отгрузить» — действие стоит там же, где на «Складе»
+ * стоит номер полки, и рука ищет его в одном и том же месте.
+ */
+.wh-issue__route .wh-route__number-text {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wh-route__readiness {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+}
+
+.wh-route__ship {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: end;
+  min-height: 32px;
+  padding: 0 14px;
+}
+
+/* «+ Ячейка» — во всю ширину раскрытой карточки, под составом листа. */
+.wh-route__add-cell {
+  width: 100%;
 }
 
 /* Окно проверки: то же компактное окно, что и у камеры. */
@@ -176,14 +433,359 @@
  * как один длинный список заказов. Рамка отвечает на вопрос «что именно
  * уедет по кнопке „Отгрузить“».
  */
+/*
+ * Лист курьера — приподнятая полоса в углублении.
+ *
+ * Рамка осталась от прежнего оформления и спорила со светотенью соседних
+ * вкладок: там поверхности разделяет тень, а не линия.
+ */
 .wh-issue__route {
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
 }
 
 /*
- * Группа листов на доске: заголовок с точкой, счётчиком и стрелкой.
+ * Складская группа: заголовок в углублении, список под ним.
+ *
+ * Тот же приём, что на досках сборки и выдачи: общая панель утоплена, а её
+ * содержимое приподнято. Заголовок с номером группы и счётчиком лежит прямо
+ * на ней и своей поверхности не имеет.
+ */
+.wh-plate {
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+.wh-plate > .wh-group__toggle {
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/*
+ * Карточка размещения на телефоне.
+ *
+ * Две строки и четыре угла: сверху слева номер заказа, сверху справа вид
+ * полки, снизу слева маршрутный лист, снизу справа её номер. Кладовщик
+ * держит телефон одной рукой и ищет глазами угол, а не строку в столбце.
+ *
+ * Поверхность карточки несёт смысл: тёплая — коробку надо перенести,
+ * зелёная — она на своей маршрутной полке, спокойная — просто лежит,
+ * красноватая — заказ отменён. Значения из макета рабочего места.
+ */
+@media (max-width: 767px) {
+  .warehouse .table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-2);
+    align-items: center;
+    /*
+     * Отступ задан полем, а не `border-spacing`: строка стала сеткой и
+     * из табличной раскладки вышла, а вместе с ней и промежуток между
+     * строками — карточки слипались.
+     */
+    margin: 0 0 8px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 14px;
+    background: var(--surface-raised);
+    box-shadow:
+      3px 3px 8px rgb(150 160 182 / 45%),
+      -2px -2px 6px rgb(255 255 255 / 88%);
+  }
+
+  .warehouse .table tr[data-kind='relocation'],
+  .warehouse .table tr[data-kind='pending'] {
+    background: var(--row-move);
+    box-shadow:
+      3px 3px 8px rgb(175 160 140 / 45%),
+      -2px -2px 6px rgb(255 255 255 / 85%);
+  }
+
+  .warehouse .table tr[data-kind='route'],
+  .warehouse .table tr[data-kind='accepted'] {
+    background: var(--row-ready);
+    box-shadow:
+      3px 3px 8px rgb(150 172 155 / 40%),
+      -2px -2px 6px rgb(255 255 255 / 85%);
+  }
+
+  .warehouse .table tr[data-kind='cancelled'] {
+    background: var(--row-danger);
+    box-shadow:
+      3px 3px 8px rgb(180 150 155 / 45%),
+      -2px -2px 6px rgb(255 255 255 / 85%);
+  }
+
+  /*
+   * Ширина ячеек гасится намеренно.
+   *
+   * Общее мобильное правило задаёт каждой ячейке `width: 100%`. В сетке это
+   * значит, что элемент ПРАВОЙ колонки требует себе всю ширину строки, и
+   * карточка становится вдвое шире экрана — отсюда и была прокрутка вбок.
+   */
+  .warehouse .table td {
+    display: block;
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  /*
+   * Обёртка на телефоне — просто контейнер: поверхность даёт панель группы.
+   *
+   * `min-width: 0` обязателен. Обёртка лежит в колонке-флексе, а такой элемент
+   * по умолчанию не сжимается уже своего содержимого: одна строка с запретом
+   * переноса — и вся таблица становится шире экрана, сколько ни правь ячейки.
+   */
+  .warehouse .table-wrap,
+  .wh-group .table-wrap {
+    min-width: 0;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+    overflow-x: visible;
+  }
+
+  .warehouse .table,
+  .warehouse .table tbody,
+  .warehouse .table tr {
+    min-width: 0;
+  }
+
+  /* Номер заказа: занимает строку и не разрывает карточку длиной. */
+  .warehouse .table td.wh-placement__order {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    font-size: 15px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Вид полки — таблетка справа сверху, цвет по смыслу группы. */
+  .warehouse .table td.wh-placement__kind {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+    box-shadow:
+      inset 2px 2px 4px rgb(163 172 191 / 40%),
+      inset -2px -2px 4px rgb(255 255 255 / 72%);
+  }
+
+  .warehouse .table tr[data-kind='relocation'] td.wh-placement__kind,
+  .warehouse .table tr[data-kind='pending'] td.wh-placement__kind {
+    background: #efe0c9;
+    color: var(--color-warning);
+    box-shadow: none;
+  }
+
+  .warehouse .table tr[data-kind='route'] td.wh-placement__kind,
+  .warehouse .table tr[data-kind='accepted'] td.wh-placement__kind {
+    background: var(--color-success-soft);
+    color: var(--color-success);
+    box-shadow: none;
+  }
+
+  .warehouse .table tr[data-kind='cancelled'] td.wh-placement__kind {
+    background: var(--color-error-soft);
+    color: var(--color-error);
+    box-shadow: none;
+  }
+
+  /* Маршрутный лист — приглушённая строка снизу слева. */
+  .warehouse .table td.wh-placement__route {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Номер ячейки — вдавленная таблетка снизу справа. */
+  .warehouse .table td.wh-placement__cell {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    box-shadow:
+      inset 2px 2px 5px rgb(163 172 191 / 45%),
+      inset -2px -2px 5px rgb(255 255 255 / 78%);
+  }
+
+  /*
+   * Полки нет — простой приглушённый текст без заливки, как в макете.
+   *
+   * Правило стоит ПОСЛЕ таблетки намеренно: вес селекторов у них одинаковый,
+   * и решает порядок. Поставленное выше, оно молча проигрывало бы.
+   */
+  .warehouse .table td.wh-placement__cell--none {
+    min-height: 0;
+    padding: 0;
+    background: none;
+    color: var(--color-text-disabled);
+    font-weight: 400;
+    box-shadow: none;
+  }
+
+  /*
+   * Пометки — третья строка во всю ширину и только когда они есть.
+   *
+   * Пустая ячейка убирается из сетки целиком: иначе карточка держала бы
+   * высоту под строку, которой нет.
+   */
+  .warehouse .table td.wh-placement__flags {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+  }
+
+  .warehouse .table td.wh-placement__flags:empty {
+    display: none;
+  }
+
+  /* Причина возврата и курьер — приглушённая подпись третьей строки. */
+  .warehouse .wh-return__reason {
+    color: var(--color-text-muted);
+    font-size: 13px;
+  }
+
+  /* Действия по отменённому заказу тоже идут во всю ширину под углами. */
+  .warehouse .table td:not([class*='wh-placement__']) {
+    grid-column: 1 / -1;
+  }
+
+  /*
+   * Две кнопки делят строку поровну.
+   *
+   * «Передать на пересборку» вдвое длиннее «Списать», и по содержимому они
+   * встали бы вразнобой; равные половины ещё и попадают под палец.
+   */
+  .warehouse .wh-placement__actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: 6px;
+  }
+
+  .warehouse .wh-placement__actions .btn {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 10px;
+    font-size: 13px;
+  }
+}
+
+/*
+ * Общая панель группы и курьера — утопленная.
+ *
+ * Она держит заголовок и список листов и сама лежит в холсте, а не над ним:
+ * приподнятая панель поверх приподнятых карточек давала два одинаковых
+ * уровня подряд, и принадлежность приходилось угадывать по отступам.
+ */
+.wh-group,
+.wh-issue__courier {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-xl);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-in-lg);
+}
+
+/* Список листов внутри общей панели: только промежуток, своей поверхности нет. */
+.wh-well {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/*
+ * Заголовок лежит прямо на утопленной панели.
+ *
+ * Своя поверхность делала бы из него ещё один уровень, которого в этой
+ * иерархии нет.
+ */
+.wh-group > .wh-group__toggle,
+.wh-issue__courier > .wh-group__toggle {
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/*
+ * Маршрутный лист — приподнятая панель над углублением.
+ *
+ * Полный `card` со своим воздухом и большим радиусом спорил бы с подложкой:
+ * получилась бы панель в панели.
+ */
+.wh-group .wh-route,
+.wh-issue__courier .wh-route {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-radius: 14px;
+  padding: 8px 10px;
+  background: var(--surface-raised);
+  box-shadow:
+    3px 3px 8px rgb(150 160 182 / 45%),
+    -2px -2px 6px rgb(255 255 255 / 88%);
+}
+
+/*
+ * Цвет листа повторяет цвет его очереди.
+ *
+ * Синий — работу можно делать прямо сейчас, тёплый — чего-то ещё ждут.
+ * Свёрнутая группа прячет заголовок, а цвет карточки остаётся.
+ */
+.wh-group .wh-route[data-tone='ready'] {
+  background: var(--row-action);
+  box-shadow:
+    3px 3px 8px rgb(150 160 182 / 45%),
+    -2px -2px 6px rgb(255 255 255 / 88%);
+}
+
+.wh-group .wh-route[data-tone='waiting'] {
+  background: var(--row-move);
+  box-shadow:
+    3px 3px 8px rgb(175 160 140 / 45%),
+    -2px -2px 6px rgb(255 255 255 / 85%);
+}
+
+/*
+ * Группа листов: заголовок с точкой, счётчиком и стрелкой.
  *
  * Точка отвечает на вопрос «что это за очередь» раньше, чем прочитан
  * заголовок: синяя — работа, которую можно делать прямо сейчас, янтарная —
@@ -196,12 +798,35 @@
   border-radius: 999px;
 }
 
+.wh-group__dot--route {
+  background: var(--dot-ready);
+}
+
+/*
+ * «Можно переносить» отмечено синим, а не зелёным.
+ *
+ * Зелёный на досках означает «дело закрыто», а здесь работа только начинается:
+ * лист собран и ждёт переноса. Синий — тот же цвет, которым помечено действие.
+ */
 .wh-group__dot--ready {
   background: var(--color-accent);
 }
 
+/* Складские группы: тот же смысл, что у поверхностей карточек. */
+.wh-group__dot--relocation {
+  background: var(--dot-move);
+}
+
+.wh-group__dot--cancelled {
+  background: var(--color-error);
+}
+
+.wh-group__dot--storage {
+  background: var(--dot-quiet);
+}
+
 .wh-group__dot--waiting {
-  background: var(--color-warning);
+  background: var(--dot-move);
 }
 
 .wh-group__dot--done {
@@ -221,22 +846,24 @@
  * а не действие.
  */
 .wh-group__count--sunken {
-  min-width: 28px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--surface-sunken);
-  box-shadow: var(--shadow-in);
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 11px;
+  background: var(--color-surface);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  box-shadow:
+    inset 3px 3px 6px rgb(163 172 191 / 45%),
+    inset -3px -3px 6px rgb(255 255 255 / 78%);
 }
 
 /* Группы разделены между собой заметнее, чем листы внутри группы. */
 .wh-group + .wh-group {
   margin-top: var(--space-4);
-}
-
-/* Соседние листы внутри группы — отдельные карточки, а не одна полоса. */
-.wh-group .wh-route + .wh-route {
-  margin-top: var(--space-3);
 }
 
 /*
@@ -262,30 +889,6 @@
   flex: none;
   color: var(--color-accent);
   font-variant-numeric: tabular-nums;
-}
-
-/*
- * Ячейка стоит вплотную к статусу.
- *
- * Свободное место забирает она, а не значки статуса: тогда пара «где лежит —
- * что с ней» держится вместе у правого края и читается одним движением глаз.
- */
-.wh-route__cell-note {
-  margin-left: auto;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  font-variant-numeric: tabular-nums;
-}
-
-/*
- * Два листа одного курьера — две отдельные карточки.
- *
- * Промежуток задаётся соседством, а не отступом контейнера: карточки лежат
- * внутри общей группы курьера, и без явного разделения их поверхности
- * читались как один длинный лист. Одинаково работает на любой ширине.
- */
-.wh-issue__route + .wh-issue__route {
-  margin-top: var(--space-3);
 }
 
 /*
@@ -337,50 +940,100 @@
  * из десятка. Таблица с волосяными линиями на белом читается хуже плиток:
  * строка не имеет границ, и взгляд соскальзывает на соседнюю.
  */
-.warehouse .table-wrap,
-.wh-group .table-wrap {
-  padding: var(--space-2);
-  border: 0;
-  border-radius: var(--radius-xl);
-  background: var(--surface-sunken);
-  box-shadow: var(--shadow-in-lg);
-  overflow-x: auto;
+/*
+ * Утопленная подложка таблицы — только на большом экране.
+ *
+ * На телефоне углубление ровно одно: панель группы. Вторая утопленная
+ * поверхность внутри неё давала углубление в углублении, а `overflow-x: auto`
+ * вне медиазапроса перебивал общее мобильное правило и уводил карточку
+ * в горизонтальную прокрутку вместо переноса.
+ */
+@media (min-width: 768px) {
+  .warehouse .table-wrap,
+  .wh-group .table-wrap {
+    padding: var(--space-2);
+    border: 0;
+    border-radius: var(--radius-xl);
+    background: var(--surface-sunken);
+    box-shadow: var(--shadow-in-lg);
+    overflow-x: auto;
+  }
 }
 
-.warehouse .table,
-.wh-group .table {
-  border-collapse: separate;
-  border-spacing: 0 var(--space-2);
+/*
+ * Поверхность несёт сама плитка, а не её ячейки — и только на большом экране.
+ *
+ * На телефоне строка уже стала карточкой со своим цветом, и заливка ячейки
+ * рисовала поверх него прямоугольник другого оттенка под номером заказа и
+ * маршрутным листом. Отступы отсюда же делали карточку в полтора раза выше
+ * нужного: правило стояло ниже мобильного и молча перебивало его.
+ */
+@media (min-width: 768px) {
+  .warehouse .table,
+  .wh-group .table {
+    border-collapse: separate;
+    border-spacing: 0 var(--space-2);
+  }
+
+  .warehouse .table th,
+  .wh-group .table th {
+    padding: 2px var(--space-2);
+    border: 0;
+    background: none;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-xs);
+    font-weight: 600;
+  }
+
+  .warehouse .table td,
+  .wh-group .table td {
+    padding: var(--space-3) var(--space-2);
+    border: 0;
+    background: var(--surface-raised);
+    box-shadow: 0 3px 8px rgb(150 160 182 / 28%);
+  }
+
+  .warehouse .table td:first-child,
+  .wh-group .table td:first-child {
+    border-top-left-radius: var(--radius-lg);
+    border-bottom-left-radius: var(--radius-lg);
+  }
+
+  .warehouse .table td:last-child,
+  .wh-group .table td:last-child {
+    border-top-right-radius: var(--radius-lg);
+    border-bottom-right-radius: var(--radius-lg);
+  }
 }
 
-.warehouse .table th,
-.wh-group .table th {
-  padding: 2px var(--space-2);
-  border: 0;
-  background: none;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
+/*
+ * Заголовок складской группы: название тянется, счётчик и стрелка справа.
+ *
+ * Без этого счётчик вставал вплотную к названию, и в списке из четырёх
+ * групп числа шли лесенкой — сравнить их взглядом было нельзя.
+ */
+.wh-plate .wh-group__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  font-size: 15px;
   font-weight: 600;
 }
 
-.warehouse .table td,
-.wh-group .table td {
-  padding: var(--space-3) var(--space-2);
-  border: 0;
-  background: var(--surface-raised);
-  box-shadow: 0 3px 8px rgb(150 160 182 / 28%);
+/* Стрелка состояния: вниз у раскрытой группы, влево у свёрнутой. */
+.wh-group__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  color: var(--color-text-muted);
 }
 
-.warehouse .table td:first-child,
-.wh-group .table td:first-child {
-  border-top-left-radius: var(--radius-lg);
-  border-bottom-left-radius: var(--radius-lg);
-}
-
-.warehouse .table td:last-child,
-.wh-group .table td:last-child {
-  border-top-right-radius: var(--radius-lg);
-  border-bottom-right-radius: var(--radius-lg);
+.wh-group__chevron[data-open='false'] {
+  transform: rotate(-90deg);
 }
 
 /* Заголовок группы: название и счётчик, без своей поверхности. */
@@ -406,12 +1059,17 @@
 /*
  * Узкое окно прокручивает таблицу, а не сжимает её.
  *
- * Таблица по умолчанию ужимается под обёртку: на 375 точках одиннадцать
- * колонок из тринадцати схлопывались до двух пикселей — числа оставались
- * в разметке, но прочитать их было нельзя. Ширина по содержимому заставляет
- * обёртку прокручиваться вбок, и ни одна колонка не пропадает.
+ * Таблица по умолчанию ужимается под обёртку: одиннадцать колонок из
+ * тринадцати схлопывались до двух пикселей — числа оставались в разметке,
+ * но прочитать их было нельзя. Ширина по содержимому заставляет обёртку
+ * прокручиваться вбок, и ни одна колонка не пропадает.
+ *
+ * Только на большом экране. На телефоне таблицы уже нет — там карточки,
+ * и ширина по содержимому растягивала бы их за край экрана.
  */
-.warehouse .table,
-.wh-group .table {
-  min-width: max-content;
+@media (min-width: 768px) {
+  .warehouse .table,
+  .wh-group .table {
+    min-width: max-content;
+  }
 }

@@ -32,6 +32,14 @@ export interface QueueItemView {
   changedSinceClaim: boolean;
   /** Заказ отменён: собирать нельзя. Из списка при этом не исчезает. */
   cancelled?: boolean;
+  /**
+   * Ближайший самовывоз: до начала интервала меньше часа.
+   *
+   * Признак считает сервер по полному набору очереди. Клиент им только
+   * группирует строки: выводить принадлежность к приоритету из подписи или
+   * из времени в браузере значило бы получить второй ответ на тот же вопрос.
+   */
+  pickupSoon?: boolean;
 }
 
 /**
@@ -175,6 +183,16 @@ export const EMPTY_VALUE = '—';
  * больше неё бессмысленно: запрос будет отклонён, а не урезан.
  */
 export const QUEUE_PAGE_SIZE = 50;
+
+/**
+ * Как часто перезапрашивается очередь.
+ *
+ * Приоритет ближайших самовывозов наступает от хода времени: в момент, когда
+ * до начала интервала остаётся меньше часа, никто ничего не делает, и события
+ * realtime не происходит. Полминуты — компромисс: заказ поднимается наверх
+ * почти сразу, а нагрузка остаётся двумя запросами в минуту на смену.
+ */
+export const QUEUE_POLL_MS = 30_000;
 
 export const PROCESS_LABELS: Record<string, string> = {
   NEW: 'Свободен',
@@ -349,6 +367,28 @@ export function routeLabel(item: QueueItemView): string | null {
     : `Маршрут ${item.route.number}, остановка ${item.route.position}`;
 }
 
+/** Что это за группа очереди: приоритетные самовывозы, лист или всё прочее. */
+export type QueueGroupKind = 'pickup-soon' | 'route' | 'none';
+
+export interface QueueGroupView {
+  key: string;
+  kind: QueueGroupKind;
+  /** Лист группы. `null` у приоритетных самовывозов и у заказов без листа. */
+  route: { id: string; number: string } | null;
+  items: QueueItemView[];
+}
+
+/** Заголовок группы очереди. */
+export function queueGroupTitle(group: {
+  kind: QueueGroupKind;
+  route: { number: string } | null;
+}): string {
+  if (group.kind === 'pickup-soon') {
+    return 'Ближайшие самовывозы';
+  }
+  return group.route === null ? 'Без маршрута' : `Маршрут ${group.route.number}`;
+}
+
 /**
  * Очередь, разложенная по листам.
  *
@@ -357,22 +397,26 @@ export function routeLabel(item: QueueItemView): string | null {
  * соседние строки одного листа лишь собираются в группу, порядок не меняется:
  * пересортировка на клиенте разошлась бы с постраничной загрузкой.
  */
-export function groupQueueByRoute(
-  items: readonly QueueItemView[],
-): { key: string; route: { id: string; number: string } | null; items: QueueItemView[] }[] {
-  const groups: {
-    key: string;
-    route: { id: string; number: string } | null;
-    items: QueueItemView[];
-  }[] = [];
+export function groupQueueByRoute(items: readonly QueueItemView[]): QueueGroupView[] {
+  const groups: QueueGroupView[] = [];
   for (const item of items) {
-    const key = item.route === null ? 'none' : item.route.id;
+    /*
+     * Ближайшие самовывозы — своя группа, и она перекрывает маршрутную.
+     *
+     * Сервер уже поставил их первыми, поэтому строки идут подряд и группа
+     * собирается тем же проходом. Один заказ попадает ровно в одну группу:
+     * вид выбирается один раз, и в маршрутную он после этого не заходит.
+     */
+    const kind: QueueGroupKind =
+      item.pickupSoon === true ? 'pickup-soon' : item.route === null ? 'none' : 'route';
+    const route = kind === 'route' ? item.route : null;
+    const key = route === null ? kind : route.id;
     const last = groups[groups.length - 1];
     if (last !== undefined && last.key === key) {
       last.items.push(item);
       continue;
     }
-    groups.push({ key, route: item.route, items: [item] });
+    groups.push({ key, kind, route, items: [item] });
   }
   return groups;
 }
