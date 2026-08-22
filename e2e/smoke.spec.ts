@@ -7364,7 +7364,9 @@ test('два сеанса: ячейка, «Требуется перемещен
   const stored = card.locator('.wh-route__order', { hasText: second });
   // Отдельной пометки больше нет: про хранение говорят ячейка и стадия.
   await expect(stored).not.toContainText('Требуется перемещение');
-  await expect(stored).toContainText('Хранение');
+  // Подпись вида полки из строки убрана: в ней стоит НОМЕР полки, а «где
+  // именно лежит коробка» договаривает стадия.
+  await expect(stored).toContainText(storage);
   await expect(stored).toContainText('В хранении');
   await expect(
     watcher.getByTestId('assembly-relocatable').locator(`[data-route-number="${route}"]`),
