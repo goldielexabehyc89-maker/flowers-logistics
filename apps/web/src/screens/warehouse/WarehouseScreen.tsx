@@ -158,6 +158,9 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const [scannedOrder, setScannedOrder] = useState<string | null>(null);
   /** Открыто ли окно сканирования возврата. */
   const [scanning, setScanning] = useState(false);
+  // Обе группы открыты: возвратов за смену немного, и прятать их незачем.
+  const [pendingOpen, setPendingOpen] = useState(true);
+  const [acceptedOpen, setAcceptedOpen] = useState(true);
 
   const returns = useQuery({
     queryKey: ['warehouse-returns'],
@@ -300,39 +303,105 @@ function ReturnsTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
         )}
       </div>
 
-      <div className="card stack">
-        <h3>Ждут приёмки</h3>
-        {returns.isPending && <LoadingState title="Загружаем возвраты…" />}
-        {returns.isError && (
-          <ErrorState
-            title="Не удалось загрузить возвраты"
-            onRetry={() => void returns.refetch()}
-          />
-        )}
-        {returns.data !== undefined &&
-          (returns.data.pending.length === 0 ? (
-            <EmptyState title="Возвратов нет" />
-          ) : (
-            <ReturnsTable items={returns.data.pending} showCell={false} />
-          ))}
-      </div>
+      {returns.isPending && <LoadingState title="Загружаем возвраты…" />}
+      {returns.isError && (
+        <ErrorState title="Не удалось загрузить возвраты" onRetry={() => void returns.refetch()} />
+      )}
+
+      {/*
+        Возвраты собраны в такие же вдавленные группы, что и складские
+        размещения: тот же заголовок с точкой, счётчиком и стрелкой, те же
+        карточки по четырём углам. Разделы склада кладовщик перебирает
+        подряд, и разная разметка в них стоила бы лишнего взгляда.
+      */}
+      {returns.data !== undefined && returns.data.pending.length === 0 && (
+        <EmptyState title="Возвратов нет" />
+      )}
+
+      {returns.data !== undefined && returns.data.pending.length > 0 && (
+        <ReturnGroup
+          id="pending"
+          title="Ждут приёмки"
+          tone="relocation"
+          items={returns.data.pending}
+          showCell={false}
+          open={pendingOpen}
+          onToggle={() => setPendingOpen((open) => !open)}
+        />
+      )}
 
       {returns.data !== undefined && returns.data.accepted.length > 0 && (
-        <div className="card stack">
-          <h3>Принятые возвраты</h3>
-          <ReturnsTable items={returns.data.accepted} showCell />
-        </div>
+        <ReturnGroup
+          id="accepted"
+          title="Принятые возвраты"
+          tone="route"
+          items={returns.data.accepted}
+          showCell
+          open={acceptedOpen}
+          onToggle={() => setAcceptedOpen((open) => !open)}
+        />
       )}
     </>
+  );
+}
+
+/**
+ * Группа возвратов.
+ *
+ * Устроена как складская: утопленная панель, заголовок с точкой, счётчиком
+ * и стрелкой, внутри — карточки. Свернуть можно любую.
+ */
+function ReturnGroup({
+  id,
+  title,
+  tone,
+  items,
+  showCell,
+  open,
+  onToggle,
+}: {
+  id: string;
+  title: string;
+  tone: string;
+  items: readonly WarehouseReturnView[];
+  showCell: boolean;
+  open: boolean;
+  onToggle: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="stack wh-plate" data-testid={`wh-returns-${id}`}>
+      <button
+        type="button"
+        className="wh-group__toggle"
+        aria-expanded={open}
+        data-testid={`wh-returns-${id}-toggle`}
+        onClick={onToggle}
+      >
+        <span className={`wh-group__dot wh-group__dot--${tone}`} aria-hidden="true" />
+        <span className="wh-group__title">{title}</span>
+        <span
+          className="wh-group__count wh-group__count--sunken"
+          data-testid={`wh-returns-${id}-count`}
+        >
+          {items.length}
+        </span>
+        <GroupChevron open={open} />
+      </button>
+
+      {open && <ReturnsTable items={items} showCell={showCell} kind={id} />}
+    </div>
   );
 }
 
 function ReturnsTable({
   items,
   showCell,
+  kind,
 }: {
   items: readonly WarehouseReturnView[];
   showCell: boolean;
+  /** Смысл группы: от него зависит цвет карточки, как и на «Складе». */
+  kind?: string;
 }): React.JSX.Element {
   return (
     <div className="table-wrap">
@@ -340,32 +409,51 @@ function ReturnsTable({
         <thead>
           <tr>
             <th>Возврат</th>
-            <th>Курьер</th>
-            <th>Причина</th>
             <th>Состояние</th>
-            {showCell && <th>Ячейка</th>}
+            <th>Заказ</th>
+            <th>Ячейка</th>
+            <th>Причина</th>
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
             <tr
               key={item.orderId}
+              data-kind={item.cancelled ? 'cancelled' : kind}
               data-order-number={item.orderNumber}
               data-return-number={item.displayNumber}
             >
-              <td>
+              <td className="wh-placement__order">
                 <strong>{item.displayNumber}</strong>
-                <div className="muted text-sm">заказ {item.orderNumber}</div>
+              </td>
+              <td className="wh-placement__kind muted">
+                {RETURN_STATE_LABELS[item.state] ?? item.state}
+              </td>
+              <td className="wh-placement__route muted">заказ {item.orderNumber}</td>
+              <td
+                className={
+                  showCell && item.cellCode !== null
+                    ? 'wh-placement__cell'
+                    : 'wh-placement__cell wh-placement__cell--none'
+                }
+              >
+                {showCell && item.cellCode !== null ? item.cellCode : 'без ячейки'}
+              </td>
+              {/*
+                Причина и курьер — третья строка: на вопрос «что это за
+                коробка» отвечают углы, а это уже подробности.
+              */}
+              <td className="wh-placement__flags">
+                <span className="wh-return__reason">
+                  {item.reasonName}
+                  {item.courier === null ? '' : ` · ${item.courier}`}
+                </span>
                 {item.cancelled && (
-                  <div data-testid="wh-return-cancelled">
+                  <span data-testid="wh-return-cancelled">
                     <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>
-                  </div>
+                  </span>
                 )}
               </td>
-              <td>{item.courier ?? '—'}</td>
-              <td>{item.reasonName}</td>
-              <td>{RETURN_STATE_LABELS[item.state] ?? item.state}</td>
-              {showCell && <td>{item.cellCode ?? '—'}</td>}
             </tr>
           ))}
         </tbody>

@@ -499,14 +499,16 @@
       -2px -2px 6px rgb(255 255 255 / 88%);
   }
 
-  .warehouse .table tr[data-kind='relocation'] {
+  .warehouse .table tr[data-kind='relocation'],
+  .warehouse .table tr[data-kind='pending'] {
     background: var(--row-move);
     box-shadow:
       3px 3px 8px rgb(175 160 140 / 45%),
       -2px -2px 6px rgb(255 255 255 / 85%);
   }
 
-  .warehouse .table tr[data-kind='route'] {
+  .warehouse .table tr[data-kind='route'],
+  .warehouse .table tr[data-kind='accepted'] {
     background: var(--row-ready);
     box-shadow:
       3px 3px 8px rgb(150 172 155 / 40%),
@@ -587,13 +589,15 @@
       inset -2px -2px 4px rgb(255 255 255 / 72%);
   }
 
-  .warehouse .table tr[data-kind='relocation'] td.wh-placement__kind {
+  .warehouse .table tr[data-kind='relocation'] td.wh-placement__kind,
+  .warehouse .table tr[data-kind='pending'] td.wh-placement__kind {
     background: #efe0c9;
     color: var(--color-warning);
     box-shadow: none;
   }
 
-  .warehouse .table tr[data-kind='route'] td.wh-placement__kind {
+  .warehouse .table tr[data-kind='route'] td.wh-placement__kind,
+  .warehouse .table tr[data-kind='accepted'] td.wh-placement__kind {
     background: var(--color-success-soft);
     color: var(--color-success);
     box-shadow: none;
@@ -670,6 +674,12 @@
 
   .warehouse .table td.wh-placement__flags:empty {
     display: none;
+  }
+
+  /* Причина возврата и курьер — приглушённая подпись третьей строки. */
+  .warehouse .wh-return__reason {
+    color: var(--color-text-muted);
+    font-size: 13px;
   }
 
   /* Действия по отменённому заказу тоже идут во всю ширину под углами. */
