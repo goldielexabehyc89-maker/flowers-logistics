@@ -230,8 +230,14 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                               <StatusBadge tone={order.ready ? 'success' : 'warning'}>
                                 {order.ready ? 'Готов' : 'Не готов'}
                               </StatusBadge>
-                              {order.checked && <StatusBadge tone="info">Внесён</StatusBadge>}
                             </span>
+
+                            {/* Добавочный статус — третьей строкой, как в «Сборке». */}
+                            {order.checked && (
+                              <span className="wh-route__extra">
+                                <StatusBadge tone="info">Внесён</StatusBadge>
+                              </span>
+                            )}
                           </li>
                         ))}
                       </ul>
@@ -469,12 +475,14 @@ function ShipDialog({
             >
               <span className="wh-route__position">{order.position}</span>
               <span className="wh-route__order-number">{order.orderNumber}</span>
-              <span className="muted text-sm" data-testid="issue-check-cell">
+              <span className="wh-check__cell" data-testid="issue-check-cell">
                 {issueCellLabel(order)}
               </span>
-              <StatusBadge tone={order.checked ? 'success' : 'neutral'}>
-                {order.checked ? 'Проверен' : 'Ожидает'}
-              </StatusBadge>
+              <span className="wh-route__badges">
+                <StatusBadge tone={order.checked ? 'success' : 'neutral'}>
+                  {order.checked ? 'Проверен' : 'Ожидает'}
+                </StatusBadge>
+              </span>
             </li>
           ))}
         </ul>

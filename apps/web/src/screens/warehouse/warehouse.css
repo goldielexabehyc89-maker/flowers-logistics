@@ -188,28 +188,45 @@
     inset -3px -3px 6px rgb(255 255 255 / 74%);
 }
 
-/* Окно проверки листа осталось прежним: его в макете нет. */
+/*
+ * Окно проверки: тот же список, что и в раскрытой карточке листа.
+ *
+ * Приподнятые строки во вдавленном лотке давали в окне четвёртый уровень
+ * подряд; на доске те же заказы уже утоплены, и одинаковая работа выглядела
+ * по-разному в двух местах.
+ */
 .wh-check__list {
   display: grid;
-  gap: var(--space-2);
+  gap: 6px;
   margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  border-radius: var(--radius-lg);
-  background: var(--surface-sunken);
-  box-shadow: var(--shadow-in-lg);
+  padding: 0;
   list-style: none;
 }
 
 .wh-check__item {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
+  gap: 2px var(--space-2);
+  padding: 7px 10px;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: 12px;
   background: var(--color-surface);
-  box-shadow: var(--shadow-out);
+  box-shadow:
+    inset 3px 3px 6px rgb(163 172 191 / 40%),
+    inset -3px -3px 6px rgb(255 255 255 / 74%);
+}
+
+/* Где коробка — нижняя строка окна, во всю ширину. */
+.wh-check__cell {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wh-route__position {
@@ -228,11 +245,6 @@
   box-shadow:
     2px 2px 4px rgb(150 160 182 / 40%),
     -1px -1px 3px rgb(255 255 255 / 85%);
-}
-
-.wh-check__item .wh-route__position {
-  grid-column: auto;
-  grid-row: auto;
 }
 
 .wh-route__order-number {
@@ -271,6 +283,21 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * Добавочный статус заказа — третья строка во всю ширину.
+ *
+ * В верхней строке он стоял рядом со стадией и отнимал место у номера
+ * заказа: от длинного номера оставалась одна буква с многоточием.
+ */
+.wh-route__extra {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
 }
 
 /* Номер полки заказа — та же вдавленная таблетка, что и у листа. */
@@ -649,6 +676,25 @@
   .warehouse .table td:not([class*='wh-placement__']) {
     grid-column: 1 / -1;
   }
+
+  /*
+   * Две кнопки делят строку поровну.
+   *
+   * «Передать на пересборку» вдвое длиннее «Списать», и по содержимому они
+   * встали бы вразнобой; равные половины ещё и попадают под палец.
+   */
+  .warehouse .wh-placement__actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: 6px;
+  }
+
+  .warehouse .wh-placement__actions .btn {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 10px;
+    font-size: 13px;
+  }
 }
 
 /*
@@ -832,19 +878,6 @@
 .wh-courier__ready {
   flex: none;
   color: var(--color-accent);
-  font-variant-numeric: tabular-nums;
-}
-
-/*
- * Ячейка стоит вплотную к статусу.
- *
- * Свободное место забирает она, а не значки статуса: тогда пара «где лежит —
- * что с ней» держится вместе у правого края и читается одним движением глаз.
- */
-.wh-route__cell-note {
-  margin-left: auto;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
   font-variant-numeric: tabular-nums;
 }
 

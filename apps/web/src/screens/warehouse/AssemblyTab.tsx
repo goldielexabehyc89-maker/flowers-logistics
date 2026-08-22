@@ -475,13 +475,21 @@ function RouteCard({
                 <StatusBadge tone={STAGE_TONES[order.stage]}>
                   {STAGE_LABELS[order.stage]}
                 </StatusBadge>
-                {/*
-                  Отдельной пометки «требуется перемещение» больше нет: про
-                  коробку в хранении уже сказали и ячейка, и стадия, а третья
-                  подпись о том же занимала строку и спорила с ними за взгляд.
-                */}
-                {order.cancelled && <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>}
               </span>
+
+              {/*
+                Добавочный статус идёт третьей строкой во всю ширину.
+
+                Рядом со стадией он отнимал место у номера заказа, и от номера
+                оставалась одна буква. Отдельной пометки «требуется
+                перемещение» здесь больше нет: про коробку в хранении уже
+                сказали и ячейка, и стадия.
+              */}
+              {order.cancelled && (
+                <span className="wh-route__extra">
+                  <StatusBadge tone="error">Отменён — не выдавать</StatusBadge>
+                </span>
+              )}
             </li>
           ))}
         </ul>
@@ -655,12 +663,14 @@ function RouteCheckDialog({
             >
               <span className="wh-route__position">{order.position}</span>
               <span className="wh-route__order-number">{order.orderNumber}</span>
-              <span className="wh-route__cell-note" data-testid="assembly-check-cell">
+              <span className="wh-check__cell" data-testid="assembly-check-cell">
                 {issueCellLabel(order)}
               </span>
-              <StatusBadge tone={order.stage === 'READY' ? 'success' : 'neutral'}>
-                {order.stage === 'READY' ? 'Проверен' : 'Ожидает'}
-              </StatusBadge>
+              <span className="wh-route__badges">
+                <StatusBadge tone={order.stage === 'READY' ? 'success' : 'neutral'}>
+                  {order.stage === 'READY' ? 'Проверен' : 'Ожидает'}
+                </StatusBadge>
+              </span>
             </li>
           ))}
         </ul>

@@ -1256,9 +1256,13 @@ function PlacementTable({
                     или в списание. Третьего смысла нет, а свободный текст
                     потом нельзя посчитать.
                   */}
-                  <div className="row resolutions__actions">
+                  {/*
+                    Обычные кнопки, а не текст: на цветной карточке призрачная
+                    кнопка неотличима от подписи, и нажать её никто не пробует.
+                  */}
+                  <div className="row wh-placement__actions">
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       disabled={busy === true}
                       data-testid="wh-withdraw-reassembly"
                       onClick={() => onWithdraw(item.orderNumber, 'REASSEMBLY')}
@@ -1266,7 +1270,7 @@ function PlacementTable({
                       Передать на пересборку
                     </Button>
                     <Button
-                      variant="ghost"
+                      variant="danger"
                       disabled={busy === true}
                       data-testid="wh-withdraw-write-off"
                       onClick={() => onWithdraw(item.orderNumber, 'WRITE_OFF')}
