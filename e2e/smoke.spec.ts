@@ -2209,19 +2209,18 @@ test('склад: развилка «сборка или хранение», с�
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
   const issueHead = issueRoute.getByTestId('issue-route-head');
   await expect(issueHead).toHaveAttribute('aria-expanded', 'false');
-  await issueHead.locator('.muted').first().click();
+  await issueHead.getByTestId('issue-route-counts').click();
   await expect(issueHead).toHaveAttribute('aria-expanded', 'true');
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
-  await issueHead.locator('.muted').first().click();
+  await issueHead.getByTestId('issue-route-counts').click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(0);
-  await issueHead.locator('.muted').first().click();
+  await issueHead.getByTestId('issue-route-counts').click();
   await expect(issueRoute.locator('.wh-route__order')).toHaveCount(2);
 
   // Ячейка каждого заказа названа, «Не готов» у стоящей коробки не появляется.
-  // Ячейка стоит в скобках вплотную к статусу: код и вид полки вместе.
-  await expect(issueRoute.getByTestId('issue-order-cell').first()).toHaveText(
-    /^\(.+ · (Хранение|Маршрутная)\)$/,
-  );
+  // В строке стоит ТОЛЬКО номер полки: подпись вида убрана по принятому
+  // макету — она расширяла колонку и уводила номер заказа вправо.
+  await expect(issueRoute.getByTestId('issue-order-cell').first()).toHaveText(/^[^()]+$/);
   // Коробка в хранении больше не подписывается «Не готов»: полка известна.
   await expect(issueRoute.locator('.wh-route__badges', { hasText: 'Не готов' })).toHaveCount(0);
 
@@ -7047,7 +7046,7 @@ test('склад на пяти размерах: вкладки, окна, дл�
     await expect(route).toContainText(longRoute);
     expect(await overflow(), `раскрытый курьер ${label}`).toBeLessThanOrEqual(1);
 
-    await route.getByTestId('issue-route-head').locator('.muted').first().click();
+    await route.getByTestId('issue-route-counts').click();
     await expect(route.locator('.wh-route__order')).toHaveCount(1);
     expect(await overflow(), `раскрытые заказы ${label}`).toBeLessThanOrEqual(1);
 
@@ -7304,13 +7303,13 @@ test('два сеанса: ячейка, «Требуется перемещен
   const head = card.getByTestId('assembly-route-head');
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
-  // Нажатие мимо кнопок — по строке с датой и числом заказов.
-  await head.locator('.muted').first().click();
+  // Нажатие мимо кнопок — по строке с числом заказов.
+  await head.getByTestId('assembly-route-counts').click();
   await expect(head).toHaveAttribute('aria-expanded', 'true');
   await expect(card).toHaveAttribute('data-expanded', 'true');
 
   // Повторное нажатие сворачивает.
-  await head.locator('.muted').first().click();
+  await head.getByTestId('assembly-route-counts').click();
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
   // Клавиатура делает то же самое.
@@ -7321,17 +7320,19 @@ test('два сеанса: ячейка, «Требуется перемещен
   await expect(head).toHaveAttribute('aria-expanded', 'false');
 
   /*
-   * Самостоятельные кнопки шапки раскрытие не переключают.
+   * Самостоятельные кнопки карточки раскрытие не переключают.
    *
-   * «+ Ячейка» открывает сканирование полки, а не состав листа: иначе
-   * каждое такое нажатие ещё и разворачивало бы карточку под окном.
+   * «+ Ячейка» стоит в РАСКРЫТОЙ карточке: свёрнутая по принятому макету —
+   * ровно две строки, и кнопка не отнимает у них место. Открывает она
+   * сканирование полки, а не состав листа, поэтому карточка остаётся
+   * раскрытой и после закрытия окна.
    */
+  await head.getByTestId('assembly-route-counts').click();
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
   await card.getByTestId('assembly-add-cell').click();
   await expect(watcher.getByTestId('scan-video')).toBeVisible();
   await watcher.getByTestId('scan-close').click();
-  await expect(head).toHaveAttribute('aria-expanded', 'false');
-
-  await card.getByTestId('assembly-route-head').locator('.muted').first().click();
+  await expect(head).toHaveAttribute('aria-expanded', 'true');
 
   await login(worker, stand['кладовщик'] ?? '', stand['пин'] ?? '');
 
