@@ -45,6 +45,10 @@ export interface EnqueueCandidate {
   /// Локальная правка логиста: рабочим считается именно она.
   /// Необязательна: прежний код её не передаёт, и это значит «правки нет».
   localAddress?: string | null;
+  /// Рабочий адрес нового контракта и его версия. Необязательны: их
+  /// отсутствие означает заказ прежнего контракта.
+  structuredAddress?: string | null;
+  addressContractVersion?: number | null;
   inScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;

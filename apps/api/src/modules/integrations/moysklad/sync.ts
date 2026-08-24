@@ -30,6 +30,7 @@ import type { MOYSKLAD_IDS } from './config.js';
 import { approvedStoreFilter, deltaFilter } from './filters.js';
 import { applyOrderSnapshot, markSourceMissing } from './import-service.js';
 import { mapOrder, type AddressSource } from './mapper.js';
+import { RegionDirectory, regionHrefOf } from './regions.js';
 import { acquireSyncLock, type LockDeps, type SyncLock } from './sync-lock.js';
 import {
   CompositionError,
@@ -60,6 +61,13 @@ export interface SyncDeps {
   ids: typeof MOYSKLAD_IDS;
   /** Откуда собирать запрос к геокодеру. Умолчание — отдельного запроса нет. */
   addressSource?: AddressSource;
+  /**
+   * Создавать ли ВПЕРВЫЕ появившиеся заказы по новому адресному контракту.
+   *
+   * Значение выключателя окружения. На существующие заказы не влияет никак:
+   * их версия уже записана и синхронизацией не переписывается.
+   */
+  structuredAddressV2?: boolean;
   /**
    * Идентификатор статуса «Отменен» этого аккаунта.
    *
@@ -315,11 +323,26 @@ async function applyRows(
   rows: unknown[],
   result: PassResult,
   source: CompositionSource,
+  regions: RegionDirectory,
 ): Promise<void> {
   const now = (deps.now ?? (() => new Date()))();
 
+  /*
+   * Названия регионов дочитываются ОДИН раз на страницу и до транзакций.
+   *
+   * Регион приходит ссылкой без названия, а деталям адреса нужно название.
+   * Спрашивать справочник внутри транзакции нельзя — соединение с базой
+   * висело бы на время HTTP; спрашивать на каждый заказ незачем — страница
+   * одного города даёт один запрос.
+   */
+  await regions.resolve(
+    rows
+      .map((row) => regionHrefOf((row as MoyskladOrderDto).shipmentAddressFull))
+      .filter((href): href is string => href !== null),
+  );
+
   for (const row of rows) {
-    const { snapshot } = mapOrder(row as never, deps.ids, deps.addressSource);
+    const { snapshot } = mapOrder(row as never, deps.ids, deps.addressSource, regions.snapshot);
     const order = row as MoyskladOrderDto;
 
     // Состав нужен только производственной области. Заказ чужого склада
@@ -334,6 +357,7 @@ async function applyRows(
       const orderResult = await applyOrderSnapshot(tx, snapshot, now, {
         geocoding: deps.enqueueOnImport === true,
         cancelledStateId: deps.cancelledStateId ?? null,
+        structuredAddressV2: deps.structuredAddressV2 === true,
       });
 
       if (composition === null) {
@@ -554,11 +578,14 @@ export async function runInitialLoad(deps: SyncDeps, cursor?: CursorState): Prom
   // Кэш бандлов живёт ровно проход: один различный бандл загружается один раз,
   // даже если встретился в сотне заказов.
   const source = new CompositionSource(deps.client, deps.ids);
+  // Справочник регионов живёт ровно проход: названия не меняются, а память
+  // между проходами держать незачем.
+  const regions = new RegionDirectory(deps.client);
 
   result.pages = await readAllPages(
     deps,
     { filter: approvedStoreFilter(deps.ids, initialLoadSince(now)), order: 'updated,asc' },
-    (rows) => applyRows(deps, rows, result, source),
+    (rows) => applyRows(deps, rows, result, source, regions),
   );
 
   // Дозагрузка выполняется ДО объявления загрузки завершённой. Заказы, состав
@@ -594,6 +621,7 @@ export async function runDeltaPass(deps: SyncDeps, cursor: CursorState): Promise
   const from = new Date((cursor.updatedCursor?.getTime() ?? now.getTime()) - overlapMs);
   const result = emptyResult('delta');
   const source = new CompositionSource(deps.client, deps.ids);
+  const regions = new RegionDirectory(deps.client);
 
   const seen = new Set<string>();
 
@@ -610,7 +638,7 @@ export async function runDeltaPass(deps: SyncDeps, cursor: CursorState): Promise
         seen.add(id);
         return true;
       });
-      await applyRows(deps, unique, result, source);
+      await applyRows(deps, unique, result, source, regions);
     },
   );
 
@@ -646,6 +674,7 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
   const result = emptyResult('reconciliation');
   const present = new Set<string>();
   const source = new CompositionSource(deps.client, deps.ids);
+  const regions = new RegionDirectory(deps.client);
 
   result.pages = await readAllPages(
     deps,
@@ -657,7 +686,7 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
           present.add(id);
         }
       }
-      await applyRows(deps, rows, result, source);
+      await applyRows(deps, rows, result, source, regions);
     },
   );
 

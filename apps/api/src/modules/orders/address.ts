@@ -13,6 +13,38 @@
  * отправку за выполненную.
  */
 
+/**
+ * Версия адресного контракта заказа.
+ *
+ * `LEGACY` — прежний путь: показывается `address`, геокодеру уходит
+ * `geocodeAddress`. `V2` — структурированный: рабочий адрес собран из города,
+ * улицы и дома, а детали живут отдельной строкой.
+ */
+export type AddressContract = 'LEGACY' | 'V2';
+
+/**
+ * Какой контракт у заказа.
+ *
+ * `null` — legacy: так выглядят все заказы, созданные до перехода. Двойки
+ * не бывает случайно: её ставит только импорт при создании строки, а база
+ * не принимает иных значений. Любое другое число означает, что данные
+ * пришли не оттуда, откуда мы думаем, — и это отказ, а не молчаливый
+ * возврат к прежнему поведению: молчание здесь показало бы курьеру не тот
+ * адрес и никак себя не проявило бы.
+ */
+export function contractVersionOf(order: {
+  addressContractVersion?: number | null;
+}): AddressContract {
+  const version = order.addressContractVersion;
+  if (version === null || version === undefined) {
+    return 'LEGACY';
+  }
+  if (version === 2) {
+    return 'V2';
+  }
+  throw new Error(`неизвестная версия адресного контракта: ${String(version)}`);
+}
+
 /** Минимум, которого достаточно для вычисления рабочего адреса. */
 export interface AddressSource {
   address: string | null;
@@ -30,6 +62,17 @@ export interface AddressSource {
    * «отдельного запроса нет» — геокодер берёт адрес заказа.
    */
   geocodeAddress?: string | null;
+  /**
+   * Рабочий адрес нового контракта: город, улица, дом.
+   *
+   * Необязателен: прежний код его не передаёт, и это значит «заказ живёт
+   * по старому контракту».
+   */
+  structuredAddress?: string | null;
+  /** Детали адреса нового контракта. Наружу не уходят никогда. */
+  addressDetails?: string | null;
+  /** Версия контракта. Пусто — legacy. */
+  addressContractVersion?: number | null;
 }
 
 /** Состояние локальной правки для карточки и правил внимания. */
@@ -42,6 +85,10 @@ export interface AddressState {
   corrected: boolean;
   /** Разошёлся ли источник с тем, что видел логист при правке. */
   conflict: boolean;
+  /** Детали адреса. `null` у legacy-заказа: их там не существует. */
+  details: string | null;
+  /** Версия контракта: по ней интерфейс решает, что показывать. */
+  contract: AddressContract;
 }
 
 /** Пустая строка адресом не считается: она неотличима от отсутствия значения. */
@@ -60,7 +107,28 @@ function normalize(value: string | null | undefined): string | null {
  * адреса у заказа нет, и он остаётся в «Требует внимания».
  */
 export function effectiveAddress(order: AddressSource): string | null {
+  if (contractVersionOf(order) === 'V2') {
+    /*
+     * У нового контракта запасного пути нет.
+     *
+     * `address` — операционная строка источника вперемешку с квартирой и
+     * домофоном; ради её замены контракт и вводился. Тихий откат к ней
+     * означал бы, что проверка нового контракта проверяет неизвестно что,
+     * а курьер едет по строке, которую никто не разбирал.
+     */
+    return normalize(order.localAddress) ?? normalize(order.structuredAddress);
+  }
   return normalize(order.localAddress) ?? normalize(order.address);
+}
+
+/**
+ * Детали адреса для показа человеку.
+ *
+ * Только у нового контракта: у legacy их не существует, и пустая строка
+ * там означала бы «деталей нет», хотя на самом деле они просто не разбирались.
+ */
+export function addressDetailsOf(order: AddressSource): string | null {
+  return contractVersionOf(order) === 'V2' ? normalize(order.addressDetails) : null;
 }
 
 /**
@@ -90,10 +158,19 @@ export function effectiveAddress(order: AddressSource): string | null {
 export function automaticGeocodingAddress(
   order: AddressSource & { geocodeAddress?: string | null },
 ): string | null {
+  if (contractVersionOf(order) === 'V2') {
+    return normalize(order.localAddress) ?? normalize(order.structuredAddress);
+  }
   return normalize(order.localAddress) ?? normalize(order.geocodeAddress);
 }
 
 export function geocodingAddress(order: AddressSource): string | null {
+  if (contractVersionOf(order) === 'V2') {
+    // Ни `geocodeAddress`, ни `address` у нового контракта в запас не идут:
+    // первый собран по прежним правилам (с индексом и регионом), второй —
+    // операционная строка. Оба увели бы геокодер от нужного дома.
+    return normalize(order.localAddress) ?? normalize(order.structuredAddress);
+  }
   return (
     normalize(order.localAddress) ?? normalize(order.geocodeAddress) ?? normalize(order.address)
   );
@@ -102,11 +179,16 @@ export function geocodingAddress(order: AddressSource): string | null {
 /** Полное состояние адреса для карточки. */
 export function addressState(order: AddressSource & { addressConflict: boolean }): AddressState {
   const local = normalize(order.localAddress);
+  const contract = contractVersionOf(order);
   return {
-    effective: local ?? normalize(order.address),
+    effective: effectiveAddress(order),
+    // Исходная строка источника показывается рядом при обоих контрактах:
+    // сравнением её с рабочим адресом логист и принимает решение о правке.
     source: normalize(order.address),
     corrected: local !== null,
     conflict: order.addressConflict,
+    details: addressDetailsOf(order),
+    contract,
   };
 }
 
@@ -134,3 +216,19 @@ export function isSourceConflict(
   }
   return normalize(order.sourceAddressAtLocalEdit) !== normalize(nextSourceAddress);
 }
+
+/**
+ * Колонки, без которых рабочий адрес посчитать нельзя.
+ *
+ * Общий фрагмент, а не переписанный в каждом модуле список: забытая колонка
+ * не даёт ошибки — она молча превращает заказ версии 2 в legacy, и человек
+ * видит операционную строку вместо разобранного адреса.
+ */
+export const ORDER_ADDRESS_SELECT = {
+  address: true,
+  localAddress: true,
+  geocodeAddress: true,
+  structuredAddress: true,
+  addressDetails: true,
+  addressContractVersion: true,
+} as const;

@@ -117,8 +117,9 @@ model User {
   geoChanges         OrderGeoHistory[]
 
   /// Локальные правки адреса: авторство правки и записи её истории.
-  correctedAddresses  DeliveryOrder[]       @relation("OrderLocalAddressAuthor")
-  addressHistoryItems OrderAddressHistory[] @relation("OrderAddressHistoryActor")
+  correctedAddresses      DeliveryOrder[]               @relation("OrderLocalAddressAuthor")
+  addressHistoryItems     OrderAddressHistory[]         @relation("OrderAddressHistoryActor")
+  structuredAddressEvents OrderStructuredAddressEvent[] @relation("OrderStructuredAddressActor")
 
   floristShifts       FloristShift[]  @relation("FloristShiftUser")
   closedFloristShifts FloristShift[]  @relation("FloristShiftClosedBy")
@@ -146,7 +147,7 @@ model User {
   deliveryCancellations DeliveryAttemptCancellation[] @relation("DeliveryCancelActor")
   deliveryReasons       DeliveryFailureReason[]       @relation("DeliveryReasonChangedBy")
 
-  createdTariffs     CourierTariffVersion[] @relation("TariffAuthor")
+  createdTariffs     CourierTariffVersion[]  @relation("TariffAuthor")
   resolutions        OrderResolution[]       @relation("ResolutionDecidedBy")
   returnsAsCourier   OrderReturn[]           @relation("ReturnCourier")
   returnsAccepted    OrderReturn[]           @relation("ReturnAcceptedBy")
@@ -155,12 +156,12 @@ model User {
   issueChecksCleared RouteIssueCheck[]       @relation("IssueCheckClearedBy")
   cancelledOrders    DeliveryOrder[]         @relation("OrderCancelledByLogist")
 
-  cashEntries        LogistCashEntry[]      @relation("CashOwner")
-  cashOperations     LogistCashEntry[]      @relation("CashActor")
-  cashTransfers      LogistCashEntry[]      @relation("CashCourier")
-  ledgerEntries      CourierLedgerEntry[]   @relation("LedgerCourier")
-  ledgerOperations   CourierLedgerEntry[]   @relation("LedgerActor")
-  correctedDistances RouteOrderDistance[]   @relation("DistanceActor")
+  cashEntries        LogistCashEntry[]    @relation("CashOwner")
+  cashOperations     LogistCashEntry[]    @relation("CashActor")
+  cashTransfers      LogistCashEntry[]    @relation("CashCourier")
+  ledgerEntries      CourierLedgerEntry[] @relation("LedgerCourier")
+  ledgerOperations   CourierLedgerEntry[] @relation("LedgerActor")
+  correctedDistances RouteOrderDistance[] @relation("DistanceActor")
 
   @@index([status])
   @@index([createdAt])
@@ -544,7 +545,6 @@ model DeliveryOrder {
   cancelledByLogistById String?   @db.Uuid
   cancelledByLogist     User?     @relation("OrderCancelledByLogist", fields: [cancelledByLogistById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-
   /// Склад и способ доставки — два условия принадлежности к нашей области.
   ///
   /// Оба nullable: у ранее импортированного заказа значение может исчезнуть, и тогда
@@ -593,6 +593,39 @@ model DeliveryOrder {
   /// Пусто — отдельного запроса нет, геокодер берёт `address`.
   geocodeAddress String?
 
+  /// Рабочий адрес нового контракта: ТОЛЬКО город, улица и дом.
+  ///
+  /// Собирается из разобранного адреса МоегоСклада и заменяет `address`
+  /// у заказов версии 2 везде: на экранах, в геокодере, в матрице и в
+  /// маршруте. Индекс, страна, регион, квартира и «Другое» сюда не входят —
+  /// геокодер ищет дом, а не квартиру в нём, а человеку эти части нужны
+  /// отдельной строкой.
+  ///
+  /// Пусто у legacy-заказов и у заказов версии 2, которым не хватает части
+  /// адреса: подставлять вместо этого `address` запрещено — ради его замены
+  /// контракт и вводился.
+  structuredAddress String?
+
+  /// Детали адреса для ЛЮДЕЙ: регион, квартира или офис, «Другое».
+  ///
+  /// Наружу не уходят никогда: ни в геокодер, ни в матрицу, ни в маршрутный
+  /// решатель, ни в ссылку карт, ни в общий аудит, ни в realtime. Курьер
+  /// читает их рядом с адресом, в том числе в печатной форме.
+  addressDetails String?
+
+  /// Версия адресного контракта заказа.
+  ///
+  /// `NULL` — прежний контракт (`address` + необязательный `geocodeAddress`).
+  /// `2` — структурированный: рабочий адрес берётся из `structuredAddress`.
+  /// Единицу не записывает никто: версия появляется только вместе с новым
+  /// контрактом, а неизвестное значение база не принимает
+  /// (CHECK `DeliveryOrder_address_contract_version`).
+  ///
+  /// Значение выбирается ОДИН раз — при создании нашей строки — и никогда
+  /// не переписывается синхронизацией: перевод существующего заказа на новый
+  /// контракт был бы той самой массовой миграцией, которой здесь нет.
+  addressContractVersion Int?
+
   /// Локально исправленный логистом адрес.
   ///
   /// Пока он задан, рабочим («эффективным») считается именно он: список, карта,
@@ -622,11 +655,12 @@ model DeliveryOrder {
   addressConflictDetectedAt DateTime?
 
   /// Неизменяемая история локального адреса и разрешения конфликтов.
-  addressHistory OrderAddressHistory[]
+  addressHistory          OrderAddressHistory[]
+  structuredAddressEvents OrderStructuredAddressEvent[]
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
-  recipient      String?
+  recipient               String?
   /// Только «Комментарий по доставке». Необязателен.
-  comment        String?
+  comment                 String?
 
   paymentTypeId   String? @db.Uuid
   paymentTypeName String?
@@ -793,7 +827,7 @@ model DeliveryOrder {
   fulfillmentPositions DeliveryOrderPosition[]
   fulfillmentRevisions OrderFulfillmentRevision[]
   placements           OrderPlacement[]
-  issueChecks   RouteIssueCheck[]
+  issueChecks          RouteIssueCheck[]
   pickupIssue          OrderPickupIssue?
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
@@ -1782,6 +1816,41 @@ model OrderAddressHistory {
   /// Автор. Пусто у системного обнаружения конфликта: его находит синхронизация.
   actorUserId String? @db.Uuid
   actor       User?   @relation("OrderAddressHistoryActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([orderId, occurredAt])
+}
+
+/// История структурированного адреса: что изменил ИСТОЧНИК у заказа версии 2.
+///
+/// Отдельная таблица, а не новое действие в `OrderAddressHistory`, по двум
+/// причинам. Первая: честного действия «МойСклад изменил адрес» в том перечне
+/// нет, а занимать чужое значение — это ложь в истории. Вторая, решающая:
+/// новое значение перечисления PostgreSQL ломает откат — предыдущий клиент
+/// Prisma, встретив незнакомое значение при чтении истории, отказывается
+/// разбирать строку. О новой таблице он просто не знает и не читает её.
+///
+/// Только вставка: `UPDATE` и `DELETE` запрещены триггерами. История не
+/// переписывается задним числом.
+model OrderStructuredAddressEvent {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// `ADDRESS` — изменился рабочий адрес, `DETAILS` — изменились детали.
+  /// Текст, а не перечисление: перечисление пришлось бы расширять, а это
+  /// ровно та беда с откатом, от которой уходит вся таблица.
+  kind String
+
+  occurredAt DateTime @default(now())
+
+  /// Прежнее и новое значения того, что названо в `kind`.
+  oldValue String?
+  newValue String?
+
+  /// Автор. Пусто у изменений источника: их приносит синхронизация.
+  actorUserId String? @db.Uuid
+  actor       User?   @relation("OrderStructuredAddressActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([orderId, occurredAt])
 }

@@ -33,8 +33,10 @@ import { applyCancellation, isCancelledInSource } from './cancellation.js';
 import { invalidateGeoOnAddressChange } from '../../orders/geo.js';
 import {
   automaticGeocodingAddress,
+  contractVersionOf,
   geocodingAddress,
   isSourceConflict,
+  type AddressContract,
 } from '../../orders/address.js';
 import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
 
@@ -69,6 +71,15 @@ export interface ApplyOptions {
    * геокодирования, попадают в очередь разовым наполнением (`backfillGeocoding`).
    */
   geocoding?: boolean;
+
+  /**
+   * Создавать ли ВПЕРВЫЕ появившийся заказ по новому адресному контракту.
+   *
+   * Влияет ровно на создание: существующий заказ на новый контракт не
+   * переводится ни при каком значении, а заказ версии 2 остаётся собой
+   * и после выключения. Значение приходит из настройки окружения.
+   */
+  structuredAddressV2?: boolean;
 }
 
 interface StoredOrder {
@@ -96,6 +107,19 @@ interface StoredOrder {
   localAddress: string | null;
   sourceAddressAtLocalEdit: string | null;
   addressConflict: boolean;
+  /// Контракт адреса ЭТОГО заказа. Синхронизация его только читает.
+  structuredAddress: string | null;
+  addressDetails: string | null;
+  addressContractVersion: number | null;
+}
+
+/** Пустая строка и отсутствие значения — одно и то же: сравниваются они так же. */
+function normalizedText(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
 }
 
 /**
@@ -152,7 +176,8 @@ async function lockByExternalId(
            "manualIntervalStartMinute", "manualIntervalEndMinute",
            "geoState", "geoSource", "geoLatMicro", "geoLonMicro", "geoGeneration",
            "address", "geocodeAddress", "cancelledInSource",
-           "localAddress", "sourceAddressAtLocalEdit", "addressConflict"
+           "localAddress", "sourceAddressAtLocalEdit", "addressConflict",
+           "structuredAddress", "addressDetails", "addressContractVersion"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${externalId}::uuid
     FOR UPDATE
@@ -172,6 +197,14 @@ function orderData(
   now: Date,
   manual: ManualInterval | null,
   address?: AddressAttention | null,
+  /**
+   * Контракт ЭТОГО заказа.
+   *
+   * `LEGACY` — новые колонки не пишутся вовсе: существующий заказ не переводят
+   * на новый контракт очередной синхронизацией. `V2` — обновляются рабочий
+   * адрес и детали.
+   */
+  contract: AddressContract = 'LEGACY',
 ): Prisma.DeliveryOrderUncheckedUpdateInput {
   const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual, address);
 
@@ -192,6 +225,20 @@ function orderData(
     intervalEndMinute: snapshot.intervalEndMinute,
     address: snapshot.address,
     geocodeAddress: snapshot.geocodeAddress,
+    /*
+     * Новые колонки — только у нового контракта.
+     *
+     * У legacy-заказа их не касаются даже значением `null`: запись `null`
+     * в уже пустое поле безвредна, но она стёрла бы границу между «мы этот
+     * заказ не трогаем» и «мы его обновили пустотой», а именно эта граница
+     * и доказывается проверкой «legacy после синхронизации идентичен».
+     */
+    ...(contract === 'V2'
+      ? {
+          structuredAddress: snapshot.structuredAddress,
+          addressDetails: snapshot.addressDetails,
+        }
+      : {}),
     recipient: snapshot.recipient,
     comment: snapshot.comment,
     paymentTypeId: snapshot.paymentTypeId,
@@ -220,14 +267,38 @@ async function createOrder(
   now: Date,
   options: ApplyOptions,
 ): Promise<ApplyResult> {
+  /*
+   * Версия адресного контракта выбирается ЗДЕСЬ и только здесь.
+   *
+   * Это наше решение о переходе, а не данные источника: снимок МоегоСклада
+   * о версии не знает и знать не должен. Выключатель спрашивается ровно один
+   * раз — в момент появления нашей строки; дальше заказ живёт по записанной
+   * версии, что бы с выключателем ни случилось потом.
+   */
+  const contract: AddressContract = options.structuredAddressV2 === true ? 'V2' : 'LEGACY';
+
   const created = await tx.deliveryOrder.create({
     data: {
       // Новый заказ ручного интервала иметь не может: он появляется только руками.
-      ...(orderData(snapshot, now, null) as Prisma.DeliveryOrderUncheckedCreateInput),
+      ...(orderData(
+        snapshot,
+        now,
+        null,
+        contract === 'V2'
+          ? {
+              corrected: false,
+              conflict: false,
+              structuredIncomplete: snapshot.structuredAddress === null,
+            }
+          : null,
+        contract,
+      ) as Prisma.DeliveryOrderUncheckedCreateInput),
       // Ключ идемпотентности и версия задаются после общих полей: они не входят
       // в набор, который переиспользуется при обновлении.
       externalId: snapshot.externalId,
       version: 1,
+      // Единицу не записывает никто: legacy — это отсутствие версии.
+      ...(contract === 'V2' ? { addressContractVersion: 2 } : {}),
     },
     select: { id: true },
   });
@@ -245,6 +316,8 @@ async function createOrder(
     address: snapshot.address,
     geocodeAddress: snapshot.geocodeAddress,
     localAddress: null,
+    structuredAddress: snapshot.structuredAddress,
+    addressContractVersion: contract === 'V2' ? 2 : null,
   });
 
   if (options.geocoding === true && automaticSource !== null) {
@@ -254,6 +327,8 @@ async function createOrder(
         id: created.id,
         address: snapshot.address,
         geocodeAddress: snapshot.geocodeAddress,
+        structuredAddress: snapshot.structuredAddress,
+        addressContractVersion: contract === 'V2' ? 2 : null,
         // Новый заказ локальной правки ещё не имеет по определению.
         localAddress: null,
         inScope: snapshot.inScope,
@@ -338,20 +413,65 @@ async function updateOrder(
   // Выбор между двумя адресами делает человек — молча взять один из них нельзя,
   // потому что правильными могут быть оба.
   const conflictDetected = isSourceConflict(existing, snapshot.address);
+  /*
+   * Контракт берётся ИЗ СТРОКИ БАЗЫ, а не из выключателя.
+   *
+   * Выключатель спрашивают только при создании. Спроси мы его здесь —
+   * очередная синхронизация переводила бы старые заказы на новый контракт
+   * пачками, а это и есть та массовая миграция, которой в пакете нет.
+   * И обратное верно: выключенный флаг не откатывает заказ версии 2 к прежним
+   * правилам, потому что его версия уже записана.
+   */
+  const contract = contractVersionOf(existing);
   const address = {
     corrected: existing.localAddress !== null,
     conflict: existing.addressConflict || conflictDetected,
+    ...(contract === 'V2' ? { structuredIncomplete: snapshot.structuredAddress === null } : {}),
   };
   const reasons = effectiveAttentionReasons(snapshot.attentionReasons, manual, address);
 
   await tx.deliveryOrder.update({
     where: { id: existing.id },
     data: {
-      ...orderData(snapshot, now, manual, address),
+      ...orderData(snapshot, now, manual, address, contract),
       version: existing.version + 1,
       ...(conflictDetected ? { addressConflict: true, addressConflictDetectedAt: now } : {}),
     },
   });
+
+  /*
+   * История нового контракта.
+   *
+   * Рабочий адрес и детали — разные события: по первому курьер едет, второе
+   * читает человек у двери. Слитая строка «адрес изменился» заставляла бы
+   * гадать, надо ли перепроверять маршрут.
+   */
+  if (contract === 'V2') {
+    if (normalizedText(existing.structuredAddress) !== normalizedText(snapshot.structuredAddress)) {
+      await tx.orderStructuredAddressEvent.create({
+        data: {
+          orderId: existing.id,
+          kind: 'ADDRESS',
+          occurredAt: now,
+          oldValue: existing.structuredAddress,
+          newValue: snapshot.structuredAddress,
+          actorUserId: null,
+        },
+      });
+    }
+    if (normalizedText(existing.addressDetails) !== normalizedText(snapshot.addressDetails)) {
+      await tx.orderStructuredAddressEvent.create({
+        data: {
+          orderId: existing.id,
+          kind: 'DETAILS',
+          occurredAt: now,
+          oldValue: existing.addressDetails,
+          newValue: snapshot.addressDetails,
+          actorUserId: null,
+        },
+      });
+    }
+  }
 
   if (conflictDetected) {
     // История адреса живёт отдельно от общего аудита: адрес — персональные
@@ -433,6 +553,10 @@ async function updateOrder(
     localAddress: existing.localAddress,
     geocodeAddress: snapshot.geocodeAddress,
     address: snapshot.address,
+    // У нового контракта запрос — это рабочий адрес из города, улицы и дома.
+    // Смена квартиры или «Другого» его не меняет, поэтому точка остаётся.
+    structuredAddress: snapshot.structuredAddress,
+    addressContractVersion: existing.addressContractVersion,
   });
 
   /*
@@ -447,6 +571,8 @@ async function updateOrder(
     localAddress: existing.localAddress,
     geocodeAddress: snapshot.geocodeAddress,
     address: snapshot.address,
+    structuredAddress: snapshot.structuredAddress,
+    addressContractVersion: existing.addressContractVersion,
   });
 
   let geoState = existing.geoState;
@@ -490,6 +616,8 @@ async function updateOrder(
         id: existing.id,
         address: snapshot.address,
         geocodeAddress: snapshot.geocodeAddress,
+        structuredAddress: snapshot.structuredAddress,
+        addressContractVersion: existing.addressContractVersion,
         localAddress: existing.localAddress,
         inScope: snapshot.inScope,
         sourceArchived: snapshot.sourceArchived,
