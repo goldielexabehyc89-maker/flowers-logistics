@@ -23,7 +23,7 @@ import { createDatabase } from '../platform/db.js';
 import { toDateColumn } from '../modules/integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../modules/integrations/moysklad/config.js';
 import { snapshotHash, type FulfillmentSnapshot } from '../modules/fulfillment/composition.js';
-import { moscowToday } from '@fl/shared';
+import { moscowToday, shiftCalendarDate } from '@fl/shared';
 import { moscowMinuteOfDay } from '../modules/fulfillment/queue.js';
 
 /** Базы, где допустимо создавать проверочные данные. */
@@ -194,6 +194,13 @@ async function main(): Promise<number> {
      * Ближний заказ начинается через пять минут и из группы уже не выходит:
      * наступившее начало приоритета не снимает. Дальний отстоит на пять часов
      * и в группу не попадает, пока прогон идёт.
+     *
+     * Если пять часов в текущие сутки не помещаются, дальний заказ уезжает
+     * на следующий день. Прижимать его к 23:58 нельзя: у прогона, начатого
+     * поздно вечером, «дальний» оказывался ближе часа и честно попадал
+     * в группу приоритета — фикстура утверждала одно, а создавала другое.
+     * Очередь самовывоза ко дню не привязана, поэтому завтрашний заказ в ней
+     * виден и от начала интервала отстоит заведомо больше часа.
      */
     const nowMinute = moscowMinuteOfDay(new Date());
     const soonStart = Math.min(nowMinute + 5, 1438);
@@ -203,10 +210,11 @@ async function main(): Promise<number> {
       startMinute: soonStart,
       endMinute: Math.min(soonStart + 60, 1439),
     });
-    const laterStart = Math.min(nowMinute + 300, 1438);
+    const fitsToday = nowMinute + 300 <= 1438;
+    const laterStart = fitsToday ? nowMinute + 300 : 720;
     const laterNumber = await createPickup({
       number: `PL-${stamp}`,
-      day,
+      day: fitsToday ? day : shiftCalendarDate(day, 1),
       startMinute: laterStart,
       endMinute: Math.min(laterStart + 60, 1439),
     });
