@@ -34,7 +34,7 @@ import { moscowCalendarDate } from '@fl/shared';
 import { accrueDeliveryResult, reverseDeliveryAccruals } from '../finance/accrual.js';
 import { closeAfterCancelledResult, openAfterFailedDelivery } from '../returns/service.js';
 // Рабочий адрес считается в одном месте на весь продукт, а не переписывается здесь.
-import { effectiveAddress } from '../orders/address.js';
+import { addressDetailsOf, effectiveAddress, ORDER_ADDRESS_SELECT } from '../orders/address.js';
 import { fromMicro } from '../orders/geo.js';
 import { readLedgerActivation } from '../finance/tariffs.js';
 
@@ -391,8 +391,7 @@ export async function listActiveDeliveries(
             select: {
               id: true,
               externalName: true,
-              address: true,
-              localAddress: true,
+              ...ORDER_ADDRESS_SELECT,
               geoState: true,
               geoLatMicro: true,
               geoLonMicro: true,
@@ -433,6 +432,9 @@ export async function listActiveDeliveries(
           position: participation.position,
           number: participation.order.externalName,
           address: effectiveAddress(participation.order),
+          // Детали идут сразу за адресом: курьеру у двери нужны и квартира,
+          // и домофон, а в расчёт маршрута они не входят.
+          addressDetails: addressDetailsOf(participation.order),
           point: confirmedPoint(participation.order),
           recipient: participation.order.recipient,
           comment: participation.order.comment,
@@ -1039,7 +1041,7 @@ export async function listDeliveryHistory(
       cancellation: { select: { id: true } },
       route: { select: { number: true } },
       order: {
-        select: { externalName: true, address: true, localAddress: true, recipient: true },
+        select: { externalName: true, ...ORDER_ADDRESS_SELECT, recipient: true },
       },
     },
   });
@@ -1062,6 +1064,7 @@ export async function listDeliveryHistory(
       masked,
       // Тот же рабочий адрес, что видел курьер в «Активных».
       address: masked ? null : effectiveAddress(row.order),
+      addressDetails: masked ? null : addressDetailsOf(row.order),
       recipient: masked ? null : row.order.recipient,
       comment: masked ? null : row.comment,
     })),

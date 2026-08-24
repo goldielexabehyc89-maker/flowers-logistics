@@ -132,6 +132,20 @@ export function addressDetailsOf(order: AddressSource): string | null {
 }
 
 /**
+ * Рабочий адрес ИСТОЧНИКА — тот, с которым сравнивают правку логиста.
+ *
+ * У прежнего контракта это `address`. У версии 2 — разобранный адрес: именно
+ * он рабочий, а операционная строка живёт рядом справочно. Сравнивай мы её,
+ * заказ с правкой логиста получал бы блокирующее расхождение всякий раз, когда
+ * в МоёмСкладе поправили квартиру, — при том что дом не менялся.
+ */
+export function sourceWorkingAddress(order: AddressSource): string | null {
+  return contractVersionOf(order) === 'V2'
+    ? normalize(order.structuredAddress)
+    : normalize(order.address);
+}
+
+/**
  * Строка, которая уходит в геокодер.
  *
  * Отличается от адреса для человека намеренно. Курьеру нужен операционный

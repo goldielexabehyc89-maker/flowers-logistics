@@ -261,6 +261,25 @@ function orderData(
   };
 }
 
+/**
+ * Поля снимка, которых у прежнего контракта не существует.
+ *
+ * Маппер собирает кандидатов ВСЕГДА: версию заказа он не знает и знать
+ * не должен. Поэтому отсеиваются они здесь — по версии уже созданной строки.
+ *
+ * Без этого отсева правка одной лишь квартиры в МоёмСкладе заводила бы
+ * у СТАРОГО заказа ревизию, запись в журнале и уведомление на всех экранах —
+ * при том что ни адрес, ни точка, ни маршрут не менялись. Переход обязан быть
+ * невидимым для заказов, которые к нему не переводили.
+ */
+const V2_ONLY_SNAPSHOT_FIELDS: readonly string[] = ['structuredAddress', 'addressDetails'];
+
+function contractChangedFields(fields: string[], contract: AddressContract): string[] {
+  return contract === 'V2'
+    ? fields
+    : fields.filter((field) => !V2_ONLY_SNAPSHOT_FIELDS.includes(field));
+}
+
 async function createOrder(
   tx: TransactionClient,
   snapshot: OrderSnapshot,
@@ -352,7 +371,7 @@ async function createOrder(
     });
   }
 
-  const changedFields = diffSnapshots(null, snapshot);
+  const changedFields = contractChangedFields(diffSnapshots(null, snapshot), contract);
   await writeRevision(tx, created.id, snapshot, changedFields, 'INITIAL_IMPORT');
   await writeOrderAudit(tx, 'ORDER_IMPORTED', created.id, snapshot, changedFields, 1, [
     ...snapshot.attentionReasons,
@@ -372,7 +391,17 @@ async function updateOrder(
   options: ApplyOptions,
 ): Promise<ApplyResult> {
   const previous = await previousSnapshot(tx, existing.id);
-  const changedFields = diffSnapshots(previous, snapshot);
+  /*
+   * Контракт берётся ИЗ СТРОКИ БАЗЫ, а не из выключателя.
+   *
+   * Выключатель спрашивают только при создании. Спроси мы его здесь —
+   * очередная синхронизация переводила бы старые заказы на новый контракт
+   * пачками, а это и есть та массовая миграция, которой в пакете нет.
+   * И обратное верно: выключенный флаг не откатывает заказ версии 2 к прежним
+   * правилам, потому что его версия уже записана.
+   */
+  const contract = contractVersionOf(existing);
+  const changedFields = contractChangedFields(diffSnapshots(previous, snapshot), contract);
 
   // Заказ, найденный снова после контрольной сверки, обязан вернуться в работу
   // даже если внешний снимок не изменился ни одним полем: пропал он не из-за
@@ -412,17 +441,13 @@ async function updateOrder(
   // не затирается, а заказ получает явный конфликт и блокирующую причину.
   // Выбор между двумя адресами делает человек — молча взять один из них нельзя,
   // потому что правильными могут быть оба.
-  const conflictDetected = isSourceConflict(existing, snapshot.address);
-  /*
-   * Контракт берётся ИЗ СТРОКИ БАЗЫ, а не из выключателя.
-   *
-   * Выключатель спрашивают только при создании. Спроси мы его здесь —
-   * очередная синхронизация переводила бы старые заказы на новый контракт
-   * пачками, а это и есть та массовая миграция, которой в пакете нет.
-   * И обратное верно: выключенный флаг не откатывает заказ версии 2 к прежним
-   * правилам, потому что его версия уже записана.
-   */
-  const contract = contractVersionOf(existing);
+  const conflictDetected = isSourceConflict(
+    existing,
+    // Сравнивается РАБОЧИЙ адрес источника: у версии 2 это разобранный адрес,
+    // а не операционная строка. Иначе поправленная в МоёмСкладе квартира
+    // объявляла бы расхождение с правкой логиста, хотя дом тот же.
+    contract === 'V2' ? snapshot.structuredAddress : snapshot.address,
+  );
   const address = {
     corrected: existing.localAddress !== null,
     conflict: existing.addressConflict || conflictDetected,
@@ -484,7 +509,7 @@ async function updateOrder(
         occurredAt: now,
         oldAddress: existing.sourceAddressAtLocalEdit,
         newAddress: existing.localAddress,
-        sourceAddress: snapshot.address,
+        sourceAddress: contract === 'V2' ? snapshot.structuredAddress : snapshot.address,
         actorUserId: null,
       },
     });

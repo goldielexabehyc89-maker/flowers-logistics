@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { geocodingAddress } from '../address.js';
+import { geocodingAddress, ORDER_ADDRESS_SELECT } from '../address.js';
 import type { $Enums } from '../../../generated/prisma/client.js';
 import type { Database } from '../../../platform/db.js';
 import type { AppLogger } from '../../../platform/logging/logger.js';
@@ -134,6 +134,16 @@ interface OrderSnapshot {
   /** Запрос к геокодеру. Пусто — берётся адрес заказа. */
   geocodeAddress: string | null;
   localAddress: string | null;
+  /**
+   * Рабочий адрес нового контракта и его версия.
+   *
+   * Читаются вместе с остальными: без них `geocodingAddress` посчитал бы
+   * заказ версии 2 старым и отправил бы провайдеру операционную строку —
+   * ровно ту, ради замены которой контракт и вводился.
+   */
+  structuredAddress: string | null;
+  addressDetails: string | null;
+  addressContractVersion: number | null;
   inScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
@@ -219,9 +229,7 @@ async function readOrder(db: Database, orderId: string): Promise<OrderSnapshot |
     where: { id: orderId },
     select: {
       id: true,
-      address: true,
-      geocodeAddress: true,
-      localAddress: true,
+      ...ORDER_ADDRESS_SELECT,
       inScope: true,
       sourceArchived: true,
       sourceMissing: true,
@@ -235,7 +243,9 @@ async function readOrder(db: Database, orderId: string): Promise<OrderSnapshot |
 
 async function lockOrder(tx: TransactionClient, orderId: string): Promise<OrderSnapshot | null> {
   const rows = await tx.$queryRaw<OrderSnapshot[]>`
-    SELECT "id", "address", "geocodeAddress", "localAddress", "inScope", "sourceArchived", "sourceMissing",
+    SELECT "id", "address", "geocodeAddress", "localAddress",
+           "structuredAddress", "addressDetails", "addressContractVersion",
+           "inScope", "sourceArchived", "sourceMissing",
            "geoState", "geoSource", "geoGeneration", "version"
     FROM "DeliveryOrder"
     WHERE "id" = ${orderId}::uuid

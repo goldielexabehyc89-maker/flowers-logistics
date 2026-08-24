@@ -821,15 +821,32 @@ describe('полнота списка полей снимка', () => {
     apartment: '137',
   };
 
+  /*
+   * Оба снимка сняты с ОДНОГО заказа: различается только источник запроса.
+   *
+   * Разобранные части присутствуют в обоих — их маппер собирает всегда,
+   * независимо от источника и версии контракта. Так проверка и остаётся
+   * проверкой одного поля: убери мы части из «до», отличий стало бы три,
+   * и утверждение «изменилось ровно одно» доказывало бы совсем другое.
+   */
   const withQuery = (): OrderSnapshot =>
     mapOrder(order({ shipmentAddressFull: FULL } as never), IDS, 'shipmentAddressFull').snapshot;
-  const withoutQuery = (): OrderSnapshot => mapOrder(order(), IDS).snapshot;
+  const withoutQuery = (): OrderSnapshot =>
+    mapOrder(order({ shipmentAddressFull: FULL } as never), IDS).snapshot;
 
   it('запрос к геокодеру входит в список полей снимка', () => {
     // Через этот список работают сравнение снимков, канонический JSON и хеш.
     // Поле, добавленное в тип, но не сюда, было бы невидимо для всех троих.
     expect(SNAPSHOT_KEYS).toContain('geocodeAddress');
     expect(SNAPSHOT_KEYS).toContain('address');
+    // Рабочий адрес и детали нового контракта — там же. Поля, невидимого для
+    // сравнения снимков, изменение источника не достигло бы вовсе: заказ
+    // считался бы неизменившимся, и новая квартира не доехала бы до карточки.
+    expect(SNAPSHOT_KEYS).toContain('structuredAddress');
+    expect(SNAPSHOT_KEYS).toContain('addressDetails');
+    // А версии контракта в снимке нет и быть не должно: это наше решение
+    // о переходе, а не данные МоегоСклада.
+    expect(SNAPSHOT_KEYS).not.toContain('addressContractVersion');
   });
 
   it('изменение ОДНОГО лишь запроса геокодера видно в changedFields', () => {

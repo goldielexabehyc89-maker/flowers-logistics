@@ -58,6 +58,7 @@ import type { Role } from '@fl/shared';
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { addressDetailsOf, effectiveAddress, ORDER_ADDRESS_SELECT } from './address.js';
 
 /** Этап жизни заказа: им экран красит строку и группирует смысл. */
 export type TimelineGroup =
@@ -127,6 +128,18 @@ const ADDRESS_TITLES: Record<string, string> = {
   SOURCE_CONFLICT_DETECTED: 'Источник изменил адрес: расхождение с ручным',
   CONFLICT_RESOLVED_KEEP_LOCAL: 'Расхождение адреса закрыто: оставлен ручной',
   CONFLICT_RESOLVED_USE_SOURCE: 'Расхождение адреса закрыто: принят адрес источника',
+};
+
+/**
+ * Изменения адреса, пришедшие из источника у заказа версии 2.
+ *
+ * Адрес и детали — разные строки: по первому курьер едет, второе он читает
+ * у двери. Слитое «адрес изменился» заставляло бы каждый раз выяснять,
+ * надо ли перепроверять маршрут.
+ */
+const STRUCTURED_ADDRESS_TITLES: Record<string, string> = {
+  ADDRESS: 'Источник изменил адрес доставки',
+  DETAILS: 'Источник изменил детали адреса',
 };
 
 const FULFILLMENT_TITLES: Record<string, string> = {
@@ -229,6 +242,8 @@ export interface TimelineHeader {
   deliveryDate: string | null;
   interval: { startMinute: number | null; endMinute: number | null; manual: boolean };
   address: string | null;
+  /** Детали адреса. У заказа прежнего контракта их не существует. */
+  addressDetails: string | null;
   florist: { id: string; fullName: string } | null;
   route: { id: string; number: string; state: string } | null;
   courier: { id: string; fullName: string } | null;
@@ -312,8 +327,7 @@ export async function readOrderTimeline(
       intervalEndMinute: true,
       manualIntervalStartMinute: true,
       manualIntervalEndMinute: true,
-      localAddress: true,
-      address: true,
+      ...ORDER_ADDRESS_SELECT,
       fulfillmentProcessState: true,
       fulfillmentAssignee: { select: { id: true, fullName: true } },
       cancelledInSource: true,
@@ -430,6 +444,49 @@ export async function readOrderTimeline(
         group: 'IMPORT',
         kind: `ADDRESS_${entry.action}`,
         title: ADDRESS_TITLES[entry.action] ?? 'Изменение адреса',
+        actor: entry.actorUserId === null ? SOURCE_ACTOR : userActor(entry.actorUserId),
+        details,
+        reverted: false,
+        route: null,
+      }),
+    );
+  }
+
+  /*
+   * 3а. Изменения адреса источником у заказа версии 2.
+   *
+   * Отдельная append-only таблица, а не новое значение в перечислении истории
+   * адреса: перечисление читается прежним клиентом Prisma, и строка
+   * с неизвестным ему значением сделала бы откат невозможным.
+   */
+  const structuredAddressEvents = await db.orderStructuredAddressEvent.findMany({
+    where: { orderId: order.id },
+    orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
+    select: {
+      id: true,
+      kind: true,
+      occurredAt: true,
+      oldValue: true,
+      newValue: true,
+      actorUserId: true,
+    },
+  });
+  for (const entry of structuredAddressEvents) {
+    const details: TimelineDetail[] = [];
+    if (entry.oldValue !== null) {
+      details.push({ label: 'Было', value: entry.oldValue });
+    }
+    if (entry.newValue !== null) {
+      details.push({ label: 'Стало', value: entry.newValue });
+    }
+    events.push(
+      event({
+        key: `15:structured:${entry.id}`,
+        at: entry.occurredAt,
+        group: 'IMPORT',
+        // Вид берётся из колонки, а не угадывается по содержимому строки.
+        kind: `STRUCTURED_ADDRESS_${entry.kind}`,
+        title: STRUCTURED_ADDRESS_TITLES[entry.kind] ?? 'Изменение адреса',
         actor: entry.actorUserId === null ? SOURCE_ACTOR : userActor(entry.actorUserId),
         details,
         reverted: false,
@@ -1174,6 +1231,9 @@ function buildHeader(
     manualIntervalEndMinute: number | null;
     localAddress: string | null;
     address: string | null;
+    structuredAddress: string | null;
+    addressDetails: string | null;
+    addressContractVersion: number | null;
     fulfillmentProcessState: string;
     fulfillmentAssignee: { id: string; fullName: string } | null;
     cancelledInSource: boolean;
@@ -1225,7 +1285,8 @@ function buildHeader(
       endMinute: manual ? order.manualIntervalEndMinute : order.intervalEndMinute,
       manual,
     },
-    address: order.localAddress ?? order.address,
+    address: effectiveAddress(order),
+    addressDetails: addressDetailsOf(order),
     florist: order.fulfillmentAssignee,
     route:
       activeParticipation === undefined
