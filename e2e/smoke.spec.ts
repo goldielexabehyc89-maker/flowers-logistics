@@ -9315,18 +9315,26 @@ test('адрес: обновление источника без F5, точка 
   await page.getByTestId('order-window-history').click();
   await expect(page.getByTestId('order-history')).toBeVisible();
 
-  const kinds = await historyKinds(page);
-  expect(kinds.filter((kind) => kind === 'STRUCTURED_ADDRESS_DETAILS').length).toBeGreaterThan(0);
-  expect(kinds.filter((kind) => kind === 'STRUCTURED_ADDRESS_ADDRESS').length).toBeGreaterThan(0);
-
+  // Строки ждутся локаторами, а не читаются массивом: массив вернул бы
+  // пустоту раньше, чем лента успела отрисоваться, и проверка доказывала бы
+  // скорость браузера вместо содержимого истории.
   const detailsRow = page
     .locator('[data-testid="order-history-event"][data-kind="STRUCTURED_ADDRESS_DETAILS"]')
     .first();
+  await expect(detailsRow).toBeVisible();
   await expect(detailsRow).toContainText('детали адреса');
+
   const addressRow = page
     .locator('[data-testid="order-history-event"][data-kind="STRUCTURED_ADDRESS_ADDRESS"]')
     .first();
+  await expect(addressRow).toBeVisible();
   await expect(addressRow).toContainText('адрес доставки');
+
+  // Событий ровно два вида, и они не слиты в одно: по адресу перепроверяют
+  // маршрут, по деталям — нет.
+  const kinds = await historyKinds(page);
+  expect(kinds.filter((kind) => kind === 'STRUCTURED_ADDRESS_DETAILS').length).toBeGreaterThan(0);
+  expect(kinds.filter((kind) => kind === 'STRUCTURED_ADDRESS_ADDRESS').length).toBeGreaterThan(0);
 });
 
 test('адрес: маршрутный лист и печатная форма показывают оба значения', async ({
