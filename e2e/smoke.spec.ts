@@ -8470,3 +8470,633 @@ test('флорист: ближайшие самовывозы стоят пер�
 
   await floristContext.close();
 });
+
+/*
+ * История заказа: шесть взаимоисключающих исходов на шести заказах.
+ *
+ * Один заказ не может быть одновременно доставленным, пересобранным и
+ * списанным. Поэтому фикстура готовит шесть отдельных историй настоящими
+ * доменными операциями, а сценарий открывает каждую страницу и сверяет
+ * состав, порядок, авторов и пометки.
+ */
+
+/** Машинные имена строк открытой истории — в порядке показа. */
+async function historyKinds(page: Page): Promise<string[]> {
+  return page
+    .getByTestId('order-history-event')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => (node as { dataset: { kind?: string } }).dataset.kind ?? ''),
+    );
+}
+
+/** Открыть историю по прямой ссылке: право проверяет сервер, а не переход. */
+async function openHistory(page: Page, orderId: string): Promise<void> {
+  await page.goto(`/order-history/${orderId}`);
+  await expect(page.getByTestId('order-history')).toBeVisible();
+  await expect(page.getByTestId('order-history-event').first()).toBeVisible();
+}
+
+function requireKinds(kinds: string[], expected: string[], label: string): void {
+  for (const kind of expected) {
+    expect(
+      kinds.filter((value) => value === kind),
+      `${label}: ${kind}`,
+    ).toHaveLength(1);
+  }
+}
+
+test('история заказа: успешная доставка, повторная доставка и пересборка', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  const delivered = process.env['E2E_HISTORY_DELIVERED_ID'] ?? '';
+  const deliveredNumber = process.env['E2E_HISTORY_DELIVERED'] ?? '';
+  const redelivery = process.env['E2E_HISTORY_REDELIVERY_ID'] ?? '';
+  const reassembly = process.env['E2E_HISTORY_REASSEMBLY_ID'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    delivered === '' || redelivery === '' || reassembly === '',
+    'не переданы фикстуры истории (E2E_HISTORY_*)',
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  /*
+   * 1. Успешная доставка — прямая линия без единой пометки об отмене.
+   */
+  await openHistory(page, delivered);
+  await expect(page.getByTestId('order-history-number')).toContainText(deliveredNumber);
+  const deliveredKinds = await historyKinds(page);
+  requireKinds(
+    deliveredKinds,
+    [
+      'ORDER_INITIAL_IMPORT',
+      'ORDER_QUEUED_FOR_FLORIST',
+      'ADDRESS_LOCAL_ADDRESS_SET',
+      'ORDER_FULFILLMENT_CLAIMED',
+      'ORDER_FULFILLMENT_ASSEMBLED',
+      'ORDER_PRINTED',
+      'ORDER_REPRINTED',
+      'PLACEMENT_RECEIVED',
+      'ROUTE_ORDER_ADDED',
+      'ROUTE_COURIER_ASSIGNED',
+      'ROUTE_CONFIRMED',
+      'ROUTE_ISSUE_CHECKED',
+      'PLACEMENT_RELEASED_ISSUED_TO_COURIER',
+      'ROUTE_ACTIVE',
+      'DELIVERY_DELIVERED',
+    ],
+    'доставка',
+  );
+  /*
+   * Правка интервала проверяется «хотя бы одна».
+   *
+   * Соседний сценарий этого же прогона правит интервал ещё раз, чтобы
+   * доказать обновление без F5, — и требовать здесь ровно одну строку
+   * значило бы проверять порядок запуска сценариев, а не историю.
+   */
+  expect(deliveredKinds).toContain('ORDER_INTERVAL_SET');
+
+  // Недоставки, возврата и пересборки в этой истории быть не может.
+  expect(deliveredKinds).not.toContain('DELIVERY_FAILED');
+  expect(deliveredKinds).not.toContain('ORDER_RETURN_OPENED');
+  // Дублей нет: ключи строк уникальны, одно действие показано один раз.
+  const deliveredKeys = await page
+    .getByTestId('order-history-event')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => (node as { textContent: string }).textContent ?? ''),
+    );
+  expect(new Set(deliveredKeys).size).toBe(deliveredKeys.length);
+  // Порядок: сборка раньше отгрузки, отгрузка раньше доставки.
+  expect(deliveredKinds.indexOf('ORDER_FULFILLMENT_ASSEMBLED')).toBeLessThan(
+    deliveredKinds.indexOf('ROUTE_ACTIVE'),
+  );
+  expect(deliveredKinds.indexOf('ROUTE_ACTIVE')).toBeLessThan(
+    deliveredKinds.indexOf('DELIVERY_DELIVERED'),
+  );
+  // Время строк не убывает.
+  const times = await page
+    .getByTestId('order-history-event')
+    .locator('.order-history__time')
+    .allInnerTexts();
+  expect([...times].sort()).toEqual(times);
+
+  // Автор и роль видны прямо в строке.
+  const claimRow = page.locator('[data-kind="ORDER_FULFILLMENT_CLAIMED"]');
+  await expect(claimRow).toContainText('Флорист истории');
+  await expect(claimRow).toContainText('флорист');
+  await expect(page.locator('[data-kind="ORDER_INITIAL_IMPORT"]')).toContainText('МойСклад');
+  await expect(page.locator('[data-kind="PLACEMENT_RECEIVED"]')).toContainText('Кладовщик истории');
+  await expect(page.locator('[data-kind="DELIVERY_DELIVERED"]')).toContainText('Курьер истории');
+
+  // Ни телефона, ни получателя, ни комментария, ни сырого снимка.
+  const body = (await page.getByTestId('order-history').innerText()).replace(/\s+/g, ' ');
+  expect(body).not.toContain('Проверочный получатель');
+  expect(body).not.toContain('Позвонить за час');
+  expect(body).not.toMatch(/\+7\d{10}/);
+  expect(body).not.toContain('snapshot');
+  expect(body).not.toContain('Роза красная');
+
+  /*
+   * 2. Повторная доставка ТЕМ ЖЕ букетом: два маршрута, один круг сборки.
+   */
+  await openHistory(page, redelivery);
+  const redeliveryKinds = await historyKinds(page);
+  requireKinds(
+    redeliveryKinds,
+    [
+      'DELIVERY_FAILED',
+      'ORDER_RESOLUTION_OPENED',
+      'ORDER_RETURN_OPENED',
+      'ORDER_RETURN_ACCEPTED',
+      'PLACEMENT_COURIER_RETURN',
+      'ORDER_RESOLUTION_REDELIVER_SAME_BOUQUET',
+      'DELIVERY_DELIVERED',
+    ],
+    'повторная доставка',
+  );
+  // Второй маршрут и вторая выдача — по две строки на каждое.
+  expect(redeliveryKinds.filter((value) => value === 'ROUTE_ORDER_ADDED')).toHaveLength(2);
+  expect(redeliveryKinds.filter((value) => value === 'ROUTE_ACTIVE')).toHaveLength(2);
+  expect(
+    redeliveryKinds.filter((value) => value === 'PLACEMENT_RELEASED_ISSUED_TO_COURIER'),
+  ).toHaveLength(2);
+  // Букет тот же: второго круга сборки нет.
+  expect(redeliveryKinds.filter((value) => value === 'ORDER_FULFILLMENT_ASSEMBLED')).toHaveLength(
+    1,
+  );
+  // Порядок: недоставка → возврат → решение → повторная доставка.
+  expect(redeliveryKinds.indexOf('DELIVERY_FAILED')).toBeLessThan(
+    redeliveryKinds.indexOf('ORDER_RETURN_ACCEPTED'),
+  );
+  expect(redeliveryKinds.indexOf('ORDER_RETURN_ACCEPTED')).toBeLessThan(
+    redeliveryKinds.indexOf('ORDER_RESOLUTION_REDELIVER_SAME_BOUQUET'),
+  );
+  expect(redeliveryKinds.indexOf('ORDER_RESOLUTION_REDELIVER_SAME_BOUQUET')).toBeLessThan(
+    redeliveryKinds.lastIndexOf('DELIVERY_DELIVERED'),
+  );
+  // Недоставка осталась в истории и после успешной повторной доставки.
+  await expect(page.locator('[data-kind="DELIVERY_FAILED"]')).toBeVisible();
+
+  /*
+   * 3. Пересборка: второй круг сборки с новой печатью и новой готовностью.
+   */
+  await openHistory(page, reassembly);
+  const reassemblyKinds = await historyKinds(page);
+  requireKinds(
+    reassemblyKinds,
+    [
+      'DELIVERY_FAILED',
+      'ORDER_RETURN_ACCEPTED',
+      'ORDER_RESOLUTION_REDELIVER_REASSEMBLE',
+      'PLACEMENT_RELEASED_WITHDRAWN',
+    ],
+    'пересборка',
+  );
+  // Два круга сборки: две отметки «Собран», две первые печати, два бланка.
+  expect(reassemblyKinds.filter((value) => value === 'ORDER_FULFILLMENT_ASSEMBLED')).toHaveLength(
+    2,
+  );
+  expect(reassemblyKinds.filter((value) => value === 'ORDER_PRINT_FORM_CREATED')).toHaveLength(2);
+  expect(reassemblyKinds.filter((value) => value === 'ORDER_FULFILLMENT_CLAIMED')).toHaveLength(2);
+  // Решение о пересборке стоит РАНЬШЕ второго захвата и второй печати.
+  const decisionAt = reassemblyKinds.indexOf('ORDER_RESOLUTION_REDELIVER_REASSEMBLE');
+  expect(decisionAt).toBeLessThan(reassemblyKinds.lastIndexOf('ORDER_FULFILLMENT_CLAIMED'));
+  expect(decisionAt).toBeLessThan(reassemblyKinds.lastIndexOf('ORDER_FULFILLMENT_ASSEMBLED'));
+  // Первый круг никуда не делся: его строки по-прежнему выше решения.
+  expect(reassemblyKinds.indexOf('ORDER_FULFILLMENT_ASSEMBLED')).toBeLessThan(decisionAt);
+  // Второй круг печатается как ПЕРВАЯ печать своего бланка, а не как повтор.
+  expect(reassemblyKinds.filter((value) => value === 'ORDER_PRINTED')).toHaveLength(2);
+  await expect(page.locator('[data-kind="ORDER_PRINT_FORM_CREATED"]').last()).toContainText('2');
+  await expect(page.locator('[data-kind="ORDER_PRINTED"]').last()).toContainText('Круг сборки');
+  // Снятие с полки на пересборку названо причиной.
+  await expect(page.locator('[data-kind="PLACEMENT_RELEASED_WITHDRAWN"]')).toContainText(
+    'на пересборку',
+  );
+});
+
+test('история заказа: отмена источника, отмена логистом и списание', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  const sourceCancel = process.env['E2E_HISTORY_SOURCE_CANCEL_ID'] ?? '';
+  const logistCancel = process.env['E2E_HISTORY_LOGIST_CANCEL_ID'] ?? '';
+  const writeOff = process.env['E2E_HISTORY_WRITE_OFF_ID'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    sourceCancel === '' || logistCancel === '' || writeOff === '',
+    'не переданы фикстуры истории (E2E_HISTORY_*)',
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  /*
+   * 1. Отмена из МоегоСклада и её снятие: обе строки остаются.
+   */
+  await openHistory(page, sourceCancel);
+  const cancelKinds = await historyKinds(page);
+  requireKinds(
+    cancelKinds,
+    ['ORDER_CANCELLED_IN_SOURCE', 'ORDER_CANCELLATION_WITHDRAWN'],
+    'отмена источника',
+  );
+  expect(cancelKinds.indexOf('ORDER_CANCELLED_IN_SOURCE')).toBeLessThan(
+    cancelKinds.indexOf('ORDER_CANCELLATION_WITHDRAWN'),
+  );
+  // Отменённое действие не исчезает, а получает пометку.
+  await expect(page.locator('[data-kind="ORDER_CANCELLED_IN_SOURCE"]')).toHaveAttribute(
+    'data-reverted',
+    'true',
+  );
+  await expect(page.locator('[data-kind="ORDER_CANCELLED_IN_SOURCE"]')).toContainText(
+    'отменено позже',
+  );
+  // Отмена снята — шапка об отмене больше не сообщает.
+  await expect(page.getByTestId('order-history-cancelled')).toHaveCount(0);
+
+  /*
+   * 2. Отмена логистом: автор с ролью и итоговое состояние заказа.
+   */
+  await openHistory(page, logistCancel);
+  const logistKinds = await historyKinds(page);
+  requireKinds(
+    logistKinds,
+    ['DELIVERY_FAILED', 'ORDER_RESOLUTION_OPENED', 'ORDER_RESOLUTION_CANCELLED'],
+    'отмена логистом',
+  );
+  /*
+   * Автора решения проверяем по признаку «это человек», а не по имени.
+   *
+   * Имя первого администратора зависит от того, кто поднял окружение, и
+   * привязка к нему делала бы проверку рассказом о стенде, а не о продукте.
+   * Роль при этом обязана быть названа: она приходит снимком из журнала.
+   */
+  const decisionRow = page.locator('[data-kind="ORDER_RESOLUTION_CANCELLED"]');
+  await expect(decisionRow).not.toContainText('Система');
+  await expect(decisionRow).not.toContainText('МойСклад');
+  await expect(page.locator('[data-kind="ORDER_CANCELLED_BY_LOGIST"]')).toContainText(
+    'администратор',
+  );
+  await expect(page.getByTestId('order-history-cancelled')).toContainText('Отменён логистом');
+
+  /*
+   * 3. Списание: возврат и списание — РАЗНЫЕ строки.
+   */
+  await openHistory(page, writeOff);
+  const writeOffKinds = await historyKinds(page);
+  requireKinds(
+    writeOffKinds,
+    ['ORDER_RETURN_ACCEPTED', 'PLACEMENT_COURIER_RETURN', 'PLACEMENT_RELEASED_WITHDRAWN'],
+    'списание',
+  );
+  expect(writeOffKinds.indexOf('ORDER_RETURN_ACCEPTED')).toBeLessThan(
+    writeOffKinds.indexOf('PLACEMENT_RELEASED_WITHDRAWN'),
+  );
+  await expect(page.locator('[data-kind="PLACEMENT_RELEASED_WITHDRAWN"]')).toContainText(
+    'в списание',
+  );
+
+  /*
+   * 4. Право читать историю проверяет СЕРВЕР.
+   *
+   * Флорист, кладовщик и курьер получают отказ по прямому запросу — спрятанная
+   * кнопка чужой запрос не останавливает.
+   */
+  for (const [phone, pin] of [
+    [process.env['E2E_HISTORY_FLORIST'] ?? '', '3517'],
+    [process.env['E2E_HISTORY_KEEPER'] ?? '', '3518'],
+    [process.env['E2E_HISTORY_COURIER'] ?? '', '3519'],
+  ] as [string, string][]) {
+    if (phone === '') {
+      continue;
+    }
+    const auth = await request.post('/api/auth/login', { data: { phone, pin } });
+    expect(auth.status(), phone).toBe(200);
+    const token = ((await auth.json()) as { accessToken: string }).accessToken;
+    const denied = await request.get(`/api/orders/${writeOff}/timeline`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(denied.status(), phone).toBe(403);
+  }
+});
+
+test('история заказа: обновление без F5, только чтение и телефон', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  const orderId = process.env['E2E_HISTORY_DELIVERED_ID'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(orderId === '', 'не передана фикстура истории (E2E_HISTORY_DELIVERED_ID)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openHistory(page, orderId);
+  const screen = page.getByTestId('order-history');
+
+  // 1. Экран только читает: полей ввода на нём нет вовсе.
+  await expect(screen.locator('input, textarea, select')).toHaveCount(0);
+  await expect(screen.getByTestId('order-window-address')).toHaveCount(0);
+  await expect(screen.getByTestId('order-window-interval')).toHaveCount(0);
+
+  /*
+   * 2. Новое действие доходит без перезагрузки.
+   *
+   * Интервал меняет логист обычным входом, а открытая история узнаёт об этом
+   * сама: событие realtime перечитывает ленту и ставит строку на своё место.
+   */
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+  const card = await request.get(`/api/orders/${orderId}`, { headers });
+  const version = ((await card.json()) as { order: { version: number } }).order.version;
+
+  const intervalRows = page.locator('[data-kind="ORDER_INTERVAL_SET"]');
+  const before = await intervalRows.count();
+  const saved = await request.put(`/api/orders/${orderId}/interval`, {
+    headers,
+    data: { startMinute: 720, endMinute: 840, version },
+  });
+  expect(saved.status(), await saved.text()).toBe(200);
+
+  await expect(intervalRows).toHaveCount(before + 1, { timeout: 30_000 });
+  await expect(intervalRows.last()).toContainText('12:00–14:00');
+  // Новая строка встала последней по времени, а не в середину ленты.
+  const kinds = await historyKinds(page);
+  expect(kinds.lastIndexOf('ORDER_INTERVAL_SET')).toBe(kinds.length - 1);
+
+  // 3. Дни: заголовок дня есть и он московский.
+  await expect(page.getByTestId('order-history-day').first()).toBeVisible();
+
+  // 4. Телефон 390×844: горизонтального выезда нет ни у страницы, ни у ленты.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(screen).toBeVisible();
+  const overflow = await page.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const list = scope.document.querySelector('.order-history__list');
+    const header = scope.document.querySelector('.order-history__header');
+    return {
+      page: scope.document.documentElement.scrollWidth - scope.document.documentElement.clientWidth,
+      list: list === null ? 0 : list.scrollWidth - list.clientWidth,
+      header: header === null ? 0 : header.scrollWidth - header.clientWidth,
+    };
+  });
+  expect(overflow.page).toBeLessThanOrEqual(0);
+  expect(overflow.list).toBeLessThanOrEqual(0);
+  expect(overflow.header).toBeLessThanOrEqual(0);
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  /*
+   * 5. Вход из окна заказа и возврат назад.
+   *
+   * Берётся живой заказ дня, а не доставленный: выполненный уходит из
+   * «Сделок» по своему правилу, и его отсутствие там — не про историю.
+   */
+  const dealNumber = process.env['E2E_HISTORY_SOURCE_CANCEL'] ?? '';
+  const dealId = process.env['E2E_HISTORY_SOURCE_CANCEL_ID'] ?? '';
+  test.skip(dealNumber === '', 'не передана фикстура живого заказа (E2E_HISTORY_SOURCE_CANCEL)');
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(dealNumber);
+  const dealCard = page.locator(`[data-testid="deal-card"][data-order-number="${dealNumber}"]`);
+  await expect(dealCard).toBeVisible();
+  await dealCard.getByTestId('order-number').click();
+  await expect(page.getByTestId('order-window')).toBeVisible();
+  await page.getByTestId('order-window-history').click();
+  await expect(page.getByTestId('order-history')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/order-history/${dealId}$`));
+
+  /*
+   * «Назад» ведёт в общий раздел истории.
+   *
+   * Пришли из окна заказа — значит, в списке результатов человека ещё не
+   * было, и возвращать его «на шаг назад» в чужой раздел незачем.
+   */
+  await page.getByTestId('order-history-back').click();
+  await expect(page.getByTestId('order-history-search')).toBeVisible();
+});
+
+/*
+ * Общий раздел «История заказов».
+ *
+ * Проверяется то, ради чего он отделён от «Логистики»: заказ ищется по номеру
+ * за любую дату и с любым исходом, список постраничный и серверный, а возврат
+ * из истории сохраняет и запрос, и догруженные страницы.
+ */
+test('раздел «История заказов»: меню, серверный поиск и возврат к результатам', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  const delivered = process.env['E2E_HISTORY_DELIVERED'] ?? '';
+  const deliveredId = process.env['E2E_HISTORY_DELIVERED_ID'] ?? '';
+  const writeOff = process.env['E2E_HISTORY_WRITE_OFF'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(delivered === '', 'не переданы фикстуры истории (E2E_HISTORY_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  // 1. Пункт меню есть и ведёт в самостоятельный раздел, а не во вкладку.
+  await openSection(page, 'История заказов');
+  await expect(page.getByTestId('order-history-search')).toBeVisible();
+  await expect(page).toHaveURL(/\/order-history$/);
+
+  /*
+   * 2. Поиск серверный: общий префикс шести историй находит их все, включая
+   *    доставленную, отменённую, возвращённую, пересобранную и списанную.
+   */
+  const prefix = delivered.replace(/-DLV$/, '');
+  await page.getByTestId('order-history-search-input').fill(prefix);
+  await page.getByTestId('order-history-search-submit').click();
+
+  const rows = page.getByTestId('order-history-result');
+  await expect(rows.first()).toBeVisible();
+  await expect(page.getByTestId('order-history-count')).toContainText('из 6');
+
+  // Первая страница короче набора: клиент не прячет остальные заказы.
+  const shownFirst = await rows.count();
+  expect(shownFirst).toBeLessThanOrEqual(6);
+
+  // Догрузка добирает недостающие строки, и повторов не возникает.
+  const more = page.getByTestId('order-history-more');
+  while ((await more.count()) > 0) {
+    await more.click();
+    await expect(more).toHaveCount(0, { timeout: 15_000 });
+  }
+  const numbers = await rows.evaluateAll((nodes) =>
+    nodes.map((node) => (node as { dataset: { orderNumber?: string } }).dataset.orderNumber ?? ''),
+  );
+  expect(new Set(numbers).size).toBe(numbers.length);
+  for (const suffix of ['DLV', 'RDL', 'RAS', 'CNS', 'CNL', 'WOF']) {
+    expect(numbers, suffix).toContain(`${prefix}-${suffix}`);
+  }
+
+  // Строка объясняет состояние и не выдаёт персональных данных.
+  const listText = (await page.getByTestId('order-history-results').innerText()).replace(
+    /\s+/g,
+    ' ',
+  );
+  expect(listText).not.toContain('Проверочный получатель');
+  expect(listText).not.toContain('Позвонить за час');
+  expect(listText).not.toMatch(/\+7\d{10}/);
+
+  // Отменённый заказ подписан прямо в списке.
+  const cancelledRow = page.locator(
+    `[data-testid="order-history-result"][data-order-number="${prefix}-CNL"]`,
+  );
+  await expect(cancelledRow).toContainText('Отменён логистом');
+
+  /*
+   * 3. Строка открывает историю ИМЕННО этого заказа по постоянному
+   *    идентификатору, а «Назад» возвращает список с тем же запросом.
+   */
+  const deliveredRow = page.locator(
+    `[data-testid="order-history-result"][data-order-number="${delivered}"]`,
+  );
+  await deliveredRow.getByTestId('order-history-open-button').click();
+  await expect(page.getByTestId('order-history')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/order-history/${deliveredId}$`));
+  await expect(page.getByTestId('order-history-number')).toContainText(delivered);
+
+  await page.getByTestId('order-history-back').click();
+  await expect(page.getByTestId('order-history-search')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`q=${prefix}`));
+  await expect(page.getByTestId('order-history-search-input')).toHaveValue(prefix);
+  // Догруженные страницы никуда не делись: список того же размера.
+  await expect(rows).toHaveCount(numbers.length);
+
+  // 4. Прежний адрес истории продолжает работать и ведёт в новый раздел.
+  await page.goto(`/logistics/orders/${deliveredId}/history`);
+  await expect(page.getByTestId('order-history')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/order-history/${deliveredId}$`));
+
+  /*
+   * 5. Право читать раздел проверяет СЕРВЕР.
+   */
+  for (const [phone, pin] of [
+    [process.env['E2E_HISTORY_FLORIST'] ?? '', '3517'],
+    [process.env['E2E_HISTORY_KEEPER'] ?? '', '3518'],
+    [process.env['E2E_HISTORY_COURIER'] ?? '', '3519'],
+  ] as [string, string][]) {
+    if (phone === '') {
+      continue;
+    }
+    const auth = await request.post('/api/auth/login', { data: { phone, pin } });
+    expect(auth.status(), phone).toBe(200);
+    const token = ((await auth.json()) as { accessToken: string }).accessToken;
+    const denied = await request.get(
+      `/api/orders/history/search?query=${encodeURIComponent(writeOff)}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    expect(denied.status(), phone).toBe(403);
+  }
+
+  // 6. Телефон 390×844: горизонтального выезда нет.
+  await page.goto('/order-history?q=' + encodeURIComponent(prefix));
+  await expect(page.getByTestId('order-history-result').first()).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const overflow = await page.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const list = scope.document.querySelector('[data-testid="order-history-results"]');
+    return {
+      page: scope.document.documentElement.scrollWidth - scope.document.documentElement.clientWidth,
+      list: list === null ? 0 : list.scrollWidth - list.clientWidth,
+    };
+  });
+  expect(overflow.page).toBeLessThanOrEqual(0);
+  expect(overflow.list).toBeLessThanOrEqual(0);
+  await page.setViewportSize({ width: 1280, height: 900 });
+});
+
+test('раздел «История заказов»: скрыт у чужих ролей и обновляется без F5', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  const delivered = process.env['E2E_HISTORY_DELIVERED'] ?? '';
+  const deliveredId = process.env['E2E_HISTORY_DELIVERED_ID'] ?? '';
+  const floristPhone = process.env['E2E_HISTORY_FLORIST'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(delivered === '' || floristPhone === '', 'не переданы фикстуры истории');
+
+  /*
+   * 1. У флориста пункта нет вовсе, а прямой адрес его в раздел не пускает.
+   */
+  const floristContext = await browser.newContext();
+  const floristPage = await floristContext.newPage();
+  await login(floristPage, floristPhone, '3517');
+  await expect(floristPage.getByRole('link', { name: 'История заказов' })).toHaveCount(0);
+  await floristPage.goto(`/order-history/${deliveredId}`);
+  await expect(floristPage.getByTestId('order-history')).toHaveCount(0);
+  await floristContext.close();
+
+  /*
+   * 2. Краткое состояние в результатах обновляется без перезагрузки.
+   *
+   * Логист правит интервал обычным входом, а открытый список узнаёт об этом
+   * сам: событие realtime перечитывает и ленту, и результаты поиска.
+   */
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await page.goto(`/order-history?q=${encodeURIComponent(delivered)}`);
+  const row = page.locator(
+    `[data-testid="order-history-result"][data-order-number="${delivered}"]`,
+  );
+  await expect(row).toBeVisible();
+  const before = await row.innerText();
+
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+  const card = await request.get(`/api/orders/${deliveredId}`, { headers });
+  const version = ((await card.json()) as { order: { version: number } }).order.version;
+  /*
+   * Новое значение выбирается от текущего.
+   *
+   * Прогон идёт по общей базе, и заказ мог получить этот интервал в соседнем
+   * сценарии. Постоянная пара чисел проверяла бы порядок запуска, а не
+   * обновление без F5.
+   */
+  const alreadyEvening = before.includes('13:00–15:00');
+  const expected = alreadyEvening ? '14:00–16:00' : '13:00–15:00';
+  const saved = await request.put(`/api/orders/${deliveredId}/interval`, {
+    headers,
+    data: alreadyEvening
+      ? { startMinute: 840, endMinute: 960, version }
+      : { startMinute: 780, endMinute: 900, version },
+  });
+  expect(saved.status(), await saved.text()).toBe(200);
+
+  expect(before).not.toContain(expected);
+  await expect(row).toContainText(expected, { timeout: 30_000 });
+});

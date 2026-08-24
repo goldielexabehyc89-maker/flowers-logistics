@@ -389,6 +389,49 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
 };
 
 /**
+ * События, после которых открытая история заказа обязана перечитаться.
+ *
+ * История собирается из десятка источников, и почти любое действие над
+ * заказом добавляет в неё строку. Перечислять для каждого топика свой ключ
+ * значило бы однажды забыть один и получить ленту, которая молча отстаёт.
+ *
+ * В само событие при этом ничего не добавляется: экран идёт за строками
+ * своим запросом, а в потоке остаются прежние идентификаторы.
+ */
+const ORDER_TIMELINE_TOPICS = new Set<string>([
+  'order.created',
+  'order.updated',
+  'order.scope_changed',
+  'order.geo_changed',
+  'order.address_changed',
+  'order.cancellation_changed',
+  'order.resolution_changed',
+  'order.return_changed',
+  'order.fulfillment_changed',
+  'order.fulfillment_process_changed',
+  'print_job.changed',
+  'route.created',
+  'route.updated',
+  'route.confirmed',
+  'route.returned_to_draft',
+  'route.cancelled',
+  'route.completed',
+  'warehouse.placement_changed',
+  'warehouse.route_flow_changed',
+  'delivery.result_recorded',
+  'delivery.result_cancelled',
+  'pickup.issued',
+]);
+
+const ORDER_TIMELINE_KEY: string[] = ['order-timeline'];
+
+/*
+ * Результаты поиска истории показывают краткое состояние заказа и время
+ * последнего события — значит, они устаревают ровно тогда же, когда лента.
+ */
+const ORDER_HISTORY_SEARCH_KEY: string[] = ['order-history-search'];
+
+/**
  * Какие ключи запросов обновить при событии.
  *
  * Незнакомое событие обновляет только общий признак состояния: молча
@@ -396,5 +439,8 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
  * весь клиент на неизвестное имя нельзя.
  */
 export function invalidationKeysFor(topic: string): string[][] {
-  return TOPIC_KEYS[topic as RealtimeTopic] ?? [['status']];
+  const keys = TOPIC_KEYS[topic as RealtimeTopic] ?? [['status']];
+  return ORDER_TIMELINE_TOPICS.has(topic)
+    ? [...keys, ORDER_TIMELINE_KEY, ORDER_HISTORY_SEARCH_KEY]
+    : keys;
 }

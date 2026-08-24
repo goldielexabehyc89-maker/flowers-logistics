@@ -1,0 +1,230 @@
+/*
+ * «История заказа»: шапка и вертикальная лента событий.
+ *
+ * Экран читают, а не работают в нём: ни одного действия здесь нет, и вся
+ * вёрстка подчинена чтению сверху вниз. Токены общие с остальным приложением —
+ * отдельного оформления у истории нет намеренно, иначе она выглядела бы
+ * чужим разделом.
+ */
+
+.order-history {
+  max-width: none;
+}
+
+.order-history__top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.order-history__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+/* Шапка: факты в колонках, длинные значения переносятся, а не режутся. */
+.order-history__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+
+.order-history__fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.order-history__fact--wide {
+  grid-column: 1 / -1;
+}
+
+.order-history__label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.order-history__value {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.order-history__cancelled {
+  margin: var(--space-3) 0 0;
+}
+
+/* День — отдельный заголовок: лента читается сутками, а не сплошняком. */
+.order-history__day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.order-history__date {
+  margin: 0;
+  padding: 0 var(--space-1);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+/*
+ * Лента: время слева, точка на линии, содержимое справа.
+ *
+ * Линия рисуется фоном самого списка, а не рамкой каждой строки: так она
+ * не рвётся между событиями и не сдвигается от разной высоты строк.
+ */
+.order-history__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.order-history__event {
+  display: grid;
+  grid-template-columns: 56px 14px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow:
+    3px 3px 8px rgb(150 160 182 / 40%),
+    -2px -2px 6px rgb(255 255 255 / 85%);
+}
+
+.order-history__time {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Точка этапа: цвет отвечает на вопрос «чей это шаг» раньше подписи. */
+.order-history__dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--dot-quiet);
+}
+
+.order-history__event[data-group='FLORIST'] .order-history__dot {
+  background: var(--color-accent);
+}
+
+.order-history__event[data-group='WAREHOUSE'] .order-history__dot {
+  background: var(--dot-move);
+}
+
+.order-history__event[data-group='LOGISTICS'] .order-history__dot {
+  background: var(--color-info);
+}
+
+.order-history__event[data-group='DELIVERY'] .order-history__dot {
+  background: var(--dot-ready);
+}
+
+.order-history__event[data-group='RETURN'] .order-history__dot {
+  background: var(--color-error);
+}
+
+/* Отменённое действие не исчезает: оно приглушено и подписано. */
+.order-history__event[data-reverted='true'] {
+  background: var(--surface-sunken);
+  box-shadow:
+    inset 2px 2px 5px rgb(163 172 191 / 40%),
+    inset -2px -2px 5px rgb(255 255 255 / 70%);
+}
+
+.order-history__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.order-history__event-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.order-history__actor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.order-history__stage {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  font-size: var(--font-size-xs);
+  box-shadow:
+    inset 2px 2px 4px rgb(163 172 191 / 38%),
+    inset -2px -2px 4px rgb(255 255 255 / 70%);
+}
+
+/* Подробности: подпись и значение парами, длинное значение переносится. */
+.order-history__details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 2px var(--space-3);
+  margin: 2px 0 0;
+}
+
+.order-history__details > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.order-history__details dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.order-history__details dd {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.order-history__link {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/*
+ * Телефон: время уходит на свою строку.
+ *
+ * Колонка в 56 точек на узком экране забирала треть ширины у названия
+ * события, и длинные подписи ломались по слогам.
+ */
+@media (max-width: 767px) {
+  .order-history__event {
+    grid-template-columns: 14px minmax(0, 1fr);
+  }
+
+  .order-history__time {
+    grid-column: 1 / -1;
+  }
+
+  .order-history__details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

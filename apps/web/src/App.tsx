@@ -6,7 +6,7 @@
  * Неизвестный или запрещённый адрес ведёт на первый доступный раздел.
  */
 
-import { Navigate, Route, Routes, useLocation } from 'react-router';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router';
 import { useAuth } from './auth/AuthContext';
 import {
   firstAvailablePath,
@@ -27,6 +27,8 @@ import { HistoryScreen } from './screens/delivery/HistoryScreen';
 import { HistoryScreen as LogisticsHistoryScreen } from './screens/logistics/HistoryScreen';
 import { ReportsScreen } from './screens/logistics/ReportsScreen';
 import { ResolutionsScreen } from './screens/logistics/ResolutionsScreen';
+import { OrderHistoryScreen } from './screens/logistics/OrderHistoryScreen';
+import { OrderHistorySearchScreen } from './screens/history/OrderHistorySearchScreen';
 import { DealsWorkspace } from './screens/deals/DealsWorkspace';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
@@ -60,6 +62,17 @@ function SectionRoute({ children }: { children: React.JSX.Element }): React.JSX.
   }
 
   return children;
+}
+
+/**
+ * Прежний адрес истории заказа ведёт в общий раздел.
+ *
+ * Перенаправление, а не копия экрана: два адреса одного экрана однажды
+ * разошлись бы поведением, и чинить пришлось бы оба.
+ */
+function LegacyOrderHistoryRedirect(): React.JSX.Element {
+  const { orderId = '' } = useParams<{ orderId: string }>();
+  return <Navigate to={orderId === '' ? '/order-history' : `/order-history/${orderId}`} replace />;
 }
 
 export function App(): React.JSX.Element {
@@ -147,6 +160,39 @@ export function App(): React.JSX.Element {
           <Route path="history" element={<LogisticsHistoryScreen />} />
           <Route path="reports" element={<ReportsScreen />} />
         </Route>
+        {/*
+          «История заказов» — самостоятельный раздел приложения.
+
+          Поиск и лента живут рядом: сначала находят заказ по номеру за любую
+          дату, потом читают его историю. Прямая ссылка на историю работает
+          сама по себе: право проверяет сервер, а не переход по меню.
+        */}
+        <Route
+          path="/order-history"
+          element={
+            <SectionRoute>
+              <OrderHistorySearchScreen />
+            </SectionRoute>
+          }
+        />
+        <Route
+          path="/order-history/:orderId"
+          element={
+            <SectionRoute>
+              <OrderHistoryScreen />
+            </SectionRoute>
+          }
+        />
+
+        {/*
+          Прежний адрес истории продолжает работать.
+
+          Ссылку могли сохранить в закладках или передать коллеге, и обрыв на
+          ровном месте выглядел бы как пропавший раздел. Перенаправление
+          сохраняет идентификатор заказа и ведёт в новый общий раздел.
+        */}
+        <Route path="/logistics/orders/:orderId/history" element={<LegacyOrderHistoryRedirect />} />
+
         {/* Прежние адреса верхнего уровня ведут в точный новый эквивалент. */}
         {Object.entries(LEGACY_PATHS).map(([from, to]) => (
           <Route key={from} path={from} element={<Navigate to={to} replace />} />

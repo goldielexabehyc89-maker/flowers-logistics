@@ -17,6 +17,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { useNavigate } from 'react-router';
 import { formatMoscowDateTime } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
@@ -109,6 +110,7 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
   const { client } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
+  const navigate = useNavigate();
 
   const [editing, setEditing] = useState<'ADDRESS' | 'INTERVAL' | 'POINT' | null>(null);
   const [intervalError, setIntervalError] = useState<string | null>(null);
@@ -352,6 +354,23 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
               <span className="order-window__value">{view.attentionReasons.join(', ')}</span>
             </div>
           )}
+
+          {/*
+            История заказа — отдельный экран, а не ещё одна вкладка окна.
+
+            В окне работают: правят адрес, интервал и точку. История нужна
+            тогда, когда работать уже поздно и надо разобраться, — и для
+            разбора нужна вся ширина страницы, а не колонка модального окна.
+          */}
+          <div className="order-window__actions">
+            <Button
+              variant="secondary"
+              data-testid="order-window-history"
+              onClick={() => void navigate(`/order-history/${view.id}`)}
+            >
+              История заказа
+            </Button>
+          </div>
 
           <p className="order-window__updated">
             Обновлён из источника: {formatMoscowDateTime(view.updatedAt)}
