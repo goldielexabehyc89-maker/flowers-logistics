@@ -506,12 +506,21 @@ jobs:
           output="$(npm run --silent seed:e2e-order-history)"
           get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n 1p; }
           {
-            echo "order=$(get 'заказ истории')"
-            echo "orderid=$(get 'идентификатор истории')"
-            echo "route=$(get 'маршрут истории')"
-            echo "storage=$(get 'ячейка хранения истории')"
-            echo "routecell=$(get 'маршрутная ячейка истории')"
+            echo "delivered=$(get 'успешная доставка: заказ')"
+            echo "deliveredid=$(get 'успешная доставка: id')"
+            echo "redelivery=$(get 'повторная доставка: заказ')"
+            echo "redeliveryid=$(get 'повторная доставка: id')"
+            echo "reassembly=$(get 'пересборка: заказ')"
+            echo "reassemblyid=$(get 'пересборка: id')"
+            echo "sourcecancel=$(get 'отмена источника: заказ')"
+            echo "sourcecancelid=$(get 'отмена источника: id')"
+            echo "logistcancel=$(get 'отмена логистом: заказ')"
+            echo "logistcancelid=$(get 'отмена логистом: id')"
+            echo "writeoff=$(get 'списание: заказ')"
+            echo "writeoffid=$(get 'списание: id')"
             echo "florist=$(get 'флорист истории')"
+            echo "keeper=$(get 'кладовщик истории')"
+            echo "courier=$(get 'курьер истории')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Создать фикстуру самовывоза
@@ -597,12 +606,21 @@ jobs:
           E2E_WH_CAM_ORDER_2: ${{ steps.seed-warehouse-camera.outputs.order2 }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
-          E2E_HISTORY_ORDER: ${{ steps.seed-history.outputs.order }}
-          E2E_HISTORY_ORDER_ID: ${{ steps.seed-history.outputs.orderid }}
-          E2E_HISTORY_ROUTE: ${{ steps.seed-history.outputs.route }}
-          E2E_HISTORY_STORAGE_CELL: ${{ steps.seed-history.outputs.storage }}
-          E2E_HISTORY_ROUTE_CELL: ${{ steps.seed-history.outputs.routecell }}
+          E2E_HISTORY_DELIVERED: ${{ steps.seed-history.outputs.delivered }}
+          E2E_HISTORY_DELIVERED_ID: ${{ steps.seed-history.outputs.deliveredid }}
+          E2E_HISTORY_REDELIVERY: ${{ steps.seed-history.outputs.redelivery }}
+          E2E_HISTORY_REDELIVERY_ID: ${{ steps.seed-history.outputs.redeliveryid }}
+          E2E_HISTORY_REASSEMBLY: ${{ steps.seed-history.outputs.reassembly }}
+          E2E_HISTORY_REASSEMBLY_ID: ${{ steps.seed-history.outputs.reassemblyid }}
+          E2E_HISTORY_SOURCE_CANCEL: ${{ steps.seed-history.outputs.sourcecancel }}
+          E2E_HISTORY_SOURCE_CANCEL_ID: ${{ steps.seed-history.outputs.sourcecancelid }}
+          E2E_HISTORY_LOGIST_CANCEL: ${{ steps.seed-history.outputs.logistcancel }}
+          E2E_HISTORY_LOGIST_CANCEL_ID: ${{ steps.seed-history.outputs.logistcancelid }}
+          E2E_HISTORY_WRITE_OFF: ${{ steps.seed-history.outputs.writeoff }}
+          E2E_HISTORY_WRITE_OFF_ID: ${{ steps.seed-history.outputs.writeoffid }}
           E2E_HISTORY_FLORIST: ${{ steps.seed-history.outputs.florist }}
+          E2E_HISTORY_KEEPER: ${{ steps.seed-history.outputs.keeper }}
+          E2E_HISTORY_COURIER: ${{ steps.seed-history.outputs.courier }}
           E2E_PICKUP_SOON: ${{ steps.seed-pickup.outputs.soon }}
           E2E_PICKUP_LATER: ${{ steps.seed-pickup.outputs.later }}
         run: npm run test:e2e

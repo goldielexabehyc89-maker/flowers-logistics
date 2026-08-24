@@ -6,7 +6,7 @@
  * готовые строки по дням и называет автора по-человечески.
  */
 
-import { formatCalendarDate, formatMoscowTime as formatTime } from '@fl/shared';
+import { formatCalendarDate, MOSCOW_LOCALE, MOSCOW_TIME_ZONE } from '@fl/shared';
 
 export type TimelineGroup =
   'IMPORT' | 'FLORIST' | 'WAREHOUSE' | 'LOGISTICS' | 'DELIVERY' | 'RETURN';
@@ -170,4 +170,23 @@ export function formatMoscowDay(value: string | null): string {
   return value === null ? '—' : formatCalendarDate(value);
 }
 
-export const formatMoscowTime = formatTime;
+/**
+ * Время строки с секундами.
+ *
+ * Остальные экраны показывают часы и минуты — там этого достаточно. В истории
+ * же соседние события одной операции происходят в одну и ту же минуту, и без
+ * секунд порядок строк приходится принимать на веру.
+ */
+export function formatMoscowTime(value: string): string {
+  const instant = new Date(value);
+  if (Number.isNaN(instant.getTime())) {
+    return '—';
+  }
+  return new Intl.DateTimeFormat(MOSCOW_LOCALE, {
+    timeZone: MOSCOW_TIME_ZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(instant);
+}

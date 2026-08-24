@@ -29,7 +29,7 @@ import { setManualInterval } from '../modules/orders/service.js';
 import { startShift } from '../modules/fulfillment/shifts.js';
 import { assembleOrder, claimOrder } from '../modules/fulfillment/assembly.js';
 import { markPrinted, retryPrint } from '../modules/fulfillment/print.js';
-import { receiveOrder } from '../modules/warehouse/placement.js';
+import { receiveOrder, withdrawOrder } from '../modules/warehouse/placement.js';
 import {
   bindRouteCell,
   checkOrderForIssue,
@@ -42,9 +42,12 @@ import { confirmRoute } from '../modules/routing/lifecycle.js';
 import { recordDeliveryResult } from '../modules/delivery/service.js';
 import {
   acceptReturn,
+  decideCancel,
+  decideReassemble,
   decideRedeliverSameBouquet,
   markReturning,
 } from '../modules/returns/service.js';
+import { applyCancellation } from '../modules/integrations/moysklad/cancellation.js';
 import type { AuthenticatedActor } from '../modules/auth/guards.js';
 
 /** PIN-коды стенда. Допустимы ровно потому, что скрипт fail closed. */
@@ -100,7 +103,16 @@ async function main(): Promise<number> {
       pin: string,
       suffix: string,
     ): Promise<{ id: string; phone: string }> {
+      /*
+       * Российский номер — одиннадцать цифр.
+       *
+       * С коротким номером пользователь заводился, но войти не мог: вход
+       * нормализует телефон и такого просто не находил.
+       */
       const phone = `+79${stamp}${suffix}`;
+      if (phone.length !== 12) {
+        throw new Error(`некорректный проверочный телефон: ${phone}`);
+      }
       const created = await db.user.create({
         data: {
           phone,
@@ -115,293 +127,524 @@ async function main(): Promise<number> {
       return created;
     }
 
-    const florist = await person('Флорист истории', 'FLORIST', FLORIST_PIN, '01');
-    const keeper = await person('Кладовщик истории', 'WAREHOUSE', KEEPER_PIN, '02');
-    const courier = await person('Курьер истории', 'COURIER', COURIER_PIN, '03');
+    const florist = await person('Флорист истории', 'FLORIST', FLORIST_PIN, '001');
+    const keeper = await person('Кладовщик истории', 'WAREHOUSE', KEEPER_PIN, '002');
+    const courier = await person('Курьер истории', 'COURIER', COURIER_PIN, '003');
     const floristActor = actorOf(florist.id, ['FLORIST']);
     const keeperActor = actorOf(keeper.id, ['WAREHOUSE']);
     const courierActor = actorOf(courier.id, ['COURIER']);
 
-    // 1. Импорт заказа: состав подтверждён, значит он виден флористу.
-    const number = `OH-${stamp}`;
-    const composition: FulfillmentSnapshot = {
-      externalId: randomUUID(),
-      description: 'Собрать в крафт',
-      cardText: 'С днём рождения!',
-      positions: [
-        {
-          externalPositionId: randomUUID(),
-          ordinal: 0,
-          assortmentId: randomUUID(),
-          assortmentKind: 'BUNDLE',
-          assortmentKindRaw: 'bundle',
-          name: 'Букет «История»',
-          quantity: '1',
-          uomId: null,
-          uomName: null,
-          characteristicLabel: null,
-          components: [
-            {
-              externalComponentId: randomUUID(),
-              ordinal: 0,
-              assortmentId: randomUUID(),
-              assortmentKind: 'PRODUCT',
-              assortmentKindRaw: 'product',
-              name: 'Роза красная',
-              quantity: '11',
-              uomId: null,
-              uomName: null,
-            },
-          ],
-        },
-      ],
+    /*
+     * Шаги разнесены во времени намеренно.
+     *
+     * Сервисы склада, флориста и заказов часов не принимают: время события —
+     * это момент, когда оно действительно произошло. Поэтому между этапами
+     * стоит пауза: порядок остаётся настоящим, а на экране строки перестают
+     * сливаться в одну секунду. Подменять сам порядок ради вида нельзя.
+     */
+    const STEP_PAUSE_MS = 1200;
+    const pause = async (): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS));
     };
 
-    const order = await db.deliveryOrder.create({
-      data: {
-        externalId: composition.externalId,
-        externalName: number,
-        externalUpdated: new Date(),
-        externalStateName: 'Новый',
-        deliveryDate: toDateColumn(day),
-        deliveryDateRaw: `${day} 12:00:00.000`,
-        intervalKind: 'RANGE',
-        intervalStartMinute: 600,
-        intervalEndMinute: 840,
-        address: 'Москва, Тверская улица, 1',
-        recipient: 'Проверочный получатель',
-        comment: 'Позвонить за час',
-        inScope: true,
-        // Точка нужна, чтобы заказ был пригоден для маршрута.
-        geoState: 'RESOLVED',
-        geoSource: 'MANUAL',
-        geoPrecision: 'EXACT_HOUSE',
-        geoLatMicro: 55_757_997,
-        geoLonMicro: 37_614_069,
-        geoResolvedAt: new Date(),
-        fulfillmentInScope: true,
-        fulfillmentDescription: composition.description,
-        fulfillmentCardText: composition.cardText,
-        fulfillmentSnapshotHash: snapshotHash(composition),
-        fulfillmentCompositionState: 'READY',
-        fulfillmentCompositionSyncedAt: new Date(),
-        fulfillmentPositions: {
-          create: composition.positions.map((position) => ({
-            externalPositionId: position.externalPositionId,
-            ordinal: position.ordinal,
-            assortmentId: position.assortmentId,
-            assortmentKind: position.assortmentKind,
-            assortmentKindRaw: position.assortmentKindRaw,
-            name: position.name,
-            quantity: position.quantity,
-            characteristicLabel: position.characteristicLabel,
-            components: {
-              create: position.components.map((component) => ({
-                externalComponentId: component.externalComponentId,
-                ordinal: component.ordinal,
-                assortmentId: component.assortmentId,
-                assortmentKind: component.assortmentKind,
-                assortmentKindRaw: component.assortmentKindRaw,
-                name: component.name,
-                quantity: component.quantity,
-              })),
+    let cellCounter = 0;
+    async function cell(kind: 'STORAGE' | 'ROUTE'): Promise<string> {
+      cellCounter += 1;
+      const code = `H${kind === 'STORAGE' ? 'S' : 'R'}-${stamp}-${cellCounter}`;
+      const created = await db.storageCell.create({
+        data: { code, normalizedCode: code, kind, createdById: admin.id },
+        select: { normalizedCode: true },
+      });
+      return created.normalizedCode;
+    }
+
+    function compositionFor(suffix: string): FulfillmentSnapshot {
+      return {
+        externalId: randomUUID(),
+        description: `Собрать в крафт (${suffix})`,
+        cardText: 'С днём рождения!',
+        positions: [
+          {
+            externalPositionId: randomUUID(),
+            ordinal: 0,
+            assortmentId: randomUUID(),
+            assortmentKind: 'BUNDLE',
+            assortmentKindRaw: 'bundle',
+            name: 'Букет «История»',
+            quantity: '1',
+            uomId: null,
+            uomName: null,
+            characteristicLabel: null,
+            components: [
+              {
+                externalComponentId: randomUUID(),
+                ordinal: 0,
+                assortmentId: randomUUID(),
+                assortmentKind: 'PRODUCT',
+                assortmentKindRaw: 'product',
+                name: 'Роза красная',
+                quantity: '11',
+                uomId: null,
+                uomName: null,
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    /** Импорт заказа: своя история у каждого сценария, данные не смешиваются. */
+    async function importOrder(suffix: string): Promise<{ id: string; number: string }> {
+      const composition = compositionFor(suffix);
+      const number = `OH-${stamp}-${suffix}`;
+      const created = await db.deliveryOrder.create({
+        data: {
+          externalId: composition.externalId,
+          externalName: number,
+          externalUpdated: new Date(),
+          externalStateName: 'Новый',
+          deliveryDate: toDateColumn(day),
+          deliveryDateRaw: `${day} 12:00:00.000`,
+          intervalKind: 'RANGE',
+          intervalStartMinute: 600,
+          intervalEndMinute: 840,
+          address: 'Москва, Тверская улица, 1',
+          recipient: 'Проверочный получатель',
+          comment: 'Позвонить за час',
+          inScope: true,
+          geoState: 'RESOLVED',
+          geoSource: 'MANUAL',
+          geoPrecision: 'EXACT_HOUSE',
+          geoLatMicro: 55_757_997,
+          geoLonMicro: 37_614_069,
+          geoResolvedAt: new Date(),
+          fulfillmentInScope: true,
+          fulfillmentDescription: composition.description,
+          fulfillmentCardText: composition.cardText,
+          fulfillmentSnapshotHash: snapshotHash(composition),
+          fulfillmentCompositionState: 'READY',
+          fulfillmentCompositionSyncedAt: new Date(),
+          fulfillmentPositions: {
+            create: composition.positions.map((position) => ({
+              externalPositionId: position.externalPositionId,
+              ordinal: position.ordinal,
+              assortmentId: position.assortmentId,
+              assortmentKind: position.assortmentKind,
+              assortmentKindRaw: position.assortmentKindRaw,
+              name: position.name,
+              quantity: position.quantity,
+              characteristicLabel: position.characteristicLabel,
+              components: {
+                create: position.components.map((component) => ({
+                  externalComponentId: component.externalComponentId,
+                  ordinal: component.ordinal,
+                  assortmentId: component.assortmentId,
+                  assortmentKind: component.assortmentKind,
+                  assortmentKindRaw: component.assortmentKindRaw,
+                  name: component.name,
+                  quantity: component.quantity,
+                })),
+              },
+            })),
+          },
+          revisions: {
+            create: {
+              externalUpdated: new Date(),
+              snapshot: composition as never,
+              snapshotHash: snapshotHash(composition),
+              changedFields: ['externalId', 'address', 'deliveryDate', 'positions'],
+              reason: 'INITIAL_IMPORT',
             },
-          })),
-        },
-        revisions: {
-          create: {
-            externalUpdated: new Date(),
-            snapshot: composition as never,
-            snapshotHash: snapshotHash(composition),
-            changedFields: ['externalId', 'address', 'deliveryDate', 'positions'],
-            reason: 'INITIAL_IMPORT',
+          },
+          fulfillmentRevisions: {
+            create: {
+              externalUpdated: new Date(),
+              snapshot: composition as never,
+              snapshotHash: snapshotHash(composition),
+              changedFields: ['externalId', 'description', 'cardText', 'positions'],
+              reason: 'INITIAL_IMPORT',
+            },
           },
         },
-        fulfillmentRevisions: {
-          create: {
-            externalUpdated: new Date(),
-            snapshot: composition as never,
-            snapshotHash: snapshotHash(composition),
-            changedFields: ['externalId', 'description', 'cardText', 'positions'],
-            reason: 'INITIAL_IMPORT',
-          },
-        },
-      },
-      select: { id: true, version: true },
-    });
+        select: { id: true, externalName: true },
+      });
+      return { id: created.id, number: created.externalName };
+    }
 
-    // Обновление источника: изменилось отслеживаемое поле.
-    await db.deliveryOrderRevision.create({
-      data: {
-        orderId: order.id,
-        externalUpdated: new Date(),
-        snapshot: composition as never,
-        snapshotHash: `${snapshotHash(composition)}-2`,
-        changedFields: ['comment'],
-        reason: 'EXTERNAL_UPDATE',
-      },
-    });
+    /** Правки логиста: адрес и интервал — с настоящими старыми значениями. */
+    async function logistEdits(orderId: string): Promise<void> {
+      const before = await db.deliveryOrder.findUniqueOrThrow({
+        where: { id: orderId },
+        select: { version: true },
+      });
+      await setLocalAddress(
+        deps,
+        adminActor,
+        orderId,
+        { address: 'Москва, Тверская улица, 1, подъезд 2' },
+        context,
+      );
+      await pause();
+      const afterAddress = await db.deliveryOrder.findUniqueOrThrow({
+        where: { id: orderId },
+        select: { version: true },
+      });
+      await setManualInterval(
+        deps,
+        adminActor,
+        { orderId, startMinute: 660, endMinute: 780, version: afterAddress.version },
+        context,
+      );
+      if (before.version === afterAddress.version) {
+        throw new Error('правка адреса не изменила версию заказа');
+      }
+    }
 
-    // 2. Логист правит адрес и интервал.
-    await setLocalAddress(
-      deps,
-      adminActor,
-      order.id,
-      { address: 'Москва, Тверская улица, 1, подъезд 2' },
-      context,
-    );
-    const afterAddress = await db.deliveryOrder.findUniqueOrThrow({
-      where: { id: order.id },
-      select: { version: true },
-    });
-    await setManualInterval(
-      deps,
-      adminActor,
-      {
-        orderId: order.id,
-        startMinute: 660,
-        endMinute: 780,
-        version: afterAddress.version,
-      },
-      context,
-    );
+    /** Круг сборки: захват, «Собран», печать и повторная печать. */
+    async function floristRound(orderId: string): Promise<void> {
+      const claimed = await claimOrder(db, floristActor, orderId, context);
+      await pause();
+      const assembled = await assembleOrder(
+        db,
+        floristActor,
+        { orderId, expectedProcessVersion: claimed.processVersion },
+        context,
+      );
+      await markPrinted(db, floristActor, assembled.printJobId, context);
+      await pause();
+      const retried = await retryPrint(db, floristActor, assembled.printJobId, context);
+      await markPrinted(db, floristActor, retried.id, context);
+    }
 
-    // 3. Флорист: смена, захват, печать, повторная печать, «Собран».
-    await startShift(db, floristActor, context);
-    const claimed = await claimOrder(db, floristActor, order.id, context);
-    const assembled = await assembleOrder(
-      db,
-      floristActor,
-      { orderId: order.id, expectedProcessVersion: claimed.processVersion },
-      context,
-    );
-    await markPrinted(db, floristActor, assembled.printJobId, context);
-    // Повторная печать — отдельное задание и отдельная строка истории.
-    const retried = await retryPrint(db, floristActor, assembled.printJobId, context);
-    await markPrinted(db, floristActor, retried.id, context);
+    /** Лист под ключ: черновик, курьер, подтверждение, полка и отгрузка. */
+    async function routeAndShip(
+      orderId: string,
+      number: string,
+    ): Promise<{ routeId: string; routeNumber: string; participationId: string }> {
+      const draft = await createEmptyDraft(
+        deps,
+        adminActor,
+        { deliveryDate: day, vehicleType: 'CAR', creationKey: randomUUID() },
+        context,
+      );
+      const added = await addOrders(
+        deps,
+        adminActor,
+        draft.id,
+        { orderIds: [orderId], expectedVersion: draft.version },
+        context,
+      );
+      const withCourier = await setCourier(
+        deps,
+        adminActor,
+        draft.id,
+        { courierUserId: courier.id, expectedVersion: added.version },
+        context,
+      );
+      await pause();
+      await confirmRoute(
+        deps,
+        adminActor,
+        draft.id,
+        { expectedVersion: withCourier.version },
+        context,
+      );
 
-    // 4. Склад: приёмка в хранение.
-    const storageCell = await db.storageCell.create({
-      data: {
-        code: `HS-${stamp}`,
-        normalizedCode: `HS-${stamp}`,
-        kind: 'STORAGE',
-        createdById: admin.id,
-      },
-      select: { normalizedCode: true },
-    });
-    await receiveOrder(
-      deps,
-      keeperActor,
-      { orderNumber: number, cellCode: storageCell.normalizedCode },
-      context,
-    );
+      const routeCell = await cell('ROUTE');
+      await bindRouteCell(deps, keeperActor, draft.id, { cellCode: routeCell }, context);
+      await pause();
+      await pickOrderToRouteCell(
+        deps,
+        keeperActor,
+        draft.id,
+        { orderNumber: number, cellCode: routeCell },
+        context,
+      );
+      await confirmCourier(deps, keeperActor, draft.id, { courierUserId: courier.id }, context);
+      await checkOrderForIssue(deps, keeperActor, draft.id, { orderNumber: number }, context);
+      await pause();
+      await shipRoute(deps, keeperActor, draft.id, context);
 
-    // 5. Логистика: черновик, заказ, курьер, подтверждение.
-    const draft = await createEmptyDraft(
-      deps,
-      adminActor,
-      { deliveryDate: day, vehicleType: 'CAR', creationKey: randomUUID() },
-      context,
-    );
-    const added = await addOrders(
-      deps,
-      adminActor,
-      draft.id,
-      { orderIds: [order.id], expectedVersion: draft.version },
-      context,
-    );
-    const withCourier = await setCourier(
-      deps,
-      adminActor,
-      draft.id,
-      { courierUserId: courier.id, expectedVersion: added.version },
-      context,
-    );
-    await confirmRoute(
-      deps,
-      adminActor,
-      draft.id,
-      { expectedVersion: withCourier.version },
-      context,
-    );
+      const participation = await db.routeOrder.findFirstOrThrow({
+        where: { orderId, routeId: draft.id },
+        select: { id: true },
+      });
+      return { routeId: draft.id, routeNumber: draft.number, participationId: participation.id };
+    }
 
-    // 6. Склад: маршрутная ячейка, перенос коробки, комплектование, отгрузка.
-    const routeCell = await db.storageCell.create({
-      data: {
-        code: `HR-${stamp}`,
-        normalizedCode: `HR-${stamp}`,
-        kind: 'ROUTE',
-        createdById: admin.id,
-      },
-      select: { normalizedCode: true },
-    });
-    await bindRouteCell(
-      deps,
-      keeperActor,
-      draft.id,
-      { cellCode: routeCell.normalizedCode },
-      context,
-    );
-    await pickOrderToRouteCell(
-      deps,
-      keeperActor,
-      draft.id,
-      { orderNumber: number, cellCode: routeCell.normalizedCode },
-      context,
-    );
-    await confirmCourier(deps, keeperActor, draft.id, { courierUserId: courier.id }, context);
-    await checkOrderForIssue(deps, keeperActor, draft.id, { orderNumber: number }, context);
-    await shipRoute(deps, keeperActor, draft.id, context);
-
-    // 7. Курьер: недоставка с причиной.
-    const participation = await db.routeOrder.findFirstOrThrow({
-      where: { orderId: order.id, removedAt: null },
-      select: { id: true },
-    });
-    const reason = await db.deliveryFailureReason.findFirstOrThrow({
+    const failureReason = await db.deliveryFailureReason.findFirstOrThrow({
       where: { code: 'NO_ANSWER' },
       select: { id: true },
     });
-    await recordDeliveryResult(
-      deps,
-      courierActor,
-      participation.id,
-      { outcome: 'NOT_DELIVERED', reasonId: reason.id },
-      context,
-    );
 
-    // 8. Возврат: курьер везёт, склад принимает.
-    await markReturning(deps, courierActor, order.id);
-    await acceptReturn(
+    async function deliver(participationId: string): Promise<void> {
+      await recordDeliveryResult(
+        deps,
+        courierActor,
+        participationId,
+        { outcome: 'DELIVERED' },
+        context,
+      );
+    }
+
+    async function fail(participationId: string): Promise<void> {
+      await recordDeliveryResult(
+        deps,
+        courierActor,
+        participationId,
+        { outcome: 'NOT_DELIVERED', reasonId: failureReason.id },
+        context,
+      );
+    }
+
+    /** Возврат букета: курьер везёт, склад принимает на полку хранения. */
+    async function returnToWarehouse(orderId: string, number: string): Promise<string> {
+      await markReturning(deps, courierActor, orderId);
+      await pause();
+      const storage = await cell('STORAGE');
+      await acceptReturn(deps, keeperActor, { orderNumber: number, cellCode: storage }, context);
+      return storage;
+    }
+
+    async function pendingResolution(orderId: string): Promise<string> {
+      const resolution = await db.orderResolution.findFirstOrThrow({
+        where: { orderId, decision: null },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      return resolution.id;
+    }
+
+    const report: string[] = [];
+    function publish(key: string, value: string): void {
+      report.push(`${key}: ${value}`);
+    }
+
+    await startShift(db, floristActor, context);
+
+    /*
+     * СЦЕНАРИЙ 1. Успешная доставка.
+     *
+     * Самый частый исход: собрали, отгрузили, доставили. Он и должен читаться
+     * в истории как прямая линия без единой пометки об отмене.
+     */
+    const delivered = await importOrder('DLV');
+    await pause();
+    await logistEdits(delivered.id);
+    await pause();
+    await floristRound(delivered.id);
+    await pause();
+    const deliveredStorage = await cell('STORAGE');
+    await receiveOrder(
       deps,
       keeperActor,
-      { orderNumber: number, cellCode: storageCell.normalizedCode },
+      { orderNumber: delivered.number, cellCode: deliveredStorage },
       context,
     );
+    await pause();
+    const deliveredRoute = await routeAndShip(delivered.id, delivered.number);
+    await pause();
+    await deliver(deliveredRoute.participationId);
+    publish('успешная доставка: заказ', delivered.number);
+    publish('успешная доставка: id', delivered.id);
+    publish('успешная доставка: маршрут', deliveredRoute.routeNumber);
 
-    // 9. Логист: решение «везём тот же букет».
-    const resolution = await db.orderResolution.findFirstOrThrow({
-      where: { orderId: order.id },
-      orderBy: { createdAt: 'desc' },
-      select: { id: true },
+    /*
+     * СЦЕНАРИЙ 2. Повторная доставка ТЕМ ЖЕ букетом.
+     *
+     * Заказ не доставлен, букет вернулся на склад целым, логист решил везти
+     * его снова. Пересборки нет: второй круг сборки в истории появиться не
+     * должен, а вот второй маршрут и вторая выдача — обязаны.
+     */
+    const redelivery = await importOrder('RDL');
+    await pause();
+    await floristRound(redelivery.id);
+    await pause();
+    const redeliveryStorage = await cell('STORAGE');
+    await receiveOrder(
+      deps,
+      keeperActor,
+      { orderNumber: redelivery.number, cellCode: redeliveryStorage },
+      context,
+    );
+    await pause();
+    const redeliveryFirstRoute = await routeAndShip(redelivery.id, redelivery.number);
+    await pause();
+    await fail(redeliveryFirstRoute.participationId);
+    await pause();
+    await returnToWarehouse(redelivery.id, redelivery.number);
+    await pause();
+    await decideRedeliverSameBouquet(
+      deps,
+      adminActor,
+      await pendingResolution(redelivery.id),
+      context,
+    );
+    await pause();
+    const redeliverySecondRoute = await routeAndShip(redelivery.id, redelivery.number);
+    await pause();
+    await deliver(redeliverySecondRoute.participationId);
+    publish('повторная доставка: заказ', redelivery.number);
+    publish('повторная доставка: id', redelivery.id);
+    publish(
+      'повторная доставка: маршруты',
+      `${redeliveryFirstRoute.routeNumber}, ${redeliverySecondRoute.routeNumber}`,
+    );
+
+    /*
+     * СЦЕНАРИЙ 3. Пересборка.
+     *
+     * Букет вернулся негодным: логист отправляет заказ на новый круг сборки.
+     * В истории обязаны стоять рядом первый круг и второй — с новой печатью
+     * и новой отметкой «Собран», а прежние строки никуда не деваются.
+     */
+    const reassembly = await importOrder('RAS');
+    await pause();
+    await floristRound(reassembly.id);
+    await pause();
+    const reassemblyStorage = await cell('STORAGE');
+    await receiveOrder(
+      deps,
+      keeperActor,
+      { orderNumber: reassembly.number, cellCode: reassemblyStorage },
+      context,
+    );
+    await pause();
+    const reassemblyFirstRoute = await routeAndShip(reassembly.id, reassembly.number);
+    await pause();
+    await fail(reassemblyFirstRoute.participationId);
+    await pause();
+    await returnToWarehouse(reassembly.id, reassembly.number);
+    await pause();
+    await decideReassemble(deps, adminActor, await pendingResolution(reassembly.id), context);
+    await pause();
+    // Коробка уходит с полки на пересборку: это отдельное складское событие.
+    await withdrawOrder(
+      deps,
+      keeperActor,
+      { orderNumber: reassembly.number, reason: 'REASSEMBLY' },
+      context,
+    );
+    await pause();
+    await floristRound(reassembly.id);
+    await pause();
+    const reassemblySecondStorage = await cell('STORAGE');
+    await receiveOrder(
+      deps,
+      keeperActor,
+      { orderNumber: reassembly.number, cellCode: reassemblySecondStorage },
+      context,
+    );
+    await pause();
+    const reassemblySecondRoute = await routeAndShip(reassembly.id, reassembly.number);
+    publish('пересборка: заказ', reassembly.number);
+    publish('пересборка: id', reassembly.id);
+    publish(
+      'пересборка: маршруты',
+      `${reassemblyFirstRoute.routeNumber}, ${reassemblySecondRoute.routeNumber}`,
+    );
+
+    /*
+     * СЦЕНАРИЙ 4. Отмена из МоегоСклада и её снятие.
+     *
+     * Сигнал приходит извне: тем же доменным проходом, что и импорт. Обе
+     * строки обязаны остаться в истории — и отмена, и её снятие.
+     */
+    const sourceCancel = await importOrder('CNS');
+    await pause();
+    await floristRound(sourceCancel.id);
+    await pause();
+    await db.$transaction(async (tx) => {
+      await applyCancellation(tx, {
+        orderId: sourceCancel.id,
+        cancelled: true,
+        previous: false,
+        now: new Date(),
+      });
     });
-    await decideRedeliverSameBouquet(deps, adminActor, resolution.id, context);
+    await pause();
+    await db.$transaction(async (tx) => {
+      await applyCancellation(tx, {
+        orderId: sourceCancel.id,
+        cancelled: false,
+        previous: true,
+        now: new Date(),
+      });
+    });
+    publish('отмена источника: заказ', sourceCancel.number);
+    publish('отмена источника: id', sourceCancel.id);
+
+    /*
+     * СЦЕНАРИЙ 5. Отмена логистом после недоставки.
+     *
+     * Решение принимает человек, и история обязана назвать его вместе с ролью.
+     */
+    const logistCancel = await importOrder('CNL');
+    await pause();
+    await floristRound(logistCancel.id);
+    await pause();
+    const logistCancelStorage = await cell('STORAGE');
+    await receiveOrder(
+      deps,
+      keeperActor,
+      { orderNumber: logistCancel.number, cellCode: logistCancelStorage },
+      context,
+    );
+    await pause();
+    const logistCancelRoute = await routeAndShip(logistCancel.id, logistCancel.number);
+    await pause();
+    await fail(logistCancelRoute.participationId);
+    await pause();
+    await decideCancel(deps, adminActor, await pendingResolution(logistCancel.id), context);
+    publish('отмена логистом: заказ', logistCancel.number);
+    publish('отмена логистом: id', logistCancel.id);
+
+    /*
+     * СЦЕНАРИЙ 6. Списание.
+     *
+     * Возврат и списание — РАЗНЫЕ события: сначала букет вернулся на склад,
+     * и только потом его сняли с хранения в списание.
+     */
+    const writeOff = await importOrder('WOF');
+    await pause();
+    await floristRound(writeOff.id);
+    await pause();
+    const writeOffStorage = await cell('STORAGE');
+    await receiveOrder(
+      deps,
+      keeperActor,
+      { orderNumber: writeOff.number, cellCode: writeOffStorage },
+      context,
+    );
+    await pause();
+    const writeOffRoute = await routeAndShip(writeOff.id, writeOff.number);
+    await pause();
+    await fail(writeOffRoute.participationId);
+    await pause();
+    const writeOffReturnCell = await returnToWarehouse(writeOff.id, writeOff.number);
+    await pause();
+    await withdrawOrder(
+      deps,
+      keeperActor,
+      { orderNumber: writeOff.number, reason: 'WRITE_OFF' },
+      context,
+    );
+    publish('списание: заказ', writeOff.number);
+    publish('списание: id', writeOff.id);
+    publish('списание: ячейка возврата', writeOffReturnCell);
 
     // Значения нужны браузерному сценарию и ручной приёмке.
-    process.stdout.write(`заказ истории: ${number}\n`);
-    process.stdout.write(`идентификатор истории: ${order.id}\n`);
-    process.stdout.write(`флорист истории: ${florist.phone}\n`);
-    process.stdout.write(`пин флориста истории: ${FLORIST_PIN}\n`);
-    process.stdout.write(`кладовщик истории: ${keeper.phone}\n`);
-    process.stdout.write(`пин кладовщика истории: ${KEEPER_PIN}\n`);
-    process.stdout.write(`курьер истории: ${courier.phone}\n`);
-    process.stdout.write(`пин курьера истории: ${COURIER_PIN}\n`);
-    process.stdout.write(`ячейка хранения истории: ${storageCell.normalizedCode}\n`);
-    process.stdout.write(`маршрутная ячейка истории: ${routeCell.normalizedCode}\n`);
-    process.stdout.write(`маршрут истории: ${draft.number}\n`);
+    publish('флорист истории', florist.phone);
+    publish('пин флориста истории', FLORIST_PIN);
+    publish('кладовщик истории', keeper.phone);
+    publish('пин кладовщика истории', KEEPER_PIN);
+    publish('курьер истории', courier.phone);
+    publish('пин курьера истории', COURIER_PIN);
+    for (const line of report) {
+      process.stdout.write(`${line}\n`);
+    }
 
-    logger.info({ number }, 'фикстура истории заказа создана');
+    logger.info({ orders: report.length }, 'фикстуры истории заказа созданы');
     return 0;
   } finally {
     await db.$disconnect();
