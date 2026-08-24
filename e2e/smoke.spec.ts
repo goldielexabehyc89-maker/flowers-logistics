@@ -9364,7 +9364,9 @@ test('адрес: маршрутный лист и печатная форма �
   await page.getByTestId('deals-manual-draft').click();
   await expect(page.getByTestId('create-route-dialog')).toBeVisible();
   await page.getByTestId('create-route-draft').click();
-  await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
+  // Черновик открывается в «Маршрутизации» выбранным днём: порядок параметров
+  // адреса к делу не относится, важен сам переход к созданному маршруту.
+  await expect(page).toHaveURL(/\/logistics\/routing\?.*route=/);
 
   /*
    * Карточка маршрута показывает адрес и детали разными строками.
