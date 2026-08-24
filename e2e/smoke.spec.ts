@@ -8117,6 +8117,9 @@ test('«Сделки»: список курьеров не обрезан, сп�
   await page.getByTestId('create-route-courier-field').click();
 
   const options = page.getByTestId('create-route-courier-option');
+  // Справочник курьеров приходит отдельным запросом: `count()` его не ждёт,
+  // и на загруженной машине проверка получала ноль там, где курьер есть.
+  await expect(options.first()).toBeVisible();
   const count = await options.count();
   expect(count).toBeGreaterThan(0);
 
