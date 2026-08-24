@@ -34,6 +34,7 @@ import {
 import { TEST_SECRETS } from '../../platform/testing/secrets.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { readOrderTimeline, type TimelineEvent } from './timeline.js';
+import { searchOrderHistory } from './history-search.js';
 
 const DAY = '2028-10-12';
 
@@ -729,5 +730,156 @@ describe('права и границы входа', () => {
       headers: { authorization: `Bearer ${logistToken}` },
     });
     expect(missing.statusCode).toBe(404);
+  });
+});
+
+/**
+ * Поиск раздела «История заказов».
+ *
+ * Проверяется то, ради чего он заведён: заказ находится независимо от даты и
+ * исхода, страница не прячет соседние строки, а номер возврата ведёт к своему
+ * заказу по постоянному идентификатору.
+ */
+describe('поиск заказа для истории', () => {
+  it('находит заказ любого исхода и за любую дату, не ограничиваясь днём', async () => {
+    const keeper = await seedUser(ctx.db, { roles: ['WAREHOUSE'] });
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'] });
+    const logist = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const tag = unique('SRC');
+
+    // Заказ давнего дня: именно такие и ищут в разборе.
+    const old = await seedOrder(`${tag}-OLD`);
+    await ctx.db.deliveryOrder.update({
+      where: { id: old },
+      data: { deliveryDate: toDateColumn('2028-10-02') },
+    });
+
+    // Отменённый в источнике.
+    const cancelled = await seedOrder(`${tag}-CAN`);
+    await ctx.db.deliveryOrder.update({
+      where: { id: cancelled },
+      data: { cancelledInSource: true, cancelledInSourceAt: at('09:00') },
+    });
+
+    // Списанный: коробка снята с полки в списание.
+    const written = await seedOrder(`${tag}-WOF`);
+    const cell = await seedCell(keeper.id, 'STORAGE');
+    await ctx.db.orderPlacement.create({
+      data: {
+        orderId: written,
+        cellId: cell,
+        source: 'RECEIVED',
+        placedAt: at('09:00'),
+        placedById: keeper.id,
+        releasedAt: at('10:00'),
+        releasedById: keeper.id,
+        releaseReason: 'WITHDRAWN',
+        withdrawReason: 'WRITE_OFF',
+      },
+    });
+
+    // Возвращённый: у заказа есть возврат со своим отображаемым номером.
+    const returned = await seedOrder(`${tag}-RET`);
+    const routeId = await seedRoute(logist.id, courier.id);
+    const participation = await ctx.db.routeOrder.create({
+      data: { routeId, orderId: returned, position: 1, addedById: logist.id, addedAt: at('09:00') },
+      select: { id: true },
+    });
+    const reason = await ctx.db.deliveryFailureReason.create({
+      data: { code: unique('R').slice(0, 40), name: unique('Причина'), ordinal: 1 },
+      select: { id: true, name: true },
+    });
+    const attempt = await ctx.db.deliveryAttempt.create({
+      data: {
+        routeOrderId: participation.id,
+        orderId: returned,
+        routeId,
+        outcome: 'NOT_DELIVERED',
+        reasonId: reason.id,
+        reasonNameSnapshot: reason.name,
+        courierUserId: courier.id,
+        occurredAt: at('12:00'),
+      },
+      select: { id: true },
+    });
+    const returnNumber = `${tag}-RET-otm`;
+    await ctx.db.orderReturn.create({
+      data: {
+        orderId: returned,
+        routeOrderId: participation.id,
+        attemptId: attempt.id,
+        courierUserId: courier.id,
+        sequence: 1,
+        displayNumber: returnNumber,
+        state: 'WITH_COURIER',
+        createdAt: at('12:01'),
+        // Ключ активного возврата равен заказу: у одного заказа не бывает
+        // двух незакрытых возвратов (`OrderReturn_activeKey_matches_order`).
+        activeKey: returned,
+      },
+    });
+
+    const page = await searchOrderHistory(ctx.db, { query: tag, limit: 50, offset: 0 });
+    const found = page.items.map((item) => item.orderId);
+
+    // Ни дата доставки, ни исход не мешают найти заказ.
+    expect(found).toContain(old);
+    expect(found).toContain(cancelled);
+    expect(found).toContain(written);
+    expect(found).toContain(returned);
+    expect(page.total).toBeGreaterThanOrEqual(4);
+
+    // Строка объясняет состояние, но не выдаёт персональных данных.
+    const dump = JSON.stringify(page.items);
+    expect(dump).not.toContain('Проверочный Получатель');
+    expect(dump).not.toContain('+79990000000');
+    expect(dump).not.toContain('Комментарий по доставке');
+
+    // Отмена и возврат видны прямо в строке.
+    expect(page.items.find((item) => item.orderId === cancelled)?.cancellation?.source).toBe(true);
+    expect(
+      page.items.find((item) => item.orderId === returned)?.returnObligation?.displayNumber,
+    ).toBe(returnNumber);
+
+    // Время последнего события считается по источникам, а не по строке заказа.
+    expect(page.items.find((item) => item.orderId === returned)?.lastEventAt).not.toBe(null);
+
+    /*
+     * Номер возврата ведёт к ИСХОДНОМУ заказу.
+     *
+     * Человеку показывают номер возврата, и искать он будет именно его —
+     * а открыть должен историю заказа по его постоянному идентификатору.
+     */
+    const byReturn = await searchOrderHistory(ctx.db, {
+      query: returnNumber,
+      limit: 50,
+      offset: 0,
+    });
+    expect(byReturn.items.map((item) => item.orderId)).toEqual([returned]);
+  });
+
+  it('страницы не теряют и не повторяют заказы', async () => {
+    const tag = unique('PAGE');
+    const ids: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      ids.push(await seedOrder(`${tag}-${index}`));
+    }
+
+    const first = await searchOrderHistory(ctx.db, { query: tag, limit: 2, offset: 0 });
+    const second = await searchOrderHistory(ctx.db, { query: tag, limit: 2, offset: 2 });
+    const third = await searchOrderHistory(ctx.db, { query: tag, limit: 2, offset: 4 });
+
+    const collected = [...first.items, ...second.items, ...third.items].map((item) => item.orderId);
+    expect(new Set(collected).size).toBe(collected.length);
+    expect([...collected].sort()).toEqual([...ids].sort());
+    expect(first.hasMore).toBe(true);
+    expect(third.hasMore).toBe(false);
+    expect(first.total).toBe(5);
+  });
+
+  it('пустой запрос ничего не ищет', async () => {
+    const page = await searchOrderHistory(ctx.db, { query: null, limit: 20, offset: 0 });
+    expect(page.items).toEqual([]);
+    expect(page.total).toBe(0);
   });
 });

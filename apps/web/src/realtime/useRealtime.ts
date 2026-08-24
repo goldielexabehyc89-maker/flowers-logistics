@@ -87,7 +87,7 @@ export function useRealtime(): RealtimeState {
          * а не в первой. Сбросив накопленное, мы спрятали бы ровно ту строку,
          * о которой пришло событие, и отмотали бы человека к началу ленты.
          */
-        if (key[0] !== 'order-timeline') {
+        if (key[0] !== 'order-timeline' && key[0] !== 'order-history-search') {
           queryClient.setQueriesData<unknown>({ queryKey: key }, collapseToFirstPage);
         }
         void queryClient.invalidateQueries({ queryKey: key });

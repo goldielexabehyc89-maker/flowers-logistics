@@ -8,6 +8,9 @@
 import { describe, expect, it } from 'vitest';
 import { actorLine, groupByDay, intervalLine, type TimelineEventView } from './order-history';
 import { invalidationKeysFor } from '../../realtime/stream';
+import type { Role } from '@fl/shared';
+import { APP_SECTIONS, isSectionVisible, visibleSections } from '../../navigation/navigation';
+import { mergeSearchPages, scrollKeyFor } from '../history/order-history-search';
 
 function entry(overrides: Partial<TimelineEventView> & { key: string }): TimelineEventView {
   return {
@@ -92,5 +95,53 @@ describe('обновление без перезагрузки', () => {
     for (const topic of ['user.created', 'depot.changed', 'route.edit_lock_changed']) {
       expect(invalidationKeysFor(topic), topic).not.toContainEqual(['order-timeline']);
     }
+  });
+});
+
+describe('раздел «История заказов»', () => {
+  it('виден администратору и логисту и скрыт остальным ролям', () => {
+    const section = APP_SECTIONS.find((item) => item.key === 'order-history');
+    expect(section?.path).toBe('/order-history');
+
+    for (const roles of [['ADMIN'], ['LOGISTICIAN'], ['ADMIN', 'LOGISTICIAN']] as Role[][]) {
+      expect(
+        visibleSections(roles).some((item) => item.key === 'order-history'),
+        roles.join(','),
+      ).toBe(true);
+      expect(isSectionVisible(roles, '/order-history'), roles.join(',')).toBe(true);
+      expect(isSectionVisible(roles, '/order-history/order-1'), roles.join(',')).toBe(true);
+    }
+
+    // Спрятанный пункт — не защита, но и показывать его этим ролям незачем:
+    // сервер их запрос всё равно отклонит.
+    for (const roles of [['FLORIST'], ['WAREHOUSE'], ['COURIER'], ['MANAGER']] as Role[][]) {
+      expect(
+        visibleSections(roles).some((item) => item.key === 'order-history'),
+        roles.join(','),
+      ).toBe(false);
+      expect(isSectionVisible(roles, '/order-history'), roles.join(',')).toBe(false);
+    }
+  });
+
+  it('страницы поиска склеиваются без повторов', () => {
+    const row = (id: string): { orderId: string } => ({ orderId: id });
+    const merged = mergeSearchPages([
+      { items: [row('a'), row('b')] as never[] },
+      // Пока человек читал первую страницу, список сдвинулся и строка «b»
+      // пришла второй раз: в списке она обязана остаться одна.
+      { items: [row('b'), row('c')] as never[] },
+    ]);
+    expect(merged.map((item) => item.orderId)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('положение списка помнится по своему запросу', () => {
+    expect(scrollKeyFor('OH-1')).not.toBe(scrollKeyFor('OH-2'));
+  });
+
+  it('событие заказа перечитывает и ленту, и результаты поиска', () => {
+    for (const topic of ['order.updated', 'delivery.result_recorded', 'order.return_changed']) {
+      expect(invalidationKeysFor(topic), topic).toContainEqual(['order-history-search']);
+    }
+    expect(invalidationKeysFor('user.created')).not.toContainEqual(['order-history-search']);
   });
 });

@@ -1,0 +1,146 @@
+/*
+ * Раздел «История заказов»: строка поиска и результаты.
+ *
+ * Экран читают, а не работают в нём, поэтому вся вёрстка подчинена чтению:
+ * номер крупно, факты парами, действие справа. Токены общие с приложением —
+ * отдельного оформления у раздела нет намеренно.
+ */
+
+.order-search {
+  max-width: none;
+}
+
+.order-search__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.order-search__top {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.order-search__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.order-search__input {
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.order-search__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/*
+ * Строка результата: имя сверху, факты в середине, действие справа.
+ *
+ * На узком экране действие уходит вниз: кнопка рядом с длинным номером
+ * оставляла бы номеру треть ширины.
+ */
+.order-search__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+  padding: var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow:
+    3px 3px 8px rgb(150 160 182 / 40%),
+    -2px -2px 6px rgb(255 255 255 / 85%);
+}
+
+.order-search__main {
+  grid-column: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.order-search__number {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent-hover);
+  font: inherit;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.order-search__stage {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.order-search__facts {
+  grid-column: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 2px var(--space-3);
+  margin: 0;
+  min-width: 0;
+}
+
+.order-search__fact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.order-search__fact dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.order-search__fact dd {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.order-search__row > .btn {
+  grid-column: 2;
+  grid-row: 1 / -1;
+}
+
+.order-search__more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+@media (max-width: 767px) {
+  .order-search__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .order-search__row > .btn {
+    grid-column: 1;
+    grid-row: auto;
+    width: 100%;
+  }
+
+  .order-search__facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

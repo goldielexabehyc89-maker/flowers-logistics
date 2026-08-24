@@ -425,6 +425,12 @@ const ORDER_TIMELINE_TOPICS = new Set<string>([
 
 const ORDER_TIMELINE_KEY: string[] = ['order-timeline'];
 
+/*
+ * Результаты поиска истории показывают краткое состояние заказа и время
+ * последнего события — значит, они устаревают ровно тогда же, когда лента.
+ */
+const ORDER_HISTORY_SEARCH_KEY: string[] = ['order-history-search'];
+
 /**
  * Какие ключи запросов обновить при событии.
  *
@@ -434,5 +440,7 @@ const ORDER_TIMELINE_KEY: string[] = ['order-timeline'];
  */
 export function invalidationKeysFor(topic: string): string[][] {
   const keys = TOPIC_KEYS[topic as RealtimeTopic] ?? [['status']];
-  return ORDER_TIMELINE_TOPICS.has(topic) ? [...keys, ORDER_TIMELINE_KEY] : keys;
+  return ORDER_TIMELINE_TOPICS.has(topic)
+    ? [...keys, ORDER_TIMELINE_KEY, ORDER_HISTORY_SEARCH_KEY]
+    : keys;
 }

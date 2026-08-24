@@ -43,6 +43,13 @@ import {
   TIMELINE_PAGE_MAX,
   readOrderTimeline,
 } from './timeline.js';
+import {
+  HISTORY_SEARCH_LIMIT_DEFAULT,
+  HISTORY_SEARCH_LIMIT_MAX,
+  HISTORY_SEARCH_QUERY_MAX,
+  normalizeQuery,
+  searchOrderHistory,
+} from './history-search.js';
 import { activeReturnsOf } from '../returns/service.js';
 import {
   MAX_QUERY_LENGTH,
@@ -157,6 +164,23 @@ const conflictDecisionSchema = z.object({
  * Курсор — позиция в устойчивом порядке, а не смещение: между запросами
  * история дописывается, и смещение показало бы то пропуск, то повтор.
  */
+/**
+ * Поиск заказа для раздела «История заказов».
+ *
+ * Отбор и срез делает сервер: фильтр по загруженной странице молча «не нашёл
+ * бы» заказ со следующей.
+ */
+const historySearchSchema = z.object({
+  query: z.string().trim().max(HISTORY_SEARCH_QUERY_MAX).optional(),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(HISTORY_SEARCH_LIMIT_MAX)
+    .default(HISTORY_SEARCH_LIMIT_DEFAULT),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
 const timelineQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(TIMELINE_PAGE_MAX).default(TIMELINE_PAGE_DEFAULT),
   cursor: z.string().min(1).max(512).optional(),
@@ -660,6 +684,24 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         };
       }),
     };
+  });
+
+  /**
+   * Поиск заказа по номеру для раздела «История заказов».
+   *
+   * Только чтение и только по номеру: ни получателя, ни телефона в ответе нет.
+   * Ограничения по дню тоже нет — разбор нужен ровно тогда, когда заказ давно
+   * закрыт, и дневные списки для него бесполезны.
+   */
+  app.get('/api/orders/history/search', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_HISTORY_ROLES);
+    const query = historySearchSchema.parse(request.query);
+
+    return searchOrderHistory(deps.db, {
+      query: normalizeQuery(query.query),
+      limit: query.limit,
+      offset: query.offset,
+    });
   });
 
   /**

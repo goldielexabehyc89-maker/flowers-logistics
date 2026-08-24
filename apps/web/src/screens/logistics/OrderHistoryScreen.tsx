@@ -16,7 +16,7 @@
  */
 
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { useNavigate, useParams } from 'react-router';
+import { useLocation, useNavigate, useParams } from 'react-router';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
 import { formatMoscowTime, formatMoscowDay } from './order-history';
@@ -38,6 +38,16 @@ export function OrderHistoryScreen(): React.JSX.Element {
   const { orderId = '' } = useParams<{ orderId: string }>();
   const { client } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  /*
+   * «Назад» — шаг назад по истории браузера, если пришли из списка.
+   *
+   * Тогда возвращаются и поисковый запрос, и накопленные страницы, и место
+   * прокрутки. По прямой ссылке шага назад может не быть вовсе — там ведём
+   * в общий раздел, а не выбрасываем человека из приложения.
+   */
+  const fromList = (location.state as { fromList?: boolean } | null)?.fromList === true;
 
   /*
    * Страницы истории.
@@ -69,7 +79,7 @@ export function OrderHistoryScreen(): React.JSX.Element {
         <Button
           variant="secondary"
           data-testid="order-history-back"
-          onClick={() => void navigate(-1)}
+          onClick={() => void (fromList ? navigate(-1) : navigate('/order-history'))}
         >
           ← Назад
         </Button>

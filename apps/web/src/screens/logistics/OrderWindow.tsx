@@ -366,7 +366,7 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
             <Button
               variant="secondary"
               data-testid="order-window-history"
-              onClick={() => void navigate(`/logistics/orders/${view.id}/history`)}
+              onClick={() => void navigate(`/order-history/${view.id}`)}
             >
               История заказа
             </Button>
