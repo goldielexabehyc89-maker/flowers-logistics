@@ -8470,3 +8470,211 @@ test('флорист: ближайшие самовывозы стоят пер�
 
   await floristContext.close();
 });
+
+/*
+ * История заказа: сквозной путь одного букета на одном экране.
+ *
+ * Фикстура прогоняет заказ через ВЕСЬ жизненный цикл настоящими доменными
+ * операциями — импорт, правка адреса и интервала, работа флориста, две
+ * печати, склад, маршрутный лист, курьер, недоставка, возврат и решение
+ * логиста. Проверяется, что каждая из этих строк доходит до экрана, стоит
+ * на своём месте по времени, названа автором и обновляется без F5.
+ */
+test('история заказа: полный жизненный цикл, порядок, автор и обновление без F5', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  const orderNumber = process.env['E2E_HISTORY_ORDER'] ?? '';
+  const orderId = process.env['E2E_HISTORY_ORDER_ID'] ?? '';
+  const routeNumber = process.env['E2E_HISTORY_ROUTE'] ?? '';
+  const storageCell = process.env['E2E_HISTORY_STORAGE_CELL'] ?? '';
+  const routeCell = process.env['E2E_HISTORY_ROUTE_CELL'] ?? '';
+
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(
+    orderNumber === '' || orderId === '',
+    'не передана фикстура истории заказа (E2E_HISTORY_*)',
+  );
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  // 1. Прямая ссылка открывается сама: экран не спрятан за переходом.
+  await page.goto(`/logistics/orders/${orderId}/history`);
+  const screen = page.getByTestId('order-history');
+  await expect(screen).toBeVisible();
+  await expect(page.getByTestId('order-history-number')).toContainText(orderNumber);
+
+  // Шапка описывает текущее состояние заказа.
+  const header = page.getByTestId('order-history-header');
+  await expect(header).toContainText('Собран');
+  await expect(header).toContainText('11:00–13:00');
+  await expect(header).toContainText('задан вручную');
+  await expect(header).toContainText('Москва, Тверская улица, 1, подъезд 2');
+  await expect(header).toContainText('Флорист истории');
+  await expect(header).toContainText('Не доставлен');
+  await expect(header).toContainText(storageCell);
+
+  /*
+   * 2. Все обязательные строки жизненного цикла на месте.
+   *
+   * Проверяется машинное имя события, а не подпись: подпись — текст, который
+   * однажды перепишут, а имя события — контракт сервера.
+   */
+  const events = page.getByTestId('order-history-event');
+  const kinds = await events.evaluateAll((nodes) =>
+    nodes.map((node) => (node as { dataset: { kind?: string } }).dataset.kind ?? ''),
+  );
+  for (const kind of [
+    'ORDER_INITIAL_IMPORT',
+    'ORDER_EXTERNAL_UPDATE',
+    'ORDER_QUEUED_FOR_FLORIST',
+    'ADDRESS_LOCAL_ADDRESS_SET',
+    'ORDER_INTERVAL_SET',
+    'ORDER_FULFILLMENT_CLAIMED',
+    'ORDER_FULFILLMENT_ASSEMBLED',
+    'ORDER_PRINT_FORM_CREATED',
+    'ORDER_PRINTED',
+    'ORDER_REPRINTED',
+    'PLACEMENT_RECEIVED',
+    'PLACEMENT_MOVED',
+    'PLACEMENT_RELEASED_ISSUED_TO_COURIER',
+    'ROUTE_ORDER_ADDED',
+    'ROUTE_COURIER_ASSIGNED',
+    'ROUTE_CONFIRMED',
+    'ROUTE_ISSUE_CHECKED',
+    'ROUTE_ACTIVE',
+    'DELIVERY_FAILED',
+    'ORDER_RESOLUTION_OPENED',
+    'ORDER_RETURN_OPENED',
+    'ORDER_RETURN_ACCEPTED',
+    'PLACEMENT_COURIER_RETURN',
+    'ORDER_RESOLUTION_REDELIVER_SAME_BOUQUET',
+  ]) {
+    expect(
+      kinds.filter((value) => value === kind),
+      kind,
+    ).toHaveLength(1);
+  }
+
+  // Порядок: импорт раньше сборки, сборка раньше недоставки, недоставка
+  // раньше приёмки возврата.
+  expect(kinds.indexOf('ORDER_INITIAL_IMPORT')).toBeLessThan(
+    kinds.indexOf('ORDER_FULFILLMENT_ASSEMBLED'),
+  );
+  expect(kinds.indexOf('ORDER_FULFILLMENT_ASSEMBLED')).toBeLessThan(
+    kinds.indexOf('DELIVERY_FAILED'),
+  );
+  expect(kinds.indexOf('DELIVERY_FAILED')).toBeLessThan(kinds.indexOf('ORDER_RETURN_ACCEPTED'));
+
+  // Ячейки названы вместе с видом полки, лист — своим номером.
+  await expect(screen).toContainText(storageCell);
+  await expect(screen).toContainText(routeCell);
+  await expect(screen).toContainText('Маршрутная');
+  if (routeNumber !== '') {
+    await expect(screen).toContainText(routeNumber);
+  }
+
+  // Авторы: и человек с ролью, и источник, и система.
+  await expect(screen).toContainText('Флорист истории');
+  await expect(screen).toContainText('Кладовщик истории');
+  await expect(screen).toContainText('Курьер истории');
+  await expect(screen).toContainText('МойСклад');
+
+  // Строки сгруппированы по московским дням.
+  await expect(page.getByTestId('order-history-day').first()).toBeVisible();
+
+  /*
+   * 3. Экран только читает.
+   *
+   * Ни одной кнопки правки заказа: история — место разбора, а не работы.
+   */
+  await expect(screen.getByTestId('order-window-address')).toHaveCount(0);
+  await expect(screen.getByTestId('order-window-interval')).toHaveCount(0);
+  await expect(screen.locator('input, textarea, select')).toHaveCount(0);
+
+  /*
+   * 4. Новое действие доходит без F5.
+   *
+   * Интервал меняет ЛОГИСТ через обычный вход, а открытая история узнаёт
+   * об этом сама: событие realtime перечитывает ленту.
+   */
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+  const before = await request.get(`/api/orders/${orderId}`, { headers });
+  const version = ((await before.json()) as { order: { version: number } }).order.version;
+
+  const intervalRows = () => page.locator('[data-kind="ORDER_INTERVAL_SET"]');
+  const wasCount = await intervalRows().count();
+  const saved = await request.put(`/api/orders/${orderId}/interval`, {
+    headers,
+    data: { startMinute: 720, endMinute: 840, version },
+  });
+  expect(saved.status(), await saved.text()).toBe(200);
+
+  await expect(intervalRows()).toHaveCount(wasCount + 1, { timeout: 30_000 });
+  await expect(screen).toContainText('12:00–14:00');
+
+  // 5. Телефон: горизонтального выезда нет.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(screen).toBeVisible();
+  const overflow = await page.evaluate(() => {
+    const scope = globalThis as unknown as {
+      document: {
+        documentElement: { scrollWidth: number; clientWidth: number };
+        querySelector: (s: string) => { scrollWidth: number; clientWidth: number } | null;
+      };
+    };
+    const list = scope.document.querySelector('.order-history__list');
+    return {
+      page: scope.document.documentElement.scrollWidth - scope.document.documentElement.clientWidth,
+      list: list === null ? 0 : list.scrollWidth - list.clientWidth,
+    };
+  });
+  expect(overflow.page).toBeLessThanOrEqual(0);
+  expect(overflow.list).toBeLessThanOrEqual(0);
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  /*
+   * 6. Вход в историю из окна заказа и возврат назад.
+   *
+   * Кнопка живёт в окне заказа «Сделок»: оттуда логист и попадает в разбор.
+   */
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(orderNumber);
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
+  await expect(card).toBeVisible();
+  await card.getByTestId('order-number').click();
+  await expect(page.getByTestId('order-window')).toBeVisible();
+  await page.getByTestId('order-window-history').click();
+  await expect(page.getByTestId('order-history')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/logistics/orders/${orderId}/history$`));
+
+  await page.getByTestId('order-history-back').click();
+  await expect(page.getByRole('heading', { name: 'Сделки', level: 1 })).toBeAttached();
+
+  /*
+   * 7. Чужая роль не читает историю.
+   *
+   * Право проверяет СЕРВЕР: спрятанная кнопка чужой запрос не останавливает.
+   */
+  const floristPhone = process.env['E2E_HISTORY_FLORIST'] ?? '';
+  if (floristPhone !== '') {
+    const floristAuth = await request.post('/api/auth/login', {
+      data: { phone: floristPhone, pin: '3517' },
+    });
+    if (floristAuth.status() === 200) {
+      const floristToken = ((await floristAuth.json()) as { accessToken: string }).accessToken;
+      const denied = await request.get(`/api/orders/${orderId}/timeline`, {
+        headers: { authorization: `Bearer ${floristToken}` },
+      });
+      expect(denied.status()).toBe(403);
+    }
+  }
+});

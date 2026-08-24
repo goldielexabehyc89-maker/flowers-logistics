@@ -495,6 +495,25 @@ jobs:
             echo "count=$(get 'количество')"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Заказ с полным жизненным циклом
+        id: seed-history
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Один заказ, прошедший весь путь: импорт, правки, флорист, печать,
+          # склад, лист, курьер, недоставка, возврат и решение логиста.
+          # Экран «История заказа» без такого заказа проверять нечем.
+          output="$(npm run --silent seed:e2e-order-history)"
+          get() { printf '%s' "$output" | sed -n "s/^$1: //p" | sed -n 1p; }
+          {
+            echo "order=$(get 'заказ истории')"
+            echo "orderid=$(get 'идентификатор истории')"
+            echo "route=$(get 'маршрут истории')"
+            echo "storage=$(get 'ячейка хранения истории')"
+            echo "routecell=$(get 'маршрутная ячейка истории')"
+            echo "florist=$(get 'флорист истории')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Создать фикстуру самовывоза
         id: seed-pickup
         shell: bash
@@ -578,6 +597,12 @@ jobs:
           E2E_WH_CAM_ORDER_2: ${{ steps.seed-warehouse-camera.outputs.order2 }}
           E2E_PICKUP_ORDER: ${{ steps.seed-pickup.outputs.order }}
           E2E_PICKUP_CELL: ${{ steps.seed-pickup.outputs.cell }}
+          E2E_HISTORY_ORDER: ${{ steps.seed-history.outputs.order }}
+          E2E_HISTORY_ORDER_ID: ${{ steps.seed-history.outputs.orderid }}
+          E2E_HISTORY_ROUTE: ${{ steps.seed-history.outputs.route }}
+          E2E_HISTORY_STORAGE_CELL: ${{ steps.seed-history.outputs.storage }}
+          E2E_HISTORY_ROUTE_CELL: ${{ steps.seed-history.outputs.routecell }}
+          E2E_HISTORY_FLORIST: ${{ steps.seed-history.outputs.florist }}
           E2E_PICKUP_SOON: ${{ steps.seed-pickup.outputs.soon }}
           E2E_PICKUP_LATER: ${{ steps.seed-pickup.outputs.later }}
         run: npm run test:e2e

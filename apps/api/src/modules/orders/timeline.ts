@@ -45,7 +45,10 @@
  * а не содержимое заказа: содержимое живёт в карточке.
  *
  * ПОРЯДОК УСТОЙЧИВ. Строки сортируются по моменту, а при равном моменте — по
- * ключу события, который складывается из источника и его идентификатора.
+ * ключу события: два разряда порядка источника и его идентификатор. Разряды
+ * расставлены по ходу дела (импорт → флорист → склад → лист → доставка →
+ * возврат), поэтому одновременные строки читаются в понятной
+ * последовательности, а не в случайной.
  * Одинаковые миллисекунды реальны (одна транзакция пишет несколько строк),
  * и без второго ключа соседние строки менялись бы местами между запросами.
  */
@@ -338,7 +341,7 @@ export async function readOrderTimeline(
     }
     events.push(
       event({
-        key: `revision:${revision.id}`,
+        key: `10:revision:${revision.id}`,
         at: revision.receivedAt,
         group: 'IMPORT',
         kind: `ORDER_${revision.reason}`,
@@ -364,7 +367,7 @@ export async function readOrderTimeline(
   if (firstComposition !== undefined) {
     events.push(
       event({
-        key: `composition:${firstComposition.id}`,
+        key: `12:composition:${firstComposition.id}`,
         at: firstComposition.receivedAt,
         group: 'FLORIST',
         kind: 'ORDER_QUEUED_FOR_FLORIST',
@@ -382,7 +385,7 @@ export async function readOrderTimeline(
     }
     events.push(
       event({
-        key: `composition:${revision.id}`,
+        key: `12:composition:${revision.id}`,
         at: revision.receivedAt,
         group: 'FLORIST',
         kind: 'ORDER_COMPOSITION_CHANGED',
@@ -422,7 +425,7 @@ export async function readOrderTimeline(
     }
     events.push(
       event({
-        key: `address:${entry.id}`,
+        key: `14:address:${entry.id}`,
         at: entry.occurredAt,
         group: 'IMPORT',
         kind: `ADDRESS_${entry.action}`,
@@ -467,7 +470,7 @@ export async function readOrderTimeline(
     },
   });
   for (const entry of orderAudit) {
-    const key = `audit:${String(entry.id)}`;
+    const key = `16:audit:${String(entry.id)}`;
     const actor =
       entry.actorUserId === null ? SYSTEM_ACTOR : userActor(entry.actorUserId, entry.actorRoles);
 
@@ -551,7 +554,7 @@ export async function readOrderTimeline(
   for (const form of printForms) {
     events.push(
       event({
-        key: `print-form:${form.id}`,
+        key: `20:print-form:${form.id}`,
         at: form.createdAt,
         group: 'FLORIST',
         kind: 'ORDER_PRINT_FORM_CREATED',
@@ -582,7 +585,7 @@ export async function readOrderTimeline(
     }
     events.push(
       event({
-        key: `print-job:${job.id}`,
+        key: `21:print-job:${job.id}`,
         at: job.completedAt,
         group: 'FLORIST',
         kind: job.attempt === 1 ? 'ORDER_PRINTED' : 'ORDER_REPRINTED',
@@ -624,7 +627,7 @@ export async function readOrderTimeline(
     }
     events.push(
       event({
-        key: `placement:${placement.id}`,
+        key: `30:placement:${placement.id}`,
         at: placement.placedAt,
         group: 'WAREHOUSE',
         kind: `PLACEMENT_${placement.source}`,
@@ -651,7 +654,7 @@ export async function readOrderTimeline(
       }
       events.push(
         event({
-          key: `placement-release:${placement.id}`,
+          key: `31:placement-release:${placement.id}`,
           at: placement.releasedAt,
           group: 'WAREHOUSE',
           kind: `PLACEMENT_RELEASED_${reason}`,
@@ -681,7 +684,7 @@ export async function readOrderTimeline(
   for (const check of checks) {
     events.push(
       event({
-        key: `issue-check:${check.id}`,
+        key: `34:issue-check:${check.id}`,
         at: check.checkedAt,
         group: 'WAREHOUSE',
         kind: 'ROUTE_ISSUE_CHECKED',
@@ -695,7 +698,7 @@ export async function readOrderTimeline(
     if (check.clearedAt !== null) {
       events.push(
         event({
-          key: `issue-uncheck:${check.id}`,
+          key: `35:issue-uncheck:${check.id}`,
           at: check.clearedAt,
           group: 'WAREHOUSE',
           kind: 'ROUTE_ISSUE_CHECK_CLEARED',
@@ -717,7 +720,7 @@ export async function readOrderTimeline(
   if (pickup !== null) {
     events.push(
       event({
-        key: `pickup:${pickup.id}`,
+        key: `38:pickup:${pickup.id}`,
         at: pickup.issuedAt,
         group: 'DELIVERY',
         kind: 'PICKUP_ISSUED',
@@ -756,14 +759,24 @@ export async function readOrderTimeline(
   for (const participation of participations) {
     events.push(
       event({
-        key: `route-order:${participation.id}`,
+        key: `40:route-order:${participation.id}`,
         at: participation.addedAt,
         group: 'LOGISTICS',
         kind: 'ROUTE_ORDER_ADDED',
         title: 'Заказ добавлен в маршрутный лист',
         actor: userActor(participation.addedById),
         details: [{ label: 'Позиция', value: String(participation.position) }],
-        reverted: participation.removedAt !== null,
+        /*
+         * Выход из листа пометкой «отменено» не считается.
+         *
+         * Заказ уходит из листа и в обычном ходе дела — после доставки или
+         * решения о повторной, — и у выхода есть своя строка. Пометка нужна
+         * там, где действие именно ОТМЕНИЛИ: отменённый лист или снятая
+         * отмена источника.
+         */
+        reverted:
+          participation.removalReason === 'ROUTE_CANCELLED' ||
+          participation.removalReason === 'SOURCE_CANCELLATION_WITHDRAWN',
         route: { id: participation.route.id, number: participation.route.number },
       }),
     );
@@ -775,7 +788,7 @@ export async function readOrderTimeline(
       }
       events.push(
         event({
-          key: `route-order-removed:${participation.id}`,
+          key: `44:route-order-removed:${participation.id}`,
           at: participation.removedAt,
           group: 'LOGISTICS',
           kind: `ROUTE_ORDER_REMOVED_${reason}`,
@@ -819,7 +832,7 @@ export async function readOrderTimeline(
       }
       events.push(
         event({
-          key: `route-state:${transition.id}`,
+          key: `42:route-state:${transition.id}`,
           at: transition.occurredAt,
           group: 'LOGISTICS',
           kind: `ROUTE_${transition.toState}`,
@@ -872,7 +885,7 @@ export async function readOrderTimeline(
         }
         events.push(
           event({
-            key: `audit:${String(entry.id)}`,
+            key: `43:audit:${String(entry.id)}`,
             at: entry.occurredAt,
             group: 'LOGISTICS',
             kind: 'ROUTE_ORDER_REORDERED',
@@ -888,7 +901,7 @@ export async function readOrderTimeline(
 
       events.push(
         event({
-          key: `audit:${String(entry.id)}`,
+          key: `41:audit:${String(entry.id)}`,
           at: entry.occurredAt,
           group: 'LOGISTICS',
           kind: entry.action,
@@ -931,7 +944,7 @@ export async function readOrderTimeline(
     }
     events.push(
       event({
-        key: `attempt:${attempt.id}`,
+        key: `50:attempt:${attempt.id}`,
         at: attempt.occurredAt,
         group: 'DELIVERY',
         kind: attempt.outcome === 'DELIVERED' ? 'DELIVERY_DELIVERED' : 'DELIVERY_FAILED',
@@ -951,7 +964,7 @@ export async function readOrderTimeline(
       }
       events.push(
         event({
-          key: `attempt-cancel:${cancellation.id}`,
+          key: `51:attempt-cancel:${cancellation.id}`,
           at: cancellation.occurredAt,
           group: 'DELIVERY',
           kind: `DELIVERY_RESULT_CANCELLED_${cancellation.kind}`,
@@ -985,7 +998,7 @@ export async function readOrderTimeline(
   for (const resolution of resolutions) {
     events.push(
       event({
-        key: `resolution:${resolution.id}`,
+        key: `60:resolution:${resolution.id}`,
         at: resolution.createdAt,
         group: 'RETURN',
         kind: 'ORDER_RESOLUTION_OPENED',
@@ -999,7 +1012,7 @@ export async function readOrderTimeline(
     if (resolution.decision !== null && resolution.decidedAt !== null) {
       events.push(
         event({
-          key: `resolution-decision:${resolution.id}`,
+          key: `61:resolution-decision:${resolution.id}`,
           at: resolution.decidedAt,
           group: 'RETURN',
           kind: `ORDER_RESOLUTION_${resolution.decision}`,
@@ -1032,7 +1045,7 @@ export async function readOrderTimeline(
   for (const orderReturn of returns) {
     events.push(
       event({
-        key: `return:${orderReturn.id}`,
+        key: `70:return:${orderReturn.id}`,
         at: orderReturn.createdAt,
         group: 'RETURN',
         kind: 'ORDER_RETURN_OPENED',
@@ -1056,7 +1069,7 @@ export async function readOrderTimeline(
       }
       events.push(
         event({
-          key: `return-transition:${transition.id}`,
+          key: `71:return-transition:${transition.id}`,
           at: transition.occurredAt,
           group: 'RETURN',
           kind: `ORDER_RETURN_${transition.toState}`,
