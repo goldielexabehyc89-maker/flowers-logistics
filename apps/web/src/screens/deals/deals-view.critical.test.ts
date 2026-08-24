@@ -31,6 +31,7 @@ function card(patch: Partial<DealCard> = {}): DealCard {
     id: 'order-1',
     number: 'A-1024',
     address: 'Москва, Цветочная улица, 1',
+    addressDetails: null,
     sourceAddress: 'Москва, Цветочная улица, 1',
     addressCorrected: false,
     addressConflict: false,

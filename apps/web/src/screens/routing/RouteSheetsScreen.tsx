@@ -125,7 +125,10 @@ function SheetOrders({
             длиннее всех и забирает остаток строки.
           */}
           <span className="sheets__order-interval muted">{stopInterval(item.order.interval)}</span>
-          <span className="sheets__order-address">{item.order.address ?? '—'}</span>
+          <span className="sheets__order-address">
+            {item.order.address ?? '—'}
+            {item.order.addressDetails === null ? '' : ` · ${item.order.addressDetails}`}
+          </span>
           {delivered.has(item.order.number) && (
             <span className="sheets__order-state">Доставлен</span>
           )}
@@ -799,6 +802,14 @@ export function RouteSheetsScreen(): React.JSX.Element {
                     <div className="sheet__stop-line">
                       <strong>{item.order.address ?? '—'}</strong>
                     </div>
+                    {/*
+                      Печатная форма показывает ОБА значения: по адресу курьер
+                      едет, по деталям находит дверь. Лист печатают и берут
+                      с собой — спросить недостающее в пути будет не у кого.
+                    */}
+                    {item.order.addressDetails !== null && (
+                      <div className="sheet__stop-line">{item.order.addressDetails}</div>
+                    )}
                     <div className="sheet__stop-line">{item.order.recipient ?? '—'}</div>
                     {item.order.comment !== null && (
                       <div className="sheet__stop-line">Комментарий: {item.order.comment}</div>

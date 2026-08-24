@@ -638,6 +638,17 @@ export function RouteCard({
                 <div className="routes__stop-address" title={item.order.address ?? undefined}>
                   {item.order.address ?? '—'}
                 </div>
+                {/* Детали — своей строкой: по адресу считается маршрут, по ним
+                    курьер находит дверь. */}
+                {item.order.addressDetails !== null && (
+                  <div
+                    className="routes__stop-address routes__stop-details"
+                    title={item.order.addressDetails}
+                    data-testid="route-stop-address-details"
+                  >
+                    {item.order.addressDetails}
+                  </div>
+                )}
                 {item.conflicts.length > 0 && (
                   <ul className="routes__conflicts">
                     {item.conflicts.map((conflict) => (

@@ -25,6 +25,7 @@ import { useToast } from '../../ui/ToastProvider';
 import { Button, ErrorState, LoadingState, Modal, StatusBadge } from '../../ui/components';
 import { AddressDialog } from '../deals/AddressDialog';
 import { IntervalModal } from '../deals/IntervalModal';
+import { addressView } from './address-view';
 import { GeoPointDialog } from './GeoPointDialog';
 import type { DealCard } from '../deals/selection';
 import { formatMinutes, type OrderView } from '../deals/deals';
@@ -204,6 +205,7 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
   }
 
   const view = order.data.order;
+  const address = addressView(view, 'не указан');
 
   /*
    * Существующие окна правки ждут карточку «Сделок».
@@ -215,6 +217,7 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
     id: view.id,
     number: view.number,
     address: view.address,
+    addressDetails: view.addressDetails,
     sourceAddress: view.sourceAddress,
     addressCorrected: view.addressCorrected,
     addressConflict: view.addressConflict,
@@ -263,7 +266,17 @@ export function OrderWindow({ orderId, onClose }: OrderWindowProps): React.JSX.E
           <div className="order-window__row">
             <span className="order-window__label">Адрес</span>
             <span className="order-window__value">
-              {view.address ?? 'не указан'}
+              {address.address}
+              {/*
+                Детали — отдельной строкой сразу под адресом, а не в скобках
+                рядом: строку адреса отсюда копируют в поиск, и квартира в ней
+                уводит поиск с дома.
+              */}
+              {address.details !== null && (
+                <span className="order-window__details" data-testid="order-window-address-details">
+                  {address.details}
+                </span>
+              )}
               {view.addressCorrected && (
                 <span className="order-window__note">исправлен вручную</span>
               )}

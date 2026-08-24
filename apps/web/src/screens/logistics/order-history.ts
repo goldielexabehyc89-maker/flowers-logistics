@@ -46,6 +46,8 @@ export interface TimelineHeaderView {
   deliveryDate: string | null;
   interval: { startMinute: number | null; endMinute: number | null; manual: boolean };
   address: string | null;
+  /** Детали адреса. `null` у заказа прежнего контракта: их там нет. */
+  addressDetails: string | null;
   florist: { id: string; fullName: string } | null;
   route: { id: string; number: string; state: string } | null;
   courier: { id: string; fullName: string } | null;

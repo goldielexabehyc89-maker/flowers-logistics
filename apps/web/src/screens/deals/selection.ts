@@ -15,6 +15,8 @@ export interface DealCard {
   id: string;
   number: string;
   address: string | null;
+  /** Детали адреса: вторая строка карточки. `null` у прежнего контракта. */
+  addressDetails: string | null;
   sourceAddress: string | null;
   addressCorrected: boolean;
   addressConflict: boolean;

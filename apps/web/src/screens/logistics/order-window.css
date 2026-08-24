@@ -51,6 +51,19 @@
   flex-basis: 100%;
 }
 
+/*
+ * Детали адреса — своя строка сразу под адресом.
+ *
+ * `flex-basis: 100%` переносит их на новую строку раньше пометок о правке:
+ * квартира относится к адресу, и вклиниваться между ними ничему нельзя.
+ */
+.order-window__details {
+  flex-basis: 100%;
+  color: var(--log-text-muted);
+  font-size: var(--log-font-sm);
+  overflow-wrap: anywhere;
+}
+
 .order-window__row .btn,
 .order-window__row button {
   height: 28px;

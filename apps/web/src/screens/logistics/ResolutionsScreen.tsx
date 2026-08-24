@@ -38,6 +38,8 @@ export interface ResolutionRow {
   orderId: string;
   orderNumber: string;
   address: string | null;
+  /** Детали адреса. `null` у заказа прежнего контракта. */
+  addressDetails: string | null;
   routeNumber: string | null;
   courier: { id: string; fullName: string } | null;
   reasonName: string;
@@ -264,6 +266,14 @@ export function ResolutionsScreen(): React.JSX.Element {
                           <div className="muted text-sm resolutions__address">
                             {row.address ?? '—'}
                           </div>
+                          {row.addressDetails !== null && (
+                            <div
+                              className="muted text-sm resolutions__address"
+                              data-testid="resolution-address-details"
+                            >
+                              {row.addressDetails}
+                            </div>
+                          )}
                         </div>
 
                         <div className="resolutions__cell" role="cell">

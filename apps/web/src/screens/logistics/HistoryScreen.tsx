@@ -63,6 +63,7 @@ interface HistoryDetails {
     position: number;
     number: string;
     address: string | null;
+    addressDetails: string | null;
     recipient: string | null;
     interval: string | null;
     outcome: string | null;
@@ -213,6 +214,7 @@ function RouteDetails({ routeId }: { routeId: string }): React.JSX.Element {
               {/* Адрес идёт последним и забирает остаток строки: он длиннее всех. */}
               <span className="history__order-address" title={order.address ?? undefined}>
                 {order.address ?? '—'}
+                {order.addressDetails === null ? '' : ` · ${order.addressDetails}`}
               </span>
             </li>
           ))}

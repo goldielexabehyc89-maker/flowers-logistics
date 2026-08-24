@@ -187,6 +187,11 @@ export function PreviewPanel({
                           <span className="muted text-sm">окно {formatWindow(order)}</span>
                         </div>
                         <span className="routes__stop-body-text">{order.address ?? '—'}</span>
+                        {order.addressDetails !== null && (
+                          <span className="routes__stop-body-text muted text-sm">
+                            {order.addressDetails}
+                          </span>
+                        )}
                       </div>
                     </li>
                   );
@@ -209,7 +214,10 @@ export function PreviewPanel({
                     <li className="routes__list-item" key={item.orderId}>
                       <div>
                         <span className="routes__number">{order.number}</span>{' '}
-                        <span className="muted text-sm">{order.address ?? '—'}</span>
+                        <span className="muted text-sm">
+                          {order.address ?? '—'}
+                          {order.addressDetails === null ? '' : ` · ${order.addressDetails}`}
+                        </span>
                         <div className="muted text-sm">{unassignedLabel(item.reason)}</div>
                       </div>
                     </li>
