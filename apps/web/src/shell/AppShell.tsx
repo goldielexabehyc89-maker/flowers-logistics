@@ -28,6 +28,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Route,
+  ScrollText,
   Settings,
   Store,
   Users,
@@ -66,6 +67,9 @@ const SECTION_ICONS: Readonly<Record<string, LucideIcon>> = {
   florist: Flower2,
   warehouse: Warehouse,
   pickup: Store,
+  // Свиток, а не часы: «История доставок» курьера уже носит часы, и два
+  // одинаковых знака в свёрнутом меню различить было бы нечем.
+  'order-history': ScrollText,
   settings: Settings,
 };
 

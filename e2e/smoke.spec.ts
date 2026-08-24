@@ -9080,12 +9080,23 @@ test('раздел «История заказов»: скрыт у чужих �
   const headers = { authorization: `Bearer ${token}` };
   const card = await request.get(`/api/orders/${deliveredId}`, { headers });
   const version = ((await card.json()) as { order: { version: number } }).order.version;
+  /*
+   * Новое значение выбирается от текущего.
+   *
+   * Прогон идёт по общей базе, и заказ мог получить этот интервал в соседнем
+   * сценарии. Постоянная пара чисел проверяла бы порядок запуска, а не
+   * обновление без F5.
+   */
+  const alreadyEvening = before.includes('13:00–15:00');
+  const expected = alreadyEvening ? '14:00–16:00' : '13:00–15:00';
   const saved = await request.put(`/api/orders/${deliveredId}/interval`, {
     headers,
-    data: { startMinute: 780, endMinute: 900, version },
+    data: alreadyEvening
+      ? { startMinute: 840, endMinute: 960, version }
+      : { startMinute: 780, endMinute: 900, version },
   });
   expect(saved.status(), await saved.text()).toBe(200);
 
-  await expect(row).toContainText('13:00–15:00', { timeout: 30_000 });
-  expect(before).not.toContain('13:00–15:00');
+  expect(before).not.toContain(expected);
+  await expect(row).toContainText(expected, { timeout: 30_000 });
 });
