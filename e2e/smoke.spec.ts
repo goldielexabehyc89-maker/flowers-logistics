@@ -4985,6 +4985,14 @@ test('выбор курьера: открытие полем, фильтраци
   await field.click();
   await expect(list).toBeVisible();
   await expect(page.getByTestId('create-route-courier-clear')).toBeVisible();
+  /*
+   * Строки списка ждутся локатором, а не считаются сразу.
+   *
+   * Список рисуется раньше, чем приходит справочник курьеров: `count()`
+   * не ждёт, и на загруженной машине проверка получала ноль там, где
+   * курьер есть. Считалась бы скорость ответа, а не поведение поля.
+   */
+  await expect(page.getByTestId('create-route-courier-option').first()).toBeVisible();
   const total = await page.getByTestId('create-route-courier-option').count();
   expect(total).toBeGreaterThan(0);
 
