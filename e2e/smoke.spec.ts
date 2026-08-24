@@ -9383,11 +9383,39 @@ test('адрес: маршрутный лист и печатная форма �
    * Печатная форма листа: лист берут с собой, и спросить недостающее
    * в пути будет не у кого — поэтому там оба значения.
    */
+  /*
+   * Черновик подтверждается в маршрутный лист.
+   *
+   * Курьер для этого не нужен: лист живёт и без него, а проверяется здесь
+   * состав, а не отгрузка.
+   */
+  const draft = page.locator('.routes__draft').first();
+  await draft.getByRole('button', { name: 'Создать МЛ' }).click();
+  await page.getByTestId('route-confirm-submit').click();
+
   await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
   await expect(page.getByTestId('sheets-search')).toBeVisible();
   await page.getByTestId('sheets-search').fill(SA_FULL);
-  const sheetOrder = page.locator('.sheets__order-address').first();
+
+  const sheet = page.locator('[data-testid="sheet-row"]').first();
+  await expect(sheet).toBeVisible();
+  await sheet.getByTestId('sheet-expand').click();
+  const sheetOrder = sheet.locator(`[data-order-number="${SA_FULL}"] .sheets__order-address`);
   await expect(sheetOrder).toBeVisible();
-  await expect(sheetOrder).toContainText('Кв./офис: 55');
   await expect(sheetOrder).toContainText('Маленковская');
+  await expect(sheetOrder).toContainText('Кв./офис: 55');
+
+  /*
+   * Печатная форма: оба значения и разными строками.
+   *
+   * Лист берут с собой, и спросить недостающее в пути будет не у кого —
+   * поэтому квартира обязана быть на бумаге рядом с домом.
+   */
+  await sheet.getByTestId('sheet-open').click();
+  const printable = page.locator('.sheet');
+  await expect(printable).toBeVisible();
+  const stop = printable.locator('.sheet__stop').first();
+  await expect(stop).toContainText('Маленковская');
+  await expect(stop).toContainText('Кв./офис: 55');
+  await expect(stop).toContainText('домофон 42');
 });
