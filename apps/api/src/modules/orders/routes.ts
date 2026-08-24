@@ -37,6 +37,12 @@ import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { setSuggestionsStatus } from '../integrations/dadata/status.js';
 import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
 import { addressState, effectiveAddress } from './address.js';
+import {
+  OrderNotFoundError,
+  TIMELINE_PAGE_DEFAULT,
+  TIMELINE_PAGE_MAX,
+  readOrderTimeline,
+} from './timeline.js';
 import { activeReturnsOf } from '../returns/service.js';
 import {
   MAX_QUERY_LENGTH,
@@ -51,6 +57,15 @@ import { CURRENT_TRAFFIC_MODE } from '../geo/matrix/service.js';
 import { isRoutingVerified } from '../geo/routing-status.js';
 
 const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+
+/**
+ * Кто видит историю заказа.
+ *
+ * Пока только логистика и администратор: строки истории называют людей и их
+ * действия, и это не то, что показывают всем ролям сразу. Право проверяет
+ * СЕРВЕР: спрятанная кнопка чужой запрос не останавливает.
+ */
+const ORDER_HISTORY_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
 const MAX_LIMIT = 100;
 
 const dateSchema = z
@@ -134,6 +149,17 @@ const localAddressSchema = z.object({
 
 const conflictDecisionSchema = z.object({
   decision: z.enum(['KEEP_LOCAL', 'USE_SOURCE']),
+});
+
+/**
+ * Страница истории.
+ *
+ * Курсор — позиция в устойчивом порядке, а не смещение: между запросами
+ * история дописывается, и смещение показало бы то пропуск, то повтор.
+ */
+const timelineQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(TIMELINE_PAGE_MAX).default(TIMELINE_PAGE_DEFAULT),
+  cursor: z.string().min(1).max(512).optional(),
 });
 
 const idParamSchema = z.object({
@@ -634,6 +660,32 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         };
       }),
     };
+  });
+
+  /**
+   * Сквозная история заказа: что было и кто это сделал.
+   *
+   * Только чтение. Экран ничего не меняет, поэтому и вход один — GET.
+   * Права проверяются здесь, а не подписью кнопки в интерфейсе: прямая ссылка
+   * открывается так же, как и переход из окна заказа.
+   */
+  app.get('/api/orders/:id/timeline', async (request) => {
+    await authenticateWithRoles(request, deps, ORDER_HISTORY_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const query = timelineQuerySchema.parse(request.query);
+
+    try {
+      return await readOrderTimeline(deps.db, {
+        orderId: id,
+        limit: query.limit,
+        cursor: query.cursor ?? null,
+      });
+    } catch (error) {
+      if (error instanceof OrderNotFoundError) {
+        throw new AppError('NOT_FOUND', { message: 'order not found' });
+      }
+      throw error;
+    }
   });
 
   /**

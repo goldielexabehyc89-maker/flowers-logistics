@@ -27,6 +27,7 @@ import { HistoryScreen } from './screens/delivery/HistoryScreen';
 import { HistoryScreen as LogisticsHistoryScreen } from './screens/logistics/HistoryScreen';
 import { ReportsScreen } from './screens/logistics/ReportsScreen';
 import { ResolutionsScreen } from './screens/logistics/ResolutionsScreen';
+import { OrderHistoryScreen } from './screens/logistics/OrderHistoryScreen';
 import { DealsWorkspace } from './screens/deals/DealsWorkspace';
 import { FloristScreen } from './screens/florist/FloristScreen';
 import { PickupScreen } from './screens/pickup/PickupScreen';
@@ -147,6 +148,22 @@ export function App(): React.JSX.Element {
           <Route path="history" element={<LogisticsHistoryScreen />} />
           <Route path="reports" element={<ReportsScreen />} />
         </Route>
+        {/*
+          История заказа — отдельный экран, а не вкладка «Логистики».
+
+          Вкладки — это рабочие места, между которыми переключаются весь день;
+          история открывается по одному заказу и закрывается кнопкой «Назад».
+          Прямая ссылка работает так же: право проверяет сервер, а не переход.
+        */}
+        <Route
+          path="/logistics/orders/:orderId/history"
+          element={
+            <SectionRoute>
+              <OrderHistoryScreen />
+            </SectionRoute>
+          }
+        />
+
         {/* Прежние адреса верхнего уровня ведут в точный новый эквивалент. */}
         {Object.entries(LEGACY_PATHS).map(([from, to]) => (
           <Route key={from} path={from} element={<Navigate to={to} replace />} />
