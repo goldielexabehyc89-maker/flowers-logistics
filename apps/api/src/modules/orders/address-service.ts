@@ -24,6 +24,12 @@ import {
   type AttentionReason,
 } from './attention.js';
 import { enqueueGeocoding } from './geocoding/queue.js';
+import {
+  contractVersionOf,
+  effectiveAddress,
+  ORDER_ADDRESS_SELECT,
+  sourceWorkingAddress,
+} from './address.js';
 
 /** Адрес правят только логист и администратор. Проверяет сервер, а не экран. */
 export const ADDRESS_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
@@ -68,6 +74,9 @@ interface LockedOrder {
   id: string;
   address: string | null;
   localAddress: string | null;
+  structuredAddress: string | null;
+  addressDetails: string | null;
+  addressContractVersion: number | null;
   addressConflict: boolean;
   sourceMissing: boolean;
   sourceArchived: boolean;
@@ -98,8 +107,7 @@ async function lockOrder(tx: TransactionClient, orderId: string): Promise<Locked
     where: { id: orderId },
     select: {
       id: true,
-      address: true,
-      localAddress: true,
+      ...ORDER_ADDRESS_SELECT,
       addressConflict: true,
       sourceMissing: true,
       sourceArchived: true,
@@ -156,14 +164,26 @@ function reasonsAfter(
     startMinute: order.manualIntervalStartMinute,
     endMinute: order.manualIntervalEndMinute,
   };
-  const withAddress = next.corrected
-    ? snapshotReasons
-    : // Правка снята: «нет адреса» возвращается, если исходного тоже нет.
-      order.address === null || order.address.trim() === ''
-      ? [...snapshotReasons, 'MISSING_ADDRESS' as AttentionReason]
-      : snapshotReasons;
+  const contract = contractVersionOf(order);
+  /*
+   * Правка снята: причина возвращается, если у источника адреса тоже нет.
+   *
+   * У прежнего контракта это «Не указан адрес». У версии 2 неполнота названа
+   * иначе — «геокодеру адреса мало», — и добавляет её общая функция по
+   * признаку `structuredIncomplete`: двух имён у одного состояния быть
+   * не должно.
+   */
+  const withAddress =
+    next.corrected || contract === 'V2'
+      ? snapshotReasons
+      : sourceWorkingAddress(order) === null
+        ? [...snapshotReasons, 'MISSING_ADDRESS' as AttentionReason]
+        : snapshotReasons;
 
-  return effectiveAttentionReasons([...new Set(withAddress)], manual, next);
+  return effectiveAttentionReasons([...new Set(withAddress)], manual, {
+    ...next,
+    ...(contract === 'V2' ? { structuredIncomplete: sourceWorkingAddress(order) === null } : {}),
+  });
 }
 
 /**
@@ -291,7 +311,9 @@ export async function setLocalAddress(
     const order = await lockOrder(tx, orderId);
     assertEditable(order);
 
-    const previousEffective = order.localAddress ?? order.address;
+    // Прежнее рабочее значение считает общая функция: вторая формула здесь
+    // однажды разошлась бы с той, по которой заказ показывается и едет.
+    const previousEffective = effectiveAddress(order);
     const reasons = reasonsAfter(order, { corrected: true, conflict: false });
 
     await tx.deliveryOrder.update({
@@ -300,7 +322,9 @@ export async function setLocalAddress(
         localAddress: address,
         localAddressSetAt: now,
         localAddressSetById: actor.userId,
-        sourceAddressAtLocalEdit: order.address,
+        // Снимок источника — его РАБОЧИЙ адрес: с ним и будет сравниваться
+        // следующая синхронизация.
+        sourceAddressAtLocalEdit: sourceWorkingAddress(order),
         addressConflict: false,
         addressConflictDetectedAt: null,
         needsAttention: needsLogisticsAttention(reasons),
@@ -318,7 +342,7 @@ export async function setLocalAddress(
         occurredAt: now,
         oldAddress: previousEffective,
         newAddress: address,
-        sourceAddress: order.address,
+        sourceAddress: sourceWorkingAddress(order),
         actorUserId: actor.userId,
       },
     });
@@ -330,6 +354,8 @@ export async function setLocalAddress(
         {
           id: order.id,
           address: order.address,
+          structuredAddress: order.structuredAddress,
+          addressContractVersion: order.addressContractVersion,
           localAddress: address,
           inScope: order.inScope,
           sourceArchived: order.sourceArchived,
@@ -419,8 +445,8 @@ export async function clearLocalAddress(
         action: 'LOCAL_ADDRESS_CLEARED',
         occurredAt: now,
         oldAddress: order.localAddress,
-        newAddress: order.address,
-        sourceAddress: order.address,
+        newAddress: sourceWorkingAddress(order),
+        sourceAddress: sourceWorkingAddress(order),
         actorUserId: actor.userId,
       },
     });
@@ -430,6 +456,8 @@ export async function clearLocalAddress(
       {
         id: order.id,
         address: order.address,
+        structuredAddress: order.structuredAddress,
+        addressContractVersion: order.addressContractVersion,
         localAddress: null,
         inScope: order.inScope,
         sourceArchived: order.sourceArchived,
@@ -510,7 +538,7 @@ export async function resolveAddressConflict(
         ...(keepLocal
           ? // Правка остаётся, но снимок источника обновляется: иначе тот же
             // конфликт объявлялся бы на каждом проходе синхронизации.
-            { sourceAddressAtLocalEdit: order.address }
+            { sourceAddressAtLocalEdit: sourceWorkingAddress(order) }
           : {
               localAddress: null,
               localAddressSetAt: null,
@@ -528,6 +556,8 @@ export async function resolveAddressConflict(
         {
           id: order.id,
           address: order.address,
+          structuredAddress: order.structuredAddress,
+          addressContractVersion: order.addressContractVersion,
           localAddress: null,
           inScope: order.inScope,
           sourceArchived: order.sourceArchived,
@@ -546,8 +576,8 @@ export async function resolveAddressConflict(
         action: keepLocal ? 'CONFLICT_RESOLVED_KEEP_LOCAL' : 'CONFLICT_RESOLVED_USE_SOURCE',
         occurredAt: now,
         oldAddress: order.localAddress,
-        newAddress: keepLocal ? order.localAddress : order.address,
-        sourceAddress: order.address,
+        newAddress: keepLocal ? order.localAddress : sourceWorkingAddress(order),
+        sourceAddress: sourceWorkingAddress(order),
         actorUserId: actor.userId,
       },
     });

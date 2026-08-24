@@ -103,6 +103,9 @@ export function HistoryScreen(): React.JSX.Element {
                 {item.address === null ? null : (
                   <div className="delivery__order-line">{item.address}</div>
                 )}
+                {item.addressDetails === null ? null : (
+                  <div className="delivery__order-muted">{item.addressDetails}</div>
+                )}
                 {item.recipient === null ? null : (
                   <div className="delivery__order-muted">{item.recipient}</div>
                 )}

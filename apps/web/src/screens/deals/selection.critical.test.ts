@@ -28,6 +28,7 @@ function card(overrides: Partial<DealCard> = {}): DealCard {
     id: overrides.id ?? 'o-1',
     number: overrides.number ?? 'N-1',
     address: 'Москва, синтетическая улица, дом 1',
+    addressDetails: null,
     sourceAddress: 'Москва, синтетическая улица, дом 1',
     addressCorrected: false,
     addressConflict: false,

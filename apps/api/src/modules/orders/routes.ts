@@ -36,7 +36,12 @@ import { isDadataAllowed } from './geocoding/enabled.js';
 import { testSuggestFetch } from '../integrations/dadata/test-suggest.js';
 import { setSuggestionsStatus } from '../integrations/dadata/status.js';
 import { dealsCount, dealsIds, dealsWithoutPointCount, type DealsScope } from './deals-scope.js';
-import { addressState, effectiveAddress } from './address.js';
+import {
+  addressDetailsOf,
+  addressState,
+  effectiveAddress,
+  ORDER_ADDRESS_SELECT,
+} from './address.js';
 import {
   OrderNotFoundError,
   TIMELINE_PAGE_DEFAULT,
@@ -230,6 +235,9 @@ function toListItem(order: {
   manualIntervalEndMinute: number | null;
   address: string | null;
   localAddress: string | null;
+  structuredAddress: string | null;
+  addressDetails: string | null;
+  addressContractVersion: number | null;
   addressConflict: boolean;
   recipient: string | null;
   comment: string | null;
@@ -279,6 +287,9 @@ function toListItem(order: {
     sourceAddress: addressState(order).source,
     addressCorrected: addressState(order).corrected,
     addressConflict: addressState(order).conflict,
+    // Детали читает человек. У заказа прежнего контракта их нет вовсе — там
+    // приходит `null`, и клиенту нечего рисовать.
+    addressDetails: addressState(order).details,
     recipient: order.recipient,
     comment: order.comment,
     externalState: {
@@ -384,8 +395,7 @@ async function dealCards(db: Database, ids: string[]) {
     select: {
       id: true,
       externalName: true,
-      address: true,
-      localAddress: true,
+      ...ORDER_ADDRESS_SELECT,
       addressConflict: true,
       cancelledInSource: true,
       cancelledByLogistAt: true,
@@ -443,6 +453,7 @@ async function dealCards(db: Database, ids: string[]) {
         sourceAddress: address.source,
         addressCorrected: address.corrected,
         addressConflict: address.conflict,
+        addressDetails: address.details,
         recipient: row.recipient,
         // Пустой комментарий не занимает место: клиент не должен рисовать
         // строку-заглушку там, где текста нет.
@@ -767,8 +778,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         intervalEndMinute: true,
         manualIntervalStartMinute: true,
         manualIntervalEndMinute: true,
-        address: true,
-        localAddress: true,
+        ...ORDER_ADDRESS_SELECT,
         // Готовность считается ТЕМ ЖЕ правилом, что и в «Сделках»: разойдясь,
         // две карты красили бы одну точку по-разному.
         fulfillmentProcessState: true,
@@ -800,6 +810,9 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
           endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
           // Рабочий адрес: по нему поедет курьер.
           address: effectiveAddress(order),
+          // Детали — рядом с адресом и только для показа: в подсказке карты
+          // курьеру нужна и квартира, а в расчёт точки они не входят.
+          addressDetails: addressDetailsOf(order),
           assembled: isAssembled(order),
           // Разные визуальные состояния берутся из факта участия, а не угадываются.
           assigned: participation !== undefined,
@@ -1126,8 +1139,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       select: {
         id: true,
         externalName: true,
-        address: true,
-        localAddress: true,
+        ...ORDER_ADDRESS_SELECT,
         geoLatMicro: true,
         geoLonMicro: true,
         intervalStartMinute: true,
@@ -1151,6 +1163,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         number: row.externalName,
         // Адрес нужен подсказке при наведении: без него маркер не опознать.
         address: effectiveAddress(row),
+        addressDetails: addressDetailsOf(row),
         lat: fromMicro(row.geoLatMicro ?? 0),
         lon: fromMicro(row.geoLonMicro ?? 0),
         startMinute: row.manualIntervalStartMinute ?? row.intervalStartMinute,

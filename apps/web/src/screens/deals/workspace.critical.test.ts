@@ -22,6 +22,7 @@ function card(overrides: Partial<DealCard>): DealCard {
     id: 'o-1',
     number: 'N-1',
     address: null,
+    addressDetails: null,
     sourceAddress: null,
     addressCorrected: false,
     addressConflict: false,

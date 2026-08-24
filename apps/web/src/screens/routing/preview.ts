@@ -16,6 +16,8 @@ export interface PreviewOrder {
   id: string;
   number: string;
   address: string | null;
+  /** Детали адреса: вторая строка. `null` у прежнего контракта. */
+  addressDetails: string | null;
   intervalStartMinute: number | null;
   intervalEndMinute: number | null;
 }
@@ -99,6 +101,7 @@ export function orderOf(run: PlanRunView, orderId: string): PreviewOrder {
       id: orderId,
       number: '—',
       address: null,
+      addressDetails: null,
       intervalStartMinute: null,
       intervalEndMinute: null,
     }

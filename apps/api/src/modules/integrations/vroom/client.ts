@@ -100,8 +100,13 @@ export interface VroomRequest {
  * `description` и `location` — прямые каналы утечки: первый принимает
  * произвольный текст, второй — координаты. Оба необязательны для решения
  * по индексам и потому просто запрещены.
+ *
+ * Имена нового адресного контракта названы отдельно, хотя строку решателю
+ * не пропустила бы и общая проверка ниже: список читают, когда решают, что
+ * можно положить в запрос, и отсутствие имени в нём выглядело бы разрешением.
  */
-const FORBIDDEN_REQUEST_FIELDS = /^(description|location|address|recipient|comment|name|number)$/i;
+const FORBIDDEN_REQUEST_FIELDS =
+  /^(description|location|address|addressDetails|structuredAddress|recipient|comment|name|number)$/i;
 
 /**
  * Проверяет, что в запросе нет ничего, кроме чисел, индексов и известных строк.

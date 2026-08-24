@@ -32,6 +32,8 @@ export interface RouteOrderView {
       manualEndMinute: number | null;
     };
     address: string | null;
+    /** Детали адреса: вторая строка. `null` у прежнего контракта. */
+    addressDetails: string | null;
     recipient: string | null;
     comment: string | null;
     needsAttention: boolean;

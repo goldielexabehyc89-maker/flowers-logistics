@@ -20,7 +20,7 @@
 
 import type { $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
-import { effectiveAddress } from '../orders/address.js';
+import { addressDetailsOf, effectiveAddress, ORDER_ADDRESS_SELECT } from '../orders/address.js';
 import { assemblyRoundOf } from '../warehouse/placement.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
@@ -273,8 +273,7 @@ export async function listResolutions(
         order: {
           select: {
             externalName: true,
-            address: true,
-            localAddress: true,
+            ...ORDER_ADDRESS_SELECT,
             returns: { select: { state: true, createdAt: true } },
           },
         },
@@ -304,6 +303,7 @@ export async function listResolutions(
         orderId: row.orderId,
         orderNumber: row.order.externalName,
         address: effectiveAddress(row.order),
+        addressDetails: addressDetailsOf(row.order),
         routeNumber: row.routeOrder.route.number,
         courier: row.routeOrder.route.courier,
         reasonName: row.reasonNameSnapshot,

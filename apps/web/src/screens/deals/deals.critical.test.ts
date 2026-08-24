@@ -41,6 +41,7 @@ function order(overrides: Partial<OrderView> = {}): OrderView {
     deliveryDateRaw: '2026-08-07 12:00:00.000',
     interval: interval(),
     address: 'Москва, тестовый адрес',
+    addressDetails: null,
     recipient: 'Получатель',
     comment: null,
     externalState: { id: null, name: 'Новый', stateType: 'Regular' },

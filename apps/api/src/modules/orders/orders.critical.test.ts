@@ -115,6 +115,91 @@ describe('идемпотентность импорта', () => {
   });
 });
 
+describe('одинаковые границы интервала — точное время', () => {
+  /*
+   * «с 09:00 до 09:00» приходит из МоегоСклада заметно чаще, чем «в 09:00»:
+   * поле называется «Время доставки», и человек заполняет обе половины
+   * привычной формы. Прежде такой заказ считался нераспознанным и уходил
+   * в «Требует внимания», а логист вписывал руками ровно то же время.
+   */
+  it('заказ приходит точным временем и внимания не требует', async () => {
+    const snapshot = snapshotOf({
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'с 09:00 до 09:00' },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+    await apply(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+      select: {
+        intervalKind: true,
+        intervalStartMinute: true,
+        intervalEndMinute: true,
+        intervalRaw: true,
+        needsAttention: true,
+        attentionReasons: true,
+        manualIntervalStartMinute: true,
+      },
+    });
+
+    expect(order.intervalKind).toBe('EXACT');
+    expect(order.intervalStartMinute).toBe(540);
+    // Конца нет: второй способ хранить точное время развёл бы потребителей.
+    expect(order.intervalEndMinute).toBeNull();
+    // Исходная строка источника сохраняется как есть.
+    expect(order.intervalRaw).toBe('с 09:00 до 09:00');
+
+    expect(order.attentionReasons).not.toContain('UNRECOGNIZED_INTERVAL');
+    expect(order.attentionReasons).not.toContain('MISSING_INTERVAL');
+    expect(order.needsAttention).toBe(false);
+    // Руками ничего исправлять не пришлось: интервал пришёл готовым.
+    expect(order.manualIntervalStartMinute).toBeNull();
+  });
+
+  it('обратные границы по-прежнему нераспознаны', async () => {
+    const snapshot = snapshotOf({
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value: 'с 19:00 по 16:00' },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+    await apply(snapshot);
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+      select: {
+        intervalKind: true,
+        intervalStartMinute: true,
+        intervalEndMinute: true,
+        attentionReasons: true,
+      },
+    });
+
+    // Опечатка это или переход через полночь — неизвестно. Заказ идёт
+    // к человеку, а не получает выдуманную границу.
+    expect(order.intervalKind).toBe('UNRECOGNIZED');
+    expect(order.intervalStartMinute).toBeNull();
+    expect(order.intervalEndMinute).toBeNull();
+    expect(order.attentionReasons).toContain('UNRECOGNIZED_INTERVAL');
+  });
+});
+
 describe('область и ручной интервал', () => {
   it('импорт не перезаписывает ручной интервал логиста', async () => {
     const snapshot = snapshotOf();

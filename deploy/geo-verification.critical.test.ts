@@ -62,6 +62,24 @@ eval "$cmd"
 `;
 
 /**
+ * Медленный `mkdir` сервера.
+ *
+ * Нужен, чтобы ранний опрос воспроизводился НАДЁЖНО, а не «под нагрузкой».
+ * Пока каталог задания создаётся, запускающая команда обязана ждать: именно
+ * это и означает «каталог создаётся синхронно». Если подготовка снова уедет
+ * в фон, команда вернётся раньше `mkdir`, первый опрос не найдёт каталога
+ * и объявит `LOST`.
+ *
+ * Задержка стоит на самом `mkdir`, а не в подменном ssh: тормозить надо
+ * СЕРЕДИНУ цепочки, иначе замедление одинаково сдвигает оба поведения
+ * и ничего не различает.
+ */
+const SLOW_MKDIR = `#!/usr/bin/env bash
+sleep "\${MKDIR_DELAY:-0}"
+PATH="$ORIGINAL_PATH" exec mkdir "$@"
+`;
+
+/**
  * Подменённый docker.
  *
  * Считает каждый запуск: «проверка выполнилась ровно один раз» — утверждение
@@ -137,6 +155,8 @@ interface SandboxOptions {
   dockerExit?: number;
   /** Задержка проверки в секундах: моделирует долгий подсчёт сумм. */
   dockerSleep?: number;
+  /** Задержка `mkdir` в секундах: моделирует медленный сервер при запуске. */
+  mkdirDelay?: number;
   attempts?: number;
   delay?: number;
 }
@@ -203,10 +223,16 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult> {
   await writeFile(path.join(artifactsDir, 'manifest.json'), '{}\n', 'utf8');
   await writeFile(path.join(graphDir, 'tiles.tar'), 'тайлы\n', 'utf8');
 
-  for (const [name, content] of [
+  const shims: [string, string][] = [
     ['ssh', FAKE_SSH],
     ['docker', FAKE_DOCKER],
-  ] as const) {
+  ];
+  // Медленный `mkdir` ставится только по просьбе: остальным проверкам он
+  // добавил бы секунды и ничего бы не доказал.
+  if ((options.mkdirDelay ?? 0) > 0) {
+    shims.push(['mkdir', SLOW_MKDIR]);
+  }
+  for (const [name, content] of shims) {
     const file = path.join(binDir, name);
     await writeFile(file, content, 'utf8');
     await chmod(file, 0o755);
@@ -273,6 +299,10 @@ async function runInSandbox(options: SandboxOptions): Promise<RunResult> {
     POLL_DROPS: String(options.pollDrops ?? 0),
     DOCKER_EXIT: String(options.dockerExit ?? 0),
     DOCKER_SLEEP: String(options.dockerSleep ?? 0),
+    MKDIR_DELAY: String(options.mkdirDelay ?? 0),
+    // Подменный `mkdir` вызывает настоящий по исходному PATH: иначе он нашёл
+    // бы сам себя и ушёл в бесконечную рекурсию.
+    ORIGINAL_PATH: process.env['PATH'] ?? '',
     GEO_VERIFY_ATTEMPTS: String(options.attempts ?? TEST_POLL_ATTEMPTS),
     GEO_VERIFY_DELAY: String(options.delay ?? TEST_POLL_DELAY),
     VERSION_UNDER_TEST: VALID_SHA,
@@ -391,6 +421,30 @@ describe('проверка геоартефактов переживает об�
 
     expect(result.code, describeRun(result)).toBe(0);
     expect(result.stdout, describeRun(result)).toContain('СТАТУС: OK');
+  });
+
+  it('ранний опрос не выдаёт создающийся каталог за исчезнувший', async () => {
+    /*
+     * Каталог задания создаётся СИНХРОННО.
+     *
+     * Запускающая команда обязана вернуться только после того, как каталог
+     * появился на сервере. Иначе первый же опрос заглядывает раньше `mkdir`,
+     * не находит каталога и объявляет `LOST` — выкатка обрывается отказом
+     * проверки геоартефактов, с которыми всё в порядке.
+     *
+     * Сервер здесь заведомо медленный: `mkdir` занимает 400 мс при шаге
+     * опроса в 20 мс. Уйди подготовка в фон снова — опрос выиграл бы гонку
+     * с запасом в двадцать раз, и это уже не вопрос везения.
+     */
+    const result = await runInSandbox({ body: STATUS_BODY, mkdirDelay: 0.4 });
+
+    expect(result.stdout, describeRun(result)).toContain('ИТОГ: успех');
+    expect(result.stdout, describeRun(result)).toContain('СТАТУС: OK');
+    expect(result.stdout, describeRun(result)).not.toContain('LOST');
+
+    // Проверка при этом выполнена ровно один раз: медленный сервер не повод
+    // считать гигабайтный набор дважды.
+    expect(result.dockerRuns).toBe(1);
   });
 
   it('несовпадение содержимого названо несовпадением', async () => {

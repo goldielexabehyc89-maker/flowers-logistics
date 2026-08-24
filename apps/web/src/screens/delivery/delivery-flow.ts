@@ -44,6 +44,14 @@ export interface ActiveOrderView {
   number: string;
   /** Рабочий адрес: правка логиста сильнее исходного значения источника. */
   address: string | null;
+  /**
+   * Детали адреса: регион, квартира или офис, «Другое».
+   *
+   * Идут СРАЗУ за адресом и отдельной строкой. Курьер читает их у двери, а
+   * по адресу едет — ссылка на карты строится по подтверждённой точке, и
+   * квартире в ней места нет.
+   */
+  addressDetails: string | null;
   /** Подтверждённая точка. `null` — точки нет, и догадка не подставляется. */
   point: { lat: string; lon: string } | null;
   recipient: string | null;
@@ -75,6 +83,7 @@ export interface HistoryItemView {
   cancelled: boolean;
   masked: boolean;
   address: string | null;
+  addressDetails: string | null;
   recipient: string | null;
   comment: string | null;
 }

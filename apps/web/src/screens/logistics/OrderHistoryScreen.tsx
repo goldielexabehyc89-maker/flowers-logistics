@@ -114,6 +114,11 @@ export function OrderHistoryScreen(): React.JSX.Element {
             <Fact label="Дата доставки" value={formatMoscowDay(header.deliveryDate)} />
             <Fact label="Интервал" value={intervalLine(header.interval)} />
             <Fact label="Рабочий адрес" value={header.address} wide />
+            {/*
+              Детали — отдельным полем, а не приклеенными к адресу: рабочий
+              адрес отсюда сверяют со строкой, которая ушла в геокодер.
+            */}
+            <Fact label="Детали адреса" value={header.addressDetails} wide />
             <Fact label="Флорист" value={header.florist?.fullName ?? null} />
             <Fact
               label="Маршрутный лист"

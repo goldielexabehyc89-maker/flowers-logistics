@@ -34,6 +34,14 @@ export interface OrderView {
   deliveryDateRaw: string | null;
   interval: OrderInterval;
   address: string | null;
+  /**
+   * Детали адреса нового контракта: регион, квартира, «Другое».
+   *
+   * `null` у заказа прежнего контракта — их там не существует. Показываются
+   * ВТОРОЙ строкой, а не склеиваются с адресом: адрес копируют в поиск и
+   * отправляют в геокодер, и квартира в нём уводит поиск с дома.
+   */
+  addressDetails: string | null;
   recipient: string | null;
   comment: string | null;
   externalState: { id: string | null; name: string | null; stateType: string | null };

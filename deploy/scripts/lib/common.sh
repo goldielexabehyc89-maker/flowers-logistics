@@ -478,8 +478,22 @@ run_verifier_with_mount() {
     'mv "${dir}/result.tmp" "${dir}/result"')"
   encoded="$(printf '%s' "${runner}" | base64 | tr -d '\n')"
 
-  # Запуск. Все три потока закрыты, иначе ssh ждал бы завершения проверки.
-  if ! remote "mkdir -p '${REMOTE_DIR}/state/geo-verify' && mkdir '${job_dir}' && chmod 700 '${job_dir}' && printf '%s' '${encoded}' | base64 -d > '${job_dir}/run.sh' && chmod 600 '${job_dir}/run.sh' && nohup sh '${job_dir}/run.sh' '${job_dir}' > /dev/null 2>&1 < /dev/null & echo запущено" > /dev/null; then
+  # Запуск.
+  #
+  # В фон уходит ТОЛЬКО сама проверка — она и должна пережить соединение.
+  # Подготовка каталога и раннера выполняется синхронно, и команда возвращается
+  # лишь после того, как каталог задания существует на сервере.
+  #
+  # Прежде амперсанд стоял в конце всей цепочки `&&`, а `sh` относит его ко
+  # всему списку: в фон уходил и `mkdir`. Команда возвращалась сразу после
+  # `echo`, первый же опрос заглядывал раньше, чем каталог создан, не находил
+  # его и объявлял `LOST` — «каталог задания проверки исчез с сервера».
+  # Выкатка обрывалась отказом проверки геоартефактов, с которыми всё было
+  # в порядке; проявлялось это на загруженном сервере, где `mkdir` не успевал
+  # первым.
+  #
+  # Все три потока проверки закрыты, иначе ssh ждал бы её завершения.
+  if ! remote "mkdir -p '${REMOTE_DIR}/state/geo-verify' && mkdir '${job_dir}' && chmod 700 '${job_dir}' && printf '%s' '${encoded}' | base64 -d > '${job_dir}/run.sh' && chmod 600 '${job_dir}/run.sh' && { nohup sh '${job_dir}/run.sh' '${job_dir}' > /dev/null 2>&1 < /dev/null & } && echo запущено" > /dev/null; then
     GEO_VERIFY_STATUS="LAUNCH_FAILED"
     GEO_VERIFY_DETAIL="не удалось запустить проверку на сервере"
     return 1

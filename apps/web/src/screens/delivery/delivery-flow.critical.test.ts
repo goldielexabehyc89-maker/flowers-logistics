@@ -162,6 +162,7 @@ describe('объединённый список', () => {
       position: results.length - index,
       number: `N-${index}`,
       address: null,
+      addressDetails: null,
       point: null,
       cancelled: false,
       recipient: null,

@@ -50,6 +50,7 @@ import { useWorkspace } from '../logistics/useWorkspace';
 import { GeoPointDialog } from '../logistics/GeoPointDialog';
 import { OrderWindow } from '../logistics/OrderWindow';
 import { previewHref, workspaceHref } from '../logistics/workspace-url';
+import { addressView } from '../logistics/address-view';
 import {
   dropUnavailable,
   intervalProblem,
@@ -488,6 +489,9 @@ export function DealsWorkspace(): React.JSX.Element {
                   const blocked = unselectableReason(item);
                   const number = selectionNumber(selected, item.id);
                   const attention: AttentionReason | null = primaryAttention(item);
+                  // Адрес и детали — по общему правилу приложения: пустые
+                  // детали второй строки не создают.
+                  const address = addressView(item);
                   const actionLabel =
                     attention === null ? null : ATTENTION_ACTION_LABELS[attention.action];
                   const classes = [
@@ -601,9 +605,18 @@ export function DealsWorkspace(): React.JSX.Element {
                         </span>
                       </div>
 
-                      <div className="deals__line" title={item.address ?? undefined}>
-                        {item.address ?? 'Адрес не указан'}
+                      <div className="deals__line" title={address.address}>
+                        {address.address}
                       </div>
+                      {address.details !== null && (
+                        <div
+                          className="deals__address-details"
+                          data-testid="deal-address-details"
+                          title={address.details}
+                        >
+                          {address.details}
+                        </div>
+                      )}
 
                       <div className="deals__muted deals__oneline">
                         {item.deliveryDate ?? '—'} · {formatMinutes(item.startMinute)}–

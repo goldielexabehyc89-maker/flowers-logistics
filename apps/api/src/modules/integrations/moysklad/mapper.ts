@@ -53,6 +53,15 @@ export interface OrderSnapshot {
   address: string | null;
   /** Запрос к геокодеру. Пусто — отдельного запроса нет, берётся `address`. */
   geocodeAddress: string | null;
+  /**
+   * Кандидат рабочего адреса нового контракта: город, улица, дом.
+   *
+   * Именно кандидат: пользуется им только заказ версии 2, а решение о версии
+   * принимает импорт, а не источник. Legacy-заказ это поле игнорирует.
+   */
+  structuredAddress: string | null;
+  /** Кандидат деталей адреса: регион, квартира, «Другое». */
+  addressDetails: string | null;
   recipient: string | null;
   comment: string | null;
   paymentTypeId: string | null;
@@ -117,6 +126,8 @@ const SNAPSHOT_FIELDS = {
   intervalEndMinute: true,
   address: true,
   geocodeAddress: true,
+  structuredAddress: true,
+  addressDetails: true,
   recipient: true,
   comment: true,
   paymentTypeId: true,
@@ -235,6 +246,83 @@ export function composeStructuredAddress(
   return parts.length === 0 ? null : parts.join(', ');
 }
 
+/**
+ * Названия регионов по ссылке на справочник.
+ *
+ * МойСклад отдаёт регион ССЫЛКОЙ без названия — проверено на живой выборке:
+ * из двадцати четырёх заказов с заполненным регионом название не пришло
+ * ни разу, только `meta.href`. Название достаётся отдельным чтением
+ * справочника, поэтому оно передаётся в маппер уже готовым: маппер остаётся
+ * чистой функцией и в сеть не ходит.
+ *
+ * Неизвестная ссылка означает «названия нет»: регион просто не показывается.
+ * Придумывать его по идентификатору нельзя.
+ */
+export type RegionNames = ReadonlyMap<string, string>;
+
+/**
+ * РАБОЧИЙ адрес нового контракта: город, улица, дом — и ничего больше.
+ *
+ * Индекс, страна и регион не входят: они не уточняют дом, а сбивают геокодер
+ * на соседний населённый пункт с той же улицей. Квартира и «Другое» не входят
+ * тем более — геокодер ищет дом, а не квартиру в нём.
+ *
+ * Без города, улицы или дома адреса нет: возвращается `null`, и заказ уходит
+ * к человеку. Подставлять вместо этого `shipmentAddress` запрещено — ради его
+ * замены контракт и вводился, а тихий откат превратил бы проверку нового
+ * контракта в проверку неизвестно чего.
+ */
+export function composeWorkingAddress(
+  full: MoyskladOrderDto['shipmentAddressFull'],
+): string | null {
+  if (full === undefined || full === null) {
+    return null;
+  }
+  const city = text(full.city);
+  const street = text(full.street);
+  const house = text(full.house);
+  if (city === null || street === null || house === null) {
+    return null;
+  }
+  return [city, street, house].join(', ');
+}
+
+/**
+ * ДЕТАЛИ адреса: то, что нужно человеку и мешает машине.
+ *
+ * Регион, квартира или офис и «Другое». Подписи ставятся только у непустых
+ * частей: строка «Регион:  · Кв./офис: 55» заставляла бы гадать, потеряно
+ * значение или его не было.
+ *
+ * Поле источника `comment` сюда НЕ входит: в интерфейсе МоегоСклада «Другое» —
+ * это `addInfo`, а `comment` — отдельное поле адреса, и склеивать их значило
+ * бы приписать человеку слова, которых он не писал.
+ *
+ * Индекс и страна пока не показываются — решение владельца.
+ */
+export function composeAddressDetails(
+  full: MoyskladOrderDto['shipmentAddressFull'],
+  regions: RegionNames = new Map(),
+): string | null {
+  if (full === undefined || full === null) {
+    return null;
+  }
+
+  const regionHref =
+    typeof full.region === 'object' && full.region !== null
+      ? text((full.region as { meta?: { href?: unknown } }).meta?.href)
+      : null;
+  const regionName = regionHref === null ? null : (text(regions.get(regionHref)) ?? null);
+
+  const parts = [
+    regionName === null ? null : `Регион: ${regionName}`,
+    text(full.apartment) === null ? null : `Кв./офис: ${text(full.apartment) ?? ''}`,
+    text(full.addInfo) === null ? null : `Другое: ${text(full.addInfo) ?? ''}`,
+  ].filter((part): part is string => part !== null);
+
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
 /** Откуда собирать запрос к геокодеру. Адрес заказа этим не управляется. */
 export type AddressSource = 'shipmentAddress' | 'shipmentAddressFull';
 
@@ -242,6 +330,7 @@ export function mapOrder(
   order: MoyskladOrderDto,
   ids: Ids,
   addressSource: AddressSource = 'shipmentAddress',
+  regions: RegionNames = new Map(),
 ): MapOrderResult {
   const storeId = idFromHref(order.store?.meta.href);
   const deliveryMethod = attribute(order, ids.deliveryMethodAttribute);
@@ -293,6 +382,17 @@ export function mapOrder(
     addressSource === 'shipmentAddressFull'
       ? composeStructuredAddress(order.shipmentAddressFull)
       : null;
+
+  /*
+   * Кандидаты нового контракта собираются ВСЕГДА.
+   *
+   * Разбор ответа ничего не стоит и ни на что не влияет сам по себе: решение,
+   * жить ли заказу по новому контракту, принимает импорт при создании строки.
+   * Собирать их «только когда включён выключатель» значило бы завести второй
+   * источник правды о том, что пришло из МоегоСклада.
+   */
+  const structuredAddress = composeWorkingAddress(order.shipmentAddressFull);
+  const addressDetails = composeAddressDetails(order.shipmentAddressFull, regions);
   const recipient = attribute(order, ids.recipientAttribute).text;
   const comment = attribute(order, ids.commentAttribute).text;
 
@@ -314,6 +414,8 @@ export function mapOrder(
     intervalEndMinute: interval.endMinute,
     address,
     geocodeAddress,
+    structuredAddress,
+    addressDetails,
     recipient,
     comment,
     paymentTypeId: paymentType.id,

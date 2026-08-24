@@ -615,6 +615,15 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
           )}
         </div>
       )}
+      {/*
+        Детали — сразу под адресом, до получателя и комментария. Между домом
+        и квартирой ничего не вклинивается: курьер читает их одним взглядом.
+      */}
+      {order.addressDetails === null ? null : (
+        <div className="delivery__order-muted" data-testid="delivery-address-details">
+          {order.addressDetails}
+        </div>
+      )}
       {order.recipient === null ? null : (
         <div className="delivery__order-muted">{order.recipient}</div>
       )}

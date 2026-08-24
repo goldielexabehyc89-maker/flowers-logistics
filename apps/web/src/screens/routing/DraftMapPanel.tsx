@@ -115,9 +115,13 @@ export function DraftMapPanel({
   const selectedOrder = useQuery({
     queryKey: ['order-address', selectedOrderId],
     enabled: selectedOrderId !== null,
-    queryFn: () => client.get<{ address: string | null }>(`/api/orders/${selectedOrderId ?? ''}`),
+    queryFn: () =>
+      client.get<{ order: { address: string | null; addressDetails: string | null } }>(
+        `/api/orders/${selectedOrderId ?? ''}`,
+      ),
   });
-  const address = selectedOrder.data?.address ?? null;
+  const address = selectedOrder.data?.order.address ?? null;
+  const addressDetails = selectedOrder.data?.order.addressDetails ?? null;
 
   // Подпись стабильна между рендерами: иначе маркеры пересобирались бы
   // на каждом обновлении списка и карта дёргалась бы.
@@ -428,6 +432,11 @@ export function DraftMapPanel({
           <p className="routes__map-window-address" title={address ?? undefined}>
             {address ?? '—'}
           </p>
+          {addressDetails !== null && (
+            <p className="routes__map-window-address muted text-sm" title={addressDetails}>
+              {addressDetails}
+            </p>
+          )}
 
           <p className="routes__map-window-label">
             {action.kind === 'ASSIGN' ? 'Назначить в маршрут:' : 'Переназначить в маршрут:'}

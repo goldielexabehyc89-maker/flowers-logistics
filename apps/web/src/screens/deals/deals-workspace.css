@@ -396,6 +396,22 @@
   text-overflow: ellipsis;
 }
 
+/*
+ * Детали адреса — вторая строка сразу под адресом.
+ *
+ * Именно под ним, а не среди служебных пометок ниже: квартира относится
+ * к адресу, и разлучать их пометкой «интервал вручную» значило бы заставить
+ * логиста собирать адрес глазами из двух мест карточки.
+ */
+.deals__address-details {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .deals__muted {
   /* Интервал и служебные пометки — спокойным тоном, но читаемым. */
   color: var(--color-text-muted);

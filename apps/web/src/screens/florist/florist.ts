@@ -229,7 +229,9 @@ export function formatInterval(item: {
     return 'без времени';
   }
   if (item.endMinute === null || item.endMinute === item.startMinute) {
-    return formatMinutesOfDay(item.startMinute);
+    // Предлог обязателен: голое «14:00» в строке очереди читается как начало
+    // чего-то, и флорист гадает, есть ли у него запас до конца окна.
+    return `к ${formatMinutesOfDay(item.startMinute)}`;
   }
   return `${formatMinutesOfDay(item.startMinute)} – ${formatMinutesOfDay(item.endMinute)}`;
 }

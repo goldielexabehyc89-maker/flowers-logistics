@@ -359,9 +359,55 @@ describe('разбор интервала', () => {
     }
   });
 
-  it('обратный и нулевой диапазон не распознаются', () => {
+  it('обратный диапазон не распознаётся', () => {
+    // Опечатка это или переход через полночь — неизвестно, а угадывать нельзя.
     expect(parseDeliveryInterval('с 19:00 по 16:00').kind).toBe('UNRECOGNIZED');
-    expect(parseDeliveryInterval('14:00 - 14:00').kind).toBe('UNRECOGNIZED');
+    expect(parseDeliveryInterval('16:00 - 15:59').kind).toBe('UNRECOGNIZED');
+  });
+
+  it('одинаковые границы — точное время при любом разделителе', () => {
+    /*
+     * «с 09:00 до 09:00» человек пишет тогда, когда обещал прийти к девяти.
+     * Догадки здесь нет: обе границы названы им самим и совпадают.
+     *
+     * Проверяются ВСЕ поддерживаемые разделители: правило живёт в одной ветке
+     * после разбора, и разойтись они не могут — но именно это и надо
+     * зафиксировать, чтобы следующая правка выражения не сделала «до» точным
+     * временем, а тире оставила нераспознанным.
+     */
+    for (const input of [
+      'с 09:00 до 09:00',
+      'с 09:00 по 09:00',
+      '09:00 до 09:00',
+      '09:00 по 09:00',
+      '09:00-09:00',
+      '09:00 - 09:00',
+      '09:00 – 09:00',
+      '09:00 — 09:00',
+      '  С 09:00 До 09:00  ',
+    ]) {
+      const parsed = parseDeliveryInterval(input);
+      expect(parsed.kind, input).toBe('EXACT');
+      expect(parsed.startMinute, input).toBe(9 * 60);
+      // Конца нет — ровно как у одиночного времени. Второй способ хранить
+      // точное время развёл бы потребителей, читающих только `endMinute`.
+      expect(parsed.endMinute, input).toBeNull();
+      // Исходная строка сохраняется целиком, включая пробелы по краям.
+      expect(parsed.raw, input).toBe(input);
+    }
+  });
+
+  it('одинаковые границы полуночи и конца суток тоже точное время', () => {
+    expect(parseDeliveryInterval('00:00 - 00:00')).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 0,
+      endMinute: null,
+    });
+    expect(parseDeliveryInterval('23:59 - 23:59')).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 23 * 60 + 59,
+      endMinute: null,
+    });
   });
 
   it('границы времени принимаются корректно', () => {
@@ -821,15 +867,32 @@ describe('полнота списка полей снимка', () => {
     apartment: '137',
   };
 
+  /*
+   * Оба снимка сняты с ОДНОГО заказа: различается только источник запроса.
+   *
+   * Разобранные части присутствуют в обоих — их маппер собирает всегда,
+   * независимо от источника и версии контракта. Так проверка и остаётся
+   * проверкой одного поля: убери мы части из «до», отличий стало бы три,
+   * и утверждение «изменилось ровно одно» доказывало бы совсем другое.
+   */
   const withQuery = (): OrderSnapshot =>
     mapOrder(order({ shipmentAddressFull: FULL } as never), IDS, 'shipmentAddressFull').snapshot;
-  const withoutQuery = (): OrderSnapshot => mapOrder(order(), IDS).snapshot;
+  const withoutQuery = (): OrderSnapshot =>
+    mapOrder(order({ shipmentAddressFull: FULL } as never), IDS).snapshot;
 
   it('запрос к геокодеру входит в список полей снимка', () => {
     // Через этот список работают сравнение снимков, канонический JSON и хеш.
     // Поле, добавленное в тип, но не сюда, было бы невидимо для всех троих.
     expect(SNAPSHOT_KEYS).toContain('geocodeAddress');
     expect(SNAPSHOT_KEYS).toContain('address');
+    // Рабочий адрес и детали нового контракта — там же. Поля, невидимого для
+    // сравнения снимков, изменение источника не достигло бы вовсе: заказ
+    // считался бы неизменившимся, и новая квартира не доехала бы до карточки.
+    expect(SNAPSHOT_KEYS).toContain('structuredAddress');
+    expect(SNAPSHOT_KEYS).toContain('addressDetails');
+    // А версии контракта в снимке нет и быть не должно: это наше решение
+    // о переходе, а не данные МоегоСклада.
+    expect(SNAPSHOT_KEYS).not.toContain('addressContractVersion');
   });
 
   it('изменение ОДНОГО лишь запроса геокодера видно в changedFields', () => {

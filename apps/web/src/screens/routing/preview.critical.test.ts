@@ -58,6 +58,7 @@ function view(patch: Partial<PlanRunView> = {}): PlanRunView {
         id: 'a',
         number: 'A-1024',
         address: 'Москва, улица 1',
+        addressDetails: null,
         intervalStartMinute: 12 * 60,
         intervalEndMinute: 18 * 60,
       },
