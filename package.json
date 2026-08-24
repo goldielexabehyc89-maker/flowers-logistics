@@ -44,6 +44,7 @@
     "seed:e2e-pickup-stand": "tsx apps/api/src/scripts/seed-e2e-pickup-stand.ts",
     "seed:e2e-returns": "tsx apps/api/src/scripts/seed-e2e-returns.ts",
     "seed:e2e-order-history": "tsx apps/api/src/scripts/seed-e2e-order-history.ts",
+    "seed:e2e-structured-address": "tsx apps/api/src/scripts/seed-e2e-structured-address.ts",
     "snapshot:import": "node apps/api/dist/scripts/snapshot-import.js",
     "snapshot:import:dev": "tsx apps/api/src/scripts/snapshot-import.ts",
     "snapshot:retire": "node apps/api/dist/scripts/snapshot-retire.js",
