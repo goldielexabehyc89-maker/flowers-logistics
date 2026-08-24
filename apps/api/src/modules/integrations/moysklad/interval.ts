@@ -8,7 +8,9 @@
  * планированию маршрута.
  *
  * По той же причине одиночное время остаётся точным временем: окно вокруг него
- * не выдумывается.
+ * не выдумывается. Диапазон с ОДИНАКОВЫМИ границами — тот же случай: «с 09:00
+ * до 09:00» человек пишет ровно тогда, когда обещал прийти к девяти, и это
+ * точное время, записанное привычной ему формой.
  */
 
 export type DeliveryIntervalKind = 'MISSING' | 'RANGE' | 'EXACT' | 'UNRECOGNIZED';
@@ -70,7 +72,8 @@ function group(match: RegExpExecArray, index: number): string {
  * Разбирает текст интервала.
  *
  * Возвращает MISSING для пустого значения, RANGE для корректного диапазона,
- * EXACT для одиночного времени и UNRECOGNIZED во всех остальных случаях.
+ * EXACT для одиночного времени и для диапазона с одинаковыми границами,
+ * UNRECOGNIZED во всех остальных случаях.
  */
 export function parseDeliveryInterval(input: string | null | undefined): ParsedInterval {
   if (input === null || input === undefined) {
@@ -89,9 +92,25 @@ export function parseDeliveryInterval(input: string | null | undefined): ParsedI
     const start = toMinutes(group(range, 1), group(range, 2));
     const end = toMinutes(group(range, 3), group(range, 4));
 
-    // Обратный и нулевой диапазон — не интервал. «с 19:00 по 16:00» может быть
+    /*
+     * Одинаковые границы — точное время, а не пустой интервал.
+     *
+     * Прежде такой заказ уходил в «Требует внимания» как нераспознанный, и
+     * логист руками вписывал то же самое время. Догадки здесь нет: обе
+     * границы названы человеком и совпадают, а «в 09:00» и «с 09:00 до 09:00»
+     * обещают клиенту одно и то же.
+     *
+     * Конец остаётся пустым — ровно как у одиночного времени. Записать сюда
+     * `end` значило бы завести второй способ хранить точное время, и первый
+     * же потребитель, читающий только `endMinute`, увидел бы диапазон.
+     */
+    if (end === start) {
+      return { kind: 'EXACT', startMinute: start, endMinute: null, raw };
+    }
+
+    // Обратный диапазон интервалом не является. «с 19:00 по 16:00» может быть
     // как опечаткой, так и переходом через полночь; угадывать между ними нельзя.
-    if (end <= start) {
+    if (end < start) {
       return { kind: 'UNRECOGNIZED', startMinute: null, endMinute: null, raw };
     }
     return { kind: 'RANGE', startMinute: start, endMinute: end, raw };

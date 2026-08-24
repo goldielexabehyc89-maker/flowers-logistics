@@ -68,6 +68,7 @@ const DAY_EIGHT = '2026-12-08';
 const DAY_NINE = '2026-12-09';
 const DAY_TEN = '2026-12-10';
 const DAY_ELEVEN = '2026-12-11';
+const DAY_EQUAL_BOUNDS = '2026-12-21';
 
 const SHIFT = { startMinute: 9 * 60, endMinute: 21 * 60 };
 
@@ -501,6 +502,55 @@ describe('условия планирования', () => {
     // начало обслуживания ровно в названную минуту, без выдуманного допуска.
     const jobs = solver.requests[0]?.jobs ?? [];
     const index = snapshot.orders.findIndex((order) => order.orderId === exact);
+    expect(jobs[index]?.time_windows).toEqual([[14 * 60 * 60, 14 * 60 * 60]]);
+  });
+
+  it('одинаковые границы уходят решателю тем же окном нулевой ширины', async () => {
+    /*
+     * «с 14:00 до 14:00» и «к 14:00» обещают клиенту одно и то же, и решатель
+     * обязан получить одно и то же. Проверяется именно ВХОД решателя: здесь
+     * ошибка стоила бы дороже всего — заказ уехал бы с выдуманным окном,
+     * а на экране по-прежнему стояло бы точное время.
+     */
+    const actor = await actorWith(['LOGISTICIAN']);
+    // Свой день: соседние заняты, а расчёт на чужом дне сделал бы отказ
+    // «у дня уже есть незавершённый запуск» зависимым от порядка проверок.
+    const equal = await seedOrder({
+      day: DAY_EQUAL_BOUNDS,
+      interval: 'с 14:00 до 14:00',
+      latMicro: 55_755_000,
+      lonMicro: 37_615_000,
+    });
+    await seedOrder({ day: DAY_EQUAL_BOUNDS, latMicro: 55_756_000, lonMicro: 37_616_000 });
+
+    const solver = fakeSolver();
+    const deps = planningDeps({ solver });
+    await clearQueue();
+
+    // Заказ расчёт не блокирует: ручного интервала от логиста не требуется.
+    const created = await requestPlan(
+      deps,
+      actor,
+      { deliveryDate: DAY_EQUAL_BOUNDS, slots: [slot()] },
+      CONTEXT,
+    );
+    expect(created.state).toBe('QUEUED');
+
+    await runPlanningOnce(deps);
+
+    const stored = await ctx.db.routePlanInputSnapshot.findUniqueOrThrow({
+      where: { runId: created.id },
+      select: { payload: true },
+    });
+    const snapshot = stored.payload as unknown as PlanInputSnapshot;
+    const equalOrder = snapshot.orders.find((order) => order.orderId === equal);
+
+    expect(equalOrder?.windowExact).toBe(true);
+    expect(equalOrder?.windowStartMinute).toBe(14 * 60);
+    expect(equalOrder?.windowEndMinute).toBe(14 * 60);
+
+    const jobs = solver.requests[0]?.jobs ?? [];
+    const index = snapshot.orders.findIndex((order) => order.orderId === equal);
     expect(jobs[index]?.time_windows).toEqual([[14 * 60 * 60, 14 * 60 * 60]]);
   });
 
