@@ -9373,10 +9373,12 @@ test('адрес: маршрутный лист и печатная форма �
    *
    * По первому считается порядок объезда, второе курьер читает у двери.
    */
-  const stopDetails = page.getByTestId('route-stop-address-details').first();
+  const ownStop = page.locator('[data-testid="route-stop"]', { hasText: SA_FULL });
+  const stopDetails = ownStop.getByTestId('route-stop-address-details');
   await expect(stopDetails).toBeVisible();
   await expect(stopDetails).toContainText('Кв./офис: 55');
-  const stopAddress = page.locator('.routes__stop-address').first();
+  const stopAddress = ownStop.locator('.routes__stop-address').first();
+  await expect(stopAddress).toContainText('Маленковская');
   await expect(stopAddress).not.toContainText('Кв./офис');
 
   /*
@@ -9389,7 +9391,9 @@ test('адрес: маршрутный лист и печатная форма �
    * Курьер для этого не нужен: лист живёт и без него, а проверяется здесь
    * состав, а не отгрузка.
    */
-  const draft = page.locator('.routes__draft').first();
+  // Черновик ищется по СВОЕМУ заказу: соседние сценарии оставляют свои,
+  // и «первый в списке» доказывал бы порядок запуска, а не поведение.
+  const draft = page.locator('.routes__draft', { hasText: SA_FULL });
   await draft.getByRole('button', { name: 'Создать МЛ' }).click();
   await page.getByTestId('route-confirm-submit').click();
 
