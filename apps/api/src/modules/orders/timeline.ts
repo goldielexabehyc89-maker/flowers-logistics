@@ -577,21 +577,35 @@ export async function readOrderTimeline(
       createdAt: true,
       completedAt: true,
       completedById: true,
+      printForm: { select: { id: true, assemblyRound: true } },
     },
   });
+  /*
+   * «Первая печать» считается по БЛАНКУ, а не по счётчику заказа.
+   *
+   * Попытки нумеруются сквозь весь заказ, и после пересборки первая печать
+   * нового бланка получала номер три. На экране это читалось как «опять
+   * перепечатали», хотя печатали новый букет первый раз.
+   */
+  const printedForms = new Set<string>();
   for (const job of printJobs) {
     if (job.completedAt === null) {
       continue;
     }
+    const first = !printedForms.has(job.printForm.id);
+    printedForms.add(job.printForm.id);
     events.push(
       event({
         key: `21:print-job:${job.id}`,
         at: job.completedAt,
         group: 'FLORIST',
-        kind: job.attempt === 1 ? 'ORDER_PRINTED' : 'ORDER_REPRINTED',
-        title: job.attempt === 1 ? 'Бланк напечатан' : 'Бланк напечатан повторно',
+        kind: first ? 'ORDER_PRINTED' : 'ORDER_REPRINTED',
+        title: first ? 'Бланк напечатан' : 'Бланк напечатан повторно',
         actor: userActor(job.completedById),
-        details: [{ label: 'Попытка печати', value: String(job.attempt) }],
+        details: [
+          { label: 'Круг сборки', value: String(job.printForm.assemblyRound) },
+          { label: 'Попытка печати', value: String(job.attempt) },
+        ],
         reverted: false,
         route: null,
       }),

@@ -8667,8 +8667,10 @@ test('история заказа: успешная доставка, повто
   expect(decisionAt).toBeLessThan(reassemblyKinds.lastIndexOf('ORDER_FULFILLMENT_ASSEMBLED'));
   // Первый круг никуда не делся: его строки по-прежнему выше решения.
   expect(reassemblyKinds.indexOf('ORDER_FULFILLMENT_ASSEMBLED')).toBeLessThan(decisionAt);
-  // Второй бланк напечатан для второго круга сборки.
+  // Второй круг печатается как ПЕРВАЯ печать своего бланка, а не как повтор.
+  expect(reassemblyKinds.filter((value) => value === 'ORDER_PRINTED')).toHaveLength(2);
   await expect(page.locator('[data-kind="ORDER_PRINT_FORM_CREATED"]').last()).toContainText('2');
+  await expect(page.locator('[data-kind="ORDER_PRINTED"]').last()).toContainText('Круг сборки');
   // Снятие с полки на пересборку названо причиной.
   await expect(page.locator('[data-kind="PLACEMENT_RELEASED_WITHDRAWN"]')).toContainText(
     'на пересборку',
