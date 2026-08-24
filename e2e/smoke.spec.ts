@@ -9100,3 +9100,276 @@ test('раздел «История заказов»: скрыт у чужих �
   expect(before).not.toContain(expected);
   await expect(row).toContainText(expected, { timeout: 30_000 });
 });
+
+/*
+ * Два адресных контракта рядом.
+ *
+ * Проверяется не «видно ли строку», а то, из-за чего заказ уедет не туда:
+ * рабочий адрес заказа версии 2 не содержит квартиры, детали идут отдельной
+ * строкой и не склеиваются с адресом, у заказа прежнего контракта их нет
+ * вовсе, а заказ без дома виден человеку, а не молча уходит в геокодер.
+ *
+ * Заказы приходят фикстурой `seed:e2e-structured-address` — настоящим путём
+ * импорта, поэтому на экране видно то же, что придёт из МоегоСклада.
+ */
+const SA_LEGACY = process.env['E2E_SA_LEGACY'] ?? '';
+const SA_FULL = process.env['E2E_SA_FULL'] ?? '';
+const SA_FULL_DETAILS = process.env['E2E_SA_FULL_DETAILS'] ?? '';
+const SA_FULL_ADDRESS = process.env['E2E_SA_FULL_ADDRESS'] ?? '';
+const SA_NODETAILS = process.env['E2E_SA_NODETAILS'] ?? '';
+const SA_NOHOUSE = process.env['E2E_SA_NOHOUSE'] ?? '';
+const SA_MANUAL = process.env['E2E_SA_MANUAL'] ?? '';
+const SA_LATE = process.env['E2E_SA_LATE'] ?? '';
+
+/** Карточка «Сделок» по номеру: поиск действует внутри выбранного дня. */
+async function dealCard(page: Page, number: string): Promise<Locator> {
+  await page.getByLabel('Поиск в этом дне').fill(number);
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
+  await expect(card).toBeVisible();
+  return card;
+}
+
+test('адрес: детали отдельной строкой, а прежний контракт не изменился', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(SA_FULL === '', 'не переданы фикстуры адресного контракта (E2E_SA_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+
+  /*
+   * 1. Заказ версии 2: адрес и детали — ДВЕ строки.
+   *
+   * Строка адреса проверяется на отсутствие квартиры и домофона: именно её
+   * копируют в поиск и именно она уходит в геокодер.
+   */
+  const full = await dealCard(page, SA_FULL);
+  const fullDetails = full.getByTestId('deal-address-details');
+  await expect(fullDetails).toBeVisible();
+  await expect(fullDetails).toContainText('Кв./офис: 55');
+  await expect(fullDetails).toContainText('домофон 42');
+  if (SA_FULL_ADDRESS !== '') {
+    await expect(full.locator('.deals__line')).toHaveText(SA_FULL_ADDRESS);
+  }
+  await expect(full.locator('.deals__line')).not.toContainText('Кв./офис');
+  await expect(full.locator('.deals__line')).not.toContainText('домофон');
+
+  // 2. Заказ прежнего контракта выглядит ровно как прежде: второй строки нет.
+  const legacy = await dealCard(page, SA_LEGACY);
+  await expect(legacy.getByTestId('deal-address-details')).toHaveCount(0);
+  // Операционная строка источника показывается целиком — так было и до перехода.
+  await expect(legacy.locator('.deals__line')).toContainText('кв. 12');
+
+  // 3. Версия 2 без деталей: пустой блок не рисуется.
+  const noDetails = await dealCard(page, SA_NODETAILS);
+  await expect(noDetails.getByTestId('deal-address-details')).toHaveCount(0);
+
+  /*
+   * 4. Версия 2 без дома: рабочего адреса нет, и запасного пути тоже.
+   *
+   * Операционная строка источника у этого заказа заполнена — и всё равно
+   * не показывается: ради её замены контракт и вводился.
+   */
+  const noHouse = await dealCard(page, SA_NOHOUSE);
+  await expect(noHouse.locator('.deals__line')).toHaveText('Адрес не указан');
+  await expect(noHouse.locator('.deals__line')).not.toContainText('Русаковской');
+  await expect(noHouse.getByTestId('deal-address-details')).toContainText('Кв./офис: 7');
+  await expect(noHouse.getByTestId('deal-attention')).toContainText(/адрес/i);
+
+  // 5. Ручная правка логиста сильнее источника, а детали при ней остаются.
+  const manual = await dealCard(page, SA_MANUAL);
+  await expect(manual.locator('.deals__line')).toContainText('Сокольническая площадь');
+  await expect(manual.getByTestId('deal-address-details')).toContainText('Кв./офис: 3');
+
+  /*
+   * 6. Окно заказа: те же два значения и в том же порядке.
+   */
+  await dealCard(page, SA_FULL);
+  await page
+    .locator(`[data-testid="deal-card"][data-order-number="${SA_FULL}"]`)
+    .getByTestId('order-number')
+    .click();
+  const window = page.getByTestId('order-window');
+  await expect(window).toBeVisible();
+  const windowDetails = window.getByTestId('order-window-address-details');
+  await expect(windowDetails).toBeVisible();
+  if (SA_FULL_DETAILS !== '') {
+    await expect(windowDetails).toHaveText(SA_FULL_DETAILS);
+  }
+
+  // Детали стоят НИЖЕ адреса, а не сбоку от него и не выше.
+  const addressBox = await window.locator('.order-window__value').first().boundingBox();
+  const detailsBox = await windowDetails.boundingBox();
+  expect(addressBox).not.toBeNull();
+  expect(detailsBox).not.toBeNull();
+  expect(detailsBox?.y ?? 0).toBeGreaterThanOrEqual(addressBox?.y ?? 0);
+
+  /*
+   * 7. История заказа: рабочий адрес и детали — разные поля шапки.
+   */
+  await page.getByTestId('order-window-history').click();
+  await expect(page.getByTestId('order-history')).toBeVisible();
+  const header = page.getByTestId('order-history-header');
+  await expect(header).toContainText('Рабочий адрес');
+  await expect(header).toContainText('Детали адреса');
+  if (SA_FULL_ADDRESS !== '') {
+    await expect(header).toContainText(SA_FULL_ADDRESS);
+  }
+});
+
+test('адрес: обновление источника без F5, точка и отдельные строки истории', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(SA_LATE === '', 'не переданы фикстуры адресного контракта (E2E_SA_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  /*
+   * Сигнал источника подаётся отдельным запросом с собственным входом.
+   *
+   * Токен берётся своим входом, а не из браузера: страница остаётся открытой
+   * и обязана обновиться сама — этим и проверяется отсутствие F5.
+   */
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  const card = await dealCard(page, SA_LATE);
+  await expect(card.getByTestId('deal-address-details')).toContainText('Кв./офис: 19');
+
+  /*
+   * 1. Источник поправил ТОЛЬКО квартиру.
+   *
+   * Экран обязан показать новое значение без перезагрузки, а координатное
+   * состояние — остаться прежним: дом не менялся, и повторно искать его
+   * незачем.
+   */
+  const geoBefore = await card.getAttribute('data-selectable');
+  const detailsChange = await request.post('/api/testing/source-address', {
+    headers,
+    data: {
+      orderNumber: SA_LATE,
+      city: 'г. Москва',
+      street: 'Стромынка',
+      house: '21',
+      apartment: '19А',
+      addInfo: 'код у двери 1917',
+    },
+  });
+  expect(detailsChange.ok(), await detailsChange.text()).toBeTruthy();
+
+  await expect(card.getByTestId('deal-address-details')).toContainText('Кв./офис: 19А');
+  await expect(card.getByTestId('deal-address-details')).toContainText('код у двери 1917');
+  // Адрес не дрогнул, и заказ по-прежнему пригоден к маршруту.
+  await expect(card.locator('.deals__line')).toContainText('Стромынка, 21');
+  expect(await card.getAttribute('data-selectable')).toBe(geoBefore);
+
+  /*
+   * 2. Источник сменил ДОМ.
+   *
+   * Прежняя точка к новому дому не относится: она снимается, и заказ уходит
+   * на повторное определение. Оставить её пригодной опаснее, чем потерять.
+   */
+  const houseChange = await request.post('/api/testing/source-address', {
+    headers,
+    data: {
+      orderNumber: SA_LATE,
+      city: 'г. Москва',
+      street: 'Стромынка',
+      house: '23',
+      apartment: '19А',
+      addInfo: 'код у двери 1917',
+    },
+  });
+  expect(houseChange.ok(), await houseChange.text()).toBeTruthy();
+
+  await expect(card.locator('.deals__line')).toContainText('Стромынка, 23');
+  await expect(card).toHaveAttribute('data-selectable', 'no');
+
+  /*
+   * 3. История различает два события.
+   *
+   * Изменение адреса и изменение деталей — разные строки: слитое «адрес
+   * изменился» заставляло бы каждый раз выяснять, надо ли перепроверять
+   * маршрут.
+   */
+  await page
+    .locator(`[data-testid="deal-card"][data-order-number="${SA_LATE}"]`)
+    .getByTestId('order-number')
+    .click();
+  await expect(page.getByTestId('order-window')).toBeVisible();
+  await page.getByTestId('order-window-history').click();
+  await expect(page.getByTestId('order-history')).toBeVisible();
+
+  const kinds = await historyKinds(page);
+  expect(kinds.filter((kind) => kind === 'STRUCTURED_ADDRESS_DETAILS').length).toBeGreaterThan(0);
+  expect(kinds.filter((kind) => kind === 'STRUCTURED_ADDRESS_ADDRESS').length).toBeGreaterThan(0);
+
+  const detailsRow = page
+    .locator('[data-testid="order-history-event"][data-kind="STRUCTURED_ADDRESS_DETAILS"]')
+    .first();
+  await expect(detailsRow).toContainText('детали адреса');
+  const addressRow = page
+    .locator('[data-testid="order-history-event"][data-kind="STRUCTURED_ADDRESS_ADDRESS"]')
+    .first();
+  await expect(addressRow).toContainText('адрес доставки');
+});
+
+test('адрес: маршрутный лист и печатная форма показывают оба значения', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  test.skip(SA_FULL === '', 'не переданы фикстуры адресного контракта (E2E_SA_*)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+
+  // Черновик из одного заказа версии 2: маршрут строится по рабочему адресу.
+  const card = await dealCard(page, SA_FULL);
+  await expect(card).toHaveAttribute('data-selectable', 'yes');
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await expect(page.getByTestId('create-route-dialog')).toBeVisible();
+  await page.getByTestId('create-route-draft').click();
+  await expect(page).toHaveURL(/\/logistics\/routing\?route=/);
+
+  /*
+   * Карточка маршрута показывает адрес и детали разными строками.
+   *
+   * По первому считается порядок объезда, второе курьер читает у двери.
+   */
+  const stopDetails = page.getByTestId('route-stop-address-details').first();
+  await expect(stopDetails).toBeVisible();
+  await expect(stopDetails).toContainText('Кв./офис: 55');
+  const stopAddress = page.locator('.routes__stop-address').first();
+  await expect(stopAddress).not.toContainText('Кв./офис');
+
+  /*
+   * Печатная форма листа: лист берут с собой, и спросить недостающее
+   * в пути будет не у кого — поэтому там оба значения.
+   */
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  await expect(page.getByTestId('sheets-search')).toBeVisible();
+  await page.getByTestId('sheets-search').fill(SA_FULL);
+  const sheetOrder = page.locator('.sheets__order-address').first();
+  await expect(sheetOrder).toBeVisible();
+  await expect(sheetOrder).toContainText('Кв./офис: 55');
+  await expect(sheetOrder).toContainText('Маленковская');
+});

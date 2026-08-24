@@ -358,6 +358,7 @@ async function main(): Promise<number> {
       });
 
       publish(`${role} · заказ`, number);
+      publish(`${role} · id`, row.id);
       publish(`${role} · контракт`, contractVersionOf(row));
       publish(`${role} · рабочий адрес`, effectiveAddress(row) ?? '—');
       publish(`${role} · детали`, addressDetailsOf(row) ?? '—');
