@@ -200,6 +200,128 @@ describe('одинаковые границы интервала — точно�
   });
 });
 
+describe('час без минут доходит до базы', () => {
+  /** Заказ с заданной строкой интервала. Путь настоящий: mapOrder → импорт. */
+  function withInterval(value: string): OrderSnapshot {
+    return snapshotOf({
+      attributes: [
+        {
+          id: IDS.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', IDS.deliveryMethodDelivery) },
+          },
+        },
+        { id: IDS.intervalAttribute, value },
+        { id: IDS.recipientAttribute, value: 'Получатель Тестовый' },
+      ],
+    });
+  }
+
+  async function importedWith(value: string) {
+    const snapshot = withInterval(value);
+    await apply(snapshot);
+    return ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+      select: {
+        intervalKind: true,
+        intervalStartMinute: true,
+        intervalEndMinute: true,
+        intervalRaw: true,
+        needsAttention: true,
+        attentionReasons: true,
+        manualIntervalStartMinute: true,
+      },
+    });
+  }
+
+  it('диапазон часов сохраняется окном, а исходная строка — как есть', async () => {
+    const order = await importedWith('с 9 до 10');
+
+    expect(order.intervalKind).toBe('RANGE');
+    expect(order.intervalStartMinute).toBe(540);
+    expect(order.intervalEndMinute).toBe(600);
+    // Строку источника мы не переписываем: логист должен видеть, что там
+    // написано на самом деле.
+    expect(order.intervalRaw).toBe('с 9 до 10');
+
+    // Причина внимания снята: интервал понят, руками править нечего.
+    expect(order.attentionReasons).not.toContain('UNRECOGNIZED_INTERVAL');
+    expect(order.needsAttention).toBe(false);
+    expect(order.manualIntervalStartMinute).toBeNull();
+  });
+
+  it('одиночный час сохраняется точным временем без конца', async () => {
+    const order = await importedWith('10');
+
+    expect(order.intervalKind).toBe('EXACT');
+    expect(order.intervalStartMinute).toBe(600);
+    // Конца у точного времени нет: второй способ его хранить развёл бы
+    // потребителей, читающих только `endMinute`.
+    expect(order.intervalEndMinute).toBeNull();
+    expect(order.intervalRaw).toBe('10');
+    expect(order.attentionReasons).not.toContain('UNRECOGNIZED_INTERVAL');
+  });
+
+  it('равные часы дают то же точное время, что и равные с минутами', async () => {
+    const order = await importedWith('9-9');
+
+    expect(order.intervalKind).toBe('EXACT');
+    expect(order.intervalStartMinute).toBe(540);
+    expect(order.intervalEndMinute).toBeNull();
+  });
+
+  it('смешанная запись 9:30-10 доходит до базы обеими границами', async () => {
+    const order = await importedWith('9:30-10');
+
+    expect(order.intervalKind).toBe('RANGE');
+    expect(order.intervalStartMinute).toBe(570);
+    expect(order.intervalEndMinute).toBe(600);
+  });
+
+  it('недопустимый час остаётся непонятым и виден человеку', async () => {
+    const order = await importedWith('9-25');
+
+    expect(order.intervalKind).toBe('UNRECOGNIZED');
+    expect(order.intervalStartMinute).toBeNull();
+    expect(order.intervalEndMinute).toBeNull();
+    expect(order.intervalRaw).toBe('9-25');
+    expect(order.attentionReasons).toContain('UNRECOGNIZED_INTERVAL');
+  });
+
+  it('повтор того же снимка не создаёт ни ревизии, ни события', async () => {
+    /*
+     * Синхронизация ходит каждые полминуты и приносит те же строки. Новое
+     * правило разбора не должно превращать неизменившийся заказ в поток
+     * уведомлений: сравнение идёт по разобранному снимку, а он тот же.
+     */
+    const snapshot = withInterval('с 9 до 10');
+    const created = await apply(snapshot);
+    expect(created.outcome).toBe('CREATED');
+
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+      select: { id: true, version: true },
+    });
+    const revisionsBefore = await ctx.db.deliveryOrderRevision.count({
+      where: { orderId: order.id },
+    });
+
+    const again = await apply(snapshot);
+    expect(again.outcome).toBe('UNCHANGED');
+    expect(again.changedFields).toEqual([]);
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { version: true },
+    });
+    expect(after.version).toBe(order.version);
+    expect(await ctx.db.deliveryOrderRevision.count({ where: { orderId: order.id } })).toBe(
+      revisionsBefore,
+    );
+  });
+});
+
 describe('область и ручной интервал', () => {
   it('импорт не перезаписывает ручной интервал логиста', async () => {
     const snapshot = snapshotOf();

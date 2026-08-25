@@ -139,6 +139,11 @@ describe('отображение данных остановки', () => {
 
   it('точное время не превращается в выдуманное окно', () => {
     expect(stopInterval({ ...interval, kind: 'EXACT', startMinute: 840 })).toBe('к 14:00');
+    // Час без минут доходит до остановки и печатной формы тем же значением.
+    expect(stopInterval({ ...interval, kind: 'EXACT', startMinute: 540 })).toBe('к 09:00');
+    expect(stopInterval({ ...interval, kind: 'RANGE', startMinute: 540, endMinute: 600 })).toBe(
+      '09:00 – 10:00',
+    );
   });
 
   it('нераспознанный интервал и пустая дата дают честный прочерк', () => {

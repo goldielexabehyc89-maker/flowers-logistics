@@ -92,6 +92,18 @@ describe('фактический интервал', () => {
     expect(result.text).not.toContain('–');
   });
 
+  it('час без минут показывается как точное время и как окно', () => {
+    // Источник написал «9», «9-10» — на экране это «к 09:00» и «09:00 – 10:00».
+    expect(effectiveInterval(interval({ raw: '9', kind: 'EXACT', startMinute: 540 })).text).toBe(
+      'к 09:00',
+    );
+    expect(
+      effectiveInterval(
+        interval({ raw: 'с 9 до 10', kind: 'RANGE', startMinute: 540, endMinute: 600 }),
+      ).text,
+    ).toBe('09:00 – 10:00');
+  });
+
   it('нераспознанный и пустой интервал дают честный прочерк', () => {
     expect(effectiveInterval(interval({ kind: 'MISSING' })).text).toBe(EMPTY_VALUE);
     expect(effectiveInterval(interval({ raw: 'когда удобно', kind: 'UNRECOGNIZED' })).text).toBe(

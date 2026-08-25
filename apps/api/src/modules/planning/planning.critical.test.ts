@@ -69,6 +69,8 @@ const DAY_NINE = '2026-12-09';
 const DAY_TEN = '2026-12-10';
 const DAY_ELEVEN = '2026-12-11';
 const DAY_EQUAL_BOUNDS = '2026-12-21';
+const DAY_HOUR_ONLY = '2026-12-22';
+const DAY_HOUR_RANGE = '2026-12-23';
 
 const SHIFT = { startMinute: 9 * 60, endMinute: 21 * 60 };
 
@@ -552,6 +554,91 @@ describe('условия планирования', () => {
     const jobs = solver.requests[0]?.jobs ?? [];
     const index = snapshot.orders.findIndex((order) => order.orderId === equal);
     expect(jobs[index]?.time_windows).toEqual([[14 * 60 * 60, 14 * 60 * 60]]);
+  });
+
+  it('час без минут уходит решателю тем же окном, что и запись с минутами', async () => {
+    /*
+     * «14» и «14:00» обещают клиенту одно и то же, а «с 9 до 10» — то же, что
+     * «09:00-10:00». Решатель обязан получить одно и то же: здесь ошибка стоит
+     * дороже всего — заказ уехал бы с чужим окном, а на экране стояло бы
+     * названное источником время.
+     */
+    const actor = await actorWith(['LOGISTICIAN']);
+    const exactHour = await seedOrder({
+      day: DAY_HOUR_ONLY,
+      interval: '14',
+      latMicro: 55_755_000,
+      lonMicro: 37_615_000,
+    });
+    await seedOrder({ day: DAY_HOUR_ONLY, latMicro: 55_756_000, lonMicro: 37_616_000 });
+
+    const solver = fakeSolver();
+    const deps = planningDeps({ solver });
+    await clearQueue();
+
+    const created = await requestPlan(
+      deps,
+      actor,
+      { deliveryDate: DAY_HOUR_ONLY, slots: [slot()] },
+      CONTEXT,
+    );
+    expect(created.state).toBe('QUEUED');
+    await runPlanningOnce(deps);
+
+    const stored = await ctx.db.routePlanInputSnapshot.findUniqueOrThrow({
+      where: { runId: created.id },
+      select: { payload: true },
+    });
+    const snapshot = stored.payload as unknown as PlanInputSnapshot;
+    const order = snapshot.orders.find((item) => item.orderId === exactHour);
+
+    expect(order?.windowExact).toBe(true);
+    expect(order?.windowStartMinute).toBe(14 * 60);
+    expect(order?.windowEndMinute).toBe(14 * 60);
+
+    const jobs = solver.requests[0]?.jobs ?? [];
+    const index = snapshot.orders.findIndex((item) => item.orderId === exactHour);
+    expect(jobs[index]?.time_windows).toEqual([[14 * 60 * 60, 14 * 60 * 60]]);
+  });
+
+  it('диапазон часов без минут становится обычным окном, а не точным временем', async () => {
+    const actor = await actorWith(['LOGISTICIAN']);
+    const ranged = await seedOrder({
+      day: DAY_HOUR_RANGE,
+      interval: 'с 9 до 10',
+      latMicro: 55_757_000,
+      lonMicro: 37_617_000,
+    });
+    await seedOrder({ day: DAY_HOUR_RANGE, latMicro: 55_758_000, lonMicro: 37_618_000 });
+
+    const solver = fakeSolver();
+    const deps = planningDeps({ solver });
+    await clearQueue();
+
+    const created = await requestPlan(
+      deps,
+      actor,
+      { deliveryDate: DAY_HOUR_RANGE, slots: [slot()] },
+      CONTEXT,
+    );
+    await runPlanningOnce(deps);
+
+    const stored = await ctx.db.routePlanInputSnapshot.findUniqueOrThrow({
+      where: { runId: created.id },
+      select: { payload: true },
+    });
+    const snapshot = stored.payload as unknown as PlanInputSnapshot;
+    const order = snapshot.orders.find((item) => item.orderId === ranged);
+
+    // Окно настоящее, а не нулевой ширины: у диапазона есть запас, и терять
+    // его нельзя — иначе решатель считал бы заказ невыполнимым.
+    expect(order?.windowExact).toBe(false);
+    expect(order?.windowStartMinute).toBe(9 * 60);
+    expect(order?.windowEndMinute).toBe(10 * 60);
+
+    const jobs = solver.requests[0]?.jobs ?? [];
+    const index = snapshot.orders.findIndex((item) => item.orderId === ranged);
+    expect(jobs[index]?.time_windows).toEqual([[9 * 60 * 60, 10 * 60 * 60]]);
   });
 
   it('невыполнимое точное время возвращается неразмещённым заказом, а не отказом', async () => {
