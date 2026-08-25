@@ -397,6 +397,123 @@ describe('разбор интервала', () => {
     }
   });
 
+  it('час без минут — это начало часа, при любом разделителе', () => {
+    /*
+     * «9-10» человек пишет ровно в том же смысле, что «09:00-10:00»: поле
+     * свободное, и минуты в нём опускают постоянно. Прежде такой заказ уходил
+     * в «Требует внимания», и логист вписывал руками то же самое.
+     *
+     * Ведущий ноль не обязателен: «9» и «09» — один и тот же час.
+     */
+    const ranges: [string, number, number][] = [
+      ['9-10', 9 * 60, 10 * 60],
+      ['09-10', 9 * 60, 10 * 60],
+      ['с 9 до 10', 9 * 60, 10 * 60],
+      ['9 по 10', 9 * 60, 10 * 60],
+      ['9–10', 9 * 60, 10 * 60],
+      ['9—10', 9 * 60, 10 * 60],
+      ['  С 9 До 10  ', 9 * 60, 10 * 60],
+      // Смешанные записи: минуты названы у одной границы и опущены у другой.
+      ['9:30-10', 9 * 60 + 30, 10 * 60],
+      ['9-10:30', 9 * 60, 10 * 60 + 30],
+      ['9.30-10', 9 * 60 + 30, 10 * 60],
+    ];
+
+    for (const [input, start, end] of ranges) {
+      const parsed = parseDeliveryInterval(input);
+      expect(parsed.kind, input).toBe('RANGE');
+      expect(parsed.startMinute, input).toBe(start);
+      expect(parsed.endMinute, input).toBe(end);
+      expect(parsed.raw, input).toBe(input);
+    }
+
+    // Одиночный час — точное время, с тем же контрактом, что и «в 14:00».
+    for (const [input, minute] of [
+      ['10', 10 * 60],
+      ['9', 9 * 60],
+      ['09', 9 * 60],
+      ['в 9', 9 * 60],
+      ['к 10', 10 * 60],
+      ['0', 0],
+    ] as [string, number][]) {
+      const parsed = parseDeliveryInterval(input);
+      expect(parsed.kind, input).toBe('EXACT');
+      expect(parsed.startMinute, input).toBe(minute);
+      expect(parsed.endMinute, input).toBeNull();
+      expect(parsed.raw, input).toBe(input);
+    }
+  });
+
+  it('равные часы без минут — точное время, как и равные с минутами', () => {
+    expect(parseDeliveryInterval('9-9')).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 9 * 60,
+      endMinute: null,
+    });
+    expect(parseDeliveryInterval('с 9 до 9')).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 9 * 60,
+      endMinute: null,
+    });
+    // Смешанная запись того же часа тоже равна сама себе.
+    expect(parseDeliveryInterval('9-9:00')).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 9 * 60,
+      endMinute: null,
+    });
+  });
+
+  it('час без минут не ослабил границы суток и не начал угадывать', () => {
+    /*
+     * Необязательные минуты не должны превращать мусор в интервал. Час
+     * по-прежнему ограничен сутками, минуты — часом, а обратный диапазон
+     * остаётся обратным.
+     */
+    for (const input of [
+      '25',
+      '24',
+      '9-25',
+      '25-9',
+      '19-16',
+      '9:75',
+      '9-9:75',
+      '99',
+      'посторонний текст',
+      'после 18',
+      '18 часов',
+      '9 - ',
+      '-10',
+    ]) {
+      const parsed = parseDeliveryInterval(input);
+      expect(parsed.kind, input).toBe('UNRECOGNIZED');
+      expect(parsed.startMinute, input).toBeNull();
+      expect(parsed.endMinute, input).toBeNull();
+      expect(parsed.raw, input).toBe(input);
+    }
+  });
+
+  it('прежние записи с минутами не изменились', () => {
+    // Необязательные минуты — расширение, а не замена: всё, что работало,
+    // обязано работать ровно так же.
+    expect(parseDeliveryInterval('с 16:00 по 19:00')).toMatchObject({
+      kind: 'RANGE',
+      startMinute: 16 * 60,
+      endMinute: 19 * 60,
+    });
+    expect(parseDeliveryInterval('в 14:30')).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 14 * 60 + 30,
+      endMinute: null,
+    });
+    expect(parseDeliveryInterval('00:00 - 23:59')).toMatchObject({
+      kind: 'RANGE',
+      startMinute: 0,
+      endMinute: 23 * 60 + 59,
+    });
+    expect(parseDeliveryInterval('25:00 - 26:00').kind).toBe('UNRECOGNIZED');
+    expect(parseDeliveryInterval('12:60-13:00').kind).toBe('UNRECOGNIZED');
+  });
+
   it('одинаковые границы полуночи и конца суток тоже точное время', () => {
     expect(parseDeliveryInterval('00:00 - 00:00')).toMatchObject({
       kind: 'EXACT',

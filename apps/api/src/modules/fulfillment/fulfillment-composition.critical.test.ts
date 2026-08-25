@@ -761,12 +761,61 @@ describe('единица измерения количества', () => {
       ].sort(),
     );
 
-    // Ни кода ОКЕИ, ни внешнего кода, ни полного названия каталога в снимке
-    // нет: хранить непоказываемое — значит однажды показать его случайно.
-    const serialized = JSON.stringify(snapshot);
-    expect(serialized).not.toContain('796');
-    expect(serialized).not.toContain('PCS');
-    expect(serialized).not.toContain('Штука');
+    /*
+     * Ни кода ОКЕИ, ни внешнего кода, ни полного названия каталога в снимке
+     * нет: хранить непоказываемое — значит однажды показать его случайно.
+     *
+     * Проверяются ЗНАЧЕНИЯ, а не подстрока всего документа. Прежний поиск по
+     * `JSON.stringify` однажды нашёл «796» внутри случайного идентификатора
+     * (`a0693431-c796-4ca1-…`) и уронил проверку на ровном месте: она
+     * доказывала везение генератора, а не отсутствие кода.
+     *
+     * Строгость при этом не потеряна. Поля справочника — человекочитаемый
+     * текст, и они попали бы в снимок целыми значениями: подстрока ищется
+     * в тексте, а полное совпадение — вообще везде, включая идентификаторы.
+     */
+    const FORBIDDEN = ['796', 'PCS', 'Штука'];
+    const ID_KEYS = new Set([
+      'externalId',
+      'externalPositionId',
+      'externalComponentId',
+      'assortmentId',
+      'uomId',
+    ]);
+
+    /** Все строковые значения снимка: `[ключ, значение]`. */
+    function values(node: unknown, key = ''): [string, string][] {
+      if (typeof node === 'string') {
+        return [[key, node]];
+      }
+      if (Array.isArray(node)) {
+        return node.flatMap((item) => values(item, key));
+      }
+      if (typeof node === 'object' && node !== null) {
+        return Object.entries(node).flatMap(([name, item]) => values(item, name));
+      }
+      return [];
+    }
+
+    const all = values(snapshot);
+    expect(all.length).toBeGreaterThan(0);
+
+    for (const forbidden of FORBIDDEN) {
+      // В человекочитаемом тексте запрещённого нет даже частью.
+      expect(
+        all.filter(([key, value]) => !ID_KEYS.has(key) && value.includes(forbidden)),
+        `подстрока «${forbidden}» в тексте снимка`,
+      ).toEqual([]);
+
+      // А целым значением — нет нигде, включая поля идентификаторов.
+      expect(
+        all.filter(([, value]) => value === forbidden),
+        `значение «${forbidden}» в снимке`,
+      ).toEqual([]);
+    }
+
+    // Обозначение сохранилось именно короткое — то, что нужно на бланке.
+    expect(snapshot.positions[0]?.uomName).toBe('шт');
   });
 });
 

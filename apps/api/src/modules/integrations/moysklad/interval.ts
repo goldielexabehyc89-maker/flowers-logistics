@@ -33,7 +33,18 @@ const DASHES = '\\-\\u2013\\u2014';
  */
 const SEPARATOR = `(?:\\s*[${DASHES}]\\s*|\\s+(?:до|по)\\s+)`;
 
-const TIME = '([01]?\\d|2[0-3])[:.]([0-5]\\d)';
+/**
+ * Время: час обязателен, минуты — нет.
+ *
+ * «10» человек пишет ровно в том же смысле, что «10:00», и в поле свободного
+ * текста делает это постоянно. Минуты вынесены в необязательную группу того же
+ * выражения, а не в отдельный разбор: два разбора одного поля однажды разошлись
+ * бы, и «9-10» означало бы разное в импорте и в проверке.
+ *
+ * Часы и минуты по-прежнему ограничены сутками: `24`, `25` и `9:75` остаются
+ * непонятыми, а не превращаются в догадку.
+ */
+const TIME = '([01]?\\d|2[0-3])(?:[:.]([0-5]\\d))?';
 
 const RANGE_RE = new RegExp(`^(?:с\\s+)?${TIME}${SEPARATOR}${TIME}$`, 'i');
 const EXACT_RE = new RegExp(`^(?:в\\s+|к\\s+)?${TIME}$`, 'i');
@@ -52,6 +63,17 @@ function normalize(value: string): string {
 
 function toMinutes(hours: string, minutes: string): number {
   return Number(hours) * 60 + Number(minutes);
+}
+
+/**
+ * Минуты необязательной группы.
+ *
+ * Отсутствие группы — это НУЛЬ минут, а не отказ: «10» означает начало часа.
+ * Отдельная функция нужна потому, что `group` намеренно бросает на пустой
+ * группе — там она сторожит обязательные части выражения.
+ */
+function optionalMinutes(match: RegExpExecArray, index: number): string {
+  return match[index] ?? '00';
 }
 
 /**
@@ -89,8 +111,8 @@ export function parseDeliveryInterval(input: string | null | undefined): ParsedI
 
   const range = RANGE_RE.exec(text);
   if (range !== null) {
-    const start = toMinutes(group(range, 1), group(range, 2));
-    const end = toMinutes(group(range, 3), group(range, 4));
+    const start = toMinutes(group(range, 1), optionalMinutes(range, 2));
+    const end = toMinutes(group(range, 3), optionalMinutes(range, 4));
 
     /*
      * Одинаковые границы — точное время, а не пустой интервал.
@@ -120,7 +142,7 @@ export function parseDeliveryInterval(input: string | null | undefined): ParsedI
   if (exact !== null) {
     return {
       kind: 'EXACT',
-      startMinute: toMinutes(group(exact, 1), group(exact, 2)),
+      startMinute: toMinutes(group(exact, 1), optionalMinutes(exact, 2)),
       endMinute: null,
       raw,
     };

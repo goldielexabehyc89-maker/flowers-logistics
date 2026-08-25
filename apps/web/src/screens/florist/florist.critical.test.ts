@@ -193,6 +193,9 @@ describe('показ значений', () => {
     // начало окна, и флорист гадает, есть ли у него запас.
     expect(formatInterval({ startMinute: 840, endMinute: 840 })).toBe('к 14:00');
     expect(formatInterval({ startMinute: 840, endMinute: null })).toBe('к 14:00');
+    // Час без минут из источника доходит сюда тем же точным временем.
+    expect(formatInterval({ startMinute: 540, endMinute: null })).toBe('к 09:00');
+    expect(formatInterval({ startMinute: 540, endMinute: 600 })).toBe('09:00 – 10:00');
     expect(formatInterval({ startMinute: 600, endMinute: 840 })).toBe('10:00 – 14:00');
     expect(formatInterval({ startMinute: null, endMinute: null })).toBe('без времени');
   });
