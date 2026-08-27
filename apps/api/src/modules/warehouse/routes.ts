@@ -15,6 +15,7 @@ import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
 import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
+import { expandRange, splitList } from './bulk-cells.js';
 import { MAX_CODE_LENGTH } from './cell-code.js';
 import { renderCellLabelSvg } from './qr.js';
 import { listConfirmedRoutes, getRouteFlow, listPlacedOrders } from './views.js';
@@ -44,6 +45,8 @@ import {
   MAX_LIMIT,
   changeStorageCellKind,
   createStorageCell,
+  createStorageCellBatch,
+  previewStorageCellBatch,
   getStorageCell,
   listStorageCells,
   resolveStorageCell,
@@ -138,6 +141,33 @@ function isAdmin(actor: AuthenticatedActor): boolean {
   return actor.roles.includes('ADMIN');
 }
 
+/**
+ * Ввод партии: либо диапазон, либо готовый список.
+ *
+ * Два способа в одной схеме, а не два входа: и тот и другой дают на выходе
+ * список кодов, и дальше их обрабатывает один и тот же разбор. Разведи мы их
+ * по разным маршрутам — правила проверки однажды разошлись бы.
+ */
+const bulkSchema = z.object({
+  kind: z.enum(['STORAGE', 'ROUTE']),
+  range: z
+    .object({
+      prefix: z.string().max(MAX_CODE_LENGTH),
+      from: z.number().int().min(0),
+      to: z.number().int().min(0),
+      pad: z.number().int().min(1).max(6),
+    })
+    .optional(),
+  list: z.string().max(64_000).optional(),
+});
+
+/** Один список кодов из любого способа ввода. */
+function codesOf(body: z.infer<typeof bulkSchema>): string[] {
+  const fromRange = body.range === undefined ? [] : expandRange(body.range);
+  const fromList = body.list === undefined ? [] : splitList(body.list);
+  return [...fromRange, ...fromList];
+}
+
 export async function registerWarehouseRoutes(
   app: AppServer,
   deps: WarehouseRouteDeps,
@@ -194,6 +224,33 @@ export async function registerWarehouseRoutes(
 
     const created = await createStorageCell(cellDeps, actor, body, contextOf(request));
     return reply.code(201).send(toView(created));
+  });
+
+  /*
+   * Партия ячеек.
+   *
+   * Права РОВНО те же, что у одиночного создания, и проверяются здесь, на
+   * сервере: спрятанная кнопка защитой не является — запрос отправляют
+   * и мимо интерфейса.
+   */
+  app.post('/api/storage-cells/bulk/preview', async (request) => {
+    await authenticateWithRoles(request, deps, CELL_WRITE_ROLES);
+    const body = bulkSchema.parse(request.body);
+
+    return previewStorageCellBatch(deps.db, codesOf(body));
+  });
+
+  app.post('/api/storage-cells/bulk', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, CELL_WRITE_ROLES);
+    const body = bulkSchema.parse(request.body);
+
+    const result = await createStorageCellBatch(
+      cellDeps,
+      actor,
+      { codes: codesOf(body), kind: body.kind },
+      contextOf(request),
+    );
+    return reply.code(201).send(result);
   });
 
   /**

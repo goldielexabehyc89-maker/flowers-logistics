@@ -18,6 +18,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
+import { assertBatchSize, parseBatch, type RejectedCode } from './bulk-cells.js';
 import { normalizeCellCode } from './cell-code.js';
 
 /** Читают справочник администратор и кладовщик; изменяет только администратор. */
@@ -386,5 +387,165 @@ export async function setStorageCellActive(
 
     await publishChange(tx, id);
     return updated;
+  });
+}
+
+// --- Партия ячеек ------------------------------------------------------------
+
+export interface BulkPreview {
+  /** Годные и ещё не существующие коды: именно они будут созданы. */
+  willCreate: { code: string; normalizedCode: string }[];
+  /** Уже существующие: показываются явно, но не трогаются. */
+  existing: { code: string; normalizedCode: string }[];
+  /** Повторы внутри самого ввода. */
+  duplicates: string[];
+  /** Строки, кодом ячейки не являющиеся. */
+  invalid: RejectedCode[];
+  total: number;
+}
+
+/**
+ * Что произойдёт с партией, если её сохранить.
+ *
+ * Отдельная операция ЧТЕНИЯ, а не побочный эффект сохранения: человек обязан
+ * увидеть последствия до того, как они наступят. Ячейку нельзя удалить —
+ * её можно только выключить, — поэтому сотня ошибочных кодов останется
+ * в справочнике навсегда.
+ */
+export async function previewStorageCellBatch(
+  db: Database,
+  codes: readonly string[],
+): Promise<BulkPreview> {
+  const parsed = parseBatch(codes);
+  assertBatchSize(parsed.codes.length);
+
+  const found =
+    parsed.codes.length === 0
+      ? []
+      : await db.storageCell.findMany({
+          where: { normalizedCode: { in: parsed.codes.map((item) => item.normalizedCode) } },
+          select: { code: true, normalizedCode: true },
+        });
+
+  const taken = new Set(found.map((cell) => cell.normalizedCode));
+
+  return {
+    willCreate: parsed.codes.filter((item) => !taken.has(item.normalizedCode)),
+    existing: parsed.codes.filter((item) => taken.has(item.normalizedCode)),
+    duplicates: parsed.duplicates,
+    invalid: parsed.invalid,
+    total: parsed.codes.length,
+  };
+}
+
+export interface BulkResult {
+  created: number;
+  skippedExisting: number;
+  duplicates: number;
+  invalid: number;
+}
+
+/**
+ * Создаёт партию ячеек ОДНОЙ транзакцией.
+ *
+ * Частично созданной партии не бывает: либо появились все годные коды, либо
+ * ни одного. Половина стеллажа хуже, чем его отсутствие — человек не знает,
+ * с какого места продолжать, а повторная попытка упирается в уже созданные
+ * коды.
+ *
+ * Уже существующие коды пропускаются, а не обновляются: ячейка живёт долго,
+ * на ней висит наклейка, и переписать её тип «заодно» значило бы менять
+ * физический смысл полки незаметно для владельца.
+ */
+export async function createStorageCellBatch(
+  deps: CellDeps,
+  actor: AuthenticatedActor,
+  input: { codes: readonly string[]; kind: $Enums.StorageCellKind },
+  context: RequestContext,
+): Promise<BulkResult> {
+  const parsed = parseBatch(input.codes);
+  assertBatchSize(parsed.codes.length);
+
+  if (parsed.codes.length === 0) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'batch has no usable codes',
+      publicMessage: 'В списке нет ни одного пригодного кода.',
+    });
+  }
+
+  return deps.db.$transaction(async (tx: TransactionClient) => {
+    /*
+     * Существующие коды определяются ВНУТРИ транзакции.
+     *
+     * Снаружи их список успел бы устареть: пока человек читал предпросмотр,
+     * сосед мог завести часть тех же полок.
+     */
+    const existing = await tx.storageCell.findMany({
+      where: { normalizedCode: { in: parsed.codes.map((item) => item.normalizedCode) } },
+      select: { normalizedCode: true },
+    });
+    const taken = new Set(existing.map((cell) => cell.normalizedCode));
+    const fresh = parsed.codes.filter((item) => !taken.has(item.normalizedCode));
+
+    for (const item of fresh) {
+      await tx.storageCell.create({
+        data: {
+          code: item.code,
+          normalizedCode: item.normalizedCode,
+          kind: input.kind,
+          createdById: actor.userId,
+        },
+        select: { id: true },
+      });
+    }
+
+    /*
+     * Событие на партию — ОДНО.
+     *
+     * В payload изменения ячейки и так лежит только идентификатор: подписчик
+     * перезапрашивает справочник целиком. Пятьсот одинаковых по смыслу
+     * событий означали бы пятьсот строк рассылки и пятьсот `NOTIFY` внутри
+     * одной транзакции — при том же результате на экране.
+     */
+    if (fresh.length > 0) {
+      await publishRealtimeEvent(tx, {
+        topic: 'storage_cell.changed',
+        payload: { cellId: null, created: fresh.length },
+        audienceRoles: [...CELL_AUDIENCE],
+      });
+    }
+
+    /*
+     * Аудит на партию — ОДНА запись.
+     *
+     * Пятьсот отдельных строк утопили бы журнал и всё равно не ответили бы
+     * на главный вопрос: кто и когда завёл этот стеллаж. Коды в запись
+     * не попадают: их и так видно в справочнике, а журнал читают все
+     * административные экраны.
+     */
+    await writeAudit(tx, {
+      action: 'STORAGE_CELL_CREATED',
+      entityType: 'StorageCell',
+      entityId: null,
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      source: 'api',
+      newValue: {
+        batch: true,
+        kind: input.kind,
+        requested: parsed.codes.length,
+        created: fresh.length,
+        skippedExisting: taken.size,
+      },
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+
+    return {
+      created: fresh.length,
+      skippedExisting: taken.size,
+      duplicates: parsed.duplicates.length,
+      invalid: parsed.invalid.length,
+    };
   });
 }
