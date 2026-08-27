@@ -62,5 +62,34 @@ export default tseslint.config(
     },
     rules: { 'no-console': 'off' },
   },
+  {
+    /*
+     * Агент печати.
+     *
+     * Отдельная программа, а не часть приложения: из неё собирается
+     * самостоятельный `.exe` для чужого компьютера. CommonJS здесь
+     * вынужденный — штатная сборка Node в один файл другого формата
+     * не принимает.
+     */
+    files: ['agent/src/**/*.cjs'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        Buffer: 'readonly',
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        require: 'readonly',
+        module: 'writable',
+        setTimeout: 'readonly',
+        URL: 'readonly',
+      },
+    },
+    rules: {
+      'no-console': 'off',
+      // Формат файла продиктован сборщиком одиночного `.exe`, а не вкусом.
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
   prettier,
 );
