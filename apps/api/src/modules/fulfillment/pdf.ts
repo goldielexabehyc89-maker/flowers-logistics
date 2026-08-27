@@ -19,14 +19,7 @@
  */
 
 import fontkit from '@pdf-lib/fontkit';
-import {
-  PDFDocument,
-  PDFHexString,
-  rgb,
-  type PDFArray,
-  type PDFFont,
-  type PDFPage,
-} from 'pdf-lib';
+import { PDFDocument, PDFHexString, rgb, type PDFArray, type PDFFont, type PDFPage } from 'pdf-lib';
 import { encodeQrMatrix } from '../warehouse/qr.js';
 import { labelFontBytes } from '../printing/font.js';
 import { renderLabelsPdf } from '../printing/label-pdf.js';

@@ -77,12 +77,6 @@ async function actorFor(roles: Role[]): Promise<AuthenticatedActor> {
   return { userId: user.id, roles, familyId: randomUUID() } as AuthenticatedActor;
 }
 
-async function seedPoint(): Promise<string> {
-  const admin = await actorFor(['ADMIN']);
-  const point = await createPrintPoint(ctx.db, admin, { name: unique('Стол') }, CONTEXT);
-  return point.id;
-}
-
 /** Подключённая точка: код выпущен и погашен агентом. */
 async function pairedPoint(): Promise<{ pointId: string; token: string }> {
   const admin = await actorFor(['ADMIN']);
