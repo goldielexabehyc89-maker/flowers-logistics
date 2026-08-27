@@ -19,6 +19,7 @@ import { createDatabase } from '../platform/db.js';
 import { toDateColumn } from '../modules/integrations/moysklad/delivery-date.js';
 import { moscowToday } from '../modules/orders/routes.js';
 import { snapshotHash, type FulfillmentSnapshot } from '../modules/fulfillment/composition.js';
+import { MAX_ORDER_NUMBER_LENGTH } from '../modules/warehouse/order-lookup.js';
 
 /** Базы, где допустимо создавать проверочные данные. */
 const ALLOWED_DATABASES = ['fl_e2e', 'fl_ci', 'fl_test'];
@@ -54,6 +55,28 @@ async function main(): Promise<number> {
   const countArg = process.argv.find((argument) => argument.startsWith('--count='));
   const count = Math.min(Math.max(Number(countArg?.split('=')[1] ?? '1') || 1, 1), 10);
 
+  /*
+   * Заданный номер: нужен стенду, где номер и есть предмет показа.
+   *
+   * Длинный номер на термоэтикетке проверяется глазами — значит, его надо
+   * уметь завести повторяемо, а не подгонять руками в базе. Допустим только
+   * вместе с `--count=1`: одинаковые номера у нескольких заказов сделали бы
+   * поиск по номеру неоднозначным.
+   */
+  const numberArg = process.argv.find((argument) => argument.startsWith('--number='));
+  const explicitNumber = numberArg?.slice('--number='.length).trim() || null;
+  if (explicitNumber !== null && count !== 1) {
+    logger.error('--number задаётся только вместе с --count=1');
+    return 2;
+  }
+  if (explicitNumber !== null && explicitNumber.length > MAX_ORDER_NUMBER_LENGTH) {
+    logger.error(
+      { limit: MAX_ORDER_NUMBER_LENGTH },
+      'номер длиннее того, что принимает складской сканер',
+    );
+    return 2;
+  }
+
   /**
    * Сразу поставить подтверждённую точку.
    *
@@ -72,7 +95,8 @@ async function main(): Promise<number> {
   const db = createDatabase(config, logger);
   try {
     for (let index = 0; index < count; index += 1) {
-      const number = `E2E-${String((Date.now() + index) % 1_000_000).padStart(6, '0')}`;
+      const number =
+        explicitNumber ?? `E2E-${String((Date.now() + index) % 1_000_000).padStart(6, '0')}`;
       const externalId = crypto.randomUUID();
 
       /**
