@@ -443,6 +443,14 @@ export interface BulkResult {
   skippedExisting: number;
   duplicates: number;
   invalid: number;
+  /**
+   * Идентификаторы созданных ячеек в порядке создания.
+   *
+   * Нужны ровно для одного: сразу напечатать наклейки той партии, которую
+   * человек только что завёл. Искать их потом в общем справочнике среди
+   * сотен других — работа, которой быть не должно.
+   */
+  createdIds: string[];
 }
 
 /**
@@ -487,8 +495,9 @@ export async function createStorageCellBatch(
     const taken = new Set(existing.map((cell) => cell.normalizedCode));
     const fresh = parsed.codes.filter((item) => !taken.has(item.normalizedCode));
 
+    const createdIds: string[] = [];
     for (const item of fresh) {
-      await tx.storageCell.create({
+      const created = await tx.storageCell.create({
         data: {
           code: item.code,
           normalizedCode: item.normalizedCode,
@@ -497,6 +506,7 @@ export async function createStorageCellBatch(
         },
         select: { id: true },
       });
+      createdIds.push(created.id);
     }
 
     /*
@@ -546,6 +556,7 @@ export async function createStorageCellBatch(
       skippedExisting: taken.size,
       duplicates: parsed.duplicates.length,
       invalid: parsed.invalid.length,
+      createdIds,
     };
   });
 }

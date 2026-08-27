@@ -174,6 +174,8 @@ export interface BulkResultResponse {
   skippedExisting: number;
   duplicates: number;
   invalid: number;
+  /** Созданные ячейки: по ним сразу печатаются наклейки этой партии. */
+  createdIds: string[];
 }
 
 /**

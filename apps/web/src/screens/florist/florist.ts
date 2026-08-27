@@ -137,6 +137,22 @@ export interface ShiftView {
   closeKind: string | null;
   closeReason: string | null;
   openAssignments: number;
+  /**
+   * Точка печати смены.
+   *
+   * Живёт в смене, а не отдельной сессией: завершение смены снимает выбор
+   * само. У смен, открытых до появления печати, здесь `null` — точку спросят
+   * при первом «Собран».
+   */
+  printPointId: string | null;
+  printPointName: string | null;
+}
+
+/** Точка печати в списке выбора. Флористу видно название и связь. */
+export interface PrintPointOption {
+  id: string;
+  name: string;
+  state: 'ONLINE' | 'OFFLINE' | 'ERROR';
 }
 
 /**

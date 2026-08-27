@@ -77,6 +77,7 @@ import {
   routeLabel,
   safeFileName,
   type FloristOption,
+  type PrintPointOption,
   type FloristTab,
   type OrderCardView,
   type PrintJobsResponse,
@@ -347,6 +348,23 @@ export function FloristScreen(): React.JSX.Element {
     showToast(error instanceof ApiError ? error.message : fallback, 'error');
   }
 
+  /**
+   * Точки печати, доступные флористу.
+   *
+   * Запрашиваются всегда, а не только при открытом выборе: пока их ноль,
+   * ни строки о печати не показывается вовсе — в мастерской без принтера
+   * лишних слов быть не должно.
+   */
+  const printPointsQuery = useQuery({
+    queryKey: ['florist-print-points'],
+    queryFn: () => client.get<{ items: PrintPointOption[] }>('/api/florist/print-points'),
+  });
+
+  const printPoints = printPointsQuery.data?.items ?? [];
+
+  /** Открыт ли выбор точки и что делать после выбора. */
+  const [pointPicker, setPointPicker] = useState<{ afterOrderId: string | null } | null>(null);
+
   const action = useMutation({
     mutationFn: async (input: { path: string; body?: unknown; success: string }) => {
       await client.post(input.path, input.body);
@@ -363,6 +381,57 @@ export function FloristScreen(): React.JSX.Element {
       reportError(error, 'Не удалось выполнить действие.');
     },
   });
+
+  /**
+   * Выбор точки печати на текущую смену.
+   *
+   * После выбора работа ПРОДОЛЖАЕТСЯ сама: если выбор открылся из-за нажатия
+   * «Собран», сборка выполняется тут же. Заставлять человека нажимать дважды
+   * значило бы наказывать его за то, что мы спросили не вовремя.
+   */
+  const choosePoint = useMutation({
+    mutationFn: async (input: { printPointId: string; afterOrderId: string | null }) => {
+      await client.post('/api/florist/shift/print-point', { printPointId: input.printPointId });
+      return input;
+    },
+    onSuccess: async (input) => {
+      setPointPicker(null);
+      await refresh();
+      if (input.afterOrderId !== null) {
+        assemble(input.afterOrderId);
+      }
+    },
+    onError: (error: unknown) => reportError(error, 'Не удалось выбрать точку печати.'),
+  });
+
+  /**
+   * «Собран».
+   *
+   * Точка печати спрашивается ДО отправки, но не запрещает работу: отказаться
+   * от выбора можно, и тогда заказ всё равно соберётся, а наклейку напечатают
+   * вручную. Печать не имеет права останавливать цех.
+   */
+  function assemble(orderId: string): void {
+    // Версия процесса та, которую видел человек: чужое изменение обязано
+    // отказать, а не перезаписать чужую работу.
+    const open = cardQuery.data?.card ?? null;
+    const version = open?.id === orderId ? open.process.version : null;
+
+    action.mutate({
+      path: `/api/florist/orders/${orderId}/assemble`,
+      ...(version === null ? {} : { body: { expectedProcessVersion: version } }),
+      success: 'Заказ собран, бланк поставлен в очередь печати',
+    });
+  }
+
+  function assembleWithPoint(orderId: string): void {
+    const needsPoint = shift !== null && shift.printPointId === null && printPoints.length > 0;
+    if (needsPoint) {
+      setPointPicker({ afterOrderId: orderId });
+      return;
+    }
+    assemble(orderId);
+  }
 
   /** Скачивание документа: токен живёт в памяти, поэтому обычная ссылка не годится. */
   async function download(path: string, fileName: string): Promise<void> {
@@ -516,6 +585,93 @@ export function FloristScreen(): React.JSX.Element {
           )}
         </div>
       </header>
+
+      {/*
+        Точка печати смены.
+
+        Одна строка, а не раздел: выбор делается раз за смену и дальше только
+        читается. Пока точек нет ни одной, строка не показывается вовсе —
+        в мастерской без принтера лишних слов быть не должно.
+      */}
+      {hasActiveShift && printPoints.length > 0 && (
+        <div className="card row florist__print-point" data-testid="florist-print-point">
+          <div>
+            <span className="muted text-sm">Точка печати: </span>
+            <strong data-testid="florist-print-point-name">
+              {shift.printPointName ?? 'не выбрана'}
+            </strong>
+            {shift.printPointId === null && (
+              <div className="muted text-sm">
+                Наклейки собранных заказов печатаются вручную, пока точка не выбрана.
+              </div>
+            )}
+          </div>
+          <Button
+            variant="secondary"
+            data-testid="florist-print-point-change"
+            disabled={choosePoint.isPending}
+            onClick={() => setPointPicker({ afterOrderId: null })}
+          >
+            {shift.printPointId === null ? 'Выбрать' : 'Изменить'}
+          </Button>
+        </div>
+      )}
+
+      {pointPicker !== null && (
+        <Modal
+          open
+          title="Куда печатать наклейки"
+          onClose={() => setPointPicker(null)}
+          testId="florist-point-picker"
+        >
+          <div className="stack">
+            <p className="muted text-sm">
+              Выберите компьютер с принтером, за которым работаете. Выбор сохранится до конца смены.
+            </p>
+            <ul className="florist__list">
+              {printPoints.map((point) => (
+                <li key={point.id} className="florist__row">
+                  <span>{point.name}</span>
+                  <Button
+                    variant="primary"
+                    data-testid="florist-point-choose"
+                    disabled={choosePoint.isPending}
+                    onClick={() =>
+                      choosePoint.mutate({
+                        printPointId: point.id,
+                        afterOrderId: pointPicker.afterOrderId,
+                      })
+                    }
+                  >
+                    Выбрать
+                  </Button>
+                </li>
+              ))}
+            </ul>
+            {/*
+              Отказ от выбора не отменяет работу.
+              Печать не имеет права останавливать сборку: заказ соберётся,
+              а наклейку напечатают вручную из карточки.
+            */}
+            {pointPicker.afterOrderId !== null && (
+              <Button
+                variant="ghost"
+                data-testid="florist-point-skip"
+                disabled={action.isPending}
+                onClick={() => {
+                  const orderId = pointPicker.afterOrderId;
+                  setPointPicker(null);
+                  if (orderId !== null) {
+                    assemble(orderId);
+                  }
+                }}
+              >
+                Собрать без печати
+              </Button>
+            )}
+          </div>
+        </Modal>
+      )}
 
       {/*
        * Активные смены и принудительное завершение — только администратору.
@@ -1032,15 +1188,7 @@ export function FloristScreen(): React.JSX.Element {
                 success: 'Заказ возвращён в очередь',
               })
             }
-            onAssemble={() =>
-              action.mutate({
-                path: `/api/florist/orders/${card.id}/assemble`,
-                // Версия процесса та, которую видел человек: чужое изменение
-                // обязано отказать, а не перезаписать чужую работу.
-                body: { expectedProcessVersion: card.process.version },
-                success: 'Заказ собран, бланк поставлен в очередь печати',
-              })
-            }
+            onAssemble={() => assembleWithPoint(card.id)}
             onReopen={(reason) =>
               action.mutate({
                 path: `/api/florist/orders/${card.id}/reopen`,

@@ -66,6 +66,18 @@ export function StorageCells(): React.JSX.Element {
   const [list, setList] = useState('');
   const [preview, setPreview] = useState<BulkPreviewResponse | null>(null);
 
+  /** Отмеченные строки справочника: для печати нескольких наклеек сразу. */
+  const [selected, setSelected] = useState<readonly string[]>([]);
+
+  /**
+   * Ячейки последней созданной партии.
+   *
+   * Держатся отдельно от выбора: человек только что завёл стеллаж, и наклейки
+   * нужны именно на него — искать их потом среди сотен строк справочника
+   * было бы работой, которой быть не должно.
+   */
+  const [lastBatch, setLastBatch] = useState<readonly string[]>([]);
+
   const query = useQuery({
     queryKey: ['storage-cells'],
     queryFn: () => client.get<StorageCellListResponse>('/api/storage-cells?limit=500'),
@@ -140,6 +152,7 @@ export function StorageCells(): React.JSX.Element {
     mutationFn: () => client.post<BulkResultResponse>('/api/storage-cells/bulk', bulkBody()),
     onSuccess: async (result) => {
       closeBulk();
+      setLastBatch(result.createdIds);
       await invalidate();
       showToast(
         result.skippedExisting === 0
@@ -174,23 +187,51 @@ export function StorageCells(): React.JSX.Element {
   });
 
   /**
-   * Скачивание этикетки.
+   * Скачивание этикеток.
    *
    * Документ забирается запросом с токеном и сохраняется как файл: обычная
    * ссылка ушла бы без заголовка авторизации и получила 401. Ссылка на объект
    * освобождается сразу — иначе вкладка копила бы их до перезагрузки.
+   *
+   * Формат — PDF физического размера 58×40 мм: наклейку печатают рулоном
+   * на термопринтере, и страница обязана совпадать с лентой.
    */
+  async function saveBlob(blob: Blob, fileName: string): Promise<void> {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function openLabel(cell: StorageCellView): Promise<void> {
     try {
-      const svg = await client.getText(`/api/storage-cells/${cell.id}/label.svg`, 'image/svg+xml');
-      const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `cell-${cell.normalizedCode}.svg`;
-      link.click();
-      URL.revokeObjectURL(url);
+      const blob = await client.getBlob(
+        `/api/storage-cells/${cell.id}/label.pdf`,
+        'application/pdf',
+      );
+      await saveBlob(blob, `cell-${cell.normalizedCode}.pdf`);
     } catch (error) {
       reportError(error, 'Не удалось получить этикетку.');
+    }
+  }
+
+  /**
+   * Этикетки нескольких ячеек одним документом.
+   *
+   * Одна ячейка — одна страница. Печатать сотню наклеек по одной человек
+   * не станет, а значит, не напечатает вовсе.
+   */
+  async function openLabels(ids: readonly string[], fileName: string): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    try {
+      const blob = await client.postBlob('/api/storage-cells/labels.pdf', { ids: [...ids] });
+      await saveBlob(blob, fileName);
+    } catch (error) {
+      reportError(error, 'Не удалось получить этикетки.');
     }
   }
 
@@ -545,6 +586,41 @@ export function StorageCells(): React.JSX.Element {
         </form>
       )}
 
+      {lastBatch.length > 0 && (
+        <div className="row cell-batch" data-testid="cell-batch-labels">
+          <span className="text-sm">
+            Последняя партия: {cellsPlural(lastBatch.length)}. Наклейки печатаются рулоном 58×40 мм
+            — по одной на страницу.
+          </span>
+          <Button
+            variant="primary"
+            data-testid="cell-batch-download"
+            onClick={() => void openLabels(lastBatch, `cells-batch-${lastBatch.length}.pdf`)}
+          >
+            Скачать этикетки партии
+          </Button>
+          <Button variant="ghost" onClick={() => setLastBatch([])}>
+            Скрыть
+          </Button>
+        </div>
+      )}
+
+      {selected.length > 0 && (
+        <div className="row cell-batch" data-testid="cell-selection">
+          <span className="text-sm">Отмечено: {cellsPlural(selected.length)}</span>
+          <Button
+            variant="primary"
+            data-testid="cell-selected-download"
+            onClick={() => void openLabels(selected, `cells-${selected.length}.pdf`)}
+          >
+            Скачать выбранные
+          </Button>
+          <Button variant="ghost" onClick={() => setSelected([])}>
+            Снять отметки
+          </Button>
+        </div>
+      )}
+
       {query.isPending && <LoadingState title="Загружаем справочник ячеек…" />}
 
       {query.isError && (
@@ -566,6 +642,7 @@ export function StorageCells(): React.JSX.Element {
           <table className="table">
             <thead>
               <tr>
+                <th aria-label="Отметка" />
                 <th>Код</th>
                 <th>Тип</th>
                 <th>Состояние</th>
@@ -576,6 +653,21 @@ export function StorageCells(): React.JSX.Element {
             <tbody>
               {query.data.items.map((cell) => (
                 <tr key={cell.id} data-testid="cell-row" data-cell-code={cell.normalizedCode}>
+                  <td>
+                    <input
+                      type="checkbox"
+                      data-testid="cell-select"
+                      aria-label={`Отметить ${cell.normalizedCode}`}
+                      checked={selected.includes(cell.id)}
+                      onChange={(event) =>
+                        setSelected((current) =>
+                          event.target.checked
+                            ? [...current, cell.id]
+                            : current.filter((id) => id !== cell.id),
+                        )
+                      }
+                    />
+                  </td>
                   <td>
                     <strong>{cell.code}</strong>
                     {cell.code !== cell.normalizedCode && (
