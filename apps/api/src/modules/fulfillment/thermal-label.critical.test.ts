@@ -25,7 +25,9 @@ import { PDFDocument } from 'pdf-lib';
 import { buildPrintFormSnapshot, type PrintFormSnapshot } from './print-form.js';
 import {
   LABEL_HEIGHT_MM,
+  LABEL_NUMBER_HEIGHT_PT,
   LABEL_WIDTH_MM,
+  embedLabelFont,
   labelNumberFontSize,
   qrPayload,
   renderThermalLabelPdf,
@@ -285,15 +287,40 @@ describe('номер заказа', () => {
     expect(sizeOf(content)).toBeGreaterThan(0);
   });
 
-  it('подбор кегля не опускается ниже читаемого предела', async () => {
+  it('подбор кегля держится читаемого диапазона, пока строка в него влезает', async () => {
     const font = {
       widthOfTextAtSize: (text: string, size: number) => text.length * size * 0.6,
     } as never;
 
     // Короткая строка получает максимальный кегль.
     expect(labelNumberFontSize(font, 'A1', 200)).toBe(13);
-    // Заведомо неразмещаемая — минимальный, но не ноль и не отрицательный.
-    expect(labelNumberFontSize(font, 'X'.repeat(400), 10)).toBe(5);
+    // Пока номер помещается читаемым кеглем, ниже пяти пунктов не опускаемся.
+    expect(labelNumberFontSize(font, 'X'.repeat(30), 90)).toBe(5);
+    // Заведомо неразмещаемая строка — не ноль и не отрицательный кегль.
+    const tiny = labelNumberFontSize(font, 'X'.repeat(400), 10);
+    expect(tiny).toBeGreaterThan(0);
+    expect(tiny).toBeLessThan(5);
+  });
+
+  it('номер любой длины помещается на наклейку целиком', async () => {
+    /*
+     * Проверяется физика, а не наш `slice`.
+     *
+     * Строка, вышедшая за край наклейки, обрезается печатающей головкой
+     * и выглядит настоящим номером — просто другим. Поэтому мерится ширина
+     * строки настоящей гарнитурой при выбранном кегле: она обязана уложиться
+     * в ту же высоту, по которой кегль и подбирался.
+     */
+    const document = await PDFDocument.create();
+    const font = await embedLabelFont(document);
+
+    for (const number of NUMBERS) {
+      const size = labelNumberFontSize(font, number, LABEL_NUMBER_HEIGHT_PT);
+      expect(font.widthOfTextAtSize(number, size), number).toBeLessThanOrEqual(
+        LABEL_NUMBER_HEIGHT_PT,
+      );
+      expect(size, number).toBeGreaterThan(0);
+    }
   });
 });
 

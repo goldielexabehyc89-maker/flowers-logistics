@@ -12,14 +12,44 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import {
   expect,
   test,
   type APIRequestContext,
   type Browser,
+  type Download,
   type Locator,
   type Page,
 } from '@playwright/test';
+import { PDFDocument } from 'pdf-lib';
+
+/** Точки на миллиметр: единица PDF — 1/72 дюйма. */
+const MM = 72 / 25.4;
+
+/**
+ * Скачанный файл — настоящая термоэтикетка 58×40 мм.
+ *
+ * Размер страницы проверяется по самому файлу, а не по имени и не по ответу
+ * сервера: наклейка, уехавшая на принтер листом A4, не наклеится ни на что,
+ * и обнаружится это у кладовщика с рулоном в руках.
+ *
+ * Содержимое QR здесь не разбирается — это делают направленные проверки
+ * печати, где картинка декодируется из настоящего файла. Браузерный сценарий
+ * отвечает за другое: что кнопка отдаёт именно этот документ.
+ */
+async function expectThermalLabel(download: Download, orderNumber: string): Promise<void> {
+  const path = await download.path();
+  const bytes = await readFile(path);
+  expect(bytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+
+  const pdf = await PDFDocument.load(bytes);
+  expect(pdf.getPageCount(), `этикетка ${orderNumber}`).toBe(1);
+
+  const size = pdf.getPage(0).getSize();
+  expect(size.width / MM).toBeCloseTo(58, 2);
+  expect(size.height / MM).toBeCloseTo(40, 2);
+}
 
 /**
  * Собственные заказы сценария.
@@ -1787,6 +1817,18 @@ test('флорист: смена, захват, сборка, бланк и от
   ]);
   expect(download.suggestedFilename()).toBe(`order-${orderNumber}.pdf`);
 
+  // 8.0. Термоэтикетка: отдельный файл рядом с бланком.
+  //
+  //      К букету едут оба документа: бумага для человека и наклейка на
+  //      коробку. Проверяется не «кнопка есть», а размер страницы: этикетка,
+  //      уехавшая на принтер листом A4, не наклеится ни на что.
+  const [labelDownload] = await Promise.all([
+    floristPage.waitForEvent('download'),
+    card.getByTestId('card-label').click(),
+  ]);
+  expect(labelDownload.suggestedFilename()).toBe(`label-${orderNumber}.pdf`);
+  await expectThermalLabel(labelDownload, orderNumber);
+
   // 8.1. «Мои заказы»: собранный заказ ушёл из работы в свёрнутую группу.
   //
   //      Проверяется главное обещание разделения: заказ не исчез бесследно —
@@ -1858,6 +1900,33 @@ test('флорист: смена, захват, сборка, бланк и от
   await expect(
     floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
   ).toContainText('Напечатано');
+
+  // 10. Этикетка доступна и из очереди печати — для КОНКРЕТНОЙ попытки.
+  const printedRow = floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber });
+  const [jobLabel] = await Promise.all([
+    floristPage.waitForEvent('download'),
+    printedRow.getByTestId('print-label').click(),
+  ]);
+  expect(jobLabel.suggestedFilename()).toBe(`label-${orderNumber}.pdf`);
+  await expectThermalLabel(jobLabel, orderNumber);
+
+  /*
+   * 11. Повторная печать не стирает прошлую попытку.
+   *
+   *     Печать — физическое действие: бумага уже вышла из принтера, и запись
+   *     о ней обязана остаться, даже если человек печатает второй раз. Иначе
+   *     на вопрос «печатали ли этот заказ» ответа не будет.
+   */
+  await printedRow.getByRole('button', { name: 'Повторить печать' }).click();
+  await floristPage.getByTestId('print-filter-attention').click();
+  await expect(
+    floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
+  ).toContainText('попытка 2');
+
+  await floristPage.getByTestId('print-filter-printed').click();
+  await expect(
+    floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
+  ).toContainText('попытка 1');
 
   await context.close();
 });
@@ -2090,6 +2159,135 @@ test('складские ячейки: администратор управля
   await warehousePage.goto('/settings');
   await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
   await expect(warehousePage.getByText('Складские ячейки')).toHaveCount(0);
+
+  await context.close();
+});
+
+/**
+ * Партия ячеек: стеллаж заводится сразу, а не по одной полке.
+ *
+ * Проверяется то, из-за чего ошибка здесь стоит дороже, чем при одиночном
+ * создании: ячейку нельзя удалить, только выключить. Поэтому создание закрыто
+ * до проверки, проверка отменяется при любой правке ввода, уже существующие
+ * коды видны отдельно и не переписываются, а предел партии называется числом,
+ * а не молчаливым обрезанием.
+ */
+test('складские ячейки: партия диапазоном и списком, второй экран без F5', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Настройки');
+  const cells = page.locator('section', { hasText: 'Складские ячейки' }).first();
+  await expect(cells).toBeVisible();
+
+  // Второй открытый экран того же справочника: он обязан узнать о партии сам.
+  const context = await browser.newContext();
+  const second = await context.newPage();
+  await login(second, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(second, 'Настройки');
+  const secondCells = second.locator('section', { hasText: 'Складские ячейки' }).first();
+  await expect(secondCells).toBeVisible();
+
+  const prefix = `E2EB-${Date.now() % 100_000}-`;
+
+  await cells.getByTestId('cell-bulk-open').click();
+  const bulk = cells.getByTestId('cell-bulk');
+  await expect(bulk).toBeVisible();
+
+  await bulk.getByTestId('cell-bulk-prefix').fill(prefix);
+  await bulk.getByTestId('cell-bulk-from').fill('1');
+  await bulk.getByTestId('cell-bulk-to').fill('5');
+  await bulk.getByTestId('cell-bulk-pad').fill('3');
+
+  // Края будущей партии видны до отправки: ошибаются именно в них.
+  await expect(bulk.getByTestId('cell-bulk-plan')).toContainText(`${prefix}001 … ${prefix}005`);
+  // А создать вслепую нельзя.
+  await expect(bulk.getByTestId('cell-bulk-submit')).toBeDisabled();
+
+  await bulk.getByTestId('cell-bulk-preview').click();
+  await expect(bulk.getByTestId('cell-bulk-will-create')).toContainText('Будет создано 5 ячеек');
+  await expect(bulk.getByTestId('cell-bulk-existing')).toContainText('Уже существуют: 0');
+
+  // Правка ввода отменяет проверку: иначе человек создал бы не ту партию,
+  // которую видел на экране.
+  await bulk.getByTestId('cell-bulk-to').fill('4');
+  await expect(bulk.getByTestId('cell-bulk-summary')).toHaveCount(0);
+  await expect(bulk.getByTestId('cell-bulk-submit')).toBeDisabled();
+
+  await bulk.getByTestId('cell-bulk-to').fill('5');
+  await bulk.getByTestId('cell-bulk-preview').click();
+  await expect(bulk.getByTestId('cell-bulk-will-create')).toContainText('Будет создано 5 ячеек');
+  await bulk.getByTestId('cell-bulk-submit').click();
+
+  await expect(page.locator('.toast-region')).toContainText('Создано 5 ячеек');
+  // Панель закрылась: партия заведена, повторное нажатие ничего не создаст.
+  await expect(cells.getByTestId('cell-bulk')).toHaveCount(0);
+
+  for (const number of ['001', '003', '005']) {
+    await expect(
+      cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}${number}` }),
+    ).toBeVisible();
+  }
+
+  // Второй экран обновился сам, без F5.
+  await expect(
+    secondCells.locator('[data-testid="cell-row"]', { hasText: `${prefix}005` }),
+  ).toBeVisible();
+
+  // Тот же диапазон второй раз: всё уже есть, создавать нечего.
+  await cells.getByTestId('cell-bulk-open').click();
+  await bulk.getByTestId('cell-bulk-prefix').fill(prefix);
+  await bulk.getByTestId('cell-bulk-from').fill('1');
+  await bulk.getByTestId('cell-bulk-to').fill('5');
+  await bulk.getByTestId('cell-bulk-pad').fill('3');
+  await bulk.getByTestId('cell-bulk-preview').click();
+  await expect(bulk.getByTestId('cell-bulk-will-create')).toContainText('Создавать нечего');
+  await expect(bulk.getByTestId('cell-bulk-existing')).toContainText('Уже существуют: 5');
+  await expect(bulk.getByTestId('cell-bulk-submit')).toBeDisabled();
+
+  // Вставленный список: повтор внутри ввода и негодная строка названы,
+  // а годные коды из-за них не пропадают.
+  await bulk.getByTestId('cell-bulk-mode').selectOption('LIST');
+  await bulk
+    .getByTestId('cell-bulk-list')
+    .fill(`${prefix}101, ${prefix}102\n${prefix.toLowerCase()}101\n${'Z'.repeat(60)}`);
+  await bulk.getByTestId('cell-bulk-preview').click();
+  await expect(bulk.getByTestId('cell-bulk-duplicates')).toContainText('Повторов внутри списка: 1');
+  await expect(bulk.getByTestId('cell-bulk-invalid')).toContainText('Негодных строк: 1');
+  await expect(bulk.getByTestId('cell-bulk-will-create')).toContainText('Будет создано 2 ячейки');
+
+  await bulk.getByTestId('cell-bulk-submit').click();
+  await expect(page.locator('.toast-region')).toContainText('Создано 2 ячейки');
+  await expect(
+    cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}102` }),
+  ).toBeVisible();
+
+  // Предел партии назван числом до отправки, а не обрезан молча.
+  await cells.getByTestId('cell-bulk-open').click();
+  // Панель открылась пустой: способ ввода и тип не унаследованы от прошлой
+  // партии — иначе следующий стеллаж уехал бы не того назначения.
+  await expect(bulk.getByTestId('cell-bulk-mode')).toHaveValue('RANGE');
+  await expect(bulk.getByTestId('cell-bulk-kind')).toHaveValue('STORAGE');
+  await bulk.getByTestId('cell-bulk-prefix').fill(prefix);
+  await bulk.getByTestId('cell-bulk-from').fill('1');
+  await bulk.getByTestId('cell-bulk-to').fill('501');
+  await expect(bulk.getByTestId('cell-bulk-error')).toContainText('не больше 500');
+  await expect(bulk.getByTestId('cell-bulk-preview')).toBeDisabled();
+  await bulk.getByTestId('cell-bulk-cancel').click();
+  await expect(cells.getByTestId('cell-bulk')).toHaveCount(0);
+
+  // Одиночное создание рядом продолжает работать как прежде.
+  await cells.getByTestId('cell-code').fill(`${prefix}one`);
+  await cells.getByTestId('cell-create').click();
+  await expect(
+    cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}ONE` }),
+  ).toBeVisible();
 
   await context.close();
 });

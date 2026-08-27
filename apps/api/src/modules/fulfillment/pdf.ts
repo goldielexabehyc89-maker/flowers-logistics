@@ -354,24 +354,43 @@ const QR_SIZE_MM = 30;
 const QR_QUIET_MM = 2;
 
 const LABEL_NUMBER_MAX_SIZE = 13;
-const LABEL_NUMBER_MIN_SIZE = 5;
+
+/** Ниже этого кегля термопечать превращает цифры в кашу. */
+const LABEL_NUMBER_READABLE_SIZE = 5;
+
+/** Абсолютный пол: ниже него строка перестаёт быть строкой. */
+const LABEL_NUMBER_MIN_SIZE = 2;
 
 /**
- * Размер шрифта номера, при котором строка помещается целиком.
+ * Размер шрифта номера, при котором строка помещается ЦЕЛИКОМ.
  *
- * Номер НЕ переносится и НЕ обрезается: обрезанный номер выглядит как
- * настоящий и отправляет кладовщика искать несуществующий заказ. Поэтому
- * единственная уступка длине — уменьшение кегля, и оно ограничено снизу:
- * ниже пяти пунктов термопечать превращает цифры в кашу, и лучше честно
- * показать, что номер не помещается, чем напечатать нечитаемое.
+ * Номер не переносится и не обрезается. Обрезание здесь — не только наш
+ * `slice`: строка, вышедшая за край наклейки, обрезается печатающей головкой
+ * и выглядит настоящим номером, просто другим. Кладовщик уходит искать чужой
+ * заказ, и понять, что номер неполный, уже нечем.
+ *
+ * Поэтому подбор идёт в два шага. Сначала — читаемый диапазон от 13 до 5
+ * пунктов с шагом в половину пункта: в него укладывается любой настоящий
+ * номер. Если строка не помещается и в пять пунктов, кегль считается точно
+ * по ширине: мелкий, но целый номер можно сфотографировать и увеличить,
+ * а машинное значение всё равно несёт QR. Обрезанный — нельзя ничем.
  */
 export function labelNumberFontSize(font: PDFFont, text: string, availableHeight: number): number {
-  for (let size = LABEL_NUMBER_MAX_SIZE; size > LABEL_NUMBER_MIN_SIZE; size -= 0.5) {
+  for (let size = LABEL_NUMBER_MAX_SIZE; size >= LABEL_NUMBER_READABLE_SIZE; size -= 0.5) {
     if (font.widthOfTextAtSize(text, size) <= availableHeight) {
       return size;
     }
   }
-  return LABEL_NUMBER_MIN_SIZE;
+
+  const unitWidth = font.widthOfTextAtSize(text, 1);
+  if (unitWidth <= 0) {
+    return LABEL_NUMBER_READABLE_SIZE;
+  }
+
+  // Округление ВНИЗ до четверти пункта: округлённый вверх кегль дал бы
+  // строку на волос шире доступной высоты, то есть то самое обрезание.
+  const exact = Math.floor((availableHeight / unitWidth) * 4) / 4;
+  return Math.max(LABEL_NUMBER_MIN_SIZE, Math.min(LABEL_NUMBER_READABLE_SIZE, exact));
 }
 
 /**
@@ -383,9 +402,8 @@ export function labelNumberFontSize(font: PDFFont, text: string, availableHeight
  */
 export async function renderThermalLabelPdf(snapshot: PrintFormSnapshot): Promise<Uint8Array> {
   const document = await PDFDocument.create();
-  document.registerFontkit(fontkit);
 
-  const font = await document.embedFont(fontBytes(), { subset: true });
+  const font = await embedLabelFont(document);
   const width = LABEL_WIDTH_MM * MM;
   const height = LABEL_HEIGHT_MM * MM;
   const page = document.addPage([width, height]);
@@ -426,6 +444,21 @@ export async function renderThermalLabelPdf(snapshot: PrintFormSnapshot): Promis
   });
 
   return document.save();
+}
+
+/**
+ * Высота, в которую обязан уложиться повёрнутый номер.
+ *
+ * Экспортируется, чтобы проверка мерила ровно ту величину, по которой
+ * подбирается кегль, а не собственную копию арифметики — разойдись они,
+ * проверка перестала бы ловить обрезанный номер.
+ */
+export const LABEL_NUMBER_HEIGHT_PT = (LABEL_HEIGHT_MM - LABEL_PADDING_MM * 2) * MM;
+
+/** Гарнитура этикетки. Общая для отрисовки и для замеров в проверках. */
+export async function embedLabelFont(document: PDFDocument): Promise<PDFFont> {
+  document.registerFontkit(fontkit);
+  return document.embedFont(fontBytes(), { subset: true });
 }
 
 /** Имя файла этикетки: только номер заказа, без PII. */
