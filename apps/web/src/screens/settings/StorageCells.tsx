@@ -91,9 +91,19 @@ export function StorageCells(): React.JSX.Element {
     apply();
   }
 
+  /**
+   * Панель закрывается пустой — и открывается пустой.
+   *
+   * Сброшены и способ ввода, и тип: следующая партия почти всегда про другой
+   * стеллаж, а сохранённый с прошлого раза тип «Маршрутная» человек не
+   * перечитывает — он помнит, что заводит полки хранения, и получил бы
+   * сотню ячеек не того назначения.
+   */
   function closeBulk(): void {
     setBulkOpen(false);
     setPreview(null);
+    setBulkMode('RANGE');
+    setBulkKind('STORAGE');
     setRange(EMPTY_RANGE);
     setList('');
   }
