@@ -19,7 +19,12 @@ import { AppError } from '../../platform/errors.js';
 import type { Database } from '../../platform/db.js';
 import { writeAudit } from '../audit/service.js';
 import { nextPrintAttempt, publishPrintEvent } from './assembly.js';
-import { renderPrintFormPdf, printFormFileName } from './pdf.js';
+import {
+  printFormFileName,
+  renderPrintFormPdf,
+  renderThermalLabelPdf,
+  thermalLabelFileName,
+} from './pdf.js';
 import { normalizePageRequest, pageInfo, type PageInfo, type PageRequest } from './paging.js';
 import type { PrintFormSnapshot } from './print-form.js';
 import type { RequestContext } from './shifts.js';
@@ -364,6 +369,54 @@ async function renderStored(snapshot: unknown, hash: string): Promise<PrintDocum
   return {
     bytes: await renderPrintFormPdf(stored),
     fileName: printFormFileName(stored),
+    snapshotHash: hash,
+  };
+}
+
+/**
+ * Термоэтикетка задания печати.
+ *
+ * Второе ПРЕДСТАВЛЕНИЕ того же документа, а не второй механизм: снимок берётся
+ * тот же, что и у бланка, поэтому история печати, повторы и аудит остаются
+ * общими. Заведи мы отдельную сущность «этикетка» — у одного заказа появились
+ * бы две несогласованные истории печати.
+ */
+export async function renderJobLabel(db: Database, jobId: string): Promise<PrintDocument> {
+  const job = await db.orderPrintJob.findUnique({
+    where: { id: jobId },
+    select: { printForm: { select: { snapshot: true, snapshotHash: true } } },
+  });
+
+  if (job === null) {
+    throw new AppError('NOT_FOUND', { message: 'print job not found' });
+  }
+
+  return renderStoredLabel(job.printForm.snapshot, job.printForm.snapshotHash);
+}
+
+/** Этикетка последнего бланка заказа: то, что открывается из карточки. */
+export async function renderOrderLabel(db: Database, orderId: string): Promise<PrintDocument> {
+  const form = await db.orderPrintForm.findFirst({
+    where: { orderId },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { snapshot: true, snapshotHash: true },
+  });
+
+  if (form === null) {
+    throw new AppError('NOT_FOUND', {
+      message: 'print form not found',
+      publicMessage: 'Бланк ещё не создан: заказ не собран.',
+    });
+  }
+
+  return renderStoredLabel(form.snapshot, form.snapshotHash);
+}
+
+async function renderStoredLabel(snapshot: unknown, hash: string): Promise<PrintDocument> {
+  const stored = snapshot as PrintFormSnapshot;
+  return {
+    bytes: await renderThermalLabelPdf(stored),
+    fileName: thermalLabelFileName(stored),
     snapshotHash: hash,
   };
 }

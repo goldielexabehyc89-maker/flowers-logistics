@@ -21,7 +21,15 @@
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import fontkit from '@pdf-lib/fontkit';
-import { PDFDocument, PDFHexString, rgb, type PDFArray, type PDFFont, type PDFPage } from 'pdf-lib';
+import {
+  degrees,
+  PDFDocument,
+  PDFHexString,
+  rgb,
+  type PDFArray,
+  type PDFFont,
+  type PDFPage,
+} from 'pdf-lib';
 import { encodeQrMatrix } from '../warehouse/qr.js';
 import { snapshotHash, type PrintFormSnapshot } from './print-form.js';
 
@@ -297,4 +305,131 @@ export function printFormFileName(snapshot: PrintFormSnapshot): string {
 /** Ровно то, что кодирует QR. Вынесено, чтобы проверка читала то же значение. */
 export function qrPayload(snapshot: PrintFormSnapshot): string {
   return snapshot.orderNumber;
+}
+
+// --- Термоэтикетка 58×40 мм --------------------------------------------------
+
+/**
+ * Этикетка для термопринтера шириной 58 мм.
+ *
+ * Это ВТОРОЕ представление того же печатного бланка, а не второй механизм
+ * печати: снимок, задание, история и аудит остаются прежними, меняется только
+ * то, как документ выглядит на бумаге. Поэтому функция живёт здесь, рядом
+ * с бланком, и берёт тот же `PrintFormSnapshot`.
+ *
+ * На этикетке НЕТ ничего, кроме QR и номера заказа. Ни адреса, ни получателя,
+ * ни состава: наклейка живёт на коробке, её видит каждый, кто проходит мимо,
+ * и любая лишняя строка на ней — это разглашение, которое невозможно отозвать.
+ */
+
+/** Пункт PDF — 1/72 дюйма; миллиметр — 1/25.4 дюйма. */
+const MM = 72 / 25.4;
+
+/** Физический размер носителя. Одна этикетка — одна страница. */
+export const LABEL_WIDTH_MM = 58;
+export const LABEL_HEIGHT_MM = 40;
+
+/**
+ * Безопасная ширина печати у 58-мм принтеров — около 48 мм.
+ *
+ * Печатающая головка уже носителя, и края физически не пропечатываются.
+ * Поэтому содержимое прижимается к безопасной области, а не к краю бумаги:
+ * иначе на части принтеров обрезался бы либо QR, либо номер.
+ */
+const SAFE_WIDTH_MM = 48;
+
+/** Поля внутри безопасной области. */
+const LABEL_PADDING_MM = 2;
+
+/**
+ * Сторона QR.
+ *
+ * Тридцать миллиметров при 203 DPI — это примерно 240 точек на сторону,
+ * больше трёх точек на модуль даже для длинного номера. Меньше делать нельзя:
+ * термопечать «размывает» модули, и сканер начинает ошибаться.
+ */
+const QR_SIZE_MM = 30;
+
+/** Тихая зона вокруг QR. Без неё сканер не находит границы кода. */
+const QR_QUIET_MM = 2;
+
+const LABEL_NUMBER_MAX_SIZE = 13;
+const LABEL_NUMBER_MIN_SIZE = 5;
+
+/**
+ * Размер шрифта номера, при котором строка помещается целиком.
+ *
+ * Номер НЕ переносится и НЕ обрезается: обрезанный номер выглядит как
+ * настоящий и отправляет кладовщика искать несуществующий заказ. Поэтому
+ * единственная уступка длине — уменьшение кегля, и оно ограничено снизу:
+ * ниже пяти пунктов термопечать превращает цифры в кашу, и лучше честно
+ * показать, что номер не помещается, чем напечатать нечитаемое.
+ */
+export function labelNumberFontSize(font: PDFFont, text: string, availableHeight: number): number {
+  for (let size = LABEL_NUMBER_MAX_SIZE; size > LABEL_NUMBER_MIN_SIZE; size -= 0.5) {
+    if (font.widthOfTextAtSize(text, size) <= availableHeight) {
+      return size;
+    }
+  }
+  return LABEL_NUMBER_MIN_SIZE;
+}
+
+/**
+ * Собирает термоэтикетку из того же снимка, что и бланк.
+ *
+ * QR кодирует РОВНО номер заказа — то же значение, что и на бланке, и то же,
+ * которое ожидает складской сканер. Менять его ради макета нельзя: наклейка
+ * и поиск обязаны говорить об одном заказе.
+ */
+export async function renderThermalLabelPdf(snapshot: PrintFormSnapshot): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  document.registerFontkit(fontkit);
+
+  const font = await document.embedFont(fontBytes(), { subset: true });
+  const width = LABEL_WIDTH_MM * MM;
+  const height = LABEL_HEIGHT_MM * MM;
+  const page = document.addPage([width, height]);
+
+  const safeWidth = SAFE_WIDTH_MM * MM;
+  const padding = LABEL_PADDING_MM * MM;
+  const qrSize = QR_SIZE_MM * MM;
+  const quiet = QR_QUIET_MM * MM;
+
+  // QR слева, по вертикали посередине.
+  const qrX = padding;
+  const qrY = (height - qrSize) / 2;
+  drawQr(page, snapshot.orderNumber, qrX, qrY, qrSize);
+
+  /*
+   * Номер справа, повёрнут на 90°, читается снизу вверх.
+   *
+   * Поворот — не украшение: вдоль короткой стороны 58-мм этикетки длинный
+   * номер поместился бы только столбиком по одному символу, а такой номер
+   * человек не прочитает и глазами не сверит.
+   */
+  const numberX = qrX + qrSize + quiet;
+  const availableWidth = safeWidth - numberX - padding;
+  const availableHeight = height - padding * 2;
+
+  const size = labelNumberFontSize(font, snapshot.orderNumber, availableHeight);
+  const textWidth = font.widthOfTextAtSize(snapshot.orderNumber, size);
+
+  page.drawText(snapshot.orderNumber, {
+    x: numberX + Math.max(0, (availableWidth - size) / 2) + size,
+    // Строка центрируется по высоте: повёрнутый текст растёт вверх от базовой
+    // линии, поэтому начало смещается на половину неиспользованной высоты.
+    y: padding + Math.max(0, (availableHeight - textWidth) / 2),
+    size,
+    font,
+    color: rgb(0, 0, 0),
+    rotate: degrees(90),
+  });
+
+  return document.save();
+}
+
+/** Имя файла этикетки: только номер заказа, без PII. */
+export function thermalLabelFileName(snapshot: PrintFormSnapshot): string {
+  const safe = snapshot.orderNumber.replace(/[^A-Za-z0-9._-]/g, '_');
+  return `label-${safe}.pdf`;
 }

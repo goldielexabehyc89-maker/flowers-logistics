@@ -29,6 +29,8 @@ import {
   markPrinted,
   renderJobDocument,
   renderOrderDocument,
+  renderOrderLabel,
+  renderJobLabel,
   retryPrint,
 } from './print.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
@@ -329,6 +331,27 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
     const document = await renderOrderDocument(deps.db, id);
+    return sendPdf(reply, document);
+  });
+
+  /*
+   * Термоэтикетка 58×40 мм.
+   *
+   * Те же права, тот же снимок и то же задание, что и у бланка: этикетка —
+   * другое представление одного документа, а не отдельная печать. Поэтому
+   * отдельной отметки «этикетка напечатана» нет: историю ведёт задание.
+   */
+  app.get('/api/florist/print-jobs/:id/label.pdf', async (request, reply) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const document = await renderJobLabel(deps.db, id);
+    return sendPdf(reply, document);
+  });
+
+  app.get('/api/florist/orders/:id/label.pdf', async (request, reply) => {
+    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const document = await renderOrderLabel(deps.db, id);
     return sendPdf(reply, document);
   });
 }
