@@ -273,7 +273,15 @@ describe('создание партии', () => {
       CONTEXT,
     );
 
-    expect(result).toEqual({ created: 10, skippedExisting: 0, duplicates: 0, invalid: 0 });
+    expect(result).toMatchObject({
+      created: 10,
+      skippedExisting: 0,
+      duplicates: 0,
+      invalid: 0,
+    });
+    // Созданные возвращаются поимённо: по ним сразу печатаются наклейки
+    // именно этой партии, а не поиском по всему справочнику.
+    expect(result.createdIds).toHaveLength(10);
 
     const stored = await ctx.db.storageCell.findMany({
       where: { normalizedCode: { startsWith: prefix.toUpperCase() } },
@@ -329,7 +337,13 @@ describe('создание партии', () => {
     const second = await createStorageCellBatch(cells, admin, { codes, kind: 'STORAGE' }, CONTEXT);
 
     expect(first.created).toBe(5);
-    expect(second).toEqual({ created: 0, skippedExisting: 5, duplicates: 0, invalid: 0 });
+    expect(second).toMatchObject({
+      created: 0,
+      skippedExisting: 5,
+      duplicates: 0,
+      invalid: 0,
+    });
+    expect(second.createdIds).toEqual([]);
     expect(await countWithPrefix(prefix)).toBe(5);
   });
 
@@ -347,7 +361,13 @@ describe('создание партии', () => {
       CONTEXT,
     );
 
-    expect(result).toEqual({ created: 2, skippedExisting: 0, duplicates: 1, invalid: 1 });
+    expect(result).toMatchObject({
+      created: 2,
+      skippedExisting: 0,
+      duplicates: 1,
+      invalid: 1,
+    });
+    expect(result.createdIds).toHaveLength(2);
     expect(await countWithPrefix(prefix)).toBe(2);
   });
 
