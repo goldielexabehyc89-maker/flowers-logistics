@@ -44,6 +44,7 @@ import {
   listActiveShifts,
   listAssignableFlorists,
   ownShift,
+  setShiftPrintPoint,
   startShift,
   type RequestContext,
 } from './shifts.js';
@@ -53,6 +54,15 @@ const uuid = z
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'Некорректный id');
 
 const idParamSchema = z.object({ id: uuid });
+
+/**
+ * Точка печати смены.
+ *
+ * `null` допустим намеренно: работа без печати — обычный случай, пока
+ * принтеров нет ни одного.
+ */
+const printPointSchema = z.object({ printPointId: uuid.nullable() });
+const shiftStartSchema = z.object({ printPointId: uuid.nullable().optional() });
 
 /**
  * Страница списка.
@@ -168,9 +178,33 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     return { shift, activeOrders };
   });
 
+  /**
+   * Начало смены. Здесь же выбирается точка печати.
+   *
+   * Выбор — часть начала работы, а не отдельная сессия со своим сроком жизни:
+   * завершение смены снимает привязку само.
+   */
   app.post('/api/florist/shift/start', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
-    return startShift(deps.db, actor, contextOf(request));
+    const body = shiftStartSchema.parse(request.body ?? {});
+    return startShift(deps.db, actor, contextOf(request), {
+      printPointId: body.printPointId ?? null,
+    });
+  });
+
+  /**
+   * Смена точки печати посреди смены.
+   *
+   * Флорист пересел за другой стол — наклейки должны пойти туда же. Тем же
+   * маршрутом точка выбирается впервые, если смена была открыта до появления
+   * печати: отдельного пути «сначала выбрать» не заводится.
+   */
+  app.post('/api/florist/shift/print-point', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const body = printPointSchema.parse(request.body ?? {});
+    return {
+      shift: await setShiftPrintPoint(deps.db, actor, body.printPointId, contextOf(request)),
+    };
   });
 
   app.post('/api/florist/shift/close', async (request) => {

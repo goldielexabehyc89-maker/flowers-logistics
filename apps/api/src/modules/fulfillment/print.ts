@@ -191,8 +191,17 @@ export async function listPrintJobs(
      * Бланк по-прежнему ждёт отметки человека — состояние `PENDING` остаётся
      * честным, — но наклейка ушла на печать сама, и держать такое задание
      * в рабочем списке значит наполнить его тем, с чем делать нечего.
+     *
+     * Пустое `deliveryState` перечислено ЯВНО. В SQL сравнение с NULL даёт
+     * не «истину» и не «ложь», а «неизвестно», поэтому условие вида «не равно
+     * SENT_TO_PRINTER» молча выбрасывает все задания без автоматической
+     * доставки — то есть всю прежнюю ручную очередь.
      */
-    ...(input.filter === 'attention' ? { NOT: { deliveryState: 'SENT_TO_PRINTER' as const } } : {}),
+    ...(input.filter === 'attention'
+      ? {
+          OR: [{ deliveryState: null }, { deliveryState: { notIn: ['SENT_TO_PRINTER' as const] } }],
+        }
+      : {}),
     ...(general
       ? { createdAt: { gte: new Date(now.getTime() - GENERAL_WINDOW_MS) } }
       : { order: { fulfillmentAssigneeId: input.actorUserId } }),
