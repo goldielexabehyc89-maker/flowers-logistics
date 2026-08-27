@@ -38,6 +38,26 @@ const MM = 72 / 25.4;
  * печати, где картинка декодируется из настоящего файла. Браузерный сценарий
  * отвечает за другое: что кнопка отдаёт именно этот документ.
  */
+/**
+ * Документ этикеток: одна наклейка 58×40 мм на страницу.
+ *
+ * Размер проверяется по самому файлу, а не по имени: пакет, уехавший на
+ * принтер листами A4, не наклеится ни на что.
+ */
+async function expectLabelSheet(download: Download, pages: number): Promise<void> {
+  const bytes = await readFile(await download.path());
+  expect(bytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+
+  const pdf = await PDFDocument.load(bytes);
+  expect(pdf.getPageCount()).toBe(pages);
+
+  for (let index = 0; index < pages; index += 1) {
+    const size = pdf.getPage(index).getSize();
+    expect(size.width / MM).toBeCloseTo(58, 2);
+    expect(size.height / MM).toBeCloseTo(40, 2);
+  }
+}
+
 async function expectThermalLabel(download: Download, orderNumber: string): Promise<void> {
   const path = await download.path();
   const bytes = await readFile(path);
@@ -2229,6 +2249,20 @@ test('складские ячейки: партия диапазоном и сп
   // Панель закрылась: партия заведена, повторное нажатие ничего не создаст.
   await expect(cells.getByTestId('cell-bulk')).toHaveCount(0);
 
+  /*
+   * Наклейки только что созданной партии — сразу, одной кнопкой.
+   *
+   * Искать эти пять ячеек потом среди сотен строк справочника — работа,
+   * которой быть не должно.
+   */
+  const batch = cells.getByTestId('cell-batch-labels');
+  await expect(batch).toBeVisible();
+  const [batchLabels] = await Promise.all([
+    page.waitForEvent('download'),
+    batch.getByTestId('cell-batch-download').click(),
+  ]);
+  await expectLabelSheet(batchLabels, 5);
+
   for (const number of ['001', '003', '005']) {
     await expect(
       cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}${number}` }),
@@ -2288,6 +2322,230 @@ test('складские ячейки: партия диапазоном и сп
   await expect(
     cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}ONE` }),
   ).toBeVisible();
+
+  /*
+   * Наклейки отмеченных ячеек — одним документом.
+   *
+   * Печатать сотню наклеек по одной человек не станет, а значит,
+   * не напечатает вовсе. Проверяется сам файл: размер страницы физический,
+   * и страниц ровно столько, сколько отмечено.
+   */
+  const firstRow = cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}001` });
+  const secondRow = cells.locator('[data-testid="cell-row"]', { hasText: `${prefix}002` });
+  await firstRow.getByTestId('cell-select').check();
+  await secondRow.getByTestId('cell-select').check();
+
+  const selection = cells.getByTestId('cell-selection');
+  await expect(selection).toContainText('Отмечено: 2 ячейки');
+
+  const [selectedLabels] = await Promise.all([
+    page.waitForEvent('download'),
+    selection.getByTestId('cell-selected-download').click(),
+  ]);
+  await expectLabelSheet(selectedLabels, 2);
+
+  await context.close();
+});
+
+/**
+ * Печать наклеек: точка, подключение агента и автоматическая наклейка.
+ *
+ * Windows-агента здесь нет и быть не может — сценарий воспроизводит ровно его
+ * протокол обычными запросами. Это и есть предмет проверки: что сервер отдаёт
+ * агенту готовое задание и правильно подводит итог. Физическая печать
+ * на XP-318B проверяется отдельно, на настоящей машине.
+ */
+test('печать: точка, подключение агента и автоматическая наклейка при «Собран»', async ({
+  page,
+  request,
+  browser,
+}: {
+  page: Page;
+  request: APIRequestContext;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const orderNumber = seedOrders(1, { withPoint: false })[0] ?? '';
+  const pointName = `Стол ${Date.now() % 100_000}`;
+
+  // 1. Администратор заводит точку печати.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Настройки');
+
+  const printing = page.locator('section', { hasText: 'Точка печати — это компьютер' }).first();
+  await expect(printing).toBeVisible();
+  await printing.getByTestId('print-point-name').fill(pointName);
+  await printing.getByTestId('print-point-create').click();
+
+  const row = printing.locator('[data-testid="print-point-row"]', { hasText: pointName });
+  await expect(row).toBeVisible();
+  // Пока компьютер не подключён, состояние честное: связи нет.
+  await expect(row).toContainText('Нет связи');
+
+  // 2. Код подключения показывается ОДИН раз.
+  await row.getByTestId('print-point-pair').click();
+  const codeBlock = printing.getByTestId('print-point-code');
+  await expect(codeBlock).toBeVisible();
+  const code = (await codeBlock.locator('.one-time-code').innerText()).trim();
+  expect(code).toMatch(/^\d{8}$/);
+  await codeBlock.getByRole('button', { name: 'Я записал код' }).click();
+  await expect(codeBlock).toHaveCount(0);
+
+  // 3. Агент подключается этим кодом. Дальше он живёт по токену.
+  const paired = await request.post('/api/print-agent/pair', {
+    data: { code, computerName: 'E2E-PC', printerName: 'XP-318B' },
+  });
+  expect(paired.status()).toBe(200);
+  const agentToken = ((await paired.json()) as { token: string }).token;
+  const agentHeaders = { authorization: `Bearer ${agentToken}` };
+
+  // Тот же код второй раз не работает: второй компьютер не подключится
+  // к чужому принтеру.
+  const again = await request.post('/api/print-agent/pair', {
+    data: { code, computerName: 'E2E-PC-2', printerName: 'XP-318B' },
+  });
+  expect(again.status()).toBeGreaterThanOrEqual(400);
+
+  // 4. Точка стала «Онлайн» — экран узнал об этом сам.
+  await expect(row).toContainText('Онлайн');
+  await expect(row).toContainText('E2E-PC');
+
+  // 5. Заводим флориста.
+  const floristPhone = uniquePhone();
+  await openSection(page, 'Сотрудники и курьеры');
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Флорист печати');
+  await page.getByLabel('Телефон').fill(floristPhone);
+  await page.getByRole('checkbox', { name: 'Флорист' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+  const floristCode = (await page.locator('.one-time-code').innerText()).trim();
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  const context = await browser.newContext({ acceptDownloads: true });
+  const floristPage = await context.newPage();
+  await activate(floristPage, floristPhone, floristCode, '7351');
+  await expect(floristPage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
+
+  await clickAndAwait(
+    floristPage,
+    floristPage.getByTestId('shift-start'),
+    'POST',
+    '/api/florist/shift/start',
+  );
+
+  // 6. Точка ещё не выбрана, и интерфейс говорит об этом прямо.
+  const pointLine = floristPage.getByTestId('florist-print-point');
+  await expect(pointLine).toBeVisible();
+  await expect(floristPage.getByTestId('florist-print-point-name')).toHaveText('не выбрана');
+
+  // 7. «Собран» спрашивает точку и продолжает работу сам.
+  const orderRow = floristPage.locator('.florist__row', { hasText: orderNumber });
+  await expect(orderRow).toBeVisible();
+
+  // Взятый заказ уходит из общей очереди в «Мои заказы»: строка в очереди
+  // исчезает, и открывать карточку нужно уже там.
+  await clickAndAwait(floristPage, orderRow.getByTestId('row-claim'), 'POST', '/claim');
+  await floristPage.getByTestId('florist-tab-mine').click();
+
+  const mineRow = floristPage.locator('.florist__row', { hasText: orderNumber });
+  await expect(mineRow).toBeVisible();
+  await mineRow.getByTestId('row-open').click();
+
+  const card = floristPage.getByTestId('florist-card');
+  await expect(card).toBeVisible();
+  await card.getByTestId('card-assemble').click();
+
+  const picker = floristPage.getByTestId('florist-point-picker');
+  await expect(picker).toBeVisible();
+
+  /*
+   * Выбор точки продолжает работу сам: второго нажатия «Собран» не требуется.
+   *
+   * Ожидается именно ответ на сборку, а не текст на экране: кнопка подписана
+   * тем же словом «Собран», и проверка по тексту прошла бы ещё до запроса.
+   */
+  await Promise.all([
+    floristPage.waitForResponse(
+      (response) => response.url().includes('/assemble') && response.request().method() === 'POST',
+    ),
+    picker.getByTestId('florist-point-choose').first().click(),
+  ]);
+
+  await expect(card.getByTestId('card-print-state')).toContainText('Ожидает печати');
+  await expect(floristPage.getByTestId('florist-print-point-name')).toHaveText(pointName);
+
+  // 8. Агент забирает задание и печатает.
+  const poll = await request.post('/api/print-agent/poll', { headers: agentHeaders, data: {} });
+  expect(poll.status()).toBe(200);
+  const job = ((await poll.json()) as { job: { kind: string; jobId: string; tspl: string } | null })
+    .job;
+  expect(job).not.toBeNull();
+  expect(job?.kind).toBe('ORDER_LABEL');
+
+  // В задании настоящий кадр для термоголовки, а не заглушка.
+  const tspl = Buffer.from(job?.tspl ?? '', 'base64').toString('latin1');
+  expect(tspl).toContain('SIZE 58 mm,40 mm');
+  expect(tspl).toContain('PRINT 1,1');
+
+  // Пока агент не ответил, задание держится за ним и второй раз не выдаётся.
+  const second = await request.post('/api/print-agent/poll', { headers: agentHeaders, data: {} });
+  expect(((await second.json()) as { job: unknown }).job).toBeNull();
+
+  const reported = await request.post(`/api/print-agent/jobs/${job?.jobId ?? ''}/result`, {
+    headers: agentHeaders,
+    data: { outcome: 'sent' },
+  });
+  expect(reported.status()).toBe(200);
+
+  // 9. Очередь точки опустела.
+  //
+  //    Администратор всё это время заводил флориста в другом разделе,
+  //    поэтому возвращаемся в настройки — там и видно состояние точки.
+  await openSection(page, 'Настройки');
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId('print-point-queue')).toHaveText('0');
+  // И компьютер по-прежнему на связи: отметка приходит с каждым опросом.
+  await expect(row).toContainText('Онлайн');
+
+  /*
+   * 10. Наклейка ушла, но бланк по-прежнему ждёт человека.
+   *
+   *     Спулер Windows не подтверждает выход бумаги, поэтому «напечатано»
+   *     остаётся именным действием. Задание при этом уходит из рабочего
+   *     списка: делать с ним больше нечего.
+   */
+  // Карточка остаётся открытой после сборки — закрываем её, прежде чем идти
+  // во вкладку печати.
+  await floristPage
+    .getByTestId('florist-card-dialog')
+    .getByRole('button', { name: 'Закрыть' })
+    .click();
+  await floristPage.getByTestId('florist-tab-print').click();
+  await expect(
+    floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
+  ).toHaveCount(0);
+
+  // А в «Напечатанных» его тоже нет: человек ничего не подтверждал.
+  // Задание видно в общем списке — с честной отметкой о передаче принтеру.
+  await floristPage.getByTestId('print-filter-printed').click();
+  await expect(
+    floristPage.locator('[data-testid="print-row"]', { hasText: orderNumber }),
+  ).toHaveCount(0);
+
+  // 11. Отключение точки: право печати теряется немедленно.
+  await row.getByTestId('print-point-disconnect').click();
+  await expect(row).toContainText('Отключена');
+
+  const afterDisconnect = await request.post('/api/print-agent/poll', {
+    headers: agentHeaders,
+    data: {},
+  });
+  expect(afterDisconnect.status()).toBe(401);
 
   await context.close();
 });
