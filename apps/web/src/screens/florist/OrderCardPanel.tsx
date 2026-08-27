@@ -175,6 +175,7 @@ export interface OrderCardPanelProps {
   onReopen: (reason: string) => void;
   onReassign: (floristId: string) => void;
   onDownload: () => void;
+  onDownloadLabel: () => void;
   onRetry: () => void;
   onMarkPrinted: () => void;
 }
@@ -277,6 +278,16 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
             onClick={props.onDownload}
           >
             Скачать PDF
+          </Button>
+        )}
+        {actions.canPrint && (
+          <Button
+            variant="secondary"
+            disabled={props.busy}
+            data-testid="card-label"
+            onClick={props.onDownloadLabel}
+          >
+            Этикетка
           </Button>
         )}
         {actions.canPrint && job !== null && (

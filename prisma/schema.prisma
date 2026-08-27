@@ -156,12 +156,14 @@ model User {
   issueChecksCleared RouteIssueCheck[]       @relation("IssueCheckClearedBy")
   cancelledOrders    DeliveryOrder[]         @relation("OrderCancelledByLogist")
 
-  cashEntries        LogistCashEntry[]    @relation("CashOwner")
-  cashOperations     LogistCashEntry[]    @relation("CashActor")
-  cashTransfers      LogistCashEntry[]    @relation("CashCourier")
-  ledgerEntries      CourierLedgerEntry[] @relation("LedgerCourier")
-  ledgerOperations   CourierLedgerEntry[] @relation("LedgerActor")
-  correctedDistances RouteOrderDistance[] @relation("DistanceActor")
+  cashEntries         LogistCashEntry[]    @relation("CashOwner")
+  cashOperations      LogistCashEntry[]    @relation("CashActor")
+  cashTransfers       LogistCashEntry[]    @relation("CashCourier")
+  ledgerEntries       CourierLedgerEntry[] @relation("LedgerCourier")
+  ledgerOperations    CourierLedgerEntry[] @relation("LedgerActor")
+  correctedDistances  RouteOrderDistance[] @relation("DistanceActor")
+  printPointsCreated  PrintPoint[]         @relation("PrintPointCreatedBy")
+  printTestsRequested PrintPoint[]         @relation("PrintPointTestRequestedBy")
 
   @@index([status])
   @@index([createdAt])
@@ -1065,6 +1067,24 @@ enum PrintJobState {
   ERROR
 }
 
+/// Ход автоматической доставки задания на принтер.
+///
+/// `SENT_TO_PRINTER` — честная граница нашего знания: задание принято спулером
+/// Windows. Вышла ли наклейка, спулер не сообщает.
+///
+/// `NEEDS_REVIEW` — исход неоднозначен: агент мог отдать задание спулеру,
+/// но не успел сообщить об этом серверу. Такое задание НЕ повторяется
+/// автоматически: лишняя наклейка на коробке хуже, чем её отсутствие —
+/// отсутствие видно сразу.
+enum PrintDeliveryState {
+  QUEUED
+  CLAIMED
+  SENT_TO_PRINTER
+  FAILED
+  NEEDS_REVIEW
+  CANCELLED
+}
+
 /// Смена флориста.
 ///
 /// Одновременно активная смена у пользователя ровно одна. Инвариант держит
@@ -1089,6 +1109,15 @@ model FloristShift {
   closedBy    User?                  @relation("FloristShiftClosedBy", fields: [closedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
   /// Причина администратора. Для `ADMIN_FORCED` обязательна (CHECK базы).
   closeReason String?
+
+  /// Точка печати, выбранная на эту смену.
+  ///
+  /// Живёт в смене, а не отдельной сущностью: выбор точки — часть начала
+  /// работы, и завершение смены обязано снимать привязку само, без второй
+  /// кнопки и второго срока жизни. У смен, открытых до появления печати,
+  /// точки нет — её спросят при первом «Собран».
+  printPointId String?     @db.Uuid
+  printPoint   PrintPoint? @relation(fields: [printPointId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   assignments DeliveryOrder[] @relation("OrderFulfillmentShift")
 
@@ -1160,12 +1189,47 @@ model OrderPrintJob {
   lastErrorCode String?
   lastErrorAt   DateTime?
 
+  /// Точка печати, назначенная этому заданию в момент создания.
+  ///
+  /// NULL означает «автоматической доставки нет»: так выглядят ВСЕ задания,
+  /// созданные до появления печати, и все, созданные в смене без выбранной
+  /// точки. Агент забирает только задания с явно назначенной точкой — иначе
+  /// при первом подключении принтера распечаталась бы вся историческая
+  /// очередь. Никакого заполнения задним числом не делается.
+  printPointId String?     @db.Uuid
+  printPoint   PrintPoint? @relation(fields: [printPointId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Как идёт автоматическая доставка на принтер.
+  ///
+  /// ОТДЕЛЬНОЕ поле, а не новые значения `PrintJobState`. Причина не
+  /// в аккуратности: значение, добавленное в существующее перечисление,
+  /// ломает чтение строки предыдущим клиентом Prisma, то есть откат выкладки.
+  /// Здесь же старые строки остаются с NULL, а старый клиент просто
+  /// не выбирает новую колонку.
+  ///
+  /// `state` при этом продолжает отвечать на вопрос «что с документом»,
+  /// а `deliveryState` — на вопрос «где наклейка». Передача спулеру — это
+  /// `SENT_TO_PRINTER`: вышла ли бумага, не знает и сам Windows.
+  deliveryState PrintDeliveryState?
+
+  /// Сколько раз задание выдавалось агенту. Растёт и при повторной выдаче
+  /// после истёкшей аренды: это счётчик доставки, а не попыток печати.
+  deliveryAttempts Int @default(0)
+
+  /// До какого момента задание закреплено за агентом. Просроченная аренда
+  /// возвращает задание в очередь: компьютер могли выключить.
+  leaseUntil DateTime?
+  claimedAt  DateTime?
+  /// Момент передачи спулеру. Не момент выхода бумаги — его никто не знает.
+  sentAt     DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([orderId, attempt])
   @@index([state, createdAt])
   @@index([orderId, createdAt])
+  @@index([printPointId, deliveryState, createdAt])
 }
 
 /// Курсор фоновой синхронизации. Отделён от `IntegrationStatus.details`:
@@ -1209,16 +1273,16 @@ model IntegrationCursor {
   ///
   /// Отдельной таблицы не заводится намеренно: это состояние ТОГО ЖЕ курсора,
   /// и разнеси мы их, две строки однажды разошлись бы.
-  passKind      String?
+  passKind        String?
   /// Сколько заказов уже полностью применено в этом проходе.
-  passOffset    Int?
+  passOffset      Int?
   /// Отпечаток конфигурации прохода.
   ///
   /// Продолжать старый проход с другими правилами отбора нельзя: он собирал
   /// одну выборку, а продолжение читало бы другую, и «пропущенные» страницы
   /// оказались бы не теми. Несовпадение отпечатка означает начать заново.
   passFingerprint String?
-  passStartedAt DateTime?
+  passStartedAt   DateTime?
 
   /// Техническая версия для безопасного конкурентного обновления.
   version   Int      @default(0)
@@ -2988,4 +3052,65 @@ model OrderReturnTransition {
   reason      String?
 
   @@index([returnId, occurredAt])
+}
+
+// --- Печать этикеток ---------------------------------------------------------
+
+/// Точка печати: один компьютер с одним подключённым принтером.
+///
+/// Состояние «Онлайн / Нет связи / Ошибка» в базе НЕ хранится: оно выводится
+/// из `lastSeenAt` и `lastErrorAt` при чтении. Хранимое состояние пришлось бы
+/// обновлять по расписанию, и оно показывало бы «онлайн» у компьютера,
+/// выключенного полчаса назад.
+///
+/// Одна точка обслуживается ОДНИМ агентом и печатает на ОДНОМ системном
+/// принтере — это осознанное ограничение первой версии. Несколько флористов
+/// при этом пользуются одной точкой одновременно: очередь общая и
+/// последовательная.
+model PrintPoint {
+  id   String @id @default(uuid(7)) @db.Uuid
+  name String
+
+  /// Как назвался компьютер при подключении. Заполняет агент, не человек.
+  computerName String?
+  /// Выбранный системный принтер. Тоже приходит от агента.
+  printerName  String?
+
+  isActive Boolean @default(true)
+  version  Int     @default(0)
+
+  /// Постоянный токен агента хранится ТОЛЬКО хешем: открытое значение агент
+  /// видит один раз при подключении и хранит у себя.
+  agentTokenHash String? @unique
+
+  /// Одноразовый код подключения — тоже только хеш, и он истекает.
+  pairingCodeHash  String?
+  pairingExpiresAt DateTime?
+  pairedAt         DateTime?
+
+  lastSeenAt    DateTime?
+  lastErrorAt   DateTime?
+  /// Текст последней ошибки агента для показа администратору. Без секретов.
+  lastErrorText String?
+
+  /// Запрошенный отпечаток для проверки связи.
+  ///
+  /// Не очередь и не задание: одна отметка «человек нажал „Тестовая печать“».
+  /// Агент забирает её вместе с обычным опросом и гасит. Второй очереди
+  /// у заказов от этого не появляется, а печатать в никуда становится
+  /// невозможно — отметка живёт только до ближайшего опроса.
+  testRequestedAt   DateTime?
+  testRequestedById String?   @db.Uuid
+  testRequestedBy   User?     @relation("PrintPointTestRequestedBy", fields: [testRequestedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  createdById String? @db.Uuid
+  createdBy   User?   @relation("PrintPointCreatedBy", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobs   OrderPrintJob[]
+  shifts FloristShift[]
+
+  @@index([isActive, name])
 }

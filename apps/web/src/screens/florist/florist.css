@@ -487,3 +487,15 @@
 .florist__group-head {
   padding: 0 var(--space-1);
 }
+
+/*
+ * Точка печати смены.
+ *
+ * Одна строка над рабочим списком: выбор делается раз за смену, и место
+ * ему — рядом со сменой, а не отдельным разделом.
+ */
+.florist__print-point {
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}

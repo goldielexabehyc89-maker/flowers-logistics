@@ -201,6 +201,31 @@ export class ApiClient {
   }
 
   /**
+   * Двоичный ответ на запрос с телом.
+   *
+   * Нужен там, где список для документа не помещается в адресную строку:
+   * этикетки сотни ячеек запрашиваются идентификаторами, а возвращаются
+   * одним PDF.
+   */
+  async postBlob(path: string, body: unknown): Promise<Blob> {
+    const response = await this.#requestWithRetry(
+      path,
+      {
+        method: 'POST',
+        headers: { accept: 'application/pdf', 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      true,
+    );
+
+    if (!response.ok) {
+      throw await toApiError(response);
+    }
+
+    return response.blob();
+  }
+
+  /**
    * Открывает поток событий.
    *
    * Нативный EventSource не используется: он не позволяет передать заголовок

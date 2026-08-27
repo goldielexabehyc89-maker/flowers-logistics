@@ -14,6 +14,7 @@ import { OutboxFailures } from './OutboxFailures';
 import { PlanningSettings } from './settings/PlanningSettings';
 import { FinanceSettings } from './settings/FinanceSettings';
 import { StorageCells } from './settings/StorageCells';
+import { PrintPoints } from './settings/PrintPoints';
 import './settings/settings.css';
 import { useAuth } from '../auth/AuthContext';
 import { ErrorState, LoadingState, StatusBadge, type StatusTone } from '../ui/components';
@@ -75,6 +76,7 @@ const SECTIONS: readonly { id: string; title: string }[] = [
   { id: 'settings-planning', title: 'Планирование' },
   { id: 'settings-finance', title: 'Финансы' },
   { id: 'settings-cells', title: 'Ячейки' },
+  { id: 'settings-print', title: 'Печать' },
   { id: 'settings-outbox', title: 'Отправка событий' },
   { id: 'settings-required', title: 'Обязательные настройки' },
 ];
@@ -165,6 +167,10 @@ export function SettingsScreen(): React.JSX.Element {
 
         <div id="settings-cells">
           <StorageCells />
+        </div>
+
+        <div id="settings-print">
+          <PrintPoints />
         </div>
 
         <div id="settings-outbox">

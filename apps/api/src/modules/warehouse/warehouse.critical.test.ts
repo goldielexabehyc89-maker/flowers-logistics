@@ -32,7 +32,10 @@ import {
   type CellOccupancy,
 } from './service.js';
 import jsQR from 'jsqr';
-import { renderCellLabelSvg } from './qr.js';
+import { PDFDocument } from 'pdf-lib';
+import { renderLabelsPdf } from '../printing/label-pdf.js';
+import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, MM } from '../printing/label.js';
+import { rasterizeQr, textOperations } from '../printing/testing/label-probe.js';
 
 let ctx: TestContext;
 let deps: CellDeps;
@@ -532,7 +535,7 @@ describe('права', () => {
       (await call('GET', `/api/storage-cells/resolve?code=${cell.normalizedCode}`, token))
         .statusCode,
     ).toBe(200);
-    expect((await call('GET', `/api/storage-cells/${cell.id}/label.svg`, token)).statusCode).toBe(
+    expect((await call('GET', `/api/storage-cells/${cell.id}/label.pdf`, token)).statusCode).toBe(
       200,
     );
 
@@ -584,7 +587,7 @@ describe('права', () => {
       (await call('GET', `/api/storage-cells/resolve?code=${cell.normalizedCode}`, token))
         .statusCode,
     ).toBe(404);
-    expect((await call('GET', `/api/storage-cells/${cell.id}/label.svg`, token)).statusCode).toBe(
+    expect((await call('GET', `/api/storage-cells/${cell.id}/label.pdf`, token)).statusCode).toBe(
       404,
     );
   });
@@ -608,7 +611,7 @@ describe('права', () => {
     }
 
     expect((await call('GET', '/api/storage-cells', null)).statusCode).toBe(401);
-    expect((await call('GET', `/api/storage-cells/${cell.id}/label.svg`, null)).statusCode).toBe(
+    expect((await call('GET', `/api/storage-cells/${cell.id}/label.pdf`, null)).statusCode).toBe(
       401,
     );
   });
@@ -667,50 +670,7 @@ describe('список', () => {
 
 // --- 7. Этикетка: независимое доказательство ---------------------------------
 
-/**
- * Растеризация конечного SVG в пиксели.
- *
- * Разбираются только прямоугольники модулей, которые отрисовал сам документ:
- * ничего о QR эта функция не знает и структуру символа не воспроизводит.
- * Подпись под кодом остаётся белой — она вне области QR и декодированию
- * не мешает.
- */
-function rasterizeLabel(svg: string): { data: Uint8ClampedArray; width: number; height: number } {
-  const root = /<svg[^>]*width="(\d+)"[^>]*height="(\d+)"/.exec(svg);
-  if (root === null) {
-    throw new Error('в документе нет размеров');
-  }
-  const width = Number(root[1]);
-  const height = Number(root[2]);
-
-  const pixels = new Uint8ClampedArray(width * height * 4).fill(255);
-
-  // Прямоугольники модулей отличаются от фонового наличием координат.
-  const rect = /<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)"\/>/g;
-  let match = rect.exec(svg);
-  let drawn = 0;
-  while (match !== null) {
-    const [x, y, w, h] = [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4])];
-    for (let row = y; row < y + h; row += 1) {
-      for (let col = x; col < x + w; col += 1) {
-        const offset = (row * width + col) * 4;
-        pixels[offset] = 0;
-        pixels[offset + 1] = 0;
-        pixels[offset + 2] = 0;
-      }
-    }
-    drawn += 1;
-    match = rect.exec(svg);
-  }
-
-  if (drawn === 0) {
-    throw new Error('в документе нет ни одного модуля');
-  }
-
-  return { data: pixels, width, height };
-}
-
-describe('QR-этикетка', () => {
+describe('QR-этикетка ячейки', () => {
   /**
    * Классы кодов подобраны по тому, что реально ломается: короткий ASCII,
    * рабочий код с разделителями, кириллица (двухбайтовый UTF-8) и предельная
@@ -718,10 +678,23 @@ describe('QR-этикетка', () => {
    */
   const payloads = ['A-1', 'A-01-15', 'СКЛАД-ПОЛКА-12', 'X'.repeat(MAX_CODE_LENGTH)];
 
-  it('конечный документ читается НЕЗАВИСИМЫМ декодером и даёт ровно код ячейки', () => {
+  it('наклейка ячейки физически 58×40 мм и одна на страницу', async () => {
     for (const payload of payloads) {
-      const svg = renderCellLabelSvg(payload);
-      const image = rasterizeLabel(svg);
+      const pdf = await renderLabelsPdf([{ qrText: payload, caption: payload }]);
+      const document = await PDFDocument.load(pdf);
+
+      // Принтер режет по метке, а не по нашему представлению о размере.
+      const { width, height } = document.getPage(0).getSize();
+      expect(width / MM, payload).toBeCloseTo(LABEL_WIDTH_MM, 1);
+      expect(height / MM, payload).toBeCloseTo(LABEL_HEIGHT_MM, 1);
+      expect(document.getPageCount(), payload).toBe(1);
+    }
+  });
+
+  it('конечный документ читается НЕЗАВИСИМЫМ декодером и даёт ровно код ячейки', async () => {
+    for (const payload of payloads) {
+      const pdf = await renderLabelsPdf([{ qrText: payload, caption: payload }]);
+      const image = rasterizeQr(pdf);
 
       // jsQR — самостоятельная реализация распознавания (порт ZXing), не имеющая
       // отношения к генератору. Совпадение здесь означает, что этикетку прочтёт
@@ -739,37 +712,72 @@ describe('QR-этикетка', () => {
     // по которому потом произойдёт разрешение скана.
     const cell = await seedCell('STORAGE', uniqueCode('qr').toLowerCase());
 
-    const response = await call('GET', `/api/storage-cells/${cell.id}/label.svg`, token);
+    const response = await call('GET', `/api/storage-cells/${cell.id}/label.pdf`, token);
     expect(response.statusCode).toBe(200);
-    expect(String(response.headers['content-type'])).toContain('image/svg+xml');
+    expect(String(response.headers['content-type'])).toContain('application/pdf');
 
-    const image = rasterizeLabel(response.body);
+    const image = rasterizeQr(new Uint8Array(response.rawPayload));
     const decoded = jsQR(image.data, image.width, image.height);
 
     expect(decoded?.data).toBe(cell.normalizedCode);
     expect(cell.normalizedCode).not.toBe(cell.code);
   });
 
-  it('генерация детерминированная, разные коды дают разные этикетки', () => {
-    expect(renderCellLabelSvg('A-01')).toBe(renderCellLabelSvg('A-01'));
-    expect(renderCellLabelSvg('A-01')).not.toBe(renderCellLabelSvg('A-02'));
+  it('пакет: одна ячейка — одна страница, порядок и содержимое сохранены', async () => {
+    const token = await tokenFor(['ADMIN']);
+    const first = await seedCell('STORAGE', uniqueCode('BATCH-A'));
+    const second = await seedCell('STORAGE', uniqueCode('BATCH-B'));
+    const third = await seedCell('ROUTE', uniqueCode('BATCH-C'));
+
+    const response = await call('POST', '/api/storage-cells/labels.pdf', token, {
+      // Порядок намеренно не совпадает с порядком создания: печатается ровно
+      // то, что прислали, — кладовщик раскладывает ленту по своему списку.
+      ids: [third.id, first.id, second.id],
+    });
+    expect(response.statusCode).toBe(200);
+
+    const pdf = new Uint8Array(response.rawPayload);
+    const document = await PDFDocument.load(pdf);
+    expect(document.getPageCount()).toBe(3);
+
+    const expected = [third.normalizedCode, first.normalizedCode, second.normalizedCode];
+    for (const [index, code] of expected.entries()) {
+      const image = rasterizeQr(pdf, index);
+      expect(jsQR(image.data, image.width, image.height)?.data, code).toBe(code);
+      const { width, height } = document.getPage(index).getSize();
+      expect(width / MM).toBeCloseTo(LABEL_WIDTH_MM, 1);
+      expect(height / MM).toBeCloseTo(LABEL_HEIGHT_MM, 1);
+    }
   });
 
-  it('этикетка несёт только код: ни UUID, ни ссылок, ни скриптов, ни PII', async () => {
+  it('генерация детерминированная, разные коды дают разные этикетки', async () => {
+    const one = await renderLabelsPdf([{ qrText: 'A-01', caption: 'A-01' }]);
+    const same = await renderLabelsPdf([{ qrText: 'A-01', caption: 'A-01' }]);
+    const other = await renderLabelsPdf([{ qrText: 'A-02', caption: 'A-02' }]);
+
+    // Повторная печать — тот же документ, а не похожий: иначе две наклейки
+    // на одной полке отличались бы, и было бы непонятно, какая настоящая.
+    expect(Buffer.from(one).equals(Buffer.from(same))).toBe(true);
+    expect(Buffer.from(one).equals(Buffer.from(other))).toBe(false);
+  });
+
+  it('этикетка несёт только код: ни UUID, ни ссылок, ни PII', async () => {
     const token = await tokenFor(['ADMIN']);
     const cell = await seedCell('STORAGE', uniqueCode('SAFE'));
 
-    const response = await call('GET', `/api/storage-cells/${cell.id}/label.svg`, token);
+    const response = await call('GET', `/api/storage-cells/${cell.id}/label.pdf`, token);
     expect(response.statusCode).toBe(200);
 
+    const pdf = new Uint8Array(response.rawPayload);
+    const raw = Buffer.from(pdf).toString('latin1');
+
     // Внутреннего идентификатора строки в документе нет.
-    expect(response.body).not.toContain(cell.id);
-    // Единственный http-адрес — пространство имён SVG.
-    const urls = response.body.match(/https?:\/\/[^"'\s]+/g) ?? [];
-    expect(urls).toEqual(['http://www.w3.org/2000/svg']);
-    // Ни скриптов, ни внешних ресурсов, ни шрифтов с чужого сервера.
-    expect(response.body).not.toMatch(/<script|xlink:href|<image|@import|<foreignObject/i);
-    // Подпись под кодом — сам код, чтобы этикетку можно было прочитать глазами.
-    expect(response.body).toContain(cell.normalizedCode);
+    expect(raw).not.toContain(cell.id);
+    // Ни одного внешнего адреса: наклейка печатается на машине без интернета.
+    expect(raw.match(/https?:\/\/[^\s)>]+/g) ?? []).toEqual([]);
+
+    // На наклейке ровно одна текстовая строка — сам код. Появись там что-то
+    // ещё, операций показа текста стало бы больше.
+    expect(textOperations(pdf)).toBe(1);
   });
 });

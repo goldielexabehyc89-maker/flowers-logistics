@@ -67,3 +67,85 @@
     white-space: nowrap;
   }
 }
+
+/*
+ * Партия ячеек.
+ *
+ * Блок отделён рамкой, а не карточкой: он живёт ВНУТРИ раздела справочника,
+ * и отдельная карточка читалась бы как второй раздел про то же самое.
+ */
+.cell-bulk {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.cell-bulk__error {
+  color: var(--color-error);
+}
+
+.cell-bulk__preview {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+/*
+ * Список фактов о партии.
+ *
+ * Маркеры убраны: это не перечисление действий, а четыре числа, и точки
+ * перед ними только добавляли бы шума.
+ */
+.cell-bulk__facts,
+.cell-bulk__invalid {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.cell-bulk__invalid code {
+  word-break: break-all;
+}
+
+/*
+ * На узком экране поля диапазона идут друг под другом.
+ *
+ * Четыре поля в строку на телефоне дают колонки шириной в два символа —
+ * в них не виден ни префикс, ни номер.
+ */
+@media (max-width: 767px) {
+  .cell-bulk .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/*
+ * Одноразовый код подключения.
+ *
+ * Выделен рамкой и не сливается с таблицей: его переписывают руками
+ * на другой компьютер, и потерять его среди строк нельзя — повторно
+ * показать код невозможно.
+ */
+.print-point__code {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}
+
+/*
+ * Полоса действий над справочником: партия и отмеченные строки.
+ *
+ * Появляется только когда есть что печатать, поэтому места на экране
+ * не занимает и внимания не требует.
+ */
+.cell-batch {
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+}

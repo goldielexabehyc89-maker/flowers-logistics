@@ -137,6 +137,22 @@ export interface ShiftView {
   closeKind: string | null;
   closeReason: string | null;
   openAssignments: number;
+  /**
+   * Точка печати смены.
+   *
+   * Живёт в смене, а не отдельной сессией: завершение смены снимает выбор
+   * само. У смен, открытых до появления печати, здесь `null` — точку спросят
+   * при первом «Собран».
+   */
+  printPointId: string | null;
+  printPointName: string | null;
+}
+
+/** Точка печати в списке выбора. Флористу видно название и связь. */
+export interface PrintPointOption {
+  id: string;
+  name: string;
+  state: 'ONLINE' | 'OFFLINE' | 'ERROR';
 }
 
 /**
@@ -421,4 +437,19 @@ export function groupQueueByRoute(items: readonly QueueItemView[]): QueueGroupVi
     groups.push({ key, kind, route, items: [item] });
   }
   return groups;
+}
+
+/**
+ * Имя файла этикетки — то же, что формирует сервер.
+ *
+ * Правило повторено на клиенте не ради проверки, а ради папки загрузок:
+ * браузер берёт имя из атрибута ссылки, и разойдись оно с серверным —
+ * этикетка и бланк одного заказа легли бы рядом под несопоставимыми
+ * именами. Всё, что не буква латиницы, цифра, точка, дефис или
+ * подчёркивание, заменяется подчёркиванием: кириллица и пробелы в имени
+ * файла переживают не каждую файловую систему и не каждый принтерный
+ * каталог.
+ */
+export function safeFileName(orderNumber: string): string {
+  return orderNumber.replace(/[^A-Za-z0-9._-]/g, '_');
 }

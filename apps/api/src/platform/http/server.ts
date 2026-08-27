@@ -33,6 +33,7 @@ import { registerReturnRoutes } from '../../modules/returns/routes.js';
 import { registerTestingRoutes } from '../../modules/testing/routes.js';
 import { registerFloristRoutes } from '../../modules/fulfillment/routes.js';
 import { registerPickupRoutes } from '../../modules/pickup/routes.js';
+import { registerPrintingRoutes } from '../../modules/printing/routes.js';
 import { registerSettingsRoutes } from '../../modules/settings/routes.js';
 import { registerPlanningRoutes } from '../../modules/planning/routes.js';
 import { createPlanningDeps } from '../../modules/planning/deps.js';
@@ -148,6 +149,8 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerDepotRoutes(app, { db, config });
   await registerWarehouseRoutes(app, { db, config });
   await registerWarehouseFlowRoutes(app, { db, config });
+  // Печать: точки, подключение агента и выдача заданий на принтер.
+  await registerPrintingRoutes(app, { db, config });
   // Работа курьера: результат доставки и автоматическое завершение маршрута.
   await registerDeliveryRoutes(app, { db, config });
   await registerFinanceRoutes(app, { db, config });

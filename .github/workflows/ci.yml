@@ -702,3 +702,66 @@ jobs:
             --no-banner \
             --verbose \
             --exit-code 1
+
+  print-agent:
+    name: Агент печати (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Агент не имеет зависимостей вовсе: ни одной строки из node_modules.
+      # Поэтому сборка не ставит пакеты и не зависит от состояния реестра —
+      # только штатный Node и штатный же сборщик одиночного файла.
+      - name: Проверить синтаксис агента
+        run: node --check agent/src/agent.cjs
+
+      - name: Собрать одиночный исполняемый файл
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location agent
+          node --experimental-sea-config sea-config.json
+          Copy-Item (Get-Command node).Source -Destination flowers-print-agent.exe
+          # postject вшивает собранный blob в копию node.exe. Версия
+          # закреплена: обновление сборщика не должно менять артефакт молча.
+          npx --yes postject@1.0.0-alpha.6 flowers-print-agent.exe NODE_SEA_BLOB agent.blob `
+            --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+          if (-not (Test-Path flowers-print-agent.exe)) { throw 'файл агента не собран' }
+
+      - name: Проверить, что файл запускается
+        shell: pwsh
+        run: |
+          Set-Location agent
+          # Без настроек агент обязан СПРОСИТЬ их и завершиться понятной
+          # ошибкой. Ненулевой код возврата здесь ожидаем — это и есть та самая
+          # понятная ошибка, — поэтому проверяется вывод, а не код.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:AGENT_STATE_DIR = "$env:TEMP\agent-check"
+          $output = '' | & .\flowers-print-agent.exe 2>&1 | Out-String
+          Write-Host $output
+          if ($output -notmatch 'Настройка агента печати') {
+            throw "агент не вышел на настройку: $output"
+          }
+          if ($output -notmatch 'адрес сервера обязателен') {
+            throw "агент не назвал причину отказа: $output"
+          }
+          # Оболочка шага завершает его кодом последней команды, а последней
+          # была именно та самая ожидаемая ошибка агента. Проверка прошла —
+          # шаг обязан быть успешным.
+          exit 0
+
+      - name: Приложить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowers-print-agent-windows-x64
+          path: |
+            agent/flowers-print-agent.exe
+            agent/install-autostart.ps1
+            agent/README.md
+          if-no-files-found: error
+          retention-days: 30

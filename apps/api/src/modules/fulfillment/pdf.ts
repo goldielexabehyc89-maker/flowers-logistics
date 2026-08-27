@@ -18,36 +18,20 @@
  * в генерацию не попадает.
  */
 
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import fontkit from '@pdf-lib/fontkit';
 import { PDFDocument, PDFHexString, rgb, type PDFArray, type PDFFont, type PDFPage } from 'pdf-lib';
 import { encodeQrMatrix } from '../warehouse/qr.js';
+import { labelFontBytes } from '../printing/font.js';
+import { renderLabelsPdf } from '../printing/label-pdf.js';
+import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM } from '../printing/label.js';
 import { snapshotHash, type PrintFormSnapshot } from './print-form.js';
 
-/**
- * Путь к шрифту разрешается через `require.resolve`, а не собирается из
- * `node_modules` руками: расположение пакета зависит от того, как менеджер
- * пакетов разложил дерево, и склеенный путь однажды перестал бы находиться.
- */
-const resolveFromHere = createRequire(import.meta.url);
+// Размеры наклейки переэкспортируются: потребители печати заказа не обязаны
+// знать про модуль `printing`, а второй копии чисел при этом не появляется.
+export { LABEL_HEIGHT_MM, LABEL_WIDTH_MM };
 
-/**
- * Шрифт читается один раз за процесс.
- *
- * Файл около 750 КБ; перечитывать его на каждую печать значит тратить время
- * на данные, которые не меняются.
- */
-let fontBytesCache: Uint8Array | null = null;
-
-function fontBytes(): Uint8Array {
-  if (fontBytesCache === null) {
-    fontBytesCache = new Uint8Array(
-      readFileSync(resolveFromHere.resolve('dejavu-fonts-ttf/ttf/DejaVuSans.ttf')),
-    );
-  }
-  return fontBytesCache;
-}
+/** Шрифт — тот же, что у наклейки: один файл на всю печать. */
+const fontBytes = labelFontBytes;
 
 /** A5 портрет в пунктах: достаточно для состава, но не расточительно по бумаге. */
 const PAGE_WIDTH = 419.53;
@@ -297,4 +281,27 @@ export function printFormFileName(snapshot: PrintFormSnapshot): string {
 /** Ровно то, что кодирует QR. Вынесено, чтобы проверка читала то же значение. */
 export function qrPayload(snapshot: PrintFormSnapshot): string {
   return snapshot.orderNumber;
+}
+
+// --- Термоэтикетка 58×40 мм --------------------------------------------------
+
+/**
+ * Этикетка для термопринтера шириной 58 мм.
+ *
+ * Это ВТОРОЕ ПРЕДСТАВЛЕНИЕ того же печатного бланка, а не второй механизм
+ * печати: снимок, задание, история и аудит остаются прежними, меняется только
+ * то, как документ выглядит на бумаге.
+ *
+ * Сама раскладка живёт в модуле `printing`: ту же наклейку 58×40 печатают
+ * и складские ячейки, и растр для термоголовки. Держать здесь вторую копию
+ * геометрии значило бы однажды напечатать заказы и ячейки по-разному.
+ */
+export async function renderThermalLabelPdf(snapshot: PrintFormSnapshot): Promise<Uint8Array> {
+  return renderLabelsPdf([{ qrText: qrPayload(snapshot), caption: snapshot.orderNumber }]);
+}
+
+/** Имя файла этикетки: только номер заказа, без PII. */
+export function thermalLabelFileName(snapshot: PrintFormSnapshot): string {
+  const safe = snapshot.orderNumber.replace(/[^A-Za-z0-9._-]/g, '_');
+  return `label-${safe}.pdf`;
 }

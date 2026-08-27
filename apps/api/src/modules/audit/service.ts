@@ -177,6 +177,15 @@ export const AUDIT_ACTIONS = [
   'ORDER_CANCEL_NOT_SENT',
   'FINANCE_CASH_MOVED',
   'FINANCE_CASH_REVERSED',
+  // Точки печати. В записях — название, имя компьютера и сроки; ни кода
+  // подключения, ни токена агента, ни их хешей здесь нет и быть не может.
+  'PRINT_POINT_CREATED',
+  'PRINT_POINT_PAIRING_ISSUED',
+  'PRINT_POINT_PAIRED',
+  'PRINT_POINT_DISCONNECTED',
+  'PRINT_POINT_TEST_REQUESTED',
+  // Смена флориста выбрала точку печати. В записи только идентификатор точки.
+  'FLORIST_SHIFT_PRINT_POINT_SET',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
