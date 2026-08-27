@@ -75,6 +75,7 @@ import {
   queueGroupTitle,
   processLabel,
   routeLabel,
+  safeFileName,
   type FloristOption,
   type FloristTab,
   type OrderCardView,
@@ -381,6 +382,24 @@ export function FloristScreen(): React.JSX.Element {
   /** Из карточки открывается ПОСЛЕДНИЙ бланк заказа: он относится к текущей сборке. */
   async function downloadOrderPdf(orderId: string, number: string): Promise<void> {
     await download(`/api/florist/orders/${orderId}/print-form.pdf`, `order-${number}.pdf`);
+  }
+
+  /**
+   * Термоэтикетка того же заказа.
+   *
+   * Отдельная кнопка, а не замена бланка: к букету едут оба — бланк для
+   * человека и наклейка 58×40 мм на коробку. Имя файла повторяет серверное,
+   * иначе в папке загрузок этикетка и бланк выглядели бы одним документом.
+   */
+  async function downloadOrderLabel(orderId: string, number: string): Promise<void> {
+    await download(`/api/florist/orders/${orderId}/label.pdf`, `label-${safeFileName(number)}.pdf`);
+  }
+
+  async function downloadJobLabel(job: PrintJobView): Promise<void> {
+    await download(
+      `/api/florist/print-jobs/${job.id}/label.pdf`,
+      `label-${safeFileName(job.orderNumber)}.pdf`,
+    );
   }
 
   /**
@@ -901,6 +920,13 @@ export function FloristScreen(): React.JSX.Element {
                   Скачать PDF
                 </Button>
                 <Button
+                  variant="secondary"
+                  data-testid="print-label"
+                  onClick={() => void downloadJobLabel(job)}
+                >
+                  Этикетка
+                </Button>
+                <Button
                   variant="ghost"
                   disabled={action.isPending}
                   onClick={() =>
@@ -1030,6 +1056,7 @@ export function FloristScreen(): React.JSX.Element {
               })
             }
             onDownload={() => void downloadOrderPdf(card.id, card.number)}
+            onDownloadLabel={() => void downloadOrderLabel(card.id, card.number)}
             onRetry={() => {
               const job = latestJob(card);
               if (job !== null) {

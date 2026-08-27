@@ -26,6 +26,7 @@ import {
   printStateLabel,
   processLabel,
   routeLabel,
+  safeFileName,
   type OrderCardView,
   type QueueItemView,
 } from './florist';
@@ -385,5 +386,20 @@ describe('группы очереди', () => {
     // realtime о нём молчит. Без опроса заказ поднялся бы только по F5.
     expect(QUEUE_POLL_MS).toBeGreaterThan(0);
     expect(QUEUE_POLL_MS).toBeLessThanOrEqual(60_000);
+  });
+});
+
+describe('имя файла этикетки', () => {
+  it('повторяет серверное правило', () => {
+    expect(safeFileName('FL-000123')).toBe('FL-000123');
+    expect(safeFileName('CRM-2026-08-29-000000000042')).toBe('CRM-2026-08-29-000000000042');
+  });
+
+  it('кириллица и пробелы заменяются, а не выбрасываются', () => {
+    // Выброшенный символ склеил бы два разных номера в одно имя файла:
+    // «ЗАКАЗ-1» и «ЗАКАЗ 1» легли бы в папку загрузок под одним именем.
+    expect(safeFileName('ЗАКАЗ-МСК-000123')).toBe('_____-___-000123');
+    expect(safeFileName('A 1')).toBe('A_1');
+    expect(safeFileName('A/1')).toBe('A_1');
   });
 });
