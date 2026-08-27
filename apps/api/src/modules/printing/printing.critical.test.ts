@@ -613,6 +613,8 @@ describe('выдача заданий агенту', () => {
   it('ошибка агента доходит до администратора без секретов', async () => {
     const { pointId } = await pairedPoint();
     await recordHeartbeat(ctx.db, pointId, {
+      // Значение заведомо поддельное и помечено как таковое прямо в себе:
+      // проверка про редакцию, а не про конкретную строку.
       error: 'Не найден принтер XP-318B; token=test-only-agent-token',
     });
 
