@@ -56,6 +56,16 @@ export interface ShiftView {
   closeReason: string | null;
   /** Сколько незавершённых заказов было взято в этой смене. */
   openAssignments: number;
+  /**
+   * Точка печати этой смены.
+   *
+   * Живёт в смене, а не отдельной сессией: выбор точки — часть начала работы,
+   * и завершение смены снимает привязку само, без второй кнопки и второго
+   * срока жизни. У смен, открытых до появления печати, здесь `null` — точку
+   * спросят при первом «Собран».
+   */
+  printPointId: string | null;
+  printPointName: string | null;
 }
 
 interface ShiftRow {
@@ -66,7 +76,22 @@ interface ShiftRow {
   closeKind: 'SELF' | 'ADMIN_FORCED' | null;
   closeReason: string | null;
   user: { fullName: string };
+  printPointId: string | null;
+  printPoint: { name: string } | null;
 }
+
+/** Поля смены, читаемые интерфейсом. Общий фрагмент: точку легко забыть. */
+const SHIFT_SELECT = {
+  id: true,
+  userId: true,
+  startedAt: true,
+  closedAt: true,
+  closeKind: true,
+  closeReason: true,
+  user: { select: { fullName: true } },
+  printPointId: true,
+  printPoint: { select: { name: true } },
+} as const;
 
 function toView(shift: ShiftRow, openAssignments: number): ShiftView {
   return {
@@ -78,6 +103,8 @@ function toView(shift: ShiftRow, openAssignments: number): ShiftView {
     closeKind: shift.closeKind,
     closeReason: shift.closeReason,
     openAssignments,
+    printPointId: shift.printPointId,
+    printPointName: shift.printPoint?.name ?? null,
   };
 }
 
@@ -110,14 +137,81 @@ export const OPEN_PROCESS_STATES = ['IN_ASSEMBLY'] as const;
 export async function lockActiveShift(
   tx: TransactionClient,
   userId: string,
-): Promise<{ id: string } | null> {
-  const rows = await tx.$queryRaw<{ id: string }[]>`
-    SELECT "id"
+): Promise<{ id: string; printPointId: string | null } | null> {
+  const rows = await tx.$queryRaw<{ id: string; printPointId: string | null }[]>`
+    SELECT "id", "printPointId"
     FROM "FloristShift"
     WHERE "activeKey" = ${userId}::uuid
     FOR UPDATE
   `;
   return rows[0] ?? null;
+}
+
+/**
+ * Проверяет, что точку печати вообще можно выбрать.
+ *
+ * Выбор отключённой или неподключённой точки означал бы наклейки в никуда:
+ * заказ собран, задание создано, а компьютера на том конце нет. Пустой выбор
+ * допустим — это работа без печати, как было до её появления.
+ */
+async function assertSelectablePoint(
+  db: Database | TransactionClient,
+  printPointId: string | null,
+): Promise<string | null> {
+  if (printPointId === null) {
+    return null;
+  }
+
+  const point = await db.printPoint.findUnique({
+    where: { id: printPointId },
+    select: { id: true, isActive: true, agentTokenHash: true },
+  });
+
+  if (point === null || !point.isActive || point.agentTokenHash === null) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'print point is not selectable',
+      publicMessage: 'Эта точка печати недоступна: к ней не подключён компьютер.',
+    });
+  }
+
+  return point.id;
+}
+
+/**
+ * Смена точки печати посреди смены.
+ *
+ * Флорист пересел за другой стол — наклейки должны пойти туда же. Уже
+ * созданные задания при этом НЕ переезжают: они привязаны к точке в момент
+ * создания, и переносить их значило бы печатать наклейку заказа, собранного
+ * полчаса назад, на другом принтере.
+ */
+export async function setShiftPrintPoint(
+  db: Database,
+  actor: ShiftActor,
+  printPointId: string | null,
+  context: RequestContext,
+): Promise<ShiftView> {
+  const active = await findActiveShift(db, actor.userId);
+  if (active === null) {
+    throw shiftRequired();
+  }
+
+  const resolved = await assertSelectablePoint(db, printPointId);
+
+  const updated = await db.$transaction(async (tx) => {
+    await tx.floristShift.updateMany({
+      where: { id: active.id, activeKey: actor.userId },
+      data: { printPointId: resolved },
+    });
+
+    await writeShiftAudit(tx, 'FLORIST_SHIFT_PRINT_POINT_SET', active.id, actor, context, {
+      printPointId: resolved,
+    });
+
+    return tx.floristShift.findUniqueOrThrow({ where: { id: active.id }, select: SHIFT_SELECT });
+  });
+
+  return toView(updated, await openAssignmentsOf(db, actor.userId));
 }
 
 /** Отказ действия, требующего активной смены. */
@@ -139,18 +233,7 @@ export async function findActiveShift(
   db: Database | TransactionClient,
   userId: string,
 ): Promise<ShiftRow | null> {
-  return db.floristShift.findUnique({
-    where: { activeKey: userId },
-    select: {
-      id: true,
-      userId: true,
-      startedAt: true,
-      closedAt: true,
-      closeKind: true,
-      closeReason: true,
-      user: { select: { fullName: true } },
-    },
-  });
+  return db.floristShift.findUnique({ where: { activeKey: userId }, select: SHIFT_SELECT });
 }
 
 async function openAssignmentsOf(
@@ -186,25 +269,20 @@ export async function startShift(
   db: Database,
   actor: ShiftActor,
   context: RequestContext,
+  input: { printPointId?: string | null } = {},
 ): Promise<{ shift: ShiftView; created: boolean }> {
   const existing = await findActiveShift(db, actor.userId);
   if (existing !== null) {
     return { shift: toView(existing, await openAssignmentsOf(db, actor.userId)), created: false };
   }
 
+  const printPointId = await assertSelectablePoint(db, input.printPointId ?? null);
+
   try {
     const shift = await db.$transaction(async (tx) => {
       const created = await tx.floristShift.create({
-        data: { userId: actor.userId, activeKey: actor.userId },
-        select: {
-          id: true,
-          userId: true,
-          startedAt: true,
-          closedAt: true,
-          closeKind: true,
-          closeReason: true,
-          user: { select: { fullName: true } },
-        },
+        data: { userId: actor.userId, activeKey: actor.userId, printPointId },
+        select: SHIFT_SELECT,
       });
 
       await writeShiftAudit(tx, 'FLORIST_SHIFT_STARTED', created.id, actor, context, {
@@ -277,15 +355,7 @@ export async function closeOwnShift(
 
     return tx.floristShift.findUniqueOrThrow({
       where: { id: active.id },
-      select: {
-        id: true,
-        userId: true,
-        startedAt: true,
-        closedAt: true,
-        closeKind: true,
-        closeReason: true,
-        user: { select: { fullName: true } },
-      },
+      select: SHIFT_SELECT,
     });
   });
 
@@ -376,15 +446,7 @@ export async function forceCloseShift(
 
     const row = await tx.floristShift.findUniqueOrThrow({
       where: { id: shift.id },
-      select: {
-        id: true,
-        userId: true,
-        startedAt: true,
-        closedAt: true,
-        closeKind: true,
-        closeReason: true,
-        user: { select: { fullName: true } },
-      },
+      select: SHIFT_SELECT,
     });
 
     return { shift: toView(row, orphanedOrderIds.length), orphanedOrderIds };
@@ -396,15 +458,7 @@ export async function listActiveShifts(db: Database): Promise<ShiftView[]> {
   const shifts = await db.floristShift.findMany({
     where: { closedAt: null },
     orderBy: { startedAt: 'asc' },
-    select: {
-      id: true,
-      userId: true,
-      startedAt: true,
-      closedAt: true,
-      closeKind: true,
-      closeReason: true,
-      user: { select: { fullName: true } },
-    },
+    select: SHIFT_SELECT,
   });
 
   const counts = await Promise.all(shifts.map((shift) => openAssignmentsOf(db, shift.userId)));

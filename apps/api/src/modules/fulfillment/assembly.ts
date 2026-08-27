@@ -165,7 +165,10 @@ export async function nextPrintAttempt(tx: TransactionClient, orderId: string): 
  * администратор уже собирался переназначить. Администратор от проверки
  * освобождён: разбор оставшихся назначений — его прямая обязанность.
  */
-async function lockOwnShift(tx: TransactionClient, actor: Actor): Promise<string | null> {
+async function lockOwnShift(
+  tx: TransactionClient,
+  actor: Actor,
+): Promise<{ id: string; printPointId: string | null } | null> {
   if (isAdmin(actor)) {
     return null;
   }
@@ -174,7 +177,7 @@ async function lockOwnShift(tx: TransactionClient, actor: Actor): Promise<string
   if (shift === null) {
     throw shiftRequired();
   }
-  return shift.id;
+  return shift;
 }
 
 /**
@@ -297,7 +300,8 @@ export async function releaseOrder(
 ): Promise<ProcessResult> {
   return db.$transaction(async (tx) => {
     // Порядок блокировок: сначала смена, потом заказ.
-    const shiftId = await lockOwnShift(tx, actor);
+    const shift = await lockOwnShift(tx, actor);
+    const shiftId = shift?.id ?? null;
 
     const updated = await tx.deliveryOrder.updateMany({
       where: {
@@ -451,7 +455,8 @@ export async function assembleOrder(
   return db.$transaction(async (tx) => {
     // Смена — первой: собрать заказ после подтверждённого закрытия смены нельзя,
     // и решает это блокировка, а не порядок нажатий.
-    const shiftId = await lockOwnShift(tx, actor);
+    const shift = await lockOwnShift(tx, actor);
+    const shiftId = shift?.id ?? null;
 
     // Блокировка строки на всю транзакцию: между проверкой и записью не должен
     // вклиниться ни повторный «Собран», ни переназначение.
@@ -606,18 +611,53 @@ export async function assembleOrder(
       select: { id: true, snapshotHash: true },
     });
 
+    /*
+     * Точка печати берётся из СМЕНЫ, а не из запроса клиента.
+     *
+     * Клиент мог бы прислать чужую точку, и наклейка вышла бы у соседнего
+     * стола. Выбор точки — часть начала работы, он хранится в смене, и здесь
+     * только читается.
+     *
+     * Если точка не выбрана, а печатать есть куда, сборка честно отказывает
+     * с отдельной причиной: интерфейс покажет выбор точки и повторит «Собран».
+     * Молча собрать без печати нельзя — флорист ушёл бы с букетом без наклейки
+     * и узнал бы об этом на складе.
+     *
+     * Когда точек нет вовсе, всё работает как раньше: печать остаётся ручной.
+     * Иначе появление одной ненастроенной функции остановило бы сборку целиком.
+     */
+    const printPointId = shift?.printPointId ?? null;
+    if (printPointId === null && !isAdmin(actor)) {
+      const available = await tx.printPoint.count({
+        where: { isActive: true, agentTokenHash: { not: null } },
+      });
+      if (available > 0) {
+        throw new AppError('CONFLICT', {
+          message: 'print point is not selected for the shift',
+          publicMessage: 'Выберите точку печати: наклейку заказа некуда отправить.',
+          conflict: { kind: 'PRINT_POINT_REQUIRED' },
+        });
+      }
+    }
+
     // Ровно ОДНО первоначальное задание печати на эту сборку.
     //
     // Номер попытки берётся общим счётчиком, а не единицей: после возврата
     // заказа в работу и повторной сборки единица уже занята прежним заданием,
     // и уникальный индекс `(orderId, attempt)` закономерно отклонил бы всю
     // транзакцию — аварийный путь пересборки просто не работал бы.
+    //
+    // ЭТО ЖЕ ЗАДАНИЕ и забирает Windows-агент: второй очереди у печати нет.
+    // Признак автоматической доставки ставится здесь, в той же транзакции,
+    // что и «Собран», — поэтому «собран, но печатать нечего» невозможно.
     const job = await tx.orderPrintJob.create({
       data: {
         orderId: order.id,
         printFormId: printForm.id,
         attempt: await nextPrintAttempt(tx, order.id),
         state: 'PENDING',
+        printPointId,
+        deliveryState: printPointId === null ? null : 'QUEUED',
       },
       select: { id: true, attempt: true },
     });
@@ -805,7 +845,7 @@ export async function publishPrintEvent(
   tx: TransactionClient,
   jobId: string,
   orderId: string,
-  kind: 'CREATED' | 'RETRIED' | 'PRINTED',
+  kind: 'CREATED' | 'RETRIED' | 'PRINTED' | 'DELIVERY',
 ): Promise<void> {
   await publishRealtimeEvent(tx, {
     topic: 'print_job.changed',
