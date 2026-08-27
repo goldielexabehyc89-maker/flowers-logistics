@@ -17,7 +17,8 @@ import { AppError } from '../../platform/errors.js';
 import { authenticateWithRoles, type AuthenticatedActor } from '../auth/guards.js';
 import { expandRange, splitList } from './bulk-cells.js';
 import { MAX_CODE_LENGTH } from './cell-code.js';
-import { renderCellLabelSvg } from './qr.js';
+import { renderLabelsPdf, MAX_LABELS_PER_DOCUMENT } from '../printing/label-pdf.js';
+import type { LabelContent } from '../printing/label.js';
 import { listConfirmedRoutes, getRouteFlow, listPlacedOrders } from './views.js';
 import {
   FLOW_ADMIN_ROLES,
@@ -161,6 +162,44 @@ const bulkSchema = z.object({
   list: z.string().max(64_000).optional(),
 });
 
+/**
+ * Ячейки, чьи этикетки печатаются одним документом.
+ *
+ * Предел тот же, что у партии создания: столько наклеек человек ещё способен
+ * разложить за один раз, а рулон — выдержать без замены.
+ */
+const labelsSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(MAX_LABELS_PER_DOCUMENT),
+});
+
+/**
+ * Наклейка ячейки: QR несёт нормализованный код, подпись — его же.
+ *
+ * Подпись и QR берут ОДНО значение. Разойдись они, сканер и человек читали бы
+ * с одной наклейки разные полки.
+ */
+function cellLabel(normalizedCode: string): LabelContent {
+  return { qrText: normalizedCode, caption: normalizedCode };
+}
+
+/** Единственное место, где формируются заголовки документа этикеток. */
+async function sendLabels(
+  reply: {
+    header: (name: string, value: string) => typeof reply;
+    send: (payload: Buffer) => unknown;
+  },
+  labels: readonly LabelContent[],
+  fileName: string,
+): Promise<unknown> {
+  const bytes = await renderLabelsPdf(labels);
+  const safe = fileName.replace(/[^A-Za-z0-9._-]/g, '_');
+  return reply
+    .header('content-type', 'application/pdf')
+    .header('content-disposition', `attachment; filename="${safe}.pdf"`)
+    .header('cache-control', 'no-store')
+    .send(Buffer.from(bytes));
+}
+
 /** Один список кодов из любого способа ввода. */
 function codesOf(body: z.infer<typeof bulkSchema>): string[] {
   const fromRange = body.range === undefined ? [] : expandRange(body.range);
@@ -274,13 +313,17 @@ export async function registerWarehouseRoutes(
   });
 
   /**
-   * Печатная этикетка одной ячейки.
+   * Печатная этикетка одной ячейки — та же наклейка 58×40 мм, что у заказа.
    *
-   * SVG, а не PDF: он открывается и печатается из браузера без дополнительных
-   * библиотек, а генерация остаётся детерминированной и проверяемой. Документ
-   * самодостаточен — ни одной внешней ссылки, ни одного шрифта с чужого сервера.
+   * PDF, а не SVG: наклейку печатают на термопринтере рулоном, и размер
+   * страницы обязан быть физическим. Прежний SVG растягивался под лист
+   * и на ленту не годился.
+   *
+   * Кодируется РОВНО нормализованный код: ни идентификатора строки, ни адреса
+   * сервиса. Этикетка обязана оставаться пригодной, даже если приложение
+   * переедет на другой домен.
    */
-  app.get('/api/storage-cells/:id/label.svg', async (request, reply) => {
+  app.get('/api/storage-cells/:id/label.pdf', async (request, reply) => {
     const actor = await authenticateWithRoles(request, deps, CELL_READ_ROLES);
     const { id } = idParamSchema.parse(request.params);
 
@@ -292,13 +335,51 @@ export async function registerWarehouseRoutes(
       });
     }
 
-    // Кодируется РОВНО нормализованный код: ни идентификатора строки, ни адреса
-    // сервиса. Этикетка обязана оставаться пригодной, даже если приложение
-    // переедет на другой домен.
-    return reply
-      .header('content-type', 'image/svg+xml; charset=utf-8')
-      .header('cache-control', 'no-store')
-      .send(renderCellLabelSvg(cell.normalizedCode));
+    return sendLabels(reply, [cellLabel(cell.normalizedCode)], `cell-${cell.normalizedCode}`);
+  });
+
+  /**
+   * Этикетки нескольких ячеек одним документом.
+   *
+   * Одна страница — одна наклейка, порядок — порядок присланных
+   * идентификаторов: кладовщик снимает ленту сверху вниз и раскладывает
+   * наклейки по полкам, поэтому произвольная перестановка превратила бы
+   * понятную последовательность в поиск.
+   *
+   * POST, а не GET: список ячеек бывает в сотни строк, и в адресную строку
+   * он не помещается.
+   */
+  app.post('/api/storage-cells/labels.pdf', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, CELL_READ_ROLES);
+    const body = labelsSchema.parse(request.body);
+
+    const cells = await deps.db.storageCell.findMany({
+      where: { id: { in: body.ids } },
+      select: { id: true, normalizedCode: true, isActive: true },
+    });
+
+    const byId = new Map(cells.map((cell) => [cell.id, cell]));
+    const ordered = body.ids.flatMap((id) => {
+      const cell = byId.get(id);
+      if (cell === undefined) {
+        return [];
+      }
+      // Кладовщику выключенные полки не показываются нигде — и в печати тоже.
+      return !isAdmin(actor) && !cell.isActive ? [] : [cell];
+    });
+
+    if (ordered.length === 0) {
+      throw new AppError('NOT_FOUND', {
+        message: 'no cells to print',
+        publicMessage: 'Печатать нечего: ячейки не найдены.',
+      });
+    }
+
+    return sendLabels(
+      reply,
+      ordered.map((cell) => cellLabel(cell.normalizedCode)),
+      `cells-${ordered.length}`,
+    );
   });
 }
 

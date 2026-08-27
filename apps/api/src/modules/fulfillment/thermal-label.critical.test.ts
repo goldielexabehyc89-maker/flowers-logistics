@@ -20,20 +20,24 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { inflateSync } from 'node:zlib';
 import jsQR from 'jsqr';
 import { PDFDocument } from 'pdf-lib';
 import { buildPrintFormSnapshot, type PrintFormSnapshot } from './print-form.js';
+import { qrPayload, renderThermalLabelPdf, thermalLabelFileName } from './pdf.js';
+import { pdfContent as textOf, rasterizeQr } from '../printing/testing/label-probe.js';
+import { embedLabelFont } from '../printing/label-pdf.js';
 import {
   LABEL_HEIGHT_MM,
-  LABEL_NUMBER_HEIGHT_PT,
   LABEL_WIDTH_MM,
-  embedLabelFont,
-  labelNumberFontSize,
-  qrPayload,
-  renderThermalLabelPdf,
-  thermalLabelFileName,
-} from './pdf.js';
+  MM as POINT_PER_MM,
+  PADDING_MM,
+  SINGLE_LINE_MAX,
+  captionFontSize,
+  splitCaption,
+} from '../printing/label.js';
+
+/** Длина наклейки, в которую обязана уложиться повёрнутая строка. */
+const LABEL_NUMBER_HEIGHT_PT = (LABEL_HEIGHT_MM - PADDING_MM * 2) * POINT_PER_MM;
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import {
   MAX_ORDER_NUMBER_LENGTH,
@@ -88,31 +92,6 @@ function snapshotFor(orderNumber: string): PrintFormSnapshot {
   });
 }
 
-/** Текстовые строки, нарисованные в документе. */
-function textOf(pdf: Uint8Array): string {
-  const buffer = Buffer.from(pdf);
-  const marker = Buffer.from('stream');
-  const endMarker = Buffer.from('endstream');
-  let content = '';
-  let index = 0;
-  for (;;) {
-    const at = buffer.indexOf(marker, index);
-    if (at === -1) break;
-    let start = at + marker.length;
-    if (buffer[start] === 0x0d) start += 1;
-    if (buffer[start] === 0x0a) start += 1;
-    const end = buffer.indexOf(endMarker, start);
-    if (end === -1) break;
-    try {
-      content += inflateSync(buffer.subarray(start, end)).toString('latin1');
-    } catch {
-      // Несжатый поток: шрифт или метаданные, текста в них нет.
-    }
-    index = end + endMarker.length;
-  }
-  return content;
-}
-
 /**
  * Размер страницы и их число — из готового документа.
  *
@@ -127,65 +106,6 @@ async function pageGeometry(pdf: Uint8Array): Promise<{
   const document = await PDFDocument.load(pdf);
   const { width, height } = document.getPage(0).getSize();
   return { pages: document.getPageCount(), width, height };
-}
-
-/**
- * Модули QR, прочитанные ИЗ ГОТОВОГО PDF и растеризованные.
- *
- * Читается фактический поток содержимого — то же, что увидит просмотрщик
- * и сканер, а не наша матрица.
- */
-function rasterizeQr(pdf: Uint8Array): {
-  data: Uint8ClampedArray;
-  width: number;
-  height: number;
-  moduleSizePt: number;
-  modules: number;
-  minX: number;
-  maxX: number;
-} {
-  const content = textOf(pdf);
-  const square =
-    /1 0 0 1 ([\d.]+) ([\d.]+) cm[\s\S]{0,80}?0 0 m\s+0 ([\d.]+) l\s+([\d.]+) \3 l\s+\4 0 l\s+h\s+f/g;
-
-  const found: { x: number; y: number; size: number }[] = [];
-  let match = square.exec(content);
-  while (match !== null) {
-    found.push({ x: Number(match[1]), y: Number(match[2]), size: Number(match[3]) });
-    match = square.exec(content);
-  }
-  if (found.length === 0) {
-    throw new Error('в документе нет ни одного модуля QR');
-  }
-
-  const size = found[0]?.size ?? 1;
-  const minX = Math.min(...found.map((m) => m.x));
-  const minY = Math.min(...found.map((m) => m.y));
-  const maxX = Math.max(...found.map((m) => m.x));
-  const maxY = Math.max(...found.map((m) => m.y));
-
-  const quiet = 4;
-  const columns = Math.round((maxX - minX) / size) + 1;
-  const rows = Math.round((maxY - minY) / size) + 1;
-  const scale = 4;
-  const width = (columns + quiet * 2) * scale;
-  const height = (rows + quiet * 2) * scale;
-
-  const pixels = new Uint8ClampedArray(width * height * 4).fill(255);
-  for (const module of found) {
-    const column = Math.round((module.x - minX) / size) + quiet;
-    const row = rows - 1 - Math.round((module.y - minY) / size) + quiet;
-    for (let dy = 0; dy < scale; dy += 1) {
-      for (let dx = 0; dx < scale; dx += 1) {
-        const offset = ((row * scale + dy) * width + (column * scale + dx)) * 4;
-        pixels[offset] = 0;
-        pixels[offset + 1] = 0;
-        pixels[offset + 2] = 0;
-      }
-    }
-  }
-
-  return { data: pixels, width, height, moduleSizePt: size, modules: columns, minX, maxX };
 }
 
 describe('размер носителя', () => {
@@ -328,33 +248,68 @@ describe('номер заказа', () => {
     const pdf = await renderThermalLabelPdf(snapshotFor(long));
     const content = textOf(pdf);
 
-    // Одна операция показа текста — значит, строка одна: переноса нет.
-    expect((content.match(/Tj/g) ?? []).length).toBe(1);
+    // Две операции показа текста — ровно две строки. Не три и не одна:
+    // третья не поместилась бы по ширине колонки, одна вынудила бы кегль
+    // ниже читаемого.
+    expect((content.match(/Tj/g) ?? []).length).toBe(2);
 
-    // Кегль уменьшился по сравнению с коротким номером — иначе строка
-    // не поместилась бы и её пришлось бы резать.
-    const shortPdf = await renderThermalLabelPdf(snapshotFor('A1'));
     const sizeOf = (text: string): number => {
       const m = /\/[A-Za-z0-9+.-]+ ([\d.]+) Tf/.exec(text);
       return m === null ? 0 : Number(m[1]);
     };
+
+    // Кегль уменьшился по сравнению с коротким номером.
+    const shortPdf = await renderThermalLabelPdf(snapshotFor('A1'));
     expect(sizeOf(content)).toBeLessThan(sizeOf(textOf(shortPdf)));
-    expect(sizeOf(content)).toBeGreaterThan(0);
+
+    /*
+     * Насколько уменьшился — здесь и проходит граница честности.
+     *
+     * Шестьдесят четыре ЗАГЛАВНЫХ «X» подряд — самый широкий номер, который
+     * вообще принимает сканер, и на нём двух строк хватает ровно до 4,5 пункта.
+     * Это мелко, но целиком и вчетверо крупнее прежних 2,75, когда номер
+     * рисовался одной строкой и выезжал за край наклейки.
+     *
+     * Настоящие номера уже читаемы: проверка ниже требует пяти пунктов
+     * для длинного номера из цифр и кириллицы.
+     */
+    expect(sizeOf(content)).toBeGreaterThanOrEqual(4.5);
+
+    const realistic = textOf(
+      await renderThermalLabelPdf(snapshotFor(`ЗАКАЗ-МСК-${'4'.repeat(48)}`)),
+    );
+    expect((realistic.match(/Tj/g) ?? []).length).toBe(2);
+    expect(sizeOf(realistic)).toBeGreaterThanOrEqual(5);
   });
 
-  it('подбор кегля держится читаемого диапазона, пока строка в него влезает', async () => {
+  it('подбор кегля держится читаемого диапазона, пока строка в него влезает', () => {
     const font = {
       widthOfTextAtSize: (text: string, size: number) => text.length * size * 0.6,
     } as never;
 
     // Короткая строка получает максимальный кегль.
-    expect(labelNumberFontSize(font, 'A1', 200)).toBe(13);
+    expect(captionFontSize(font, ['A1'], 200, 40)).toBe(13);
     // Пока номер помещается читаемым кеглем, ниже пяти пунктов не опускаемся.
-    expect(labelNumberFontSize(font, 'X'.repeat(30), 90)).toBe(5);
+    expect(captionFontSize(font, ['X'.repeat(30)], 90, 40)).toBe(5);
     // Заведомо неразмещаемая строка — не ноль и не отрицательный кегль.
-    const tiny = labelNumberFontSize(font, 'X'.repeat(400), 10);
+    const tiny = captionFontSize(font, ['X'.repeat(400)], 10, 40);
     expect(tiny).toBeGreaterThan(0);
     expect(tiny).toBeLessThan(5);
+  });
+
+  it('длинный номер делится на две строки, а короткий остаётся одной', () => {
+    expect(splitCaption('FL-000123')).toEqual(['FL-000123']);
+    expect(splitCaption('X'.repeat(SINGLE_LINE_MAX))).toHaveLength(1);
+    expect(splitCaption('X'.repeat(SINGLE_LINE_MAX + 1))).toHaveLength(2);
+
+    // Деление идёт по разделителю ближе к середине: человек читает номер
+    // группами, и разрыв внутри группы цифр сбивает сверку сильнее.
+    expect(splitCaption('CRM-2026-08-29-000000000042')).toEqual(['CRM-2026-08-29-000000000042']);
+    const long = splitCaption('ЗАКАЗ-МСК-' + '4'.repeat(48));
+    expect(long).toHaveLength(2);
+    // Ничего не потеряно и ничего не дописано.
+    expect(long.join('')).toBe('ЗАКАЗ-МСК-' + '4'.repeat(48));
+    expect(long.join('')).not.toContain('…');
   });
 
   it('номер любой длины помещается на наклейку целиком', async () => {
@@ -370,11 +325,17 @@ describe('номер заказа', () => {
     const font = await embedLabelFont(document);
 
     for (const number of NUMBERS) {
-      const size = labelNumberFontSize(font, number, LABEL_NUMBER_HEIGHT_PT);
-      expect(font.widthOfTextAtSize(number, size), number).toBeLessThanOrEqual(
-        LABEL_NUMBER_HEIGHT_PT,
-      );
+      const lines = splitCaption(number);
+      const size = captionFontSize(font, lines, LABEL_NUMBER_HEIGHT_PT, 12 * POINT_PER_MM);
+      for (const line of lines) {
+        expect(font.widthOfTextAtSize(line, size), number).toBeLessThanOrEqual(
+          LABEL_NUMBER_HEIGHT_PT,
+        );
+      }
       expect(size, number).toBeGreaterThan(0);
+      // Строк не больше двух, и вместе они дают исходный номер целиком.
+      expect(lines.length, number).toBeLessThanOrEqual(2);
+      expect(lines.join(''), number).toBe(number);
     }
   });
 });

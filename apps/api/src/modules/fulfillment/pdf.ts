@@ -18,11 +18,8 @@
  * в генерацию не попадает.
  */
 
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import fontkit from '@pdf-lib/fontkit';
 import {
-  degrees,
   PDFDocument,
   PDFHexString,
   rgb,
@@ -31,31 +28,17 @@ import {
   type PDFPage,
 } from 'pdf-lib';
 import { encodeQrMatrix } from '../warehouse/qr.js';
+import { labelFontBytes } from '../printing/font.js';
+import { renderLabelsPdf } from '../printing/label-pdf.js';
+import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM } from '../printing/label.js';
 import { snapshotHash, type PrintFormSnapshot } from './print-form.js';
 
-/**
- * Путь к шрифту разрешается через `require.resolve`, а не собирается из
- * `node_modules` руками: расположение пакета зависит от того, как менеджер
- * пакетов разложил дерево, и склеенный путь однажды перестал бы находиться.
- */
-const resolveFromHere = createRequire(import.meta.url);
+// Размеры наклейки переэкспортируются: потребители печати заказа не обязаны
+// знать про модуль `printing`, а второй копии чисел при этом не появляется.
+export { LABEL_HEIGHT_MM, LABEL_WIDTH_MM };
 
-/**
- * Шрифт читается один раз за процесс.
- *
- * Файл около 750 КБ; перечитывать его на каждую печать значит тратить время
- * на данные, которые не меняются.
- */
-let fontBytesCache: Uint8Array | null = null;
-
-function fontBytes(): Uint8Array {
-  if (fontBytesCache === null) {
-    fontBytesCache = new Uint8Array(
-      readFileSync(resolveFromHere.resolve('dejavu-fonts-ttf/ttf/DejaVuSans.ttf')),
-    );
-  }
-  return fontBytesCache;
-}
+/** Шрифт — тот же, что у наклейки: один файл на всю печать. */
+const fontBytes = labelFontBytes;
 
 /** A5 портрет в пунктах: достаточно для состава, но не расточительно по бумаге. */
 const PAGE_WIDTH = 419.53;
@@ -312,153 +295,16 @@ export function qrPayload(snapshot: PrintFormSnapshot): string {
 /**
  * Этикетка для термопринтера шириной 58 мм.
  *
- * Это ВТОРОЕ представление того же печатного бланка, а не второй механизм
+ * Это ВТОРОЕ ПРЕДСТАВЛЕНИЕ того же печатного бланка, а не второй механизм
  * печати: снимок, задание, история и аудит остаются прежними, меняется только
- * то, как документ выглядит на бумаге. Поэтому функция живёт здесь, рядом
- * с бланком, и берёт тот же `PrintFormSnapshot`.
+ * то, как документ выглядит на бумаге.
  *
- * На этикетке НЕТ ничего, кроме QR и номера заказа. Ни адреса, ни получателя,
- * ни состава: наклейка живёт на коробке, её видит каждый, кто проходит мимо,
- * и любая лишняя строка на ней — это разглашение, которое невозможно отозвать.
- */
-
-/** Пункт PDF — 1/72 дюйма; миллиметр — 1/25.4 дюйма. */
-const MM = 72 / 25.4;
-
-/** Физический размер носителя. Одна этикетка — одна страница. */
-export const LABEL_WIDTH_MM = 58;
-export const LABEL_HEIGHT_MM = 40;
-
-/**
- * Безопасная ширина печати у 58-мм принтеров — около 48 мм.
- *
- * Печатающая головка уже носителя, и края физически не пропечатываются.
- * Поэтому содержимое прижимается к безопасной области, а не к краю бумаги:
- * иначе на части принтеров обрезался бы либо QR, либо номер.
- */
-const SAFE_WIDTH_MM = 48;
-
-/** Поля внутри безопасной области. */
-const LABEL_PADDING_MM = 2;
-
-/**
- * Сторона QR.
- *
- * Тридцать миллиметров при 203 DPI — это примерно 240 точек на сторону,
- * больше трёх точек на модуль даже для длинного номера. Меньше делать нельзя:
- * термопечать «размывает» модули, и сканер начинает ошибаться.
- */
-const QR_SIZE_MM = 30;
-
-/** Тихая зона вокруг QR. Без неё сканер не находит границы кода. */
-const QR_QUIET_MM = 2;
-
-const LABEL_NUMBER_MAX_SIZE = 13;
-
-/** Ниже этого кегля термопечать превращает цифры в кашу. */
-const LABEL_NUMBER_READABLE_SIZE = 5;
-
-/** Абсолютный пол: ниже него строка перестаёт быть строкой. */
-const LABEL_NUMBER_MIN_SIZE = 2;
-
-/**
- * Размер шрифта номера, при котором строка помещается ЦЕЛИКОМ.
- *
- * Номер не переносится и не обрезается. Обрезание здесь — не только наш
- * `slice`: строка, вышедшая за край наклейки, обрезается печатающей головкой
- * и выглядит настоящим номером, просто другим. Кладовщик уходит искать чужой
- * заказ, и понять, что номер неполный, уже нечем.
- *
- * Поэтому подбор идёт в два шага. Сначала — читаемый диапазон от 13 до 5
- * пунктов с шагом в половину пункта: в него укладывается любой настоящий
- * номер. Если строка не помещается и в пять пунктов, кегль считается точно
- * по ширине: мелкий, но целый номер можно сфотографировать и увеличить,
- * а машинное значение всё равно несёт QR. Обрезанный — нельзя ничем.
- */
-export function labelNumberFontSize(font: PDFFont, text: string, availableHeight: number): number {
-  for (let size = LABEL_NUMBER_MAX_SIZE; size >= LABEL_NUMBER_READABLE_SIZE; size -= 0.5) {
-    if (font.widthOfTextAtSize(text, size) <= availableHeight) {
-      return size;
-    }
-  }
-
-  const unitWidth = font.widthOfTextAtSize(text, 1);
-  if (unitWidth <= 0) {
-    return LABEL_NUMBER_READABLE_SIZE;
-  }
-
-  // Округление ВНИЗ до четверти пункта: округлённый вверх кегль дал бы
-  // строку на волос шире доступной высоты, то есть то самое обрезание.
-  const exact = Math.floor((availableHeight / unitWidth) * 4) / 4;
-  return Math.max(LABEL_NUMBER_MIN_SIZE, Math.min(LABEL_NUMBER_READABLE_SIZE, exact));
-}
-
-/**
- * Собирает термоэтикетку из того же снимка, что и бланк.
- *
- * QR кодирует РОВНО номер заказа — то же значение, что и на бланке, и то же,
- * которое ожидает складской сканер. Менять его ради макета нельзя: наклейка
- * и поиск обязаны говорить об одном заказе.
+ * Сама раскладка живёт в модуле `printing`: ту же наклейку 58×40 печатают
+ * и складские ячейки, и растр для термоголовки. Держать здесь вторую копию
+ * геометрии значило бы однажды напечатать заказы и ячейки по-разному.
  */
 export async function renderThermalLabelPdf(snapshot: PrintFormSnapshot): Promise<Uint8Array> {
-  const document = await PDFDocument.create();
-
-  const font = await embedLabelFont(document);
-  const width = LABEL_WIDTH_MM * MM;
-  const height = LABEL_HEIGHT_MM * MM;
-  const page = document.addPage([width, height]);
-
-  const safeWidth = SAFE_WIDTH_MM * MM;
-  const padding = LABEL_PADDING_MM * MM;
-  const qrSize = QR_SIZE_MM * MM;
-  const quiet = QR_QUIET_MM * MM;
-
-  // QR слева, по вертикали посередине.
-  const qrX = padding;
-  const qrY = (height - qrSize) / 2;
-  drawQr(page, snapshot.orderNumber, qrX, qrY, qrSize);
-
-  /*
-   * Номер справа, повёрнут на 90°, читается снизу вверх.
-   *
-   * Поворот — не украшение: вдоль короткой стороны 58-мм этикетки длинный
-   * номер поместился бы только столбиком по одному символу, а такой номер
-   * человек не прочитает и глазами не сверит.
-   */
-  const numberX = qrX + qrSize + quiet;
-  const availableWidth = safeWidth - numberX - padding;
-  const availableHeight = height - padding * 2;
-
-  const size = labelNumberFontSize(font, snapshot.orderNumber, availableHeight);
-  const textWidth = font.widthOfTextAtSize(snapshot.orderNumber, size);
-
-  page.drawText(snapshot.orderNumber, {
-    x: numberX + Math.max(0, (availableWidth - size) / 2) + size,
-    // Строка центрируется по высоте: повёрнутый текст растёт вверх от базовой
-    // линии, поэтому начало смещается на половину неиспользованной высоты.
-    y: padding + Math.max(0, (availableHeight - textWidth) / 2),
-    size,
-    font,
-    color: rgb(0, 0, 0),
-    rotate: degrees(90),
-  });
-
-  return document.save();
-}
-
-/**
- * Высота, в которую обязан уложиться повёрнутый номер.
- *
- * Экспортируется, чтобы проверка мерила ровно ту величину, по которой
- * подбирается кегль, а не собственную копию арифметики — разойдись они,
- * проверка перестала бы ловить обрезанный номер.
- */
-export const LABEL_NUMBER_HEIGHT_PT = (LABEL_HEIGHT_MM - LABEL_PADDING_MM * 2) * MM;
-
-/** Гарнитура этикетки. Общая для отрисовки и для замеров в проверках. */
-export async function embedLabelFont(document: PDFDocument): Promise<PDFFont> {
-  document.registerFontkit(fontkit);
-  return document.embedFont(fontBytes(), { subset: true });
+  return renderLabelsPdf([{ qrText: qrPayload(snapshot), caption: snapshot.orderNumber }]);
 }
 
 /** Имя файла этикетки: только номер заказа, без PII. */
