@@ -18,7 +18,8 @@
  *  * повтор печати выдаёт тот же документ и остаётся в общей истории.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import jsQR from 'jsqr';
 import { PDFDocument } from 'pdf-lib';
@@ -34,7 +35,13 @@ import {
   thermalLabelFileName,
 } from './pdf.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
-import { normalizeOrderNumber } from '../warehouse/order-lookup.js';
+import {
+  MAX_ORDER_NUMBER_LENGTH,
+  normalizeOrderNumber,
+  resolveOrderByNumber,
+} from '../warehouse/order-lookup.js';
+import { closeTestContext, createTestContext, type TestContext } from '../auth/testing/harness.js';
+import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 
 /** Пункт PDF на миллиметр. */
 const MM = 72 / 25.4;
@@ -42,13 +49,17 @@ const MM = 72 / 25.4;
 /**
  * Номера, на которых макет реально ломается: пусто-короткий, обычный,
  * предельно длинный, с кириллицей и разделителями.
+ *
+ * Шестьдесят четыре символа — не выдумка, а `MAX_ORDER_NUMBER_LENGTH`:
+ * ровно столько принимает складской сканер. Значит, этикетка обязана
+ * вмещать весь допустимый диапазон номеров, а не только привычные.
  */
 const NUMBERS = [
   'A1',
   'FL-000123',
   'CRM-2026-08-29-000000000042',
   'ЗАКАЗ-МСК-000123',
-  'X'.repeat(64),
+  'X'.repeat(MAX_ORDER_NUMBER_LENGTH),
 ];
 
 function snapshotFor(orderNumber: string): PrintFormSnapshot {
@@ -264,6 +275,50 @@ describe('QR понимает складской сканер', () => {
     expect(image.minX).toBeGreaterThan(0);
     expect(image.maxX + image.moduleSizePt).toBeLessThan(LABEL_WIDTH_MM * MM);
     expect(image.modules).toBeGreaterThan(20);
+  });
+});
+
+describe('этикетка ведёт к настоящему заказу', () => {
+  let ctx: TestContext;
+
+  beforeAll(async () => {
+    ctx = await createTestContext();
+  });
+
+  afterAll(async () => {
+    await closeTestContext(ctx);
+  });
+
+  it('склад находит заказ по значению, снятому с наклейки', async () => {
+    /*
+     * Полная цепочка без единого допущения: заказ в базе → снимок печати →
+     * PDF → независимый декодер → тот же поиск, которым пользуется склад.
+     *
+     * Проверки выше доказывают, что QR читается и что строка проходит
+     * нормализацию. Здесь доказывается последнее звено: снятое с наклейки
+     * значение приводит к ТОМУ САМОМУ заказу. Разойдись хоть одно звено —
+     * наклейка на коробке указывала бы в пустоту, а обнаружилось бы это
+     * у кладовщика с коробкой в руках.
+     */
+    const number = `FL-${process.hrtime.bigint() % 1_000_000n}`;
+    const order = await ctx.db.deliveryOrder.create({
+      data: {
+        externalId: randomUUID(),
+        externalName: number,
+        externalUpdated: new Date(),
+        deliveryDate: toDateColumn('2027-11-18'),
+        inScope: true,
+      },
+      select: { id: true },
+    });
+
+    const pdf = await renderThermalLabelPdf(snapshotFor(number));
+    const image = rasterizeQr(pdf);
+    const decoded = jsQR(image.data, image.width, image.height);
+    expect(decoded?.data).toBe(number);
+
+    const resolved = await resolveOrderByNumber(ctx.db, decoded?.data ?? '');
+    expect(resolved.id).toBe(order.id);
   });
 });
 
