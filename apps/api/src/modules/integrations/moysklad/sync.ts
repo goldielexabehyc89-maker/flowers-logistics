@@ -68,6 +68,15 @@ export interface SyncDeps {
    * их версия уже записана и синхронизацией не переписывается.
    */
   structuredAddressV2?: boolean;
+
+  /**
+   * Нижняя граница даты доставки для ВПЕРВЫЕ создаваемых заказов.
+   *
+   * Отсутствие значения означает «границы нет»: так работают local и staging.
+   * Существующие заказы граница не трогает — они продолжают получать
+   * обновления, иначе новый контур потерял бы отмену или смену интервала.
+   */
+  importDeliveryDateFrom?: string | undefined;
   /**
    * Идентификатор статуса «Отменен» этого аккаунта.
    *
@@ -109,6 +118,14 @@ export interface PassResult {
   created: number;
   updated: number;
   skippedOutOfScope: number;
+  /**
+   * Заказов, не созданных из-за нижней границы даты доставки.
+   *
+   * Считается отдельно от «вне области»: это разные причины, и смешать их
+   * значило бы потерять ответ на вопрос «сколько старых сделок мы не завели».
+   * Сюда же попадают заказы без даты и с нераспознанной датой.
+   */
+  skippedBeforeCutoff: number;
   missing: number;
   /** Заказов, у которых производственный состав подтверждён в этом проходе. */
   compositionConfirmed: number;
@@ -127,6 +144,7 @@ const emptyResult = (kind: PassResult['kind']): PassResult => ({
   created: 0,
   updated: 0,
   skippedOutOfScope: 0,
+  skippedBeforeCutoff: 0,
   missing: 0,
   compositionConfirmed: 0,
   compositionUnconfirmed: 0,
@@ -358,6 +376,7 @@ async function applyRows(
         geocoding: deps.enqueueOnImport === true,
         cancelledStateId: deps.cancelledStateId ?? null,
         structuredAddressV2: deps.structuredAddressV2 === true,
+        importDeliveryDateFrom: deps.importDeliveryDateFrom,
       });
 
       if (composition === null) {
@@ -387,6 +406,7 @@ async function applyRows(
       result.updated += 1;
     if (applied.orderResult.outcome === 'SCOPE_EXITED') result.updated += 1;
     if (applied.orderResult.outcome === 'SKIPPED_OUT_OF_SCOPE') result.skippedOutOfScope += 1;
+    if (applied.orderResult.outcome === 'SKIPPED_BEFORE_CUTOFF') result.skippedBeforeCutoff += 1;
 
     if (applied.fulfillment !== null) {
       if (applied.fulfillment.outcome === 'UNCONFIRMED') {
@@ -584,7 +604,10 @@ export async function runInitialLoad(deps: SyncDeps, cursor?: CursorState): Prom
 
   result.pages = await readAllPages(
     deps,
-    { filter: approvedStoreFilter(deps.ids, initialLoadSince(now)), order: 'updated,asc' },
+    {
+      filter: approvedStoreFilter(deps.ids, initialLoadSince(now), deps.importDeliveryDateFrom),
+      order: 'updated,asc',
+    },
     (rows) => applyRows(deps, rows, result, source, regions),
   );
 
@@ -678,7 +701,10 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
 
   result.pages = await readAllPages(
     deps,
-    { filter: approvedStoreFilter(deps.ids, since), order: 'updated,asc' },
+    {
+      filter: approvedStoreFilter(deps.ids, since, deps.importDeliveryDateFrom),
+      order: 'updated,asc',
+    },
     async (rows) => {
       for (const row of rows) {
         const id = (row as { id?: string }).id;

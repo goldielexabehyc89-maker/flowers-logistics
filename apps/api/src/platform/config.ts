@@ -7,6 +7,7 @@
 
 import { z } from 'zod';
 import { MAX_MATRIX_POINTS } from '../modules/geo/limits.js';
+import { isCalendarDate } from '../modules/integrations/moysklad/delivery-date.js';
 
 /**
  * Необязательное значение, у которого пустая строка означает «не задано».
@@ -125,6 +126,32 @@ const configSchema = z.object({
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
     z.enum(['shipmentAddress', 'shipmentAddressFull']).default('shipmentAddress'),
   ),
+
+  /**
+   * Нижняя граница даты доставки при импорте из МоегоСклада.
+   *
+   * Московская календарная дата `ГГГГ-ММ-ДД`, граница ВКЛЮЧИТЕЛЬНАЯ: заказ
+   * с этой датой импортируется, а с предыдущей — нет. Нужна первому запуску
+   * нового контура: старые сделки из МоегоСклада туда переносить не нужно,
+   * а перенести их «потом вручную» невозможно — заказ создаётся один раз.
+   *
+   * Это ограничение ОТБОРА, а не подмена даты: у созданного заказа дата
+   * доставки остаётся ровно той, что пришла из источника.
+   *
+   * Отсутствие переменной сохраняет прежнее поведение — так работают local
+   * и staging. А вот НЕВЕРНОЕ значение роняет запуск: молча импортировать
+   * без ограничения хуже, чем не запуститься, потому что лишние заказы
+   * пришлось бы удалять руками, а удаления заказов в системе нет.
+   */
+  MOYSKLAD_IMPORT_DELIVERY_DATE_FROM: z
+    .preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.string().optional(),
+    )
+    .refine((value) => value === undefined || isCalendarDate(value), {
+      message:
+        'MOYSKLAD_IMPORT_DELIVERY_DATE_FROM должен быть московской календарной датой ГГГГ-ММ-ДД',
+    }),
 
   /**
    * Новый адресный контракт: город, улица и дом отдельно от деталей.

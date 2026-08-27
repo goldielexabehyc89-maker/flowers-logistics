@@ -103,6 +103,7 @@ async function main(): Promise<void> {
      * переписывается.
      */
     structuredAddressV2: config.MOYSKLAD_STRUCTURED_ADDRESS_V2_ENABLED,
+    importDeliveryDateFrom: config.MOYSKLAD_IMPORT_DELIVERY_DATE_FROM,
     /*
      * Статус «Отменен» распознаётся только по настроенному идентификатору.
      *
