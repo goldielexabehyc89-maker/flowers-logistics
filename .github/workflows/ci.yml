@@ -736,14 +736,20 @@ jobs:
       - name: Проверить, что файл запускается
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           Set-Location agent
-          # Без настроек агент обязан спросить их и завершиться понятной
-          # ошибкой, а не молча упасть: это и проверяется.
+          # Без настроек агент обязан СПРОСИТЬ их и завершиться понятной
+          # ошибкой. Ненулевой код возврата здесь ожидаем — это и есть та самая
+          # понятная ошибка, — поэтому проверяется вывод, а не код.
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:AGENT_STATE_DIR = "$env:TEMP\agent-check"
           $output = '' | & .\flowers-print-agent.exe 2>&1 | Out-String
           Write-Host $output
-          if ($output -notmatch 'Настройка агента печати') { throw "агент не вышел на настройку: $output" }
+          if ($output -notmatch 'Настройка агента печати') {
+            throw "агент не вышел на настройку: $output"
+          }
+          if ($output -notmatch 'адрес сервера обязателен') {
+            throw "агент не назвал причину отказа: $output"
+          }
 
       - name: Приложить артефакт
         uses: actions/upload-artifact@v4
