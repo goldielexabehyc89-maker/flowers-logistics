@@ -22,17 +22,32 @@ import {
   LoadingState,
   Select,
   StatusBadge,
+  TextArea,
   TextInput,
 } from '../../ui/components';
 import {
   CELL_KIND_LABELS,
+  MAX_BULK_CELLS,
+  MAX_BULK_PAD,
+  bulkEdges,
   cellCodeError,
+  cellsPlural,
   codeWillChange,
+  expandBulkRange,
+  parseBulkRange,
   previewCellCode,
+  splitBulkList,
+  type BulkMode,
+  type BulkPreviewResponse,
+  type BulkRangeForm,
+  type BulkResultResponse,
   type StorageCellKind,
   type StorageCellListResponse,
   type StorageCellView,
 } from './storage-cells';
+
+/** Начальный диапазон: полсотни полок одного стеллажа — обычный случай. */
+const EMPTY_RANGE: BulkRangeForm = { prefix: '', from: '1', to: '10', pad: '3' };
 
 export function StorageCells(): React.JSX.Element {
   const { client } = useAuth();
@@ -43,6 +58,13 @@ export function StorageCells(): React.JSX.Element {
   const [kind, setKind] = useState<StorageCellKind>('STORAGE');
   const [touched, setTouched] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
+
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkMode, setBulkMode] = useState<BulkMode>('RANGE');
+  const [bulkKind, setBulkKind] = useState<StorageCellKind>('STORAGE');
+  const [range, setRange] = useState<BulkRangeForm>(EMPTY_RANGE);
+  const [list, setList] = useState('');
+  const [preview, setPreview] = useState<BulkPreviewResponse | null>(null);
 
   const query = useQuery({
     queryKey: ['storage-cells'],
@@ -57,6 +79,25 @@ export function StorageCells(): React.JSX.Element {
     showToast(error instanceof ApiError ? error.message : fallback, 'error');
   }
 
+  /**
+   * Любое изменение ввода отменяет показанный предпросмотр.
+   *
+   * Иначе человек увидел бы разбор одного диапазона, поправил бы последний
+   * номер и нажал «Создать», получив совсем другую партию, чем на экране.
+   * Предпросмотр обязан описывать ровно то, что уйдёт на сервер.
+   */
+  function changeBulk(apply: () => void): void {
+    setPreview(null);
+    apply();
+  }
+
+  function closeBulk(): void {
+    setBulkOpen(false);
+    setPreview(null);
+    setRange(EMPTY_RANGE);
+    setList('');
+  }
+
   const create = useMutation({
     mutationFn: () => client.post<StorageCellView>('/api/storage-cells', { code, kind }),
     onSuccess: async (created) => {
@@ -66,6 +107,38 @@ export function StorageCells(): React.JSX.Element {
       showToast(`Ячейка ${created.normalizedCode} создана`, 'success');
     },
     onError: (error: unknown) => reportError(error, 'Не удалось создать ячейку.'),
+  });
+
+  /*
+   * Партия: два запроса, а не один.
+   *
+   * Предпросмотр — отдельная операция чтения. Ячейку нельзя удалить, её можно
+   * только выключить, поэтому сотня ошибочных кодов остаётся в справочнике
+   * навсегда — человек обязан увидеть последствия до того, как они наступят.
+   */
+  const previewBatch = useMutation({
+    mutationFn: () =>
+      client.post<BulkPreviewResponse>('/api/storage-cells/bulk/preview', bulkBody()),
+    onSuccess: (result) => setPreview(result),
+    onError: (error: unknown) => {
+      setPreview(null);
+      reportError(error, 'Не удалось проверить список.');
+    },
+  });
+
+  const createBatch = useMutation({
+    mutationFn: () => client.post<BulkResultResponse>('/api/storage-cells/bulk', bulkBody()),
+    onSuccess: async (result) => {
+      closeBulk();
+      await invalidate();
+      showToast(
+        result.skippedExisting === 0
+          ? `Создано ${cellsPlural(result.created)}`
+          : `Создано ${cellsPlural(result.created)}, пропущено существующих: ${result.skippedExisting}`,
+        'success',
+      );
+    },
+    onError: (error: unknown) => reportError(error, 'Не удалось создать партию.'),
   });
 
   const setActive = useMutation({
@@ -112,8 +185,48 @@ export function StorageCells(): React.JSX.Element {
   }
 
   const codeError = touched ? cellCodeError(code) : null;
-  const preview = previewCellCode(code);
+  const codePreview = previewCellCode(code);
   const canCreate = cellCodeError(code) === null && !create.isPending;
+
+  const parsedRange = parseBulkRange(range);
+  const listCodes = splitBulkList(list);
+
+  /**
+   * Причина, по которой партию нельзя даже отправить на проверку.
+   *
+   * Клиентские правила защитой не являются — решение принимает сервер. Они
+   * нужны, чтобы отказ по слишком большому диапазону пришёл сразу, а не после
+   * ожидания: «от 1 до 5000» набирается за секунду.
+   */
+  const bulkError: string | null =
+    bulkMode === 'RANGE'
+      ? 'error' in parsedRange
+        ? parsedRange.error
+        : null
+      : listCodes.length === 0
+        ? 'Вставьте список кодов'
+        : listCodes.length > MAX_BULK_CELLS
+          ? `За один раз — не больше ${MAX_BULK_CELLS} ячеек, а в списке ${listCodes.length}`
+          : null;
+
+  /** Коды, которые уйдут на сервер: тот же разбор, что и там. */
+  const bulkCodes =
+    bulkMode === 'RANGE'
+      ? 'range' in parsedRange
+        ? expandBulkRange(parsedRange.range)
+        : []
+      : listCodes;
+
+  function bulkBody(): Record<string, unknown> {
+    if (bulkMode === 'LIST') {
+      return { kind: bulkKind, list };
+    }
+    return 'range' in parsedRange
+      ? { kind: bulkKind, range: parsedRange.range }
+      : { kind: bulkKind };
+  }
+
+  const bulkBusy = previewBatch.isPending || createBatch.isPending;
 
   return (
     <section className="card stack">
@@ -173,15 +286,254 @@ export function StorageCells(): React.JSX.Element {
           <Button type="submit" variant="primary" disabled={!canCreate} data-testid="cell-create">
             {create.isPending ? 'Создаём…' : 'Создать'}
           </Button>
+
+          <Button
+            type="button"
+            variant="secondary"
+            data-testid="cell-bulk-open"
+            aria-expanded={bulkOpen}
+            onClick={() => (bulkOpen ? closeBulk() : setBulkOpen(true))}
+          >
+            {bulkOpen ? 'Свернуть' : 'Создать несколько'}
+          </Button>
         </div>
 
         {codeWillChange(code) && codeError === null && (
           <p className="muted text-sm">
             Для сравнения и сканирования код будет приведён к виду{' '}
-            <strong>{preview.normalizedCode}</strong>.
+            <strong>{codePreview.normalizedCode}</strong>.
           </p>
         )}
       </form>
+
+      {bulkOpen && (
+        <form
+          className="stack cell-bulk"
+          data-testid="cell-bulk"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (bulkError === null && !bulkBusy) {
+              previewBatch.mutate();
+            }
+          }}
+        >
+          <div>
+            <h4>Создать несколько</h4>
+            <p className="muted text-sm">
+              Стеллаж заводится диапазоном, разрозненные полки — вставленным списком. За один раз —
+              не больше {MAX_BULK_CELLS} ячеек: партию крупнее человек уже не проверит глазами.
+            </p>
+          </div>
+
+          <div className="row">
+            <Field label="Как задать коды">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  data-testid="cell-bulk-mode"
+                  value={bulkMode}
+                  onChange={(event) =>
+                    changeBulk(() => setBulkMode(event.target.value as BulkMode))
+                  }
+                >
+                  <option value="RANGE">Диапазон</option>
+                  <option value="LIST">Готовый список</option>
+                </Select>
+              )}
+            </Field>
+
+            <Field label="Тип">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  data-testid="cell-bulk-kind"
+                  value={bulkKind}
+                  onChange={(event) =>
+                    changeBulk(() => setBulkKind(event.target.value as StorageCellKind))
+                  }
+                >
+                  {(['STORAGE', 'ROUTE'] as const).map((value) => (
+                    <option key={value} value={value}>
+                      {CELL_KIND_LABELS[value]}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          </div>
+
+          {bulkMode === 'RANGE' ? (
+            <div className="row">
+              <Field label="Префикс" hint="Например, A- или Стеллаж-1-">
+                {(fieldProps) => (
+                  <TextInput
+                    {...fieldProps}
+                    data-testid="cell-bulk-prefix"
+                    value={range.prefix}
+                    onChange={(event) =>
+                      changeBulk(() => setRange({ ...range, prefix: event.target.value }))
+                    }
+                    placeholder="A-"
+                  />
+                )}
+              </Field>
+              <Field label="От">
+                {(fieldProps) => (
+                  <TextInput
+                    {...fieldProps}
+                    data-testid="cell-bulk-from"
+                    inputMode="numeric"
+                    value={range.from}
+                    onChange={(event) =>
+                      changeBulk(() => setRange({ ...range, from: event.target.value }))
+                    }
+                  />
+                )}
+              </Field>
+              <Field label="До" hint="Включительно">
+                {(fieldProps) => (
+                  <TextInput
+                    {...fieldProps}
+                    data-testid="cell-bulk-to"
+                    inputMode="numeric"
+                    value={range.to}
+                    onChange={(event) =>
+                      changeBulk(() => setRange({ ...range, to: event.target.value }))
+                    }
+                  />
+                )}
+              </Field>
+              <Field label="Знаков в номере" hint={`От 1 до ${MAX_BULK_PAD}`}>
+                {(fieldProps) => (
+                  <TextInput
+                    {...fieldProps}
+                    data-testid="cell-bulk-pad"
+                    inputMode="numeric"
+                    value={range.pad}
+                    onChange={(event) =>
+                      changeBulk(() => setRange({ ...range, pad: event.target.value }))
+                    }
+                  />
+                )}
+              </Field>
+            </div>
+          ) : (
+            <Field
+              label="Список кодов"
+              hint="По одному в строке; запятая и точка с запятой тоже разделяют."
+            >
+              {(fieldProps) => (
+                <TextArea
+                  {...fieldProps}
+                  data-testid="cell-bulk-list"
+                  rows={6}
+                  value={list}
+                  onChange={(event) => changeBulk(() => setList(event.target.value))}
+                  placeholder={'A-01\nA-02\nБ-07'}
+                />
+              )}
+            </Field>
+          )}
+
+          {bulkError !== null && (
+            <p className="text-sm cell-bulk__error" role="alert" data-testid="cell-bulk-error">
+              {bulkError}
+            </p>
+          )}
+
+          {bulkError === null && bulkCodes.length > 0 && preview === null && (
+            <p className="muted text-sm" data-testid="cell-bulk-plan">
+              Будет проверено {cellsPlural(bulkCodes.length)}: {bulkEdges(bulkCodes)}
+            </p>
+          )}
+
+          {preview !== null && (
+            <div className="stack cell-bulk__preview" data-testid="cell-bulk-summary">
+              <p data-testid="cell-bulk-will-create">
+                <strong>
+                  {preview.willCreate.length === 0
+                    ? 'Создавать нечего'
+                    : `Будет создано ${cellsPlural(preview.willCreate.length)}`}
+                </strong>
+                {preview.willCreate.length > 0 && (
+                  <span className="muted">
+                    {' '}
+                    — {bulkEdges(preview.willCreate.map((item) => item.normalizedCode))}
+                  </span>
+                )}
+              </p>
+              <ul className="muted text-sm cell-bulk__facts">
+                <li data-testid="cell-bulk-total">Всего кодов в партии: {preview.total}</li>
+                <li data-testid="cell-bulk-existing">
+                  Уже существуют: {preview.existing.length}
+                  {preview.existing.length > 0 && (
+                    <> — {bulkEdges(preview.existing.map((item) => item.normalizedCode))}</>
+                  )}
+                </li>
+                <li data-testid="cell-bulk-duplicates">
+                  Повторов внутри списка: {preview.duplicates.length}
+                </li>
+                <li data-testid="cell-bulk-invalid">Негодных строк: {preview.invalid.length}</li>
+              </ul>
+              {preview.invalid.length > 0 && (
+                <ul className="text-sm cell-bulk__invalid">
+                  {preview.invalid.slice(0, 10).map((item, index) => (
+                    <li key={`${item.input}-${index}`}>
+                      <code>{item.input.slice(0, 60)}</code> — {item.reason}
+                    </li>
+                  ))}
+                  {preview.invalid.length > 10 && (
+                    <li className="muted">…и ещё {preview.invalid.length - 10}</li>
+                  )}
+                </ul>
+              )}
+              <p className="muted text-sm">
+                Существующие ячейки не изменятся: на полке уже висит наклейка, и её тип менять
+                заодно нельзя.
+              </p>
+            </div>
+          )}
+
+          <div className="row">
+            <Button
+              type="submit"
+              variant="secondary"
+              disabled={bulkError !== null || bulkBusy}
+              data-testid="cell-bulk-preview"
+            >
+              {previewBatch.isPending ? 'Проверяем…' : 'Проверить'}
+            </Button>
+
+            {/*
+              Создание доступно только после проверки: партию нельзя завести
+              вслепую, а любое изменение ввода предпросмотр отменяет.
+            */}
+            <Button
+              type="button"
+              variant="primary"
+              disabled={preview === null || preview.willCreate.length === 0 || bulkBusy}
+              data-testid="cell-bulk-submit"
+              onClick={() => createBatch.mutate()}
+            >
+              {createBatch.isPending
+                ? 'Создаём…'
+                : preview === null
+                  ? 'Создать'
+                  : `Создать ${cellsPlural(preview.willCreate.length)}`}
+            </Button>
+
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={bulkBusy}
+              data-testid="cell-bulk-cancel"
+              onClick={closeBulk}
+            >
+              Отмена
+            </Button>
+          </div>
+        </form>
+      )}
 
       {query.isPending && <LoadingState title="Загружаем справочник ячеек…" />}
 

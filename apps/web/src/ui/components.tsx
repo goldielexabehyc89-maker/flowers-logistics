@@ -118,6 +118,25 @@ export function TextInput(props: TextInputProps): React.JSX.Element {
   return <input {...props} className={['input', props.className].filter(Boolean).join(' ')} />;
 }
 
+/**
+ * Многострочное поле.
+ *
+ * Оформление то же, что у однострочного: список кодов вставляют в ту же форму,
+ * и отличаться от соседнего поля он не должен. Высота задаётся строками,
+ * а не пикселями — иначе при увеличенном шрифте поле показывало бы полторы
+ * строки.
+ */
+export type TextAreaProps = React.ComponentProps<'textarea'>;
+
+export function TextArea(props: TextAreaProps): React.JSX.Element {
+  return (
+    <textarea
+      {...props}
+      className={['input', 'textarea', props.className].filter(Boolean).join(' ')}
+    />
+  );
+}
+
 export type SelectProps = React.SelectHTMLAttributes<HTMLSelectElement>;
 
 export function Select(props: SelectProps): React.JSX.Element {
