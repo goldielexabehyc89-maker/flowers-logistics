@@ -37,6 +37,7 @@ import { mapOrder } from './mapper.js';
 import type { MoyskladOrderDto } from './dto.js';
 import { applyOrderSnapshot, beforeImportCutoff } from './import-service.js';
 import { approvedStoreFilter } from './filters.js';
+import { passFingerprint } from './sync.js';
 
 const IDS = MOYSKLAD_IDS;
 /** Граница отбора: заказы этого дня импортируются, предыдущего — нет. */
@@ -290,6 +291,38 @@ describe('правило сравнения дат', () => {
     // Границы нет — не создаётся ничего: прежнее поведение сохраняется.
     expect(beforeImportCutoff(null, undefined)).toBe(false);
     expect(beforeImportCutoff('2000-01-01', undefined)).toBe(false);
+  });
+});
+
+describe('контрольная точка прохода', () => {
+  it('отпечаток различает правила отбора', () => {
+    /*
+     * Продолжать незавершённый проход можно только с теми же правилами.
+     * Смени кто-то границу импорта между запусками — «уже прочитанные»
+     * страницы относились бы к другой выборке, и продолжение молча
+     * пропустило бы заказы, которых прежний проход не видел.
+     */
+    const filter = approvedStoreFilter(IDS, NOW, CUTOFF);
+
+    // Тот же вид, тот же фильтр, та же граница — точка подходит.
+    expect(passFingerprint('initial', filter, CUTOFF)).toBe(
+      passFingerprint('initial', filter, CUTOFF),
+    );
+
+    // Другая граница — другая выборка.
+    expect(passFingerprint('initial', filter, CUTOFF)).not.toBe(
+      passFingerprint('initial', filter, '2028-12-01'),
+    );
+
+    // Появление границы там, где её не было, — тоже другая выборка.
+    expect(passFingerprint('initial', filter, undefined)).not.toBe(
+      passFingerprint('initial', filter, CUTOFF),
+    );
+
+    // И другой вид прохода: delta читает иное окно, чем первоначальная загрузка.
+    expect(passFingerprint('initial', filter, CUTOFF)).not.toBe(
+      passFingerprint('delta', filter, CUTOFF),
+    );
   });
 });
 

@@ -1482,3 +1482,192 @@ describe('прерванный сценарий не заражает следу
     await releaseTracked(real);
   });
 });
+
+/**
+ * Целостность коротких проходов.
+ *
+ * Постраничной контрольной точки у delta и контрольной сверки нет намеренно.
+ * Их выборка зависит от изменяемого поля `updated`: продолжение с сохранённого
+ * смещения без зафиксированного снимка источника опаснее полного повтора —
+ * между запусками выборка сдвигается, и «следующая» страница оказывается
+ * не той. Поэтому оборвавшийся проход повторяется ЦЕЛИКОМ, а защитой служит
+ * идемпотентность применения.
+ *
+ * Проверяется ровно то, на чём эта модель держится: курсор не двигается,
+ * пока проход не дошёл до конца.
+ */
+describe('оборванный короткий проход повторяется целиком', () => {
+  /** База, где первоначальная загрузка уже позади: дальше идут только delta. */
+  async function cursorReady(updatedCursor: Date): Promise<void> {
+    await ctx.db.integrationCursor.deleteMany({ where: { provider: PROVIDER } });
+    await ctx.db.integrationCursor.create({
+      data: {
+        provider: PROVIDER,
+        initialLoadCompleted: true,
+        initialLoadCompletedAt: new Date('2026-08-01T09:00:00.000Z'),
+        fulfillmentLoadCompleted: true,
+        fulfillmentLoadCompletedAt: new Date('2026-08-01T09:00:00.000Z'),
+        updatedCursor,
+      },
+    });
+  }
+
+  async function readCursor() {
+    return ctx.db.integrationCursor.findUniqueOrThrow({ where: { provider: PROVIDER } });
+  }
+
+  async function clearAttempt(): Promise<void> {
+    await ctx.db.integrationCursor.update({
+      where: { provider: PROVIDER },
+      data: { nextAttemptAt: null },
+    });
+  }
+
+  it('ошибка на второй странице не двигает курсор и не оставляет контрольной точки', async () => {
+    const at = new Date('2026-08-06T09:00:00.000Z');
+    const previous = new Date('2026-08-06T08:00:00.000Z');
+    await cursorReady(previous);
+
+    const first = row();
+    const second = row();
+    // Первая страница применяется целиком, вторая обрывается.
+    const api = fakeApi([[first], [second]], { failAtPage: 1 });
+
+    await expect(runSyncOnce(deps(api, at))).rejects.toBeInstanceOf(MoyskladError);
+
+    const cursor = await readCursor();
+    // Нижняя граница следующего прохода осталась прежней: частично обработанное
+    // окно сдвигать нельзя, иначе пропущенное во второй странице не вернётся.
+    expect(cursor.updatedCursor?.toISOString()).toBe(previous.toISOString());
+    // Контрольной точки у короткого прохода не появляется: повтор целиком.
+    expect(cursor.passKind).toBeNull();
+    expect(cursor.passOffset).toBeNull();
+
+    // Заказ первой страницы всё же создан: применение идемпотентно, и терять
+    // сделанную работу незачем.
+    const created = await ctx.db.deliveryOrder.findUnique({
+      where: { externalId: first['id'] as string },
+      select: { id: true, version: true },
+    });
+    expect(created).not.toBeNull();
+
+    /*
+     * Следующий запуск повторяет ТОТ ЖЕ диапазон.
+     *
+     * Нижняя граница берётся из курсора минус перекрытие — раз курсор не
+     * сдвинулся, окно совпадает с оборвавшимся.
+     */
+    await clearAttempt();
+    const retryApi = fakeApi([[first, second]]);
+    const retry = await runSyncOnce(deps(retryApi, new Date('2026-08-06T09:05:00.000Z')));
+    expect(retry.kind).toBe('delta');
+
+    const failedFilter = api.calls[0]?.filter ?? '';
+    const retriedFilter = retryApi.calls[0]?.filter ?? '';
+    const lowerBound = (filter: string): string =>
+      filter.split(';').find((part) => part.startsWith('updated>=')) ?? '';
+    expect(lowerBound(retriedFilter)).toBe(lowerBound(failedFilter));
+
+    // Повтор первой страницы дублей не создал и лишней ревизии не завёл.
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: first['id'] as string },
+      select: { id: true, version: true },
+    });
+    expect(after.id).toBe(created?.id);
+    expect(after.version).toBe(created?.version);
+    expect(await ctx.db.deliveryOrder.count({ where: { externalId: first['id'] as string } })).toBe(
+      1,
+    );
+
+    // Заказ второй страницы, потерянный при обрыве, подхвачен повтором.
+    expect(
+      await ctx.db.deliveryOrder.count({ where: { externalId: second['id'] as string } }),
+    ).toBe(1);
+
+    // И курсор сдвинулся ровно один раз — после полного успеха.
+    const done = await readCursor();
+    expect(done.updatedCursor?.toISOString()).toBe(
+      new Date('2026-08-06T09:05:00.000Z').toISOString(),
+    );
+  });
+
+  it('заказ, изменившийся во время неуспешного прохода, не теряется', async () => {
+    const previous = new Date('2026-08-06T08:00:00.000Z');
+    await cursorReady(previous);
+
+    const changing = row({ updated: '2026-08-06 08:30:00.000' });
+    // Проход обрывается на второй странице — изменение не применено.
+    await expect(
+      runSyncOnce(
+        deps(
+          fakeApi([[row()], [changing]], { failAtPage: 1 }),
+          new Date('2026-08-06T09:00:00.000Z'),
+        ),
+      ),
+    ).rejects.toBeInstanceOf(MoyskladError);
+
+    await clearAttempt();
+
+    /*
+     * Следующий проход читает то же окно, потому что курсор не двигался.
+     * Заказ попадает в него по своему `updated` и применяется.
+     */
+    const next = await runSyncOnce(
+      deps(fakeApi([[changing]]), new Date('2026-08-06T09:10:00.000Z')),
+    );
+    expect(next.kind).toBe('delta');
+
+    const stored = await ctx.db.deliveryOrder.findUnique({
+      where: { externalId: changing['id'] as string },
+      select: { intervalRaw: true },
+    });
+    expect(stored).not.toBeNull();
+  });
+
+  it('контрольная сверка ведёт себя так же: обрыв не двигает состояние', async () => {
+    /*
+     * Сверка — единственный способ заметить физически удалённый документ,
+     * и решение «заказ пропал» принимается только по ПОЛНОСТЬЮ прочитанной
+     * выборке. Обрыв не должен ни пометить кого-то отсутствующим, ни сдвинуть
+     * отметку сверки.
+     */
+    const previous = new Date('2026-08-06T08:00:00.000Z');
+    await cursorReady(previous);
+    await ctx.db.integrationCursor.update({
+      where: { provider: PROVIDER },
+      // Сверка запрашивается явно: время последней сверки в прошлом.
+      data: { lastReconciliationAt: new Date('2026-08-04T09:00:00.000Z') },
+    });
+
+    const before = await readCursor();
+    await expect(
+      runSyncOnce(
+        deps(fakeApi([[row()], [row()]], { failAtPage: 1 }), new Date('2026-08-06T09:00:00.000Z')),
+      ),
+    ).rejects.toBeInstanceOf(MoyskladError);
+
+    const after = await readCursor();
+    expect(after.updatedCursor?.toISOString()).toBe(before.updatedCursor?.toISOString());
+    expect(after.lastReconciliationAt?.toISOString()).toBe(
+      before.lastReconciliationAt?.toISOString(),
+    );
+    // Никто не помечен пропавшим по неполной выборке.
+    expect(after.passKind).toBeNull();
+  });
+
+  it('блокировка держится до конца прохода и освобождается при отказе', async () => {
+    const previous = new Date('2026-08-06T08:00:00.000Z');
+    await cursorReady(previous);
+
+    await expect(
+      runSyncOnce(
+        deps(fakeApi([[row()], [row()]], { failAtPage: 1 }), new Date('2026-08-06T09:00:00.000Z')),
+      ),
+    ).rejects.toBeInstanceOf(MoyskladError);
+
+    // Замок снят: иначе один отказ остановил бы синхронизацию навсегда.
+    await clearAttempt();
+    const next = await runSyncOnce(deps(fakeApi([[]]), new Date('2026-08-06T09:20:00.000Z')));
+    expect(next.kind).not.toBe('skipped');
+  });
+});

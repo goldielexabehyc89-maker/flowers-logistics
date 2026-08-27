@@ -87,6 +87,13 @@ async function main(): Promise<void> {
         token: config.MOYSKLAD_TOKEN ?? null,
         ids: MOYSKLAD_IDS,
       },
+      // Один ограничитель на все обращения приложения: импорт, delta,
+      // ручной проход и дочитывание состава делят одну очередь и один темп.
+      rateLimit: {
+        maxRequestsPerSecond: config.MOYSKLAD_API_MAX_REQUESTS_PER_SECOND,
+        maxConcurrency: config.MOYSKLAD_API_MAX_CONCURRENCY,
+        reserveRequests: config.MOYSKLAD_API_RESERVE_REQUESTS,
+      },
     }),
     logger,
     ids: MOYSKLAD_IDS,

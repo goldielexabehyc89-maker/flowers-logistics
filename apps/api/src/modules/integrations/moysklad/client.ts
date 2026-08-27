@@ -98,6 +98,13 @@ export interface RateLimitSnapshot {
   /** Остаток запросов в текущем интервале лимита. */
   remaining: number | null;
   limit: number | null;
+  /**
+   * Сколько миллисекунд до сброса окна.
+   *
+   * `null` — сервер не назвал. Тогда пауза берётся консервативной: ждать
+   * секунду дешевле, чем гадать и получить `429`.
+   */
+  resetMs?: number | null;
 }
 
 export interface MoyskladClientDeps {
@@ -109,6 +116,16 @@ export interface MoyskladClientDeps {
   /** Минимальный интервал между запросами. Консервативный старт — 1 секунда. */
   minIntervalMs?: number;
   timeoutMs?: number;
+  /**
+   * Доля общего токена, которую мы согласны занять.
+   *
+   * Отсутствие политики сохраняет прежнее поведение: интервал из
+   * `minIntervalMs`, неприкосновенного остатка нет, повторы не выполняются.
+   * Так работают проверки и стенды, которым чужие интеграции не мешают.
+   */
+  rateLimit?: RateLimitPolicy;
+  /** Случайная добавка к паузе после `429`. Подменяется в проверках. */
+  jitter?: () => number;
 }
 
 export interface OrderPageQuery {
@@ -176,6 +193,81 @@ export function isReadOnlyMethod(method: string): boolean {
 const DEFAULT_MIN_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
+/**
+ * Сколько раз повторять обращение, сорвавшееся не по нашей вине.
+ *
+ * Повтор ограничен намеренно. Токен общий с другими сервисами, и бесконечная
+ * настойчивость нашего импорта отняла бы лимит у чужой работающей интеграции
+ * ровно тогда, когда МоемуСкладу и так плохо.
+ */
+const DEFAULT_MAX_RETRIES = 3;
+
+/** Задержки повтора: 1 → 2 → 4 секунды. Растут, но потолок близко. */
+const RETRY_BACKOFF_MS = [1000, 2000, 4000] as const;
+
+/**
+ * Разброс паузы после `429`.
+ *
+ * Без него все экземпляры, получившие лимит одновременно, вернулись бы в сеть
+ * в одну и ту же миллисекунду и получили бы его снова.
+ */
+const RETRY_JITTER_MS = 500;
+
+/** Во сколько раз замедляется темп после ПОВТОРНОГО `429` в одном проходе. */
+const SLOWDOWN_FACTOR = 4;
+
+/** Окно лимита, если сервер его не назвал. Пауза не должна быть вечной. */
+const DEFAULT_RESET_WINDOW_MS = 1000;
+
+/**
+ * Политика обращения к общему токену.
+ *
+ * Токен МоегоСклада делят несколько сервисов, поэтому предел выбирается НЕ
+ * по возможностям API, а по доле, которую мы согласны занять. Значения
+ * приходят из конфигурации окружения: у контура, где живут чужие интеграции,
+ * они строже, чем у стенда.
+ */
+export interface RateLimitPolicy {
+  /** Верхний предел темпа. Пауза между обращениями — обратная величина. */
+  maxRequestsPerSecond: number;
+  /** Параллельность. Значение больше единицы клиентом не поддерживается. */
+  maxConcurrency: number;
+  /**
+   * Неприкосновенный остаток окна лимита.
+   *
+   * Когда сервер сообщает, что осталось меньше, очередь ждёт сброса окна.
+   * Остаток общий: его тратят и чужие сервисы, поэтому «ещё немного можно»
+   * означает «можно, но уже не нам».
+   */
+  reserveRequests: number;
+  /** Сколько раз повторять 5xx, таймаут и обрыв связи. */
+  maxRetries?: number;
+}
+
+/**
+ * Что фактически происходило с лимитом.
+ *
+ * Нужна отчёту о проходе: «настроено два запроса в секунду» — это намерение,
+ * а «фактический максимум 1.8» — факт. Ни адресов, ни токена здесь нет
+ * и быть не может: это счётчики.
+ */
+export interface RateLimitStats {
+  /** Всего сетевых обращений, включая повторы. */
+  requests: number;
+  /** Наибольшее число обращений, начатых в пределах одной секунды. */
+  maxRequestsPerSecond: number;
+  /** Наибольшая одновременность. Обязана остаться единицей. */
+  maxConcurrency: number;
+  /** Сколько раз сервер ответил `429`. */
+  rateLimited: number;
+  /** Сколько раз обращение повторялось после 5xx, таймаута или обрыва. */
+  retries: number;
+  /** Сколько раз очередь вставала из-за неприкосновенного остатка. */
+  reservePauses: number;
+  /** Замедлен ли темп до конца прохода после повторного `429`. */
+  slowedDown: boolean;
+}
+
 export class MoyskladClient {
   private readonly config: MoyskladConfig;
   private readonly fetchImpl: typeof globalThis.fetch;
@@ -189,17 +281,75 @@ export class MoyskladClient {
   private lastStartedAt: number | null = null;
   private lastRateLimit: RateLimitSnapshot = { remaining: null, limit: null };
 
+  private readonly policy: RateLimitPolicy | null;
+  private readonly jitter: () => number;
+  /** Моменты начала обращений: по ним считается ФАКТИЧЕСКИЙ темп. */
+  private readonly starts: number[] = [];
+  private inFlight = 0;
+  /** Множитель темпа: становится больше единицы после повторного `429`. */
+  private slowdown = 1;
+  private rateLimitedInPass = 0;
+  private stats: RateLimitStats = {
+    requests: 0,
+    maxRequestsPerSecond: 0,
+    maxConcurrency: 0,
+    rateLimited: 0,
+    retries: 0,
+    reservePauses: 0,
+    slowedDown: false,
+  };
+
   constructor(deps: MoyskladClientDeps) {
     this.config = deps.config;
     this.fetchImpl = deps.fetch ?? globalThis.fetch;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.minIntervalMs = deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+    this.policy = deps.rateLimit ?? null;
+    this.jitter = deps.jitter ?? ((): number => Math.random() * RETRY_JITTER_MS);
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+    /*
+     * Пауза между обращениями считается из разрешённого темпа.
+     *
+     * Политика важнее явного интервала: она названа долей общего токена,
+     * а интервал — деталь исполнения. Без политики поведение прежнее.
+     */
+    this.minIntervalMs =
+      this.policy === null
+        ? (deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS)
+        : Math.ceil(1000 / Math.max(1, this.policy.maxRequestsPerSecond));
   }
 
   get rateLimit(): RateLimitSnapshot {
     return this.lastRateLimit;
+  }
+
+  /** Что фактически происходило с лимитом. Только счётчики, без PII. */
+  get rateLimitStats(): RateLimitStats {
+    return { ...this.stats };
+  }
+
+  /**
+   * Начало прохода синхронизации.
+   *
+   * Замедление после повторного `429` держится ДО КОНЦА прохода и снимается
+   * только здесь. Возвращать высокий темп внутри того же прохода нельзя:
+   * сервер уже дважды сказал «слишком часто», и третий раз он скажет это
+   * чужой интеграции, у которой с нами общий токен.
+   */
+  startPass(): void {
+    this.slowdown = 1;
+    this.rateLimitedInPass = 0;
+    this.stats = {
+      requests: 0,
+      maxRequestsPerSecond: 0,
+      maxConcurrency: 0,
+      rateLimited: 0,
+      retries: 0,
+      reservePauses: 0,
+      slowedDown: false,
+    };
+    this.starts.length = 0;
   }
 
   /**
@@ -478,8 +628,8 @@ export class MoyskladClient {
       throw new MoyskladError('METHOD_NOT_ALLOWED');
     }
     const run = this.queue.then(
-      () => this.execute(method, path, read, extra),
-      () => this.execute(method, path, read, extra),
+      () => this.attempt(method, path, read, extra),
+      () => this.attempt(method, path, read, extra),
     );
     // Очередь не должна падать целиком из-за одной неудачи.
     this.queue = run.then(
@@ -487,6 +637,80 @@ export class MoyskladClient {
       () => undefined,
     );
     return run;
+  }
+
+  /**
+   * Обращение с повторами и соблюдением лимита.
+   *
+   * Повторы живут ЗДЕСЬ, а не у вызывающей стороны, потому что лимит общий:
+   * решай каждый вызов сам, когда вернуться, — и три места кода спорили бы
+   * за один токен. Все способы запуска — первоначальный импорт, delta,
+   * ручной проход и дочитывание состава — проходят через эту очередь.
+   *
+   * `429` повтором не является: сервер назвал паузу, и она выдерживается
+   * целиком, а не сокращается «на всякий случай».
+   */
+  private async attempt<T>(
+    method: string,
+    path: string,
+    read: ResponseReader<T>,
+    extra: TransportOptions,
+  ): Promise<T> {
+    const maxRetries = this.policy === null ? 0 : (this.policy.maxRetries ?? DEFAULT_MAX_RETRIES);
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.execute(method, path, read, extra);
+      } catch (error) {
+        const code = error instanceof MoyskladError ? error.code : null;
+
+        /*
+         * Лимит исчерпан. Останавливается ВСЯ очередь: она последовательна,
+         * и пауза внутри обращения задерживает все следующие.
+         */
+        if (code === 'RATE_LIMITED' && this.policy !== null) {
+          this.stats.rateLimited += 1;
+          this.rateLimitedInPass += 1;
+
+          // Повторный лимит в одном проходе — не случайность. Темп снижается
+          // до конца прохода и сам обратно не поднимается.
+          if (this.rateLimitedInPass >= 2) {
+            this.slowdown = SLOWDOWN_FACTOR;
+            this.stats.slowedDown = true;
+          }
+
+          const retryAfter =
+            error instanceof MoyskladError && typeof error.retryAfterMs === 'number'
+              ? error.retryAfterMs
+              : DEFAULT_RESET_WINDOW_MS;
+          await this.sleep(retryAfter + this.jitter());
+          // Счётчик попыток лимитом не расходуется: сервер сказал «позже»,
+          // а не «нельзя». Иначе один занятый час стоил бы нам прохода.
+          continue;
+        }
+
+        /*
+         * Отказ доступа повторять запрещено.
+         *
+         * Токен неверен или отозван; повтор превратился бы в шторм
+         * запросов с заведомо негодным ключом — по общему для сервисов
+         * лимиту и, возможно, до блокировки аккаунта.
+         */
+        if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN' || code === 'METHOD_NOT_ALLOWED') {
+          throw error;
+        }
+
+        const retriable =
+          code === 'SERVER_ERROR' || code === 'TRANSPORT_ERROR' || code === 'BAD_RESPONSE';
+        if (!retriable || attempt >= maxRetries) {
+          throw error;
+        }
+
+        this.stats.retries += 1;
+        const backoff = RETRY_BACKOFF_MS[Math.min(attempt, RETRY_BACKOFF_MS.length - 1)] ?? 4000;
+        await this.sleep(backoff);
+      }
+    }
   }
 
   private async execute<T>(
@@ -500,13 +724,34 @@ export class MoyskladClient {
       throw new MoyskladError('NOT_CONFIGURED');
     }
 
+    /*
+     * Неприкосновенный остаток окна.
+     *
+     * Остаток общий с чужими сервисами: «осталось десять» означает не «нам
+     * можно ещё десять», а «всем вместе осталось десять». Дождаться сброса
+     * дешевле, чем отнять последние обращения у работающей интеграции.
+     */
+    if (this.policy !== null && this.policy.reserveRequests > 0) {
+      const remaining = this.lastRateLimit.remaining;
+      if (remaining !== null && remaining < this.policy.reserveRequests) {
+        this.stats.reservePauses += 1;
+        await this.sleep(this.lastRateLimit.resetMs ?? DEFAULT_RESET_WINDOW_MS);
+        // Снимок устарел: следующий ответ принесёт новый остаток.
+        this.lastRateLimit = { ...this.lastRateLimit, remaining: null };
+      }
+    }
+
     if (this.lastStartedAt !== null) {
-      const wait = this.minIntervalMs - (this.now() - this.lastStartedAt);
+      const wait = this.minIntervalMs * this.slowdown - (this.now() - this.lastStartedAt);
       if (wait > 0) {
         await this.sleep(wait);
       }
     }
     this.lastStartedAt = this.now();
+    this.noteStart(this.lastStartedAt);
+
+    this.inFlight += 1;
+    this.stats.maxConcurrency = Math.max(this.stats.maxConcurrency, this.inFlight);
 
     let response: Response;
     try {
@@ -525,11 +770,14 @@ export class MoyskladClient {
     } catch {
       // Текст сетевой ошибки может содержать адрес запроса с фильтрами.
       throw new MoyskladError('TRANSPORT_ERROR');
+    } finally {
+      this.inFlight -= 1;
     }
 
     this.lastRateLimit = {
       remaining: numberHeader(response, 'x-ratelimit-remaining'),
       limit: numberHeader(response, 'x-ratelimit-limit'),
+      resetMs: numberHeader(response, 'x-ratelimit-reset'),
     };
 
     if (response.status === 429) {
@@ -543,6 +791,23 @@ export class MoyskladClient {
     }
 
     return read(response);
+  }
+
+  /**
+   * Учёт фактического темпа и одновременности.
+   *
+   * Считается по МОМЕНТАМ НАЧАЛА обращений, а не по намерению: настройка
+   * «два в секунду» — это план, а отчёту нужен факт. Одновременность
+   * отслеживается тем же счётчиком: очередь последовательна, и значение
+   * больше единицы означало бы, что кто-то обошёл её стороной.
+   */
+  private noteStart(at: number): void {
+    this.stats.requests += 1;
+    this.starts.push(at);
+    while (this.starts.length > 0 && at - (this.starts[0] ?? at) >= 1000) {
+      this.starts.shift();
+    }
+    this.stats.maxRequestsPerSecond = Math.max(this.stats.maxRequestsPerSecond, this.starts.length);
   }
 }
 
