@@ -263,7 +263,9 @@ describe('лимит и ошибки', () => {
     const { instance } = client(fetchImpl);
     const page = await instance.listCustomerOrders({ limit: 1, withPositions: false });
 
-    expect(page.rateLimit).toEqual({ remaining: 43, limit: 45 });
+    // Окно сброса сервер здесь не назвал: `null` означает «не знаем»,
+    // и пауза по резерву берётся консервативной, а не выдуманной.
+    expect(page.rateLimit).toEqual({ remaining: 43, limit: 45, resetMs: null });
   });
 
   it('без токена клиент отказывает и в сеть не идёт', async () => {

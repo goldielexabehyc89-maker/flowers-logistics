@@ -44,11 +44,49 @@ import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
 const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
 
 export type ApplyOutcome =
-  'CREATED' | 'UPDATED' | 'UNCHANGED' | 'SCOPE_ENTERED' | 'SCOPE_EXITED' | 'SKIPPED_OUT_OF_SCOPE';
+  | 'CREATED'
+  | 'UPDATED'
+  | 'UNCHANGED'
+  | 'SCOPE_ENTERED'
+  | 'SCOPE_EXITED'
+  | 'SKIPPED_OUT_OF_SCOPE'
+  /**
+   * Заказ старше нижней границы отбора и потому НЕ СОЗДАЁТСЯ.
+   *
+   * Отдельный исход, а не тихий пропуск: проход обязан уметь сказать, сколько
+   * заказов он не создал и почему. Уже существующий заказ этим исходом никогда
+   * не получает — граница решает только судьбу впервые создаваемой строки.
+   */
+  | 'SKIPPED_BEFORE_CUTOFF';
 
 export interface ApplyResult {
   outcome: ApplyOutcome;
   changedFields: string[];
+}
+
+/**
+ * Нижняя граница даты доставки: московская календарная дата `ГГГГ-ММ-ДД`.
+ *
+ * Сравнение строковое и потому московское по построению: обе стороны —
+ * календарные даты одного формата, а `ГГГГ-ММ-ДД` сравнивается лексикографически
+ * ровно как хронологически. Переводить их в абсолютное время нельзя: полночь
+ * Москвы и полночь UTC — разные моменты, и заказ на границе попадал бы то в одну
+ * сторону, то в другую в зависимости от часа запуска.
+ */
+export function beforeImportCutoff(
+  deliveryDate: string | null,
+  cutoff: string | undefined,
+): boolean {
+  if (cutoff === undefined) {
+    return false;
+  }
+  // Заказ без даты доставки автоматически не создаётся: границу к нему
+  // применить не к чему, а угадывать — значит однажды завести в новом контуре
+  // сделку прошлого года.
+  if (deliveryDate === null) {
+    return true;
+  }
+  return deliveryDate < cutoff;
 }
 
 export interface ApplyOptions {
@@ -60,6 +98,16 @@ export interface ApplyOptions {
    * окружения и в коде не хранится.
    */
   cancelledStateId?: string | null;
+
+  /**
+   * Нижняя граница даты доставки для ВПЕРВЫЕ создаваемых заказов.
+   *
+   * Отсутствие значения означает «границы нет» — так работают local и staging.
+   * На существующие заказы не влияет никогда: они продолжают получать
+   * обновления, иначе новый контур потерял бы отмену или смену интервала
+   * у заказа, который уже везут.
+   */
+  importDeliveryDateFrom?: string | undefined;
 
   /**
    * Ставить ли адрес в очередь геокодирования.
@@ -149,6 +197,18 @@ export async function applyOrderSnapshot(
   const existing = await lockByExternalId(tx, snapshot.externalId);
 
   if (existing === null) {
+    /*
+     * Граница отбора проверяется ЗДЕСЬ, перед созданием строки.
+     *
+     * Серверный фильтр МоегоСклада сужает выборку, но полагаться только на него
+     * нельзя: delta-проход ходит по окну `updated` и приносит заказы с любой
+     * датой доставки, а чужой API однажды вернёт лишнюю страницу. Заказ до
+     * границы не должен появиться ни одним путём — все они сходятся сюда.
+     */
+    if (beforeImportCutoff(snapshot.deliveryDate, options.importDeliveryDateFrom)) {
+      return { outcome: 'SKIPPED_BEFORE_CUTOFF', changedFields: [] };
+    }
+
     if (!inAnyScope(snapshot)) {
       // Пункт Б задания: чужой заказ не попадает в базу ни одним полем.
       // Проверяются обе области сразу: самовывоз утверждённого склада к нам

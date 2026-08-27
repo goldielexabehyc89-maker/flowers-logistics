@@ -87,6 +87,13 @@ async function main(): Promise<void> {
         token: config.MOYSKLAD_TOKEN ?? null,
         ids: MOYSKLAD_IDS,
       },
+      // Один ограничитель на все обращения приложения: импорт, delta,
+      // ручной проход и дочитывание состава делят одну очередь и один темп.
+      rateLimit: {
+        maxRequestsPerSecond: config.MOYSKLAD_API_MAX_REQUESTS_PER_SECOND,
+        maxConcurrency: config.MOYSKLAD_API_MAX_CONCURRENCY,
+        reserveRequests: config.MOYSKLAD_API_RESERVE_REQUESTS,
+      },
     }),
     logger,
     ids: MOYSKLAD_IDS,
@@ -103,6 +110,7 @@ async function main(): Promise<void> {
      * переписывается.
      */
     structuredAddressV2: config.MOYSKLAD_STRUCTURED_ADDRESS_V2_ENABLED,
+    importDeliveryDateFrom: config.MOYSKLAD_IMPORT_DELIVERY_DATE_FROM,
     /*
      * Статус «Отменен» распознаётся только по настроенному идентификатору.
      *

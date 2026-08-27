@@ -49,11 +49,29 @@ async function main(): Promise<number> {
         token: config.MOYSKLAD_TOKEN ?? null,
         ids: MOYSKLAD_IDS,
       },
+      // Один ограничитель на все обращения приложения: импорт, delta,
+      // ручной проход и дочитывание состава делят одну очередь и один темп.
+      rateLimit: {
+        maxRequestsPerSecond: config.MOYSKLAD_API_MAX_REQUESTS_PER_SECOND,
+        maxConcurrency: config.MOYSKLAD_API_MAX_CONCURRENCY,
+        reserveRequests: config.MOYSKLAD_API_RESERVE_REQUESTS,
+      },
     }),
     logger,
     ids: MOYSKLAD_IDS,
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,
     lock: { connectionString: config.DATABASE_URL },
+    /*
+     * Ручной проход обязан вести себя как автоматический.
+     *
+     * Он собирает зависимости сам, и забытое здесь значение не даёт ошибки —
+     * оно молча меняет поведение: без границы отбора одна операторская команда
+     * завела бы в новом контуре все старые сделки, а без выключателя адресного
+     * контракта — создала бы заказы прежней версии там, где остальные приходят
+     * версии 2. Удалить такие заказы потом нечем: удаления заказов нет.
+     */
+    importDeliveryDateFrom: config.MOYSKLAD_IMPORT_DELIVERY_DATE_FROM,
+    structuredAddressV2: config.MOYSKLAD_STRUCTURED_ADDRESS_V2_ENABLED,
   };
 
   try {

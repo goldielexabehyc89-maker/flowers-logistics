@@ -25,7 +25,7 @@ import type { AppLogger } from '../../../platform/logging/logger.js';
 import type { TransactionClient } from '../../auth/sessions.js';
 import { writeAudit } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
-import { MoyskladError, type MoyskladClient } from './client.js';
+import { MoyskladError, type MoyskladClient, type RateLimitStats } from './client.js';
 import type { MOYSKLAD_IDS } from './config.js';
 import { approvedStoreFilter, deltaFilter } from './filters.js';
 import { applyOrderSnapshot, markSourceMissing } from './import-service.js';
@@ -68,6 +68,15 @@ export interface SyncDeps {
    * их версия уже записана и синхронизацией не переписывается.
    */
   structuredAddressV2?: boolean;
+
+  /**
+   * Нижняя граница даты доставки для ВПЕРВЫЕ создаваемых заказов.
+   *
+   * Отсутствие значения означает «границы нет»: так работают local и staging.
+   * Существующие заказы граница не трогает — они продолжают получать
+   * обновления, иначе новый контур потерял бы отмену или смену интервала.
+   */
+  importDeliveryDateFrom?: string | undefined;
   /**
    * Идентификатор статуса «Отменен» этого аккаунта.
    *
@@ -109,6 +118,14 @@ export interface PassResult {
   created: number;
   updated: number;
   skippedOutOfScope: number;
+  /**
+   * Заказов, не созданных из-за нижней границы даты доставки.
+   *
+   * Считается отдельно от «вне области»: это разные причины, и смешать их
+   * значило бы потерять ответ на вопрос «сколько старых сделок мы не завели».
+   * Сюда же попадают заказы без даты и с нераспознанной датой.
+   */
+  skippedBeforeCutoff: number;
   missing: number;
   /** Заказов, у которых производственный состав подтверждён в этом проходе. */
   compositionConfirmed: number;
@@ -118,6 +135,14 @@ export interface PassResult {
   compositionBackfilled: number;
   /** Сетевых обращений за компонентами бандлов: показывает работу кэша прохода. */
   bundleRequests: number;
+  /**
+   * Что фактически происходило с общим лимитом токена.
+   *
+   * Настройка «два запроса в секунду» — намерение; отчёту нужен факт, иначе
+   * «мы не мешаем чужим сервисам» останется предположением. Ни адресов,
+   * ни получателей, ни токена здесь нет: это счётчики.
+   */
+  rateLimit: RateLimitStats;
 }
 
 const emptyResult = (kind: PassResult['kind']): PassResult => ({
@@ -127,11 +152,21 @@ const emptyResult = (kind: PassResult['kind']): PassResult => ({
   created: 0,
   updated: 0,
   skippedOutOfScope: 0,
+  skippedBeforeCutoff: 0,
   missing: 0,
   compositionConfirmed: 0,
   compositionUnconfirmed: 0,
   compositionBackfilled: 0,
   bundleRequests: 0,
+  rateLimit: {
+    requests: 0,
+    maxRequestsPerSecond: 0,
+    maxConcurrency: 0,
+    rateLimited: 0,
+    retries: 0,
+    reservePauses: 0,
+    slowedDown: false,
+  },
 });
 
 // --- Аренда прохода --------------------------------------------------------
@@ -236,6 +271,89 @@ interface PageReader {
 }
 
 /**
+ * Контрольная точка прохода: откуда продолжать и как её обновлять.
+ */
+/**
+ * Отпечаток правил отбора прохода.
+ *
+ * Продолжать незавершённый проход можно только с теми же правилами. Смени
+ * кто-то границу импорта между запусками — «уже прочитанные» страницы
+ * относились бы к другой выборке, и продолжение молча пропустило бы заказы,
+ * которых прежний проход не видел.
+ *
+ * Фильтр входит целиком: он и есть правила отбора, а склад и границу дат
+ * перечислять отдельно значило бы однажды забыть третье.
+ */
+export function passFingerprint(kind: string, filter: string, cutoff?: string): string {
+  return [kind, filter, cutoff ?? 'без-границы'].join('|');
+}
+
+interface PassCheckpoint {
+  /** Смещение, с которого продолжать. Ноль — читать с начала. */
+  resumeFrom: number;
+  /** Сохранить прогресс после полностью применённой страницы. */
+  save: (offset: number) => Promise<void>;
+}
+
+/**
+ * Контрольная точка прохода поверх существующего курсора интеграции.
+ *
+ * Отдельной таблицы нет намеренно: это состояние того же курсора, и разнеси
+ * мы их, две строки однажды разошлись бы.
+ */
+async function openCheckpoint(
+  deps: SyncDeps,
+  kind: string,
+  filter: string,
+  now: Date,
+): Promise<PassCheckpoint> {
+  const fingerprint = passFingerprint(kind, filter, deps.importDeliveryDateFrom);
+  const stored = await deps.db.integrationCursor.findUnique({
+    where: { provider: 'moysklad' },
+    select: { passKind: true, passOffset: true, passFingerprint: true },
+  });
+
+  const compatible =
+    stored?.passFingerprint === fingerprint &&
+    stored.passKind === kind &&
+    typeof stored.passOffset === 'number';
+
+  if (stored !== null && stored.passFingerprint !== null && !compatible) {
+    // Несовместимая точка не молчит: иначе «проход начался заново» выглядел бы
+    // как обычная работа, и причину пришлось бы искать по косвенным признакам.
+    deps.logger.info(
+      { kind, hadCheckpoint: true },
+      'контрольная точка не подходит текущим правилам отбора: проход начинается заново',
+    );
+  }
+
+  const resumeFrom = compatible ? (stored.passOffset ?? 0) : 0;
+  if (resumeFrom > 0) {
+    deps.logger.info({ kind, resumeFrom }, 'проход продолжается с контрольной точки');
+  }
+
+  await deps.db.integrationCursor.update({
+    where: { provider: 'moysklad' },
+    data: {
+      passKind: kind,
+      passOffset: resumeFrom,
+      passFingerprint: fingerprint,
+      passStartedAt: now,
+    },
+  });
+
+  return {
+    resumeFrom,
+    save: async (offset: number): Promise<void> => {
+      await deps.db.integrationCursor.update({
+        where: { provider: 'moysklad' },
+        data: { passOffset: offset },
+      });
+    },
+  };
+}
+
+/**
  * Последовательно читает все страницы выборки.
  *
  * Количество страниц определяется по `meta.size` первой страницы. Пустая страница
@@ -246,9 +364,18 @@ async function readAllPages(
   deps: SyncDeps,
   reader: PageReader,
   onPage: (rows: unknown[]) => Promise<void>,
+  checkpoint?: PassCheckpoint,
 ): Promise<number> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  let offset = 0;
+  /*
+   * Продолжение с контрольной точки.
+   *
+   * Смещение берётся, только если отпечаток конфигурации совпал: проход
+   * собирал одну выборку, и продолжать его с другими правилами отбора —
+   * значит пропустить не те страницы. Несовпадение означает начать заново;
+   * повторное применение уже применённых заказов дублей не создаёт.
+   */
+  let offset = checkpoint?.resumeFrom ?? 0;
   let pages = 0;
   let total: number | null = null;
 
@@ -277,6 +404,11 @@ async function readAllPages(
 
     await onPage(page.rows);
     offset += page.rows.length;
+
+    // Контрольная точка ставится ПОСЛЕ полного применения страницы: упади
+    // процесс здесь, следующий запуск продолжит с этого смещения, а не
+    // перечитает уже разобранные страницы по общему с чужими сервисами лимиту.
+    await checkpoint?.save(offset);
 
     if (offset >= (total ?? 0)) {
       break;
@@ -358,6 +490,7 @@ async function applyRows(
         geocoding: deps.enqueueOnImport === true,
         cancelledStateId: deps.cancelledStateId ?? null,
         structuredAddressV2: deps.structuredAddressV2 === true,
+        importDeliveryDateFrom: deps.importDeliveryDateFrom,
       });
 
       if (composition === null) {
@@ -387,6 +520,7 @@ async function applyRows(
       result.updated += 1;
     if (applied.orderResult.outcome === 'SCOPE_EXITED') result.updated += 1;
     if (applied.orderResult.outcome === 'SKIPPED_OUT_OF_SCOPE') result.skippedOutOfScope += 1;
+    if (applied.orderResult.outcome === 'SKIPPED_BEFORE_CUTOFF') result.skippedBeforeCutoff += 1;
 
     if (applied.fulfillment !== null) {
       if (applied.fulfillment.outcome === 'UNCONFIRMED') {
@@ -582,10 +716,18 @@ export async function runInitialLoad(deps: SyncDeps, cursor?: CursorState): Prom
   // между проходами держать незачем.
   const regions = new RegionDirectory(deps.client);
 
+  const initialFilter = approvedStoreFilter(
+    deps.ids,
+    initialLoadSince(now),
+    deps.importDeliveryDateFrom,
+  );
+  const checkpoint = await openCheckpoint(deps, 'initial', initialFilter, now);
+
   result.pages = await readAllPages(
     deps,
-    { filter: approvedStoreFilter(deps.ids, initialLoadSince(now)), order: 'updated,asc' },
+    { filter: initialFilter, order: 'updated,asc' },
     (rows) => applyRows(deps, rows, result, source, regions),
+    checkpoint,
   );
 
   // Дозагрузка выполняется ДО объявления загрузки завершённой. Заказы, состав
@@ -601,6 +743,12 @@ export async function runInitialLoad(deps: SyncDeps, cursor?: CursorState): Prom
       fulfillmentLoadCompleted: true,
       fulfillmentLoadCompletedAt: now,
       ...(firstEver ? { initialLoadCompletedAt: now, updatedCursor: snapshotAt } : {}),
+      // Проход дошёл до конца: незавершённой точки больше нет. Оставь мы её —
+      // следующий проход счёл бы завершённую загрузку прерванной.
+      passKind: null,
+      passOffset: null,
+      passFingerprint: null,
+      passStartedAt: null,
     },
   });
 
@@ -678,7 +826,10 @@ export async function runReconciliation(deps: SyncDeps): Promise<PassResult> {
 
   result.pages = await readAllPages(
     deps,
-    { filter: approvedStoreFilter(deps.ids, since), order: 'updated,asc' },
+    {
+      filter: approvedStoreFilter(deps.ids, since, deps.importDeliveryDateFrom),
+      order: 'updated,asc',
+    },
     async (rows) => {
       for (const row of rows) {
         const id = (row as { id?: string }).id;
@@ -752,11 +903,22 @@ export async function runSyncOnce(
   }
 
   try {
+    /*
+     * Проход начинается с чистого счётчика темпа.
+     *
+     * Замедление после повторного `429` держится до конца прохода и снимается
+     * ровно здесь: внутри прохода возвращать высокий темп нельзя, а держать
+     * его вечно — значит наказывать следующий проход за чужую занятость.
+     */
+    deps.client.startPass();
+
     const cursor = await claimPass(deps, now);
     if (cursor === null) {
       return emptyResult('skipped');
     }
-    return await runClaimedPass(deps, cursor, options, now, intervalMs, clock);
+    const pass = await runClaimedPass(deps, cursor, options, now, intervalMs, clock);
+    // Цифры лимита снимаются в конце прохода: до него они неполны.
+    return { ...pass, rateLimit: deps.client.rateLimitStats };
   } finally {
     // Освобождение обязательно: иначе замок жил бы до конца процесса.
     await lock.release();

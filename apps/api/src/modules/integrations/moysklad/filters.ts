@@ -45,11 +45,39 @@ export function formatMoment(date: Date): string {
  * Разделение на логистическую и производственную область выполняет mapper по
  * уже прочитанному заказу, а не сервер МоегоСклада.
  */
-export function approvedStoreFilter(ids: Ids, since: Date): string {
+export function approvedStoreFilter(ids: Ids, since: Date, cutoff?: string | undefined): string {
   return [
     `store=${entity('store', ids.store)}`,
-    `deliveryPlannedMoment>=${formatMoment(since)}`,
+    `deliveryPlannedMoment>=${formatMoment(lowerBound(since, cutoff))}`,
   ].join(';');
+}
+
+/**
+ * Нижняя граница выборки: позднейшая из окна прохода и границы отбора.
+ *
+ * Сужение на стороне МоегоСклада — это экономия страниц, а не защита: delta
+ * ходит по окну `updated` и приносит заказы с любой датой. Не создать старый
+ * заказ обязан импорт (`beforeImportCutoff`), и он это делает независимо
+ * от того, что вернул чужой API.
+ *
+ * Полночь считается МОСКОВСКАЯ: `deliveryPlannedMoment` сравнивается
+ * МоимСкладом в московском времени, и полночь UTC сдвинула бы границу
+ * на три часа — заказ на самой границе то попадал бы в выборку, то нет.
+ */
+function lowerBound(since: Date, cutoff: string | undefined): Date {
+  if (cutoff === undefined) {
+    return since;
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cutoff);
+  if (match === null) {
+    // Значение уже проверено разбором конфигурации; сюда попасть нельзя,
+    // но молча расширять выборку при неожиданном формате нельзя тем более.
+    return since;
+  }
+  const moscowMidnightUtc =
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) - 3 * 60 * 60 * 1000;
+  const bound = new Date(moscowMidnightUtc);
+  return bound.getTime() > since.getTime() ? bound : since;
 }
 
 /**
