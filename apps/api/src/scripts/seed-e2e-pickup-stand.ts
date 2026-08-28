@@ -197,13 +197,15 @@ async function main(): Promise<number> {
     await receive(tomorrow.number, cellB);
     report.push(`${tomorrow.number}: завтрашний, готов, ячейка ${cellB}`);
 
-    // 2. Коробку сняли с полки: заказ остаётся в очереди с честной причиной.
+    // 2. Коробку сняли с полки НА ПЕРЕСБОРКУ: заказ остаётся в очереди с честной
+    // причиной «нет ячейки». Списание (WRITE_OFF) из очереди убирает — это
+    // отдельное правило, и «без ячейки» им быть не должен, иначе строки не будет.
     const withoutCell = await seedOrder('без-ячейки', { assembled: true });
     await receive(withoutCell.number, cellB);
     await withdrawOrder(
       flow,
       keeperActor,
-      { orderNumber: withoutCell.number, reason: 'WRITE_OFF' },
+      { orderNumber: withoutCell.number, reason: 'REASSEMBLY' },
       context,
     );
     report.push(`${withoutCell.number}: в очереди, но фактической ячейки нет`);
