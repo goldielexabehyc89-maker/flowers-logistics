@@ -186,16 +186,26 @@ describe('состав очереди', () => {
     );
   });
 
-  it('заказ появляется только после складской приёмки', async () => {
+  it('самовывоз виден сразу после импорта, до складской приёмки', async () => {
     const waiting = await seedOrder();
 
-    expect(await queueNumbers()).not.toContain(waiting.number);
+    // Наличие ячейки — не условие показа: заказ в очереди сразу, с честной
+    // причиной «нет ячейки», но выдать его нельзя.
+    const before = await listPickupQueue(ctx.db, { limit: 200 });
+    const waitingRow = before.items.find((item) => item.orderNumber === waiting.number);
+    expect(waitingRow, 'самовывоз без ячейки не показан').toBeDefined();
+    expect(waitingRow?.cellCode).toBeNull();
+    expect(waitingRow?.blockers).toContain('NOT_PLACED');
 
+    // После приёмки складом в карточке появляется номер ячейки.
     const cell = await seedCell();
     const keeper = await actorFor(['WAREHOUSE']);
     await receiveOrder(flow, keeper, { orderNumber: waiting.number, cellCode: cell.code }, CONTEXT);
 
-    expect(await queueNumbers()).toContain(waiting.number);
+    const after = await listPickupQueue(ctx.db, { limit: 200 });
+    const placedRow = after.items.find((item) => item.orderNumber === waiting.number);
+    expect(placedRow?.cellCode).toBe(cell.code);
+    expect(placedRow?.blockers).toEqual([]);
   });
 
   it('перемещение между ячейками из очереди не убирает', async () => {
@@ -216,15 +226,31 @@ describe('состав очереди', () => {
     expect(row?.blockers).toEqual([]);
   });
 
-  it('снятая с полки коробка остаётся в очереди с честной причиной', async () => {
+  it('списанная коробка уходит из очереди, а после повторной приёмки возвращается', async () => {
     const { order } = await placed();
     const keeper = await actorFor(['WAREHOUSE']);
 
+    // Списание — «выдавать нечего»: заказ уходит из ожидающих (требование пакета).
     await withdrawOrder(flow, keeper, { orderNumber: order.number, reason: 'WRITE_OFF' }, CONTEXT);
+    expect(await queueNumbers()).not.toContain(order.number);
+    // Но из базы не исчез — история осталась.
+    expect(await ctx.db.deliveryOrder.count({ where: { id: order.id } })).toBe(1);
+
+    // Если коробку всё же снова приняли на полку — заказ снова ожидает выдачи.
+    const cell = await seedCell();
+    await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
+    expect(await queueNumbers()).toContain(order.number);
+  });
+
+  it('изъятая на пересборку коробка остаётся в очереди с честной причиной', async () => {
+    const { order } = await placed();
+    const keeper = await actorFor(['WAREHOUSE']);
+
+    // Пересборка — это не списание: букет вернётся, и заказ прятать нельзя.
+    await withdrawOrder(flow, keeper, { orderNumber: order.number, reason: 'REASSEMBLY' }, CONTEXT);
 
     const page = await listPickupQueue(ctx.db, { limit: 200 });
     const row = page.items.find((item) => item.orderNumber === order.number);
-    // Молча спрятать — значит потерять заказ, за которым придут.
     expect(row, 'заказ исчез из очереди').toBeDefined();
     expect(row?.cellCode).toBeNull();
     expect(row?.blockers).toContain('NOT_PLACED');
@@ -428,12 +454,16 @@ describe('ручная выдача', () => {
 
 describe('продолжение очереди', () => {
   it('не теряет и не повторяет строки', async () => {
-    const numbers: string[] = [];
+    const ids: string[] = [];
     for (let index = 0; index < 5; index += 1) {
       const seeded = await placed({ day: TOMORROW, number: unique('QQ') });
-      numbers.push(seeded.order.number);
+      ids.push(seeded.order.id);
     }
 
+    // Собираем идентификаторы, а не номера: номер в источнике не уникален —
+    // отдельная проверка неоднозначности намеренно заводит два заказа с одним
+    // номером, и оба честно стоят в очереди. Строка очереди — это заказ (id),
+    // и «не теряет, не повторяет» проверяется по нему.
     const seen: string[] = [];
     let cursor: string | null = null;
     let guard = 0;
@@ -442,14 +472,14 @@ describe('продолжение очереди', () => {
         limit: 2,
         ...(cursor === null ? {} : { cursor }),
       });
-      seen.push(...page.items.map((item) => item.orderNumber));
+      seen.push(...page.items.map((item) => item.orderId));
       cursor = page.nextCursor;
       guard += 1;
     } while (cursor !== null && guard < 100);
 
     expect(new Set(seen).size, 'строки повторились').toBe(seen.length);
-    for (const number of numbers) {
-      expect(seen, number).toContain(number);
+    for (const id of ids) {
+      expect(seen, id).toContain(id);
     }
 
     // Счётчик считает ВЕСЬ отбор, а не показанную страницу.

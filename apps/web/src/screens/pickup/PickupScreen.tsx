@@ -258,7 +258,7 @@ export function PickupScreen(): React.JSX.Element {
         ) : queue.data.items.length === 0 ? (
           <EmptyState
             title="Очередь пуста"
-            description="Заказ появится здесь, когда кладовщик примет его на склад."
+            description="Самовывозный заказ появится здесь сразу после импорта, ещё до приёмки на склад."
           />
         ) : (
           <ul className="pickup-queue">
