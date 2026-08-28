@@ -9,6 +9,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import {
+  assignableRoles,
+  canAssignRoles,
   formatMoscowDateTime,
   ROLE_LABELS,
   USER_STATUS_LABELS,
@@ -62,6 +64,7 @@ const ROLE_TABS: readonly Role[] = [
   'WAREHOUSE',
   'MANAGER',
   'LOGISTICIAN',
+  'SUPERVISOR',
   'ADMIN',
 ];
 
@@ -73,6 +76,7 @@ const ADD_LABELS: Record<Role, string> = {
   MANAGER: 'Добавить менеджера',
   LOGISTICIAN: 'Добавить логиста',
   ADMIN: 'Добавить администратора',
+  SUPERVISOR: 'Добавить управляющего',
 };
 
 const STATUS_TONES: Record<UserStatus, StatusTone> = {
@@ -96,7 +100,12 @@ export function UsersScreen(): React.JSX.Element {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
 
-  const isAdmin = currentUser?.roles.includes('ADMIN') === true;
+  // Право на выбор ролей и сам перечень назначаемых ролей берутся из общей
+  // матрицы прав, а не из проверки «это администратор». Так «Управляющий»
+  // получает всё, кроме ADMIN, а логист — по-прежнему только курьеров.
+  const actorRoles = currentUser?.roles ?? [];
+  const assignable = assignableRoles(actorRoles);
+  const canAssign = canAssignRoles(actorRoles);
 
   /*
    * Роль — это вкладка, а не фильтр.
@@ -108,7 +117,7 @@ export function UsersScreen(): React.JSX.Element {
    * Логист видит ровно одну вкладку — курьеров: остальные роли ему не
    * показывает и сам сервер.
    */
-  const tabs: Role[] = isAdmin ? [...ROLE_TABS] : ['COURIER'];
+  const tabs: Role[] = ROLE_TABS.filter((value) => assignable.includes(value));
   const [status, setStatus] = useState<UserStatus>('ACTIVE');
   const [role, setRole] = useState<Role>('COURIER');
   const [offset, setOffset] = useState(0);
@@ -150,7 +159,7 @@ export function UsersScreen(): React.JSX.Element {
         fullName: values.fullName,
         // Логисту сервер разрешает только курьеров, и интерфейс не пытается
         // спорить: он посылает роль открытой вкладки.
-        roles: isAdmin ? values.roles : ['COURIER'],
+        roles: canAssign ? values.roles : ['COURIER'],
         ...(values.comment === '' ? {} : { comment: values.comment }),
         ...(values.roles.includes('COURIER')
           ? { defaultVehicleType: values.defaultVehicleType }
@@ -181,7 +190,7 @@ export function UsersScreen(): React.JSX.Element {
         fullName: values.fullName,
         phone: values.phone,
         comment: values.comment === '' ? null : values.comment,
-        ...(isAdmin ? { roles: values.roles } : {}),
+        ...(canAssign ? { roles: values.roles } : {}),
         ...(values.roles.includes('COURIER')
           ? { defaultVehicleType: values.defaultVehicleType }
           : {}),
@@ -491,7 +500,8 @@ export function UsersScreen(): React.JSX.Element {
       <UserFormModal
         open={formOpen}
         mode={editing === null ? 'create' : 'edit'}
-        canAssignRoles={isAdmin}
+        canAssignRoles={canAssign}
+        assignable={assignable}
         initial={editing}
         defaultRole={role}
         busy={createMutation.isPending || updateMutation.isPending}

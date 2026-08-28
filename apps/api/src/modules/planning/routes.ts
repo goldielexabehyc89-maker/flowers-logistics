@@ -26,7 +26,7 @@ import {
   type RequestContext,
 } from './service.js';
 
-export const PLANNING_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+export const PLANNING_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 
 const uuid = z
   .string()

@@ -27,8 +27,12 @@ import {
   type RequestContext,
 } from './service.js';
 
-/** Читают склады логист и администратор; меняет — только администратор. */
-export const DEPOT_READ_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * Читают склады логист, администратор и управляющий; меняет — только
+ * администратор. Управляющему нужен GET `/api/depots`: точки отгрузки рисует
+ * карта сделок — рабочий экран. Изменение депо ему закрыто (см. `DEPOT_WRITE_ROLES`).
+ */
+export const DEPOT_READ_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 export const DEPOT_WRITE_ROLES = ['ADMIN'] as const;
 
 const uuid = z

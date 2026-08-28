@@ -68,7 +68,7 @@ import type { BasemapState } from '../geo/basemap/manifest.js';
 import { CURRENT_TRAFFIC_MODE } from '../geo/matrix/service.js';
 import { isRoutingVerified } from '../geo/routing-status.js';
 
-const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 
 /**
  * Кто видит историю заказа.
@@ -77,7 +77,7 @@ const ORDER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
  * действия, и это не то, что показывают всем ролям сразу. Право проверяет
  * СЕРВЕР: спрятанная кнопка чужой запрос не останавливает.
  */
-const ORDER_HISTORY_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+const ORDER_HISTORY_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 const MAX_LIMIT = 100;
 
 const dateSchema = z

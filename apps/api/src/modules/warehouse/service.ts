@@ -22,7 +22,7 @@ import { assertBatchSize, parseBatch, type RejectedCode } from './bulk-cells.js'
 import { normalizeCellCode } from './cell-code.js';
 
 /** Читают справочник администратор и кладовщик; изменяет только администратор. */
-export const CELL_READ_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
+export const CELL_READ_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] as const;
 export const CELL_WRITE_ROLES = ['ADMIN'] as const;
 
 /** Кому адресуются события справочника. Тот же список, что и права на чтение. */

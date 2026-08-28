@@ -110,7 +110,11 @@ export function FloristScreen(): React.JSX.Element {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
 
-  const isAdmin = user?.roles.includes('ADMIN') === true;
+  // Административные возможности флориста (смены, назначение, переоткрытие)
+  // доступны и управляющему: он — операционный администратор. Сервер
+  // подтверждает это тем же `FLORIST_ADMIN_ROLES`.
+  const isAdmin =
+    user?.roles.includes('ADMIN') === true || user?.roles.includes('SUPERVISOR') === true;
   const viewerId = user?.id ?? '';
 
   const [tab, setTab] = useState<FloristTab>('queue');

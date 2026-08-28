@@ -24,9 +24,9 @@ import { writeAudit, type AuditAction } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 
 /** Кто вообще имеет доступ к разделу флориста. */
-export const FLORIST_ROLES = ['ADMIN', 'FLORIST'] as const;
+export const FLORIST_ROLES = ['ADMIN', 'FLORIST', 'SUPERVISOR'] as const;
 /** Административные действия раздела. */
-export const FLORIST_ADMIN_ROLES = ['ADMIN'] as const;
+export const FLORIST_ADMIN_ROLES = ['ADMIN', 'SUPERVISOR'] as const;
 
 /** Кому адресованы общие события производственного процесса. */
 /** Смена и сборка касаются и склада: он принимает собранное. */

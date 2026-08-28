@@ -23,14 +23,14 @@ export const APP_SECTIONS: readonly AppSection[] = [
     path: '/logistics',
     title: 'Логистика',
     shortTitle: 'Логистика',
-    roles: ['ADMIN', 'LOGISTICIAN'],
+    roles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
   },
   {
     key: 'active',
     path: '/active',
     title: 'Активные',
     shortTitle: 'Активные',
-    roles: ['ADMIN', 'LOGISTICIAN', 'COURIER'],
+    roles: ['ADMIN', 'LOGISTICIAN', 'COURIER', 'SUPERVISOR'],
   },
   {
     key: 'history',
@@ -44,7 +44,7 @@ export const APP_SECTIONS: readonly AppSection[] = [
     path: '/couriers',
     title: 'Сотрудники и курьеры',
     shortTitle: 'Курьеры',
-    roles: ['ADMIN', 'LOGISTICIAN'],
+    roles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
   },
   // Разделы производственного контура. Каждая роль видит ровно свой раздел
   // и не видит соседние: флорист не попадает на склад, кладовщик — в самовывоз.
@@ -56,21 +56,21 @@ export const APP_SECTIONS: readonly AppSection[] = [
     path: '/florist',
     title: 'Флорист',
     shortTitle: 'Флорист',
-    roles: ['ADMIN', 'FLORIST'],
+    roles: ['ADMIN', 'FLORIST', 'SUPERVISOR'],
   },
   {
     key: 'warehouse',
     path: '/warehouse',
     title: 'Склад',
     shortTitle: 'Склад',
-    roles: ['ADMIN', 'WAREHOUSE'],
+    roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'],
   },
   {
     key: 'pickup',
     path: '/pickup',
     title: 'Самовывоз',
     shortTitle: 'Самовывоз',
-    roles: ['ADMIN', 'MANAGER'],
+    roles: ['ADMIN', 'MANAGER', 'SUPERVISOR'],
   },
   /*
    * «История заказов» — самостоятельный раздел, а не вкладка «Логистики».
@@ -89,7 +89,7 @@ export const APP_SECTIONS: readonly AppSection[] = [
     path: '/order-history',
     title: 'История заказов',
     shortTitle: 'История',
-    roles: ['ADMIN', 'LOGISTICIAN'],
+    roles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
   },
   {
     key: 'settings',

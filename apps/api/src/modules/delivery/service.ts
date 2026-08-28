@@ -39,9 +39,9 @@ import { fromMicro } from '../orders/geo.js';
 import { readLedgerActivation } from '../finance/tariffs.js';
 
 /** Кто работает с доставкой. Курьер сообщает результат, остальные — наблюдают и правят. */
-export const DELIVERY_ROLES = ['ADMIN', 'LOGISTICIAN', 'COURIER'] as const;
+export const DELIVERY_ROLES = ['ADMIN', 'LOGISTICIAN', 'COURIER', 'SUPERVISOR'] as const;
 /** Исправление чужого результата и справочник причин. */
-export const DELIVERY_MANAGER_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+export const DELIVERY_MANAGER_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 /** Кому уходят события доставки. Курьер получает своё персональным адресатом. */
 export const DELIVERY_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
 

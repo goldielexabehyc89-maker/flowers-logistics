@@ -7,13 +7,7 @@
  */
 
 import { useEffect, useState, type FormEvent } from 'react';
-import {
-  assignableRoles,
-  ROLE_LABELS,
-  VEHICLE_TYPE_LABELS,
-  type Role,
-  type VehicleType,
-} from '@fl/shared';
+import { ROLE_LABELS, VEHICLE_TYPE_LABELS, type Role, type VehicleType } from '@fl/shared';
 import { Button, Field, Modal, Select, TextInput } from '../../ui/components';
 import type { UserView } from './types';
 
@@ -33,14 +27,11 @@ const EMPTY: UserFormValues = {
   comment: '',
 };
 
-// Перечень берётся из общей матрицы прав, а не дублируется в интерфейсе:
-// администратор обязан видеть ровно те роли, которые примет сервер.
-const ASSIGNABLE_BY_ADMIN: readonly Role[] = assignableRoles(['ADMIN']);
-
 export function UserFormModal({
   open,
   mode,
   canAssignRoles,
+  assignable,
   initial,
   defaultRole,
   busy,
@@ -51,6 +42,12 @@ export function UserFormModal({
   open: boolean;
   mode: 'create' | 'edit';
   canAssignRoles: boolean;
+  /**
+   * Роли, которые актор вправе назначить. Приходят из общей матрицы прав
+   * (`assignableRoles`), поэтому у управляющего здесь нет ADMIN, а у логиста
+   * галочки ролей не показываются вовсе (`canAssignRoles` = false).
+   */
+  assignable: readonly Role[];
   initial: UserView | null;
   /**
    * Роль нового сотрудника: та, вкладка которой открыта.
@@ -145,7 +142,7 @@ export function UserFormModal({
         {canAssignRoles ? (
           <fieldset className="fieldset">
             <legend className="field__label">Роли</legend>
-            {ASSIGNABLE_BY_ADMIN.map((role) => (
+            {assignable.map((role) => (
               <label key={role} className="checkbox">
                 <input
                   type="checkbox"
