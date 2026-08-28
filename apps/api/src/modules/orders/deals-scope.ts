@@ -15,6 +15,7 @@
 
 import { Prisma } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
+import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 
 /** Что показывать: рабочие сделки, требующие внимания либо всё сразу. */
 export type DealsGroup = 'ROUTABLE' | 'ATTENTION' | 'ALL';
@@ -127,6 +128,10 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
     o."inScope" = true
     AND o."sourceArchived" = false
     AND o."sourceMissing" = false
+    -- «Принят, Не оплачен» хранится и обновляется, но в «Сделках» не показывается,
+    -- пока статус в источнике не станет допустимым. Сравнение по UUID состояния,
+    -- не по строке. IS DISTINCT FROM оставляет заказы с неизвестным состоянием.
+    AND o."externalStateId" IS DISTINCT FROM ${MOYSKLAD_IDS.states.acceptedUnpaid}
     AND o."deliveryDate" = ${scope.deliveryDate}::date
     AND NOT EXISTS (
       SELECT 1 FROM "RouteOrder" ro

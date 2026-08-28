@@ -297,6 +297,20 @@ function buildScopeWhere(input: {
     fulfillmentInScope: true,
     sourceArchived: false,
     sourceMissing: false,
+    // «Принят, Не оплачен» импортируется и хранится, но в работу не идёт:
+    // флорист его не собирает, пока статус в источнике не станет допустимым.
+    // Сопоставление по UUID состояния, не по строке. Условие лежит в `AND`,
+    // а не отдельным ключом `OR`: у условия дня уже есть свой `OR`, и второй
+    // ключ верхнего уровня затёр бы его. NULL перечислен явно — `<>` в SQL
+    // отбросил бы заказ без известного состояния, а его прятать нельзя.
+    AND: [
+      {
+        OR: [
+          { externalStateId: null },
+          { externalStateId: { not: MOYSKLAD_IDS.states.acceptedUnpaid } },
+        ],
+      },
+    ],
     // Пустой состав при `PENDING` неотличим от настоящего пустого состава,
     // поэтому в очередь попадает только подтверждённый.
     fulfillmentCompositionState: 'READY' as const,
