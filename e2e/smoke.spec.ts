@@ -7320,10 +7320,11 @@ test('два сеанса: отгруженный лист появляется 
 });
 
 /*
- * Самовывоз появляется у менеджера ровно тогда, когда склад положил букет
- * в ячейку: до этого выдавать нечего.
+ * Самовывоз виден менеджеру СРАЗУ после импорта — ещё до складской приёмки, —
+ * но с честной причиной «нет ячейки» и без права выдачи. Приёмка склада не
+ * добавляет заказ в очередь, а лишь проставляет ему ячейку.
  */
-test('два сеанса: самовывоз появляется у менеджера после складской приёмки', async ({
+test('два сеанса: самовывоз виден у менеджера сразу, ячейка появляется после приёмки', async ({
   browser,
   request,
 }: {
@@ -7345,9 +7346,12 @@ test('два сеанса: самовывоз появляется у менед
 
   await login(manager, stand['менеджер'] ?? '', stand['пин'] ?? '');
   await expect(manager.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
-  await expect(
-    manager.locator('[data-testid="pickup-waiting-row"]', { hasText: pickupOrder }),
-  ).toHaveCount(0);
+  // До приёмки заказ уже в очереди, но без ячейки: наличие ячейки не условие показа.
+  const managerRow = manager.locator('[data-testid="pickup-waiting-row"]', {
+    hasText: pickupOrder,
+  });
+  await expect(managerRow).toHaveCount(1);
+  await expect(managerRow).toContainText('Нет ячейки');
 
   await login(keeper, stand['кладовщик'] ?? '', stand['пин'] ?? '');
   await keeper.getByTestId('wh-scan-order').fill(pickupOrder);
@@ -7356,10 +7360,8 @@ test('два сеанса: самовывоз появляется у менед
   await keeper.getByTestId('wh-place').click();
   await expect(keeper.locator('.toast-region')).toContainText(pickupOrder);
 
-  // Менеджер узнаёт о готовом заказе сам, стоя перед покупателем.
-  await expect(
-    manager.locator('[data-testid="pickup-waiting-row"]', { hasText: pickupOrder }),
-  ).toContainText(cell);
+  // После приёмки та же строка получает номер ячейки — без перезагрузки страницы.
+  await expect(managerRow).toContainText(cell);
 
   await managerContext.close();
   await keeperContext.close();
