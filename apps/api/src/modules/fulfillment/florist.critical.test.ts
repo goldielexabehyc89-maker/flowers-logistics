@@ -61,8 +61,22 @@ import {
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { requirePhoto, MAX_PHOTO_BYTES } from './photo.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
-import { listPrintJobs, markPrinted, renderJobDocument, retryPrint } from './print.js';
-import { closeOwnShift, forceCloseShift, listAssignableFlorists, startShift } from './shifts.js';
+import {
+  claimNextDelivery,
+  listPrintJobs,
+  markPrinted,
+  renderJobDocument,
+  reportDelivery,
+  retryPrint,
+} from './print.js';
+import {
+  closeOwnShift,
+  forceCloseShift,
+  listAssignableFlorists,
+  setShiftPrintPoint,
+  startShift,
+} from './shifts.js';
+import { createPrintPoint, issuePairingCode, pairAgent } from '../printing/service.js';
 
 /** Забронированный этим файлом день и следующий за ним. */
 const DAY = '2027-03-10';
@@ -284,6 +298,42 @@ async function claimAndAssemble(
     CONTEXT,
   );
   return { printFormId: assembled.printFormId, printJobId: assembled.printJobId };
+}
+
+/**
+ * Подключённая точка печати: код выпущен и погашен агентом.
+ *
+ * Выбрать на смену можно только подключённую точку, поэтому в проверках
+ * автоматической печати она всегда проходит полный путь подключения.
+ */
+async function pairedPoint(name: string): Promise<string> {
+  const admin = await actorFor(['ADMIN']);
+  const point = await createPrintPoint(ctx.db, admin, { name: uniqueNumber(name) }, CONTEXT);
+  const issued = await issuePairingCode(
+    ctx.db,
+    admin,
+    point.id,
+    TEST_SECRETS.AUTH_PIN_PEPPER,
+    CONTEXT,
+  );
+  await pairAgent(
+    ctx.db,
+    { code: issued.code, computerName: 'PC', printerName: 'XP-318B' },
+    TEST_SECRETS.AUTH_PIN_PEPPER,
+  );
+  return point.id;
+}
+
+/** `deliveryState`/`printPointId` задания заказа. */
+async function jobDelivery(
+  orderId: string,
+): Promise<{ printPointId: string | null; deliveryState: string | null; state: string }> {
+  const job = await ctx.db.orderPrintJob.findFirstOrThrow({
+    where: { orderId },
+    orderBy: { createdAt: 'desc' },
+    select: { printPointId: true, deliveryState: true, state: true },
+  });
+  return job;
 }
 
 // --- 1. Смена ----------------------------------------------------------------
@@ -753,6 +803,174 @@ function rasterizeQrFromPdf(pdf: Uint8Array): {
 
   return { data: pixels, width, height };
 }
+
+describe('автоматическая печать: назначение точки при сборке', () => {
+  it('смена с точкой → сборка → задание назначено и получено агентом', async () => {
+    const pointId = await pairedPoint('Стол');
+    const florist = await actorFor(['FLORIST']);
+    await startShift(ctx.db, florist, CONTEXT, { printPointId: pointId });
+    const order = await seedOrder();
+
+    await claimAndAssemble(florist, order.id);
+
+    // Задание сразу несёт точку смены и встаёт в очередь доставки.
+    const job = await jobDelivery(order.id);
+    expect(job.printPointId).toBe(pointId);
+    expect(job.deliveryState).toBe('QUEUED');
+
+    // Агент этой точки его забирает.
+    const claimed = await claimNextDelivery(ctx.db, pointId);
+    expect(claimed?.orderId).toBe(order.id);
+    expect(claimed?.snapshot.orderNumber).toBe(order.number);
+  });
+
+  it('РЕГРЕССИЯ: администратор со сменой и точкой тоже назначает точку заданию', async () => {
+    /*
+     * Тот самый производственный дефект (138612CRM): собирал администратор,
+     * у которого была активная смена с выбранной точкой. `lockOwnShift`
+     * освобождает администратора от требования смены и возвращал `null`,
+     * из-за чего задание получало `printPointId=null` и агент его не видел.
+     */
+    const pointId = await pairedPoint('Стол');
+    const admin = await actorFor(['ADMIN']);
+    await startShift(ctx.db, admin, CONTEXT, { printPointId: pointId });
+    const order = await seedOrder();
+
+    await claimAndAssemble(admin, order.id);
+
+    const job = await jobDelivery(order.id);
+    expect(job.printPointId).toBe(pointId);
+    expect(job.deliveryState).toBe('QUEUED');
+    expect((await claimNextDelivery(ctx.db, pointId))?.orderId).toBe(order.id);
+  });
+
+  it('смена без точки → сборка сохраняется, но агент задание не получает', async () => {
+    const pointId = await pairedPoint('Стол');
+    const florist = await floristOnShift(); // смена без точки
+    const order = await seedOrder();
+
+    // Сборка проходит — печать не блокирует работу.
+    const { printJobId } = await claimAndAssemble(florist, order.id);
+    expect(printJobId).not.toBe('');
+
+    const job = await jobDelivery(order.id);
+    expect(job.state).toBe('PENDING');
+    expect(job.printPointId).toBeNull();
+    expect(job.deliveryState).toBeNull();
+
+    // Агенту любой точки такое задание недоступно.
+    expect(await claimNextDelivery(ctx.db, pointId)).toBeNull();
+  });
+
+  it('задание без точки остаётся недоступным агенту и не подхватывается задним числом', async () => {
+    const pointId = await pairedPoint('Стол');
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+
+    // Точку выбрали ПОСЛЕ сборки: прежнее задание остаётся ручным.
+    await setShiftPrintPoint(ctx.db, florist, pointId, CONTEXT);
+
+    expect((await jobDelivery(order.id)).printPointId).toBeNull();
+    expect(await claimNextDelivery(ctx.db, pointId)).toBeNull();
+  });
+
+  it('retry после выбора точки создаёт назначенную попытку', async () => {
+    const pointId = await pairedPoint('Стол');
+    const florist = await floristOnShift(); // смена без точки
+    const order = await seedOrder();
+    const { printJobId } = await claimAndAssemble(florist, order.id);
+
+    // Первое задание — ручное.
+    expect((await jobDelivery(order.id)).printPointId).toBeNull();
+
+    // Флорист выбрал точку и нажал «Повторить печать».
+    await setShiftPrintPoint(ctx.db, florist, pointId, CONTEXT);
+    const retried = await retryPrint(ctx.db, florist, printJobId, CONTEXT);
+
+    // Новая попытка назначена точке и доступна агенту; исходное задание цело.
+    const newJob = await ctx.db.orderPrintJob.findUniqueOrThrow({
+      where: { id: retried.id },
+      select: { printPointId: true, deliveryState: true, attempt: true },
+    });
+    expect(newJob.printPointId).toBe(pointId);
+    expect(newJob.deliveryState).toBe('QUEUED');
+    expect(newJob.attempt).toBeGreaterThan(1);
+
+    const claimed = await claimNextDelivery(ctx.db, pointId);
+    expect(claimed?.jobId).toBe(retried.id);
+  });
+
+  it('агент другой точки задание не получает', async () => {
+    const mine = await pairedPoint('Мой');
+    const other = await pairedPoint('Чужой');
+    const florist = await actorFor(['FLORIST']);
+    await startShift(ctx.db, florist, CONTEXT, { printPointId: mine });
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+
+    // Чужая точка ничего не забирает, своя — забирает.
+    expect(await claimNextDelivery(ctx.db, other)).toBeNull();
+    expect((await claimNextDelivery(ctx.db, mine))?.orderId).toBe(order.id);
+  });
+
+  it('подтверждение агента переводит ERP из «Ожидает печати» и шлёт realtime', async () => {
+    const pointId = await pairedPoint('Стол');
+    const florist = await actorFor(['FLORIST']);
+    await startShift(ctx.db, florist, CONTEXT, { printPointId: pointId });
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+
+    // До подтверждения задание — в списке «требуют внимания» (ожидает печати).
+    const before = await listPrintJobs(ctx.db, {
+      filter: 'attention',
+      actorUserId: florist.userId,
+    });
+    expect(before.items.some((item) => item.orderNumber === order.number)).toBe(true);
+
+    const claimed = await claimNextDelivery(ctx.db, pointId);
+    const eventsBefore = await ctx.db.realtimeEvent.count({
+      where: { topic: 'print_job.changed' },
+    });
+    const result = await reportDelivery(ctx.db, {
+      pointId,
+      jobId: claimed?.jobId ?? '',
+      outcome: 'sent',
+    });
+    expect(result.deliveryState).toBe('SENT_TO_PRINTER');
+
+    // Переданное принтеру уходит из рабочего списка «ожидает печати».
+    const after = await listPrintJobs(ctx.db, {
+      filter: 'attention',
+      actorUserId: florist.userId,
+    });
+    expect(after.items.some((item) => item.orderNumber === order.number)).toBe(false);
+
+    // И об этом ушло realtime-событие — экран обновится без F5.
+    expect(await ctx.db.realtimeEvent.count({ where: { topic: 'print_job.changed' } })).toBe(
+      eventsBefore + 1,
+    );
+  });
+
+  it('неопределённый исход не печатается повторно автоматически', async () => {
+    const pointId = await pairedPoint('Стол');
+    const florist = await actorFor(['FLORIST']);
+    await startShift(ctx.db, florist, CONTEXT, { printPointId: pointId });
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+
+    const claimed = await claimNextDelivery(ctx.db, pointId);
+    const result = await reportDelivery(ctx.db, {
+      pointId,
+      jobId: claimed?.jobId ?? '',
+      outcome: 'unknown',
+    });
+    expect(result.deliveryState).toBe('NEEDS_REVIEW');
+
+    // Наклейка могла выйти: повторно задание не выдаётся.
+    expect(await claimNextDelivery(ctx.db, pointId, new Date(Date.now() + 10 * 60_000))).toBeNull();
+  });
+});
 
 describe('печатный бланк', () => {
   it('один и тот же снимок даёт побайтово одинаковый файл', async () => {
