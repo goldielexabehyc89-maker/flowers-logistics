@@ -50,7 +50,14 @@ const logisticianActor = (userId: string): Actor => ({ userId, roles: ['LOGISTIC
 const NEW_ROLES: readonly Role[] = ['FLORIST', 'MANAGER'];
 
 /** Все внутренние роли: аккаунт с любой из них логисту недоступен. */
-const INTERNAL_ROLES: readonly Role[] = ['ADMIN', 'LOGISTICIAN', 'WAREHOUSE', 'FLORIST', 'MANAGER'];
+const INTERNAL_ROLES: readonly Role[] = [
+  'ADMIN',
+  'LOGISTICIAN',
+  'WAREHOUSE',
+  'FLORIST',
+  'MANAGER',
+  'SUPERVISOR',
+];
 
 beforeAll(async () => {
   ctx = await createTestContext();
@@ -76,7 +83,7 @@ describe('полное множество ролей', () => {
 
     // 2. Новые значения добавлены именно в КОНЕЦ: порядок существующих не сдвинут.
     expect(inDatabase.slice(0, 4)).toEqual(['ADMIN', 'LOGISTICIAN', 'COURIER', 'WAREHOUSE']);
-    expect(inDatabase.slice(4)).toEqual(['FLORIST', 'MANAGER']);
+    expect(inDatabase.slice(4)).toEqual(['FLORIST', 'MANAGER', 'SUPERVISOR']);
 
     // 3. У каждой роли есть русская подпись: без неё интерфейс покажет пустую строку.
     for (const role of ROLES) {
@@ -94,11 +101,21 @@ describe('полное множество ролей', () => {
       path.join(REPOSITORY_ROOT, 'apps/web/src/screens/users/UserFormModal.tsx'),
       'utf8',
     );
+    const usersScreen = await readFile(
+      path.join(REPOSITORY_ROOT, 'apps/web/src/screens/users/UsersScreen.tsx'),
+      'utf8',
+    );
 
     expect(routes).toContain('z.enum(ROLES)');
     expect(routes).not.toMatch(/z\.enum\(\[\s*'ADMIN'/);
-    expect(form).toContain("assignableRoles(['ADMIN'])");
-    expect(form).not.toMatch(/ASSIGNABLE_BY_ADMIN[^=]*=\s*\[/);
+    // Назначаемые роли выводятся из общей матрицы прав по РОЛЯМ актора, а не
+    // переписываются рядом: список для управляющего обязан отличаться от списка
+    // администратора, а хардкод «роли администратора» этого бы не дал.
+    expect(usersScreen).toContain('assignableRoles(actorRoles)');
+    // Форма перебирает переданный ей перечень, а не собственную копию ролей.
+    expect(form).toContain('assignable.map(');
+    expect(form).not.toMatch(/ASSIGNABLE_BY_ADMIN/);
+    expect(form).not.toMatch(/const\s+\w*ROLES\w*\s*(?::[^=]+)?=\s*\[\s*'ADMIN'/);
   });
 
   it('администратору доступны все роли, логисту — только курьер', () => {

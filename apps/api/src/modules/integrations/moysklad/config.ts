@@ -38,6 +38,25 @@ export const MOYSKLAD_IDS = {
    * не едет по маршруту (`MS-001`, `FUL-005`).
    */
   deliveryMethodPickup: '76f4977e-d33e-11ef-0a80-03b6000e555e',
+  /**
+   * Состояния заказа покупателя. Подтверждены read-only аудитом метаданных
+   * (`/entity/customerorder/metadata`, docs/MOYSKLAD_MAPPING.md). Сопоставление
+   * идёт по UUID, а не по отображаемой строке: название в аккаунте
+   * переименовывают, UUID стабилен.
+   */
+  states: {
+    /**
+     * «Принят, Не оплачен». Заказ импортируется и обновляется, но не готов
+     * к работе: его не показывают ни во флористской очереди, ни в «Сделках».
+     */
+    acceptedUnpaid: '45533945-2ea3-11ed-0a80-09c5000d6022',
+    /** «Доставляется» — исходящий статус активной доставки. */
+    delivering: '45533a02-2ea3-11ed-0a80-09c5000d6024',
+    /** «Завершен» — исходящий статус доставленного заказа. */
+    completed: '4cf29373-38f4-11ed-0a80-0c0500153e5a',
+    /** «Отменен» — исходящий статус отменённого заказа. */
+    cancelled: '45533b00-2ea3-11ed-0a80-09c5000d6027',
+  },
   /** Атрибут «Время доставки». */
   intervalAttribute: 'a9121214-23ce-11ee-0a80-08cc002243ce',
   /** Атрибут «Получатель». */
@@ -83,6 +102,14 @@ export interface MoyskladConfig {
   /** `null`, если токен не задан: интеграция остаётся не настроенной. */
   token: string | null;
   ids: typeof MOYSKLAD_IDS;
+  /**
+   * Разрешена ли узкая запись состояния заказа.
+   *
+   * Клиент выполняет `putCustomerOrderState` только при `true`. Значение
+   * НЕ ослабляет запрет на прочие методы: всё, кроме GET/HEAD и этой одной
+   * именованной операции, по-прежнему отвергается безусловно.
+   */
+  orderStateSyncEnabled: boolean;
 }
 
 /**
@@ -95,10 +122,11 @@ export function loadMoyskladConfig(env: NodeJS.ProcessEnv = process.env): Moyskl
   const raw = env['MOYSKLAD_TOKEN'];
   const token = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
 
-  // Режима записи у клиента нет вовсе: политика `GET`/`HEAD` безусловна
-  // и в конфигурацию не выносится. `MOYSKLAD_READ_ONLY` остаётся условием
-  // ДОПУСКА окружения и проверяется в `platform/config.ts`.
-  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS };
+  // Общий запрет записи (`MOYSKLAD_READ_ONLY`) остаётся условием ДОПУСКА
+  // окружения и проверяется в `platform/config.ts`. Здесь читается лишь узкое
+  // разрешение на смену состояния заказа; по умолчанию оно выключено.
+  const orderStateSyncEnabled = env['MOYSKLAD_ORDER_STATE_SYNC_ENABLED'] === 'true';
+  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS, orderStateSyncEnabled };
 }
 
 /** Интеграция считается настроенной только при наличии токена. */

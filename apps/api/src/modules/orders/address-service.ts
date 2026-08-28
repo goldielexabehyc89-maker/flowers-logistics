@@ -32,7 +32,7 @@ import {
 } from './address.js';
 
 /** Адрес правят только логист и администратор. Проверяет сервер, а не экран. */
-export const ADDRESS_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+export const ADDRESS_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 
 /**
  * События заказов видят те же роли.

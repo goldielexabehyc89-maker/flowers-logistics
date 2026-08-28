@@ -190,6 +190,9 @@ export function isReadOnlyMethod(method: string): boolean {
   return method === 'GET' || method === 'HEAD';
 }
 
+/** UUID заказа и состояния: узкая запись принимает только их. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const DEFAULT_MIN_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
@@ -615,6 +618,52 @@ export class MoyskladClient {
   }
 
   /**
+   * ЕДИНСТВЕННАЯ операция записи: смена поля `state` заказа покупателя.
+   *
+   * Это НЕ ослабление правила `GET`/`HEAD`: `send` и `request` по-прежнему
+   * отвергают любой не-read метод. Здесь — отдельная именованная операция,
+   * разрешённая только при `orderStateSyncEnabled` и только для одного пути
+   * `/entity/customerorder/{id}` с телом, где нет ничего, кроме ссылки на
+   * состояние. Ни адрес, ни позиции, ни сумма этим методом не меняются.
+   *
+   * Обращение проходит через ту же очередь и тот же лимитер, что и чтения:
+   * `429` и временные `5xx` обрабатываются существующей политикой 2/1/30.
+   */
+  async putCustomerOrderState(orderExternalId: string, stateId: string): Promise<void> {
+    if (!this.config.orderStateSyncEnabled) {
+      // Флаг выключен — записи нет вовсе, как и при обычном read-only контуре.
+      throw new MoyskladError('METHOD_NOT_ALLOWED');
+    }
+    if (!UUID_PATTERN.test(orderExternalId) || !UUID_PATTERN.test(stateId)) {
+      throw new MoyskladError('INVALID_QUERY');
+    }
+
+    const path = `/entity/customerorder/${orderExternalId}`;
+    const body = JSON.stringify({
+      state: {
+        meta: {
+          href: `${this.config.baseUrl}/entity/customerorder/metadata/states/${stateId}`,
+          type: 'state',
+          mediaType: 'application/json',
+        },
+      },
+    });
+
+    // Отдельная постановка в очередь, минуя проверку read-only метода: она
+    // относится к продуктовым обращениям `send`/`request`, а это — узкая
+    // именованная запись, уже проверенная флагом и формой пути выше.
+    const run = this.queue.then(
+      () => this.attempt('PUT', path, readJson, { body }),
+      () => this.attempt('PUT', path, readJson, { body }),
+    );
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
+  }
+
+  /**
    * Ставит обращение в общую очередь и выдерживает минимальный интервал.
    * Параллельных обращений не бывает: следующий ждёт завершения предыдущего.
    */
@@ -761,11 +810,14 @@ export class MoyskladClient {
           Authorization: `Bearer ${token}`,
           Accept: 'application/json;charset=utf-8',
           'Accept-Encoding': 'gzip',
+          // Content-Type появляется только у единственной записи с телом.
+          ...(extra.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         signal: AbortSignal.timeout(this.timeoutMs),
         // Политика переадресации задаётся вызывающей стороной: для JSON она
         // не важна, а для файла означает разницу между «наш адрес» и «любой».
         ...(extra.redirect === undefined ? {} : { redirect: extra.redirect }),
+        ...(extra.body === undefined ? {} : { body: extra.body }),
       });
     } catch {
       // Текст сетевой ошибки может содержать адрес запроса с фильтрами.
@@ -817,6 +869,11 @@ type ResponseReader<T> = (response: Response) => Promise<T>;
 /** Транспортные особенности одного обращения. Метод сюда не входит намеренно. */
 interface TransportOptions {
   redirect?: 'manual' | 'error' | 'follow';
+  /**
+   * Тело запроса для единственной разрешённой записи — смены состояния заказа.
+   * У чтений его нет: `GET`/`HEAD` идут без тела.
+   */
+  body?: string;
 }
 
 /**

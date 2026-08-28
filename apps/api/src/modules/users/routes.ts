@@ -29,7 +29,7 @@ const MAX_PAGE_SIZE = 100;
 const MAX_HISTORY_SIZE = 200;
 
 /** Разделы управления доступны только этим ролям. */
-const MANAGEMENT_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+const MANAGEMENT_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 
 const phoneSchema = z
   .string()

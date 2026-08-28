@@ -25,11 +25,11 @@ import {
 } from './service.js';
 
 /** Решения принимают логист и администратор. */
-const RESOLUTION_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+const RESOLUTION_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 /** Возврат принимает склад. */
-const WAREHOUSE_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
+const WAREHOUSE_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] as const;
 /** О выезде на склад сообщает курьер. */
-const COURIER_ROLES = ['ADMIN', 'COURIER'] as const;
+const COURIER_ROLES = ['ADMIN', 'COURIER', 'SUPERVISOR'] as const;
 
 const idParamSchema = z.object({ id: z.string().uuid() });
 const orderParamSchema = z.object({ orderId: z.string().uuid() });

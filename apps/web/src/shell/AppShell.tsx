@@ -105,7 +105,8 @@ export function AppShell(): React.JSX.Element {
    * когда логист работает в «Сделках». Ключ общий со списком, поэтому событие
    * `order.resolution_changed` обновляет и то и другое одним касанием.
    */
-  const logisticsVisible = roles.includes('ADMIN') || roles.includes('LOGISTICIAN');
+  const logisticsVisible =
+    roles.includes('ADMIN') || roles.includes('LOGISTICIAN') || roles.includes('SUPERVISOR');
   const unresolved = useQuery({
     queryKey: ['logistics-resolutions', 'count'],
     queryFn: () => client.get<{ unresolved: number }>('/api/logistics/resolutions/count'),

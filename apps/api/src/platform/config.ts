@@ -107,6 +107,23 @@ const configSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+  /**
+   * Узкая синхронизация СОСТОЯНИЯ заказа в МойСклад.
+   *
+   * Разрешает единственную операцию записи — смену поля `state` заказа
+   * покупателя — и ничего больше. Глобальный запрет записи (`MOYSKLAD_READ_ONLY`)
+   * этим флагом НЕ ослабляется: любой другой метод, кроме GET/HEAD и этой
+   * именованной операции, клиент по-прежнему отвергает.
+   *
+   * По умолчанию выключен во всех окружениях. Включать разрешено только в
+   * production (см. `assertMoyskladEnvironment`): на local и staging реальные
+   * записи в живой аккаунт не выполняются, а контракт проверяется подменным
+   * сервером в тестах.
+   */
+  MOYSKLAD_ORDER_STATE_SYNC_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   MOYSKLAD_SYNC_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).default(30),
   /** Перекрытие окна delta-синхронизации. Стартовое значение — пять минут. */
   MOYSKLAD_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
@@ -615,6 +632,22 @@ function assertMoyskladEnvironment(data: z.infer<typeof configSchema>): void {
 
   if (data.MOYSKLAD_SYNC_ENABLED && data.MOYSKLAD_TOKEN === undefined) {
     throw new Error('MOYSKLAD_SYNC_ENABLED=true требует MOYSKLAD_TOKEN');
+  }
+
+  // Узкая запись состояния допускается ТОЛЬКО в production. На local и staging
+  // реальные записи в живой аккаунт запрещены: контракт проверяется подменным
+  // сервером в тестах, а не живым МоимСкладом. Так исключается случайная запись
+  // в чужие данные при настройке контура.
+  if (data.MOYSKLAD_ORDER_STATE_SYNC_ENABLED && access !== 'production') {
+    throw new Error(
+      'MOYSKLAD_ORDER_STATE_SYNC_ENABLED=true допустим только в production ' +
+        '(APP_ENV=production и APP_ENVIRONMENT_MARKER=production): на local и staging ' +
+        'реальные записи в МойСклад не выполняются',
+    );
+  }
+
+  if (data.MOYSKLAD_ORDER_STATE_SYNC_ENABLED && data.MOYSKLAD_TOKEN === undefined) {
+    throw new Error('MOYSKLAD_ORDER_STATE_SYNC_ENABLED=true требует MOYSKLAD_TOKEN');
   }
 }
 

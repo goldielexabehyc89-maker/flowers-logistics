@@ -263,8 +263,25 @@ export async function listPickupQueue(
     WHERE o."deliveryMethodId" = ${PICKUP_METHOD_ID}
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
-      AND EXISTS (SELECT 1 FROM "OrderPlacement" p WHERE p."orderId" = o."id")
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
+      -- Наличие ячейки больше НЕ условие показа: самовывоз виден сразу после
+      -- импорта. До приёмки складом у него не будет активного размещения —
+      -- карточка назовёт это причиной «нет ячейки», но заказ не спрячется.
+      --
+      -- Списанные из очереди убираются: у заказа есть изъятие «в списание»
+      -- и нет действующего размещения — отдавать нечего. Если его после
+      -- списания снова приняли на полку (появилось активное размещение),
+      -- он возвращается в очередь.
+      AND NOT (
+        NOT EXISTS (
+          SELECT 1 FROM "OrderPlacement" p
+          WHERE p."orderId" = o."id" AND p."releasedAt" IS NULL
+        )
+        AND EXISTS (
+          SELECT 1 FROM "OrderPlacement" p
+          WHERE p."orderId" = o."id" AND p."withdrawReason" = 'WRITE_OFF'
+        )
+      )
   `;
 
   const keyset =

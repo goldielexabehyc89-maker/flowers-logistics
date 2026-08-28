@@ -151,7 +151,13 @@ function resolveClient(deps: FloristRouteDeps): MoyskladClient | null {
     return null;
   }
   return new MoyskladClient({
-    config: { baseUrl: MOYSKLAD_BASE_URL, token: deps.config.MOYSKLAD_TOKEN, ids: MOYSKLAD_IDS },
+    config: {
+      baseUrl: MOYSKLAD_BASE_URL,
+      token: deps.config.MOYSKLAD_TOKEN,
+      ids: MOYSKLAD_IDS,
+      // Флорист читает состав из МоегоСклада — записи состояния здесь нет.
+      orderStateSyncEnabled: false,
+    },
   });
 }
 

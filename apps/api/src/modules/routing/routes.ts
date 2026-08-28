@@ -47,7 +47,7 @@ import {
 } from './lease.js';
 import { cancelRoute, confirmBlockers, confirmRoute, returnToDraft } from './lifecycle.js';
 
-const ROUTE_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+const ROUTE_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 const MAX_LIMIT = 100;
 /** Разумный потолок массовой операции: он же защищает от случайной отправки всего дня. */
 const MAX_ORDERS_PER_OPERATION = 200;

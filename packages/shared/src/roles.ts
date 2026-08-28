@@ -23,6 +23,7 @@ export const ROLES = [
   'WAREHOUSE',
   'FLORIST',
   'MANAGER',
+  'SUPERVISOR',
 ] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -33,6 +34,7 @@ export const ROLE_LABELS: Record<Role, string> = {
   WAREHOUSE: 'Кладовщик',
   FLORIST: 'Флорист',
   MANAGER: 'Менеджер выдачи',
+  SUPERVISOR: 'Управляющий',
 };
 
 /**
@@ -66,4 +68,4 @@ export function hasAnyRole(roles: readonly Role[], allowed: readonly Role[]): bo
 }
 
 /** Роли, которым доступны операционные разделы логистики. */
-export const OPERATIONS_ROLES: readonly Role[] = ['ADMIN', 'LOGISTICIAN'];
+export const OPERATIONS_ROLES: readonly Role[] = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'];

@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assignableRoles,
+  canAccessGeneralSettings,
   canAccessUserManagement,
   canAssignRoles,
   canManageUserWithRoles,
@@ -16,11 +17,13 @@ import {
   isPlainCourier,
   isPrivileged,
 } from './permissions.js';
+import { ROLES, type Role } from './roles.js';
 
 const ADMIN = ['ADMIN'] as const;
 const LOGISTICIAN = ['LOGISTICIAN'] as const;
 const COURIER = ['COURIER'] as const;
 const WAREHOUSE = ['WAREHOUSE'] as const;
+const SUPERVISOR = ['SUPERVISOR'] as const;
 
 describe('права на управление пользователями', () => {
   it('администратор управляет всеми', () => {
@@ -68,6 +71,52 @@ describe('права на управление пользователями', ()
     expect(isPrivileged(ADMIN)).toBe(true);
     expect(isPrivileged(LOGISTICIAN)).toBe(true);
     expect(isPrivileged(WAREHOUSE)).toBe(true);
+    expect(isPrivileged(SUPERVISOR)).toBe(true);
     expect(isPrivileged(COURIER)).toBe(false);
+  });
+});
+
+describe('права управляющего', () => {
+  it('администрирует сотрудников всех ролей, кроме администраторов', () => {
+    const targets: readonly Role[][] = [
+      [...LOGISTICIAN],
+      [...COURIER],
+      [...WAREHOUSE],
+      ['FLORIST'],
+      ['MANAGER'],
+      [...SUPERVISOR],
+    ];
+    for (const target of targets) {
+      expect(canManageUserWithRoles(SUPERVISOR, target)).toBe(true);
+    }
+    // Учётка администратора управляющему недоступна целиком — ни сама роль,
+    // ни курьер, которому вдобавок выдали ADMIN.
+    expect(canManageUserWithRoles(SUPERVISOR, ADMIN)).toBe(false);
+    expect(canManageUserWithRoles(SUPERVISOR, ['COURIER', 'ADMIN'])).toBe(false);
+  });
+
+  it('роль неизвестной версии закрывает управление — fail closed', () => {
+    expect(canManageUserWithRoles(SUPERVISOR, COURIER, true)).toBe(false);
+  });
+
+  it('назначает любые роли, кроме ADMIN', () => {
+    expect(canAssignRoles(SUPERVISOR)).toBe(true);
+    const assignable = assignableRoles(SUPERVISOR);
+    expect(assignable).toEqual(ROLES.filter((role) => role !== 'ADMIN'));
+    expect(assignable).not.toContain('ADMIN');
+    // Новая роль SUPERVISOR среди назначаемых есть: управляющий заводит других управляющих.
+    expect(assignable).toContain('SUPERVISOR');
+  });
+
+  it('имеет доступ к управлению сотрудниками и видит всех, кроме админов', () => {
+    expect(canAccessUserManagement(SUPERVISOR)).toBe(true);
+    // Единственной ролью выборку не ограничиваем — админов отсекает серверный scope.
+    expect(forcedRoleFilter(SUPERVISOR)).toBeNull();
+  });
+
+  it('к общим настройкам доступа не имеет — только администратор', () => {
+    expect(canAccessGeneralSettings(ADMIN)).toBe(true);
+    expect(canAccessGeneralSettings(SUPERVISOR)).toBe(false);
+    expect(canAccessGeneralSettings(LOGISTICIAN)).toBe(false);
   });
 });

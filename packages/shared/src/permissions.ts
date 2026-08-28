@@ -24,6 +24,7 @@ export const PRIVILEGED_ROLES: readonly Role[] = [
   'WAREHOUSE',
   'FLORIST',
   'MANAGER',
+  'SUPERVISOR',
 ];
 
 export function isPrivileged(roles: readonly Role[]): boolean {
@@ -56,15 +57,23 @@ export function canManageUserWithRoles(
   if (actorRoles.includes('ADMIN')) {
     return true;
   }
+  // «Управляющий» администрирует сотрудников ВСЕХ прочих ролей, включая других
+  // управляющих, но не трогает администраторов. Учётка с ролью ADMIN ему
+  // недоступна целиком: ни изменить, ни заморозить, ни сбросить PIN или код.
+  // Роль более новой версии — fail closed: раз версия её не понимает, она не
+  // вправе объявить учётку безопасной для управляющего.
+  if (actorRoles.includes('SUPERVISOR')) {
+    return !targetHasUnsupportedRoles && !targetRoles.includes('ADMIN');
+  }
   if (actorRoles.includes('LOGISTICIAN')) {
     return !targetHasUnsupportedRoles && isPlainCourier(targetRoles);
   }
   return false;
 }
 
-/** Может ли актор назначать роли. Только администратор. */
+/** Может ли актор назначать роли. Администратор и управляющий (последний — кроме ADMIN). */
 export function canAssignRoles(actorRoles: readonly Role[]): boolean {
-  return actorRoles.includes('ADMIN');
+  return actorRoles.includes('ADMIN') || actorRoles.includes('SUPERVISOR');
 }
 
 /**
@@ -77,6 +86,13 @@ export function canAssignRoles(actorRoles: readonly Role[]): boolean {
 export function assignableRoles(actorRoles: readonly Role[]): readonly Role[] {
   if (actorRoles.includes('ADMIN')) {
     return ROLES;
+  }
+  // Управляющий назначает любые роли, КРОМЕ ADMIN: он не вправе ни создать
+  // администратора, ни повысить кого-либо (в том числе себя) до администратора.
+  // Список выводится из `ROLES` вычитанием, а не переписывается: новая роль,
+  // добавленная в конец, станет назначаемой управляющему автоматически.
+  if (actorRoles.includes('SUPERVISOR')) {
+    return ROLES.filter((role) => role !== 'ADMIN');
   }
   if (actorRoles.includes('LOGISTICIAN')) {
     return ['COURIER'];
@@ -91,7 +107,24 @@ export function assignableRoles(actorRoles: readonly Role[]): readonly Role[] {
  * управления пользователями не получают.
  */
 export function canAccessUserManagement(actorRoles: readonly Role[]): boolean {
-  return actorRoles.includes('ADMIN') || actorRoles.includes('LOGISTICIAN');
+  return (
+    actorRoles.includes('ADMIN') ||
+    actorRoles.includes('LOGISTICIAN') ||
+    actorRoles.includes('SUPERVISOR')
+  );
+}
+
+/**
+ * Имеет ли актор доступ к общему разделу «Настройки» и к записи настроек.
+ *
+ * Только администратор. Управляющий — операционный администратор: рабочие
+ * разделы и история ему доступны, но общие настройки, интеграции и секреты —
+ * нет. Отдельные операционные READ-эндпоинты (точки отгрузки, флаг ручной
+ * отгрузки) выдаются управляющему точечно на уровне маршрутов, а не через этот
+ * общий доступ.
+ */
+export function canAccessGeneralSettings(actorRoles: readonly Role[]): boolean {
+  return actorRoles.includes('ADMIN');
 }
 
 /**
@@ -100,6 +133,12 @@ export function canAccessUserManagement(actorRoles: readonly Role[]): boolean {
  */
 export function forcedRoleFilter(actorRoles: readonly Role[]): Role | null {
   if (actorRoles.includes('ADMIN')) {
+    return null;
+  }
+  // Управляющий видит сотрудников всех ролей (кроме администраторов —
+  // они отфильтровываются отдельно, см. `visibilityScope` на сервере),
+  // поэтому единственной ролью выборку не ограничиваем.
+  if (actorRoles.includes('SUPERVISOR')) {
     return null;
   }
   if (actorRoles.includes('LOGISTICIAN')) {

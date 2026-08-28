@@ -17,6 +17,7 @@ import { createNotifier } from './modules/realtime/notifier.js';
 import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
 import { MoyskladClient } from './modules/integrations/moysklad/client.js';
+import { createMoyskladOrderStateHandler } from './modules/integrations/moysklad/state-sync.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
 import {
   createSyncWorker,
@@ -58,10 +59,43 @@ async function main(): Promise<void> {
   await maintenance.runOnce();
   maintenance.start();
 
+  /*
+   * Клиент МоегоСклада создаётся ДО очереди: его же обработчик передаёт наружу
+   * состояние заказа. Один клиент — один общий лимитер на чтения и на узкую
+   * запись состояния.
+   */
+  const moyskladClient = new MoyskladClient({
+    config: {
+      baseUrl: MOYSKLAD_BASE_URL,
+      token: config.MOYSKLAD_TOKEN ?? null,
+      ids: MOYSKLAD_IDS,
+      // Узкая запись состояния: включается только в production явным флагом.
+      orderStateSyncEnabled: config.MOYSKLAD_ORDER_STATE_SYNC_ENABLED,
+    },
+    // Один ограничитель на все обращения приложения: импорт, delta,
+    // ручной проход, дочитывание состава и передача состояния делят одну
+    // очередь и один темп.
+    rateLimit: {
+      maxRequestsPerSecond: config.MOYSKLAD_API_MAX_REQUESTS_PER_SECOND,
+      maxConcurrency: config.MOYSKLAD_API_MAX_CONCURRENCY,
+      reserveRequests: config.MOYSKLAD_API_RESERVE_REQUESTS,
+    },
+  });
+
   const outbox = createOutboxWorker({
     db,
     logger,
-    handlers: { 'test.ping': createTestPingHandler(logger) },
+    handlers: {
+      'test.ping': createTestPingHandler(logger),
+      // Передача состояния заказа наружу. На local и staging `enabled=false`:
+      // реальных записей нет, сообщения сливаются без обращения к живому аккаунту.
+      'moysklad.order_state': createMoyskladOrderStateHandler({
+        db,
+        client: moyskladClient,
+        logger,
+        enabled: config.MOYSKLAD_ORDER_STATE_SYNC_ENABLED,
+      }),
+    },
   });
   outbox.start();
 
@@ -81,20 +115,7 @@ async function main(): Promise<void> {
   // ненастроенной.
   const moysklad = {
     db,
-    client: new MoyskladClient({
-      config: {
-        baseUrl: MOYSKLAD_BASE_URL,
-        token: config.MOYSKLAD_TOKEN ?? null,
-        ids: MOYSKLAD_IDS,
-      },
-      // Один ограничитель на все обращения приложения: импорт, delta,
-      // ручной проход и дочитывание состава делят одну очередь и один темп.
-      rateLimit: {
-        maxRequestsPerSecond: config.MOYSKLAD_API_MAX_REQUESTS_PER_SECOND,
-        maxConcurrency: config.MOYSKLAD_API_MAX_CONCURRENCY,
-        reserveRequests: config.MOYSKLAD_API_RESERVE_REQUESTS,
-      },
-    }),
+    client: moyskladClient,
     logger,
     ids: MOYSKLAD_IDS,
     overlapSeconds: config.MOYSKLAD_SYNC_OVERLAP_SECONDS,

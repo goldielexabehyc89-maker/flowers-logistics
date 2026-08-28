@@ -32,6 +32,7 @@ const META = { ip: '10.8.0.1', userAgent: 'vitest' };
 
 const adminActor = (userId: string): Actor => ({ userId, roles: ['ADMIN'] });
 const logisticianActor = (userId: string): Actor => ({ userId, roles: ['LOGISTICIAN'] });
+const supervisorActor = (userId: string): Actor => ({ userId, roles: ['SUPERVISOR'] });
 
 beforeAll(async () => {
   ctx = await createTestContext();
@@ -179,6 +180,148 @@ describe('права логиста', () => {
     await expect(
       listUsers(ctx, { userId: warehouse.id, roles: ['WAREHOUSE'] }, { limit: 10, offset: 0 }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+});
+
+describe('права управляющего', () => {
+  async function versionOf(userId: string): Promise<number> {
+    const row = await ctx.db.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { version: true },
+    });
+    return row.version;
+  }
+
+  it('заводит сотрудников всех ролей, включая другого управляющего, но не администратора', async () => {
+    const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'] });
+    const actor = supervisorActor(supervisor.id);
+
+    for (const role of [
+      'COURIER',
+      'FLORIST',
+      'WAREHOUSE',
+      'MANAGER',
+      'LOGISTICIAN',
+      'SUPERVISOR',
+    ] as const) {
+      const created = await createUser(
+        ctx,
+        actor,
+        { phone: uniquePhone(), fullName: `Сотрудник ${role}`, roles: [role] },
+        META,
+      );
+      expect(created.user.roles).toEqual([role]);
+    }
+
+    // Администратора управляющий не создаёт — ни отдельной ролью, ни в наборе.
+    for (const roles of [['ADMIN'], ['COURIER', 'ADMIN'], ['SUPERVISOR', 'ADMIN']] as const) {
+      await expect(
+        createUser(
+          ctx,
+          actor,
+          { phone: uniquePhone(), fullName: 'Нельзя', roles: [...roles] },
+          META,
+        ),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    }
+  });
+
+  it('администрирует не-администраторов: меняет роли, замораживает, сбрасывает PIN', async () => {
+    const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'] });
+    const actor = supervisorActor(supervisor.id);
+
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
+    // Смена ролей не-администратора на другой не-администраторский набор — можно.
+    const updated = await updateUser(
+      ctx,
+      actor,
+      courier.id,
+      { version: await versionOf(courier.id), roles: ['FLORIST'] },
+      META,
+    );
+    expect(updated.roles).toEqual(['FLORIST']);
+
+    const frozen = await freezeUser(ctx, actor, courier.id, META);
+    expect(frozen.status).toBe('FROZEN');
+    await unfreezeUser(ctx, actor, courier.id, META);
+    const reset = await resetPin(ctx, actor, courier.id, META);
+    expect(reset.activationCode).toMatch(/^\d{4}$/);
+
+    // Управляющий администрирует и другого управляющего.
+    const otherSupervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'], status: 'ACTIVE' });
+    expect((await freezeUser(ctx, actor, otherSupervisor.id, META)).status).toBe('FROZEN');
+  });
+
+  it('не назначает роль ADMIN существующему и не повышает себя', async () => {
+    const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'], status: 'ACTIVE' });
+    const actor = supervisorActor(supervisor.id);
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
+
+    await expect(
+      updateUser(
+        ctx,
+        actor,
+        courier.id,
+        { version: await versionOf(courier.id), roles: ['COURIER', 'ADMIN'] },
+        META,
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    // Повысить самого себя до администратора управляющий тоже не может.
+    await expect(
+      updateUser(
+        ctx,
+        actor,
+        supervisor.id,
+        { version: await versionOf(supervisor.id), roles: ['SUPERVISOR', 'ADMIN'] },
+        META,
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('не трогает учётку администратора: ни открыть, ни заморозить, ни сбросить PIN, ни сменить роли', async () => {
+    const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'] });
+    const actor = supervisorActor(supervisor.id);
+    const admin = await seedUser(ctx.db, { roles: ['ADMIN'], status: 'ACTIVE' });
+
+    await expect(getUser(ctx, actor, admin.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(freezeUser(ctx, actor, admin.id, META)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+    await expect(resetPin(ctx, actor, admin.id, META)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      updateUser(
+        ctx,
+        actor,
+        admin.id,
+        { version: await versionOf(admin.id), roles: ['LOGISTICIAN'] },
+        META,
+      ),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('видит и открывает сотрудников всех ролей, но не администраторов', async () => {
+    const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'] });
+    const actor = supervisorActor(supervisor.id);
+
+    const florist = await seedUser(ctx.db, { roles: ['FLORIST'], status: 'ACTIVE' });
+    const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
+    const admin = await seedUser(ctx.db, { roles: ['ADMIN'], status: 'ACTIVE' });
+
+    // Не-администраторов управляющий открывает поимённо (устойчиво к тому,
+    // сколько ещё пользователей завели другие файлы в общей базе).
+    expect((await getUser(ctx, actor, florist.id)).roles).toEqual(['FLORIST']);
+    expect((await getUser(ctx, actor, courier.id)).roles).toEqual(['COURIER']);
+    // Администратора — не открывает.
+    await expect(getUser(ctx, actor, admin.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    // В общей выборке администраторов нет вовсе — при любом числе страниц.
+    const general = await listUsers(ctx, actor, { limit: 200, offset: 0, status: 'ACTIVE' });
+    expect(general.items.some((item) => item.roles.includes('ADMIN'))).toBe(false);
+
+    // Даже явным фильтром по роли ADMIN администраторы не раскрываются.
+    const filtered = await listUsers(ctx, actor, { role: 'ADMIN', limit: 50, offset: 0 });
+    expect(filtered.items).toHaveLength(0);
   });
 });
 

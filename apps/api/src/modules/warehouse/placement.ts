@@ -33,9 +33,9 @@ import { blockingFlags, resolveOrderByNumber, type ResolvedOrder } from './order
 import { releaseEmptyRouteBinding } from './route-cells.js';
 
 /** Складские операции доступны кладовщику и администратору. */
-export const FLOW_ROLES = ['ADMIN', 'WAREHOUSE'] as const;
+export const FLOW_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] as const;
 /** Отмена сессии выдачи — только администратор. */
-export const FLOW_ADMIN_ROLES = ['ADMIN'] as const;
+export const FLOW_ADMIN_ROLES = ['ADMIN', 'SUPERVISOR'] as const;
 
 /** Складские события. Логист видит их в маршрутных листах и «Сделках». */
 export const FLOW_AUDIENCE = ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN'] as const;

@@ -133,6 +133,25 @@ describe('видимость разделов', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  it('управляющий видит все рабочие разделы, но не «Настройки»', () => {
+    const keys = keysFor(['SUPERVISOR']);
+    for (const key of [
+      'logistics',
+      'active',
+      'couriers',
+      'florist',
+      'warehouse',
+      'pickup',
+      'order-history',
+    ]) {
+      expect(keys, key).toContain(key);
+    }
+    // Общие настройки управляющему не показываются: раздел только у администратора.
+    expect(keys).not.toContain('settings');
+    // Домашний экран — логистика, как у администратора и логиста.
+    expect(firstAvailablePath(['SUPERVISOR'])).toBe('/logistics');
+  });
+
   it('первый доступный раздел зависит от ролей', () => {
     // Домашние пути существующих ролей не сдвинулись от появления новых разделов.
     expect(firstAvailablePath(['ADMIN'])).toBe('/logistics');

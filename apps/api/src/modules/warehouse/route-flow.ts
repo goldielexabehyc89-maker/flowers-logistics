@@ -15,6 +15,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
+import { enqueueRouteActivatedStateSync } from '../integrations/moysklad/state-sync.js';
 import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import {
@@ -796,6 +797,16 @@ export async function activateRouteWithinTransaction(
     payload: { routeId: route.id, state: 'ACTIVE' },
     audienceRoles: [...ROUTE_AUDIENCE, 'COURIER'],
   });
+
+  /*
+   * Единая точка передачи «Доставляется» наружу.
+   *
+   * Оба пути активации доходят до этого перехода, поэтому статус ставится
+   * ЗДЕСЬ, в той же транзакции, а не в двух местах вызова. Реальная отправка
+   * — потом, надёжной очередью: активация листа от доступности МоегоСклада
+   * не зависит.
+   */
+  await enqueueRouteActivatedStateSync(tx, route.id);
 }
 
 /**

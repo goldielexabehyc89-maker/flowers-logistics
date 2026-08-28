@@ -43,7 +43,7 @@ import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf } from './export-pdf.js';
 import { buildCashPdf, buildCashWorkbook } from './export-cash.js';
 
-const FINANCE_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+const FINANCE_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 const ADMIN_ONLY = ['ADMIN'] as const;
 
 const dateSchema = z

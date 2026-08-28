@@ -30,7 +30,17 @@ import {
   shiftSchema,
 } from './service.js';
 
-export const SETTINGS_READ_ROLES = ['ADMIN', 'LOGISTICIAN'] as const;
+/**
+ * Чтение настроек планирования.
+ *
+ * Здесь только один GET — `/api/settings/planning`, и им пользуются РАБОЧИЕ
+ * экраны (маршрутные листы читают флаг ручной отгрузки). Поэтому доступ шире
+ * записи. «Управляющий» получает именно это чтение и ничего больше из общих
+ * настроек: экран «Настройки» и любые изменения ему закрыты. В ответе нет ни
+ * секретов, ни интеграционных реквизитов — только операционные значения.
+ */
+export const SETTINGS_READ_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
+/** Изменение любых настроек — только администратор. Управляющего здесь нет намеренно. */
 export const SETTINGS_WRITE_ROLES = ['ADMIN'] as const;
 
 const shiftBodySchema = z.object({

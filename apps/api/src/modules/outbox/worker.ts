@@ -41,7 +41,41 @@ export interface OutboxMessageView {
   maxAttempts: number;
 }
 
-export type OutboxHandler = (message: OutboxMessageView) => Promise<void>;
+/**
+ * Обработчик темы.
+ *
+ * Второй аргумент — транзакция, в которой воркер уже держит сообщение: обработчик
+ * с внешней записью (например, синхронизация состояния в МойСклад) выполняет своё
+ * изменение в ней же, а не открывает вложенную. Обработчики без базы аргумент
+ * игнорируют. Сетевой вызов внутри этой транзакции допускается, поэтому её предел
+ * времени намеренно больше обычного (`DEFAULT_HANDLER_TIMEOUT_MS`).
+ */
+export type OutboxHandler = (message: OutboxMessageView, tx?: TransactionClient) => Promise<void>;
+
+/**
+ * Предел времени транзакции обработки одного сообщения.
+ *
+ * Обработчик может обращаться к внешней системе прямо в этой транзакции, а
+ * лимитер МоегоСклада способен выдержать паузу на `429`. Пять секунд Prisma
+ * по умолчанию для этого малы, поэтому предел поднят.
+ */
+export const DEFAULT_HANDLER_TIMEOUT_MS = 30_000;
+
+/**
+ * Ошибка, повторять которую бессмысленно: причина не исчезнет со временем.
+ *
+ * Обработчик бросает её там, где внешняя система ответила окончательным
+ * отказом — например, отклонила авторизацию (401) или доступ (403). Такой
+ * ответ не «позже станет лучше»: повтор с заведомо негодным ключом только
+ * молотил бы по общему лимиту. Сообщение сразу уходит в DEAD, а не изнашивает
+ * попытки часами.
+ */
+export class PermanentOutboxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermanentOutboxError';
+  }
+}
 
 /**
  * Реестр обработчиков. Тема, которой нет в реестре, не выполняется:
@@ -69,6 +103,8 @@ export interface WorkerDeps {
   /** Срок аренды и период её продления. Переопределяются только в тестах. */
   leaseTimeoutMs?: number;
   leaseRenewIntervalMs?: number;
+  /** Предел времени транзакции обработчика: у обработчиков с сетью он больше. */
+  handlerTimeoutMs?: number;
 }
 
 export interface ProcessResult {
@@ -202,43 +238,49 @@ export async function processOutboxOnce(deps: WorkerDeps, limit = 20): Promise<P
 
         // Идемпотентность: повторная доставка того же сообщения не выполняет
         // обработчик второй раз. Отметка ставится в одной транзакции с успехом.
-        const owned = await deps.db.$transaction(async (tx) => {
-          const already = await tx.outboxProcessedMessage.findUnique({
-            where: {
-              handlerName_idempotencyKey: {
-                handlerName: message.topic,
-                idempotencyKey: message.idempotencyKey,
+        const owned = await deps.db.$transaction(
+          async (tx) => {
+            const already = await tx.outboxProcessedMessage.findUnique({
+              where: {
+                handlerName_idempotencyKey: {
+                  handlerName: message.topic,
+                  idempotencyKey: message.idempotencyKey,
+                },
               },
-            },
-            select: { id: true },
-          });
-
-          if (already === null) {
-            await handler({
-              id: message.id,
-              topic: message.topic,
-              idempotencyKey: message.idempotencyKey,
-              payload: message.payload,
-              attempts: message.attempts,
-              maxAttempts: message.maxAttempts,
+              select: { id: true },
             });
 
-            // Отметка остаётся, даже если аренда потеряна: она и есть защита
-            // от повторного выполнения обработчика новым владельцем.
-            await tx.outboxProcessedMessage.create({
-              data: { handlerName: message.topic, idempotencyKey: message.idempotencyKey },
-            });
-          }
+            if (already === null) {
+              await handler(
+                {
+                  id: message.id,
+                  topic: message.topic,
+                  idempotencyKey: message.idempotencyKey,
+                  payload: message.payload,
+                  attempts: message.attempts,
+                  maxAttempts: message.maxAttempts,
+                },
+                tx,
+              );
 
-          return finalizeMessage(tx, deps, message.id, {
-            status: 'DONE',
-            processedAt: now,
-            attempts: message.attempts + 1,
-            lockedAt: null,
-            lockedBy: null,
-            lastError: null,
-          });
-        });
+              // Отметка остаётся, даже если аренда потеряна: она и есть защита
+              // от повторного выполнения обработчика новым владельцем.
+              await tx.outboxProcessedMessage.create({
+                data: { handlerName: message.topic, idempotencyKey: message.idempotencyKey },
+              });
+            }
+
+            return finalizeMessage(tx, deps, message.id, {
+              status: 'DONE',
+              processedAt: now,
+              attempts: message.attempts + 1,
+              lockedAt: null,
+              lockedBy: null,
+              lastError: null,
+            });
+          },
+          { timeout: deps.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS },
+        );
 
         if (owned) {
           result.processed += 1;
@@ -246,7 +288,14 @@ export async function processOutboxOnce(deps: WorkerDeps, limit = 20): Promise<P
           reportLostLease(deps, message, result);
         }
       } catch (error) {
-        await failMessage(deps, message, sanitizeError(error), now, result);
+        await failMessage(
+          deps,
+          message,
+          sanitizeError(error),
+          now,
+          result,
+          error instanceof PermanentOutboxError,
+        );
       } finally {
         pending.delete(message.id);
       }
@@ -294,9 +343,11 @@ async function failMessage(
   reason: string,
   now: Date,
   result: ProcessResult,
+  permanent = false,
 ): Promise<void> {
   const attempts = message.attempts + 1;
-  const exhausted = attempts >= message.maxAttempts;
+  // Окончательный отказ исчерпывает сообщение немедленно: повторять его нечем.
+  const exhausted = permanent || attempts >= message.maxAttempts;
 
   const owned = await finalizeMessage(deps.db, deps, message.id, {
     status: exhausted ? 'DEAD' : 'ERROR',

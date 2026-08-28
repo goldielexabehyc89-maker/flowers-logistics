@@ -7,6 +7,8 @@
  */
 
 import {
+  assignableRoles,
+  canAssignRoles,
   canManageUserWithRoles,
   PRIVILEGED_ROLES,
   ROLES,
@@ -269,6 +271,23 @@ function visibilityScope(actor: Actor): Prisma.UserWhereInput {
   if (actor.roles.includes('ADMIN')) {
     return {};
   }
+  // Управляющий видит сотрудников всех ролей, КРОМЕ администраторов и учёток
+  // с неизвестной этой версии ролью. Администраторов он не администрирует
+  // вовсе, поэтому и в списке их быть не должно: показать строку, которую
+  // нельзя ни открыть, ни изменить, значило бы обещать действие, на которое
+  // сервер ответит отказом. Неизвестная роль исключается по тем же
+  // соображениям fail-closed, что и у логиста.
+  if (actor.roles.includes('SUPERVISOR')) {
+    return {
+      NOT: {
+        roles: {
+          some: {
+            OR: [{ role: 'ADMIN' }, { role: { notIn: [...ROLES] } }],
+          },
+        },
+      },
+    };
+  }
   if (actor.roles.includes('LOGISTICIAN')) {
     return {
       roles: { some: { role: 'COURIER' } },
@@ -491,8 +510,18 @@ export async function updateUser(
   assertCanManage(actor, currentView.roles, currentView.hasUnsupportedRoles);
 
   if (input.roles !== undefined) {
-    if (!actor.roles.includes('ADMIN')) {
-      throw forbidden('only admin can change roles');
+    if (!canAssignRoles(actor.roles)) {
+      throw forbidden('actor cannot change roles');
+    }
+    // Каждая назначаемая роль должна быть в праве актора. Для администратора это
+    // всё множество ролей; для управляющего — всё, КРОМЕ ADMIN. Так закрываются
+    // сразу три запрета: повысить чужого до администратора, повысить себя и
+    // назначить администратора существующему пользователю. Управлять же самой
+    // учёткой администратора управляющий не может ещё раньше — `assertCanManage`
+    // выше отказывает по его текущим ролям.
+    const allowed = assignableRoles(actor.roles);
+    if (!input.roles.every((role) => allowed.includes(role))) {
+      throw forbidden('actor cannot assign one of the requested roles');
     }
     if (input.roles.length === 0) {
       throw new AppError('VALIDATION_FAILED', {

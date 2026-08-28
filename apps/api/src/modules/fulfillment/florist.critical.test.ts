@@ -3084,3 +3084,39 @@ describe('права раздела', () => {
     }
   });
 });
+
+describe('статус «Принят, Не оплачен» в очереди флориста', () => {
+  it('заказ в статусе «Принят, Не оплачен» в очередь не попадает, а после смены статуса возвращается', async () => {
+    const tag = `HOLD-${uniqueNumber()}`;
+    const viewer = await actorFor(['FLORIST']);
+    const order = await seedOrder({ number: tag });
+
+    const read = async (): Promise<string[]> => {
+      const queue = await readQueue(
+        ctx.db,
+        { userId: viewer.userId },
+        { day: 'today', scope: 'general', includeAssigned: false, search: tag },
+        NOW,
+      );
+      return queue.items.map((item) => item.id);
+    };
+
+    // Пока статус допустимый (у сида он не задан) — заказ в очереди.
+    expect(await read()).toContain(order.id);
+
+    // «Принят, Не оплачен» — заказ уходит из очереди, но из базы не исчезает.
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { externalStateId: MOYSKLAD_IDS.states.acceptedUnpaid },
+    });
+    expect(await read()).not.toContain(order.id);
+    expect(await ctx.db.deliveryOrder.count({ where: { id: order.id } })).toBe(1);
+
+    // Статус стал допустимым — заказ снова во флористской очереди.
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { externalStateId: MOYSKLAD_IDS.states.delivering },
+    });
+    expect(await read()).toContain(order.id);
+  });
+});

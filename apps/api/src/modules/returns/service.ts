@@ -27,6 +27,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
+import { enqueueOrderStateSync, ORDER_STATE_TOPIC } from '../integrations/moysklad/state-sync.js';
 
 /**
  * Кому адресованы события возврата.
@@ -404,6 +405,18 @@ export async function decideCancel(
     });
 
     await publishReturnEvent(tx, 'order.resolution_changed', task.orderId);
+
+    /*
+     * Подтверждённая логистом отмена уходит в «Отменен» — по этому заказу.
+     * Сначала факт отмены в ERP (обновление заказа выше), затем отправка
+     * наружу надёжной очередью в той же транзакции. Ключ события —
+     * идентификатор задачи решения, поэтому повтор команды статус не задваивает.
+     */
+    await enqueueOrderStateSync(tx, {
+      orderId: task.orderId,
+      target: 'cancelled',
+      dedupeKey: `${ORDER_STATE_TOPIC}:cancelled:resolution:${task.id}`,
+    });
 
     return {
       orderId: task.orderId,

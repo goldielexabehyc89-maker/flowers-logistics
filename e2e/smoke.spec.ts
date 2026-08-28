@@ -6793,7 +6793,8 @@ test('два сеанса: справочник курьеров у админи
 
   await openSection(admin, 'Сотрудники и курьеры');
   // Вкладки ролей вместо выпадающего фильтра, «Добавить» — в рабочей панели.
-  await expect(admin.getByTestId('user-role-tab')).toHaveCount(6);
+  // Семь ролей: курьер, флорист, кладовщик, менеджер, логист, управляющий, администратор.
+  await expect(admin.getByTestId('user-role-tab')).toHaveCount(7);
   await expect(admin.getByTestId('user-add')).toBeVisible();
   await expect(admin.getByLabel('Роль')).toHaveCount(0);
   // Отдельного блока с пояснением про заморозку больше нет.

@@ -547,3 +547,37 @@ describe('«Требует внимания» идёт первым во всё�
     expect(firstPage[0]).toBe(attention);
   });
 });
+
+describe('статус «Принят, Не оплачен»', () => {
+  // День внутри месяца, закреплённого за этим файлом (2027-09), а не чужого.
+  const HOLD_DAY = '2027-09-20';
+
+  it('заказ в статусе «Принят, Не оплачен» в «Сделки» не попадает, а после смены статуса появляется', async () => {
+    // Заказ полностью пригоден (в области, с точкой, без внимания) — скрывает
+    // его ровно статус источника, а не что-то ещё.
+    const held = await seedRoutable({
+      deliveryPlannedMoment: `${HOLD_DAY} 12:00:00.000`,
+      state: { meta: { href: href('state', IDS.states.acceptedUnpaid) } },
+    });
+    expect(await dealsIds(ctx.db, { deliveryDate: HOLD_DAY })).not.toContain(held);
+
+    // Статус в источнике стал допустимым — заказ обязан появиться в «Сделках».
+    await ctx.db.deliveryOrder.update({
+      where: { id: held },
+      data: { externalStateId: IDS.states.delivering },
+    });
+    expect(await dealsIds(ctx.db, { deliveryDate: HOLD_DAY })).toContain(held);
+  });
+
+  it('заказ без известного статуса из «Сделок» не пропадает', async () => {
+    const unknown = await seedRoutable({
+      deliveryPlannedMoment: `${HOLD_DAY} 12:00:00.000`,
+      state: undefined,
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: unknown },
+      data: { externalStateId: null },
+    });
+    expect(await dealsIds(ctx.db, { deliveryDate: HOLD_DAY })).toContain(unknown);
+  });
+});

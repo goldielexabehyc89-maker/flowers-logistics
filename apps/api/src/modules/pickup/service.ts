@@ -33,7 +33,7 @@ import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
 import { readWarehouseManualEntry } from '../settings/service.js';
 
 /** Выдачу самовывоза выполняет менеджер; администратор — тоже. */
-export const PICKUP_ROLES = ['ADMIN', 'MANAGER'] as const;
+export const PICKUP_ROLES = ['ADMIN', 'MANAGER', 'SUPERVISOR'] as const;
 
 /** Кому адресованы события раздела. Кладовщика здесь нет: выдача не его работа. */
 export const PICKUP_AUDIENCE = ['ADMIN', 'MANAGER'] as const;
