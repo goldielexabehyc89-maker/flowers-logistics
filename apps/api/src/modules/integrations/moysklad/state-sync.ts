@@ -27,7 +27,7 @@ import type { TransactionClient } from '../../auth/sessions.js';
 import type { AppLogger } from '../../../platform/logging/logger.js';
 import { enqueueOutbox } from '../../outbox/producer.js';
 import { PermanentOutboxError, type OutboxHandler } from '../../outbox/worker.js';
-import { MoyskladClient, MoyskladError } from './client.js';
+import { MoyskladError, type MoyskladClient } from './client.js';
 import { MOYSKLAD_IDS } from './config.js';
 
 /** Тема outbox для передачи состояния заказа. */

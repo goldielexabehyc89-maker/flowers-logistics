@@ -300,18 +300,23 @@ describe('права управляющего', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
-  it('в выборке управляющего есть все роли, кроме администраторов', async () => {
+  it('видит и открывает сотрудников всех ролей, но не администраторов', async () => {
     const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'] });
     const actor = supervisorActor(supervisor.id);
 
     const florist = await seedUser(ctx.db, { roles: ['FLORIST'], status: 'ACTIVE' });
     const courier = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE' });
-    await seedUser(ctx.db, { roles: ['ADMIN'], status: 'ACTIVE' });
+    const admin = await seedUser(ctx.db, { roles: ['ADMIN'], status: 'ACTIVE' });
 
+    // Не-администраторов управляющий открывает поимённо (устойчиво к тому,
+    // сколько ещё пользователей завели другие файлы в общей базе).
+    expect((await getUser(ctx, actor, florist.id)).roles).toEqual(['FLORIST']);
+    expect((await getUser(ctx, actor, courier.id)).roles).toEqual(['COURIER']);
+    // Администратора — не открывает.
+    await expect(getUser(ctx, actor, admin.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    // В общей выборке администраторов нет вовсе — при любом числе страниц.
     const general = await listUsers(ctx, actor, { limit: 200, offset: 0, status: 'ACTIVE' });
-    const ids = general.items.map((item) => item.id);
-    expect(ids).toContain(florist.id);
-    expect(ids).toContain(courier.id);
     expect(general.items.some((item) => item.roles.includes('ADMIN'))).toBe(false);
 
     // Даже явным фильтром по роли ADMIN администраторы не раскрываются.

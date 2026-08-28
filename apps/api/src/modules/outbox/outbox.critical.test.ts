@@ -29,6 +29,10 @@ const logger = pino({ level: 'silent' });
 
 beforeAll(async () => {
   ctx = await createTestContext();
+  // Изоляция от чужих сообщений: доменные события других файлов тоже пишут
+  // в общий outbox. Очистка в начале файла возвращает очереди чистое состояние.
+  await ctx.db.outboxProcessedMessage.deleteMany({});
+  await ctx.db.outboxMessage.deleteMany({});
 });
 
 afterAll(async () => {

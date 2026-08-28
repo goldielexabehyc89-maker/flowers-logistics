@@ -25,7 +25,6 @@ import {
 import { MoyskladClient, MoyskladError } from './client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './config.js';
 import { toDateColumn } from './delivery-date.js';
-import { enqueueOutbox } from '../../outbox/producer.js';
 import {
   PermanentOutboxError,
   processOutboxOnce,
@@ -44,6 +43,12 @@ const logger = pino({ level: 'silent' });
 
 beforeAll(async () => {
   ctx = await createTestContext();
+  // Общая тестовая база: другие файлы через доменные события тоже кладут
+  // сообщения в outbox. Здесь очередь состояния изолируется, чтобы глобальный
+  // проход обрабатывал ровно свои сообщения, а не чужие.
+  await ctx.db.outboxProcessedMessage.deleteMany({});
+  await ctx.db.outboxMessage.deleteMany({});
+  await ctx.db.orderMoyskladState.deleteMany({});
 });
 
 afterAll(async () => {
@@ -127,8 +132,8 @@ async function seedOrder(): Promise<{ id: string; externalId: string }> {
     data: {
       externalId,
       externalName: unique('SS'),
-      externalUpdated: new Date('2028-08-01T00:00:00.000Z'),
-      deliveryDate: toDateColumn('2028-08-10'),
+      externalUpdated: new Date('2028-07-01T00:00:00.000Z'),
+      deliveryDate: toDateColumn('2028-07-10'),
       address: 'Москва, секретная улица, дом 7, кв. 42',
       recipient: 'Иван Секретный',
       storeId: MOYSKLAD_IDS.store,
@@ -353,7 +358,7 @@ describe('активация маршрута ставит «Доставляе�
     const route = await ctx.db.deliveryRoute.create({
       data: {
         number: unique('R'),
-        deliveryDate: toDateColumn('2028-08-10'),
+        deliveryDate: toDateColumn('2028-07-10'),
         state: 'ACTIVE',
         vehicleType: 'CAR',
         createdById: user.id,

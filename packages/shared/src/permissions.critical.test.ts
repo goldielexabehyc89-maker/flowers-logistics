@@ -17,7 +17,7 @@ import {
   isPlainCourier,
   isPrivileged,
 } from './permissions.js';
-import { ROLES } from './roles.js';
+import { ROLES, type Role } from './roles.js';
 
 const ADMIN = ['ADMIN'] as const;
 const LOGISTICIAN = ['LOGISTICIAN'] as const;
@@ -78,7 +78,15 @@ describe('права на управление пользователями', ()
 
 describe('права управляющего', () => {
   it('администрирует сотрудников всех ролей, кроме администраторов', () => {
-    for (const target of [LOGISTICIAN, COURIER, WAREHOUSE, ['FLORIST'], ['MANAGER'], SUPERVISOR]) {
+    const targets: readonly Role[][] = [
+      [...LOGISTICIAN],
+      [...COURIER],
+      [...WAREHOUSE],
+      ['FLORIST'],
+      ['MANAGER'],
+      [...SUPERVISOR],
+    ];
+    for (const target of targets) {
       expect(canManageUserWithRoles(SUPERVISOR, target)).toBe(true);
     }
     // Учётка администратора управляющему недоступна целиком — ни сама роль,
