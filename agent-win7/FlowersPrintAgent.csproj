@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Пилотный агент печати для Windows 7 SP1.
+
+  КЛАССИЧЕСКИЙ .csproj, а не SDK-стиль: .NET Framework 4.8 — единственный
+  поддерживаемый на Windows 7 runtime, и сборка через MSBuild со ссылками на
+  сборки самого фреймворка не тянет ни одного пакета NuGet. AnyCPU даёт ОДИН
+  файл, который на x64 Windows запускается как x64, на x86 — как x86, поэтому
+  отдельные сборки под разрядности не нужны.
+-->
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>FlowersPrintAgent</RootNamespace>
+    <AssemblyName>flowers-print-agent-win7</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <!-- Читаемость важнее размера: агент ставят руками, экономить нечего. -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>7.3</LangVersion>
+    <Deterministic>true</Deterministic>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

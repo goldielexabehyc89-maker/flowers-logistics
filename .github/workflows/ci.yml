@@ -765,3 +765,51 @@ jobs:
             agent/README.md
           if-no-files-found: error
           retention-days: 30
+
+  print-agent-win7:
+    name: Пилотный агент печати (Windows 7, .NET 4.8)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # .NET Framework 4.8 собирается MSBuild из состава Visual Studio на
+      # windows-раннере. Пакетов NuGet у агента нет — только ссылки на сборки
+      # самого фреймворка, поэтому восстановление зависимостей не нужно.
+      - name: Подготовить MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Собрать один AnyCPU-исполняемый файл
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild agent-win7\FlowersPrintAgent.csproj `
+            /p:Configuration=Release /p:Platform=AnyCPU /verbosity:minimal
+          $exe = 'agent-win7\bin\Release\flowers-print-agent-win7.exe'
+          if (-not (Test-Path $exe)) { throw "файл агента не собран: $exe" }
+          Copy-Item $exe agent-win7\flowers-print-agent-win7.exe
+
+      - name: Проверить, что файл запускается
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:AGENT_STATE_DIR = "$env:TEMP\agent-win7-check"
+          # --check печатает готовность окружения. Раннер — не Windows 7, но
+          # проверка .NET 4.8 и чтения реестра доказывает, что exe собран и
+          # запускается; сетевые пункты здесь могут зависеть от внешнего адреса,
+          # поэтому шаг гейтит именно факт запуска и версию runtime.
+          $output = & agent-win7\flowers-print-agent-win7.exe --check 2>&1 | Out-String
+          Write-Host $output
+          if ($output -notmatch '\.NET Framework: 4\.8\+') {
+            throw "agent --check не подтвердил .NET 4.8: $output"
+          }
+
+      - name: Приложить пилотный артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowers-print-agent-win7-pilot
+          path: |
+            agent-win7/flowers-print-agent-win7.exe
+            agent-win7/install-autostart-win7.cmd
+            agent-win7/README.md
+          if-no-files-found: error
+          retention-days: 30
