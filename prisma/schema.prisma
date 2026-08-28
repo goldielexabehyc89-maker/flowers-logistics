@@ -407,6 +407,25 @@ model OutboxProcessedMessage {
   @@unique([handlerName, idempotencyKey])
 }
 
+/// Порядок и защита от регресса при передаче состояния заказа в МойСклад.
+///
+/// Одна строка на заказ. `enqueuedSeq` растёт при постановке каждого события
+/// в outbox и даёт монотонный порядок ПО ЗАКАЗУ; `appliedSeq` — номер последнего
+/// события, успешно отправленного в МойСклад. Обработчик применяет событие,
+/// только если его номер больше `appliedSeq`: устаревший повтор «Доставляется»
+/// с меньшим номером после уже отправленного «Завершен»/«Отменен» отбрасывается,
+/// а не откатывает статус назад. Секретов и персональных данных здесь нет —
+/// только идентификаторы и счётчики.
+model OrderMoyskladState {
+  orderId     String        @id @db.Uuid
+  order       DeliveryOrder @relation(fields: [orderId], references: [id])
+  enqueuedSeq Int           @default(0)
+  appliedSeq  Int           @default(0)
+  /// UUID последнего отправленного состояния — для наблюдаемости, не секрет.
+  lastStateId String?       @db.Uuid
+  updatedAt   DateTime      @updatedAt
+}
+
 /// Состояние внешней интеграции для индикатора в интерфейсе.
 /// На этапе 1 реальных подключений нет: обе записи находятся в состоянии NOT_CONFIGURED.
 model IntegrationStatus {
@@ -840,6 +859,7 @@ model DeliveryOrder {
   deliveryAttempts     DeliveryAttempt[]
   resolutions          OrderResolution[]
   returns              OrderReturn[]
+  moyskladState        OrderMoyskladState?
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])

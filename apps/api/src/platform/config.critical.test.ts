@@ -158,3 +158,57 @@ describe('загрузка конфигурации', () => {
     expect(config.APP_ENVIRONMENT_MARKER).toBe('production');
   });
 });
+
+describe('узкая синхронизация состояния заказа в МойСклад', () => {
+  const PROD = {
+    ...BASE,
+    NODE_ENV: 'production',
+    APP_ENV: 'production',
+    APP_ENVIRONMENT_MARKER: 'production',
+    // В production распознавание отмены обязано быть настроено.
+    MOYSKLAD_CANCELLED_STATE_ID: '45533b00-2ea3-11ed-0a80-09c5000d6027',
+  };
+
+  it('по умолчанию выключена во всех окружениях', () => {
+    expect(loadConfig({ ...BASE }).MOYSKLAD_ORDER_STATE_SYNC_ENABLED).toBe(false);
+  });
+
+  it('в production включается только вместе с токеном', () => {
+    // Без токена включить нечем: отправлять запись некому.
+    expect(() => loadConfig({ ...PROD, MOYSKLAD_ORDER_STATE_SYNC_ENABLED: 'true' })).toThrow(
+      /требует MOYSKLAD_TOKEN/,
+    );
+
+    const config = loadConfig({
+      ...PROD,
+      MOYSKLAD_TOKEN: 'live-token-not-a-secret',
+      MOYSKLAD_ORDER_STATE_SYNC_ENABLED: 'true',
+    });
+    expect(config.MOYSKLAD_ORDER_STATE_SYNC_ENABLED).toBe(true);
+  });
+
+  it('на local и staging запрещена — реальных записей там не бывает', () => {
+    // local
+    expect(() => loadConfig({ ...BASE, MOYSKLAD_ORDER_STATE_SYNC_ENABLED: 'true' })).toThrow(
+      /только в production/,
+    );
+
+    // staging в режиме read-only с токеном — узкая запись всё равно запрещена.
+    expect(() =>
+      loadConfig({
+        ...BASE,
+        APP_ENV: 'staging',
+        APP_ENVIRONMENT_MARKER: 'staging',
+        MOYSKLAD_READ_ONLY: 'true',
+        MOYSKLAD_TOKEN: 'staging-token-not-a-secret',
+        MOYSKLAD_ORDER_STATE_SYNC_ENABLED: 'true',
+      }),
+    ).toThrow(/только в production/);
+  });
+
+  it('не ослабляет общий запрет записи: MOYSKLAD_READ_ONLY=false по-прежнему не стартует', () => {
+    expect(() =>
+      loadConfig({ ...PROD, MOYSKLAD_TOKEN: 'live-token', MOYSKLAD_READ_ONLY: 'false' }),
+    ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
+  });
+});

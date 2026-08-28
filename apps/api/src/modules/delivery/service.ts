@@ -30,6 +30,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
+import { enqueueOrderStateSync, ORDER_STATE_TOPIC } from '../integrations/moysklad/state-sync.js';
 import { moscowCalendarDate } from '@fl/shared';
 import { accrueDeliveryResult, reverseDeliveryAccruals } from '../finance/accrual.js';
 import { closeAfterCancelledResult, openAfterFailedDelivery } from '../returns/service.js';
@@ -657,6 +658,21 @@ export async function recordDeliveryResult(
         courierUserId: actor.userId,
         reasonNameSnapshot: created.reasonNameSnapshot ?? 'Причина не указана',
         now,
+      });
+    }
+
+    /*
+     * Доставленный заказ уходит в «Завершен» — по конкретному заказу, а не по
+     * маршруту. Статус ставится ЗДЕСЬ, в той же транзакции: сначала факт
+     * доставки в ERP, потом отправка наружу надёжной очередью. Ключ события —
+     * идентификатор попытки, поэтому повтор того же результата второй записи
+     * не создаёт.
+     */
+    if (created.outcome === 'DELIVERED') {
+      await enqueueOrderStateSync(tx, {
+        orderId: participation.orderId,
+        target: 'completed',
+        dedupeKey: `${ORDER_STATE_TOPIC}:completed:attempt:${created.id}`,
       });
     }
 

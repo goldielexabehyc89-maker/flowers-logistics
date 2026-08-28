@@ -48,6 +48,8 @@ async function main(): Promise<number> {
         baseUrl: MOYSKLAD_BASE_URL,
         token: config.MOYSKLAD_TOKEN ?? null,
         ids: MOYSKLAD_IDS,
+        // Ручной проход — только чтение: запись состояния ему не нужна.
+        orderStateSyncEnabled: false,
       },
       // Один ограничитель на все обращения приложения: импорт, delta,
       // ручной проход и дочитывание состава делят одну очередь и один темп.

@@ -102,6 +102,14 @@ export interface MoyskladConfig {
   /** `null`, если токен не задан: интеграция остаётся не настроенной. */
   token: string | null;
   ids: typeof MOYSKLAD_IDS;
+  /**
+   * Разрешена ли узкая запись состояния заказа.
+   *
+   * Клиент выполняет `putCustomerOrderState` только при `true`. Значение
+   * НЕ ослабляет запрет на прочие методы: всё, кроме GET/HEAD и этой одной
+   * именованной операции, по-прежнему отвергается безусловно.
+   */
+  orderStateSyncEnabled: boolean;
 }
 
 /**
@@ -114,10 +122,11 @@ export function loadMoyskladConfig(env: NodeJS.ProcessEnv = process.env): Moyskl
   const raw = env['MOYSKLAD_TOKEN'];
   const token = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
 
-  // Режима записи у клиента нет вовсе: политика `GET`/`HEAD` безусловна
-  // и в конфигурацию не выносится. `MOYSKLAD_READ_ONLY` остаётся условием
-  // ДОПУСКА окружения и проверяется в `platform/config.ts`.
-  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS };
+  // Общий запрет записи (`MOYSKLAD_READ_ONLY`) остаётся условием ДОПУСКА
+  // окружения и проверяется в `platform/config.ts`. Здесь читается лишь узкое
+  // разрешение на смену состояния заказа; по умолчанию оно выключено.
+  const orderStateSyncEnabled = env['MOYSKLAD_ORDER_STATE_SYNC_ENABLED'] === 'true';
+  return { baseUrl: MOYSKLAD_BASE_URL, token, ids: MOYSKLAD_IDS, orderStateSyncEnabled };
 }
 
 /** Интеграция считается настроенной только при наличии токена. */
