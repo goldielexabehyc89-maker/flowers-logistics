@@ -589,6 +589,154 @@ describe('инварианты базы', () => {
   });
 });
 
+// --- 4b. Снятие с хранения ---------------------------------------------------
+
+describe('снять с хранения', () => {
+  it('освобождает активное размещение и ячейку, история и заказ остаются', async () => {
+    const order = await seedOrder();
+    const cell = await seedCell('STORAGE');
+    const actor = await actorFor(['WAREHOUSE']);
+
+    const placed = await receiveOrder(
+      flow,
+      actor,
+      { orderNumber: order.number, cellCode: cell.code },
+      CONTEXT,
+    );
+    expect(await countActivePlacements(ctx.db, cell.id)).toBe(1);
+
+    // Простое снятие: БЕЗ причины. Это и есть «снять с хранения».
+    const removed = await withdrawOrder(flow, actor, { orderNumber: order.number }, CONTEXT);
+    expect(removed.withdrawn).toBe(true);
+
+    // Ячейка сразу свободна, активного места у заказа нет.
+    expect(await countActivePlacements(ctx.db, cell.id)).toBe(0);
+    expect(await activeCellOf(order.id)).toBeNull();
+
+    // Ни заказ, ни ячейка, ни история не удалены: строка размещения осталась,
+    // но помечена освобождённой без причины изъятия.
+    const row = await ctx.db.orderPlacement.findUniqueOrThrow({
+      where: { id: placed.placementId },
+      select: { releasedAt: true, releaseReason: true, withdrawReason: true, releasedById: true },
+    });
+    expect(row.releasedAt).not.toBeNull();
+    expect(row.releaseReason).toBe('WITHDRAWN');
+    expect(row.withdrawReason).toBeNull();
+    expect(row.releasedById).toBe(actor.userId);
+    expect(await ctx.db.deliveryOrder.count({ where: { id: order.id } })).toBe(1);
+    expect(await ctx.db.storageCell.count({ where: { id: cell.id } })).toBe(1);
+  });
+
+  it('повторное снятие безопасно и ничего не портит', async () => {
+    const order = await seedOrder();
+    const cell = await seedCell('STORAGE');
+    const actor = await actorFor(['WAREHOUSE']);
+
+    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
+    const first = await withdrawOrder(flow, actor, { orderNumber: order.number }, CONTEXT);
+    const second = await withdrawOrder(flow, actor, { orderNumber: order.number }, CONTEXT);
+
+    expect(first.withdrawn).toBe(true);
+    // Второе нажатие не ошибка и не создаёт второй записи освобождения.
+    expect(second.withdrawn).toBe(false);
+    expect(
+      await ctx.db.orderPlacement.count({
+        where: { orderId: order.id, releasedAt: { not: null } },
+      }),
+    ).toBe(1);
+  });
+
+  it('пишет аудит и отдельное событие истории заказа', async () => {
+    const order = await seedOrder();
+    const cell = await seedCell('STORAGE');
+    const actor = await actorFor(['WAREHOUSE']);
+
+    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
+    await withdrawOrder(flow, actor, { orderNumber: order.number }, CONTEXT);
+
+    const audit = await ctx.db.auditLog.findFirstOrThrow({
+      where: { action: 'WAREHOUSE_ORDER_WITHDRAWN', actorUserId: actor.userId },
+      orderBy: { id: 'desc' },
+      select: { newValue: true, oldValue: true },
+    });
+    // Причина в журнале пустая — так простое снятие отличается от изъятия
+    // отменённого букета на пересборку или в списание.
+    expect((audit.newValue as Record<string, unknown>)['reason']).toBeNull();
+    expect((audit.newValue as Record<string, unknown>)['orderId']).toBe(order.id);
+
+    const { readOrderTimeline } = await import('../orders/timeline.js');
+    const timeline = await readOrderTimeline(ctx.db, {
+      orderId: order.id,
+      limit: 50,
+      cursor: null,
+    });
+    const release = timeline.events.find((event) => event.kind === 'PLACEMENT_RELEASED_WITHDRAWN');
+    expect(release?.title).toBe('Коробка снята с хранения');
+    // У простого снятия строки «Причина снятия» нет.
+    expect(release?.details.some((detail) => detail.label === 'Причина снятия')).toBe(false);
+  });
+
+  it('не трогает маршрутное размещение', async () => {
+    const order = await seedOrder();
+    const storage = await seedCell('STORAGE');
+    const routeCell = await seedCell('ROUTE');
+    const actor = await actorFor(['WAREHOUSE']);
+    const route = await seedRoute([order.id]);
+
+    await receiveOrder(flow, actor, { orderNumber: order.number, cellCode: storage.code }, CONTEXT);
+    await bindRouteCell(flow, actor, route.id, { cellCode: routeCell.code }, CONTEXT);
+    await pickOrderToRouteCell(
+      flow,
+      actor,
+      route.id,
+      { orderNumber: order.number, cellCode: routeCell.code },
+      CONTEXT,
+    );
+    // Теперь активное место — маршрутная ячейка.
+    expect(await activeCellOf(order.id)).toBe(routeCell.id);
+
+    // «Снять с хранения» её не касается: у коробки в маршрутной ячейке свой
+    // путь — комплектование и выдача.
+    await expect(
+      withdrawOrder(flow, actor, { orderNumber: order.number }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'PLACEMENT_NOT_IN_STORAGE' } });
+
+    // Размещение на месте: отказ ничего не освободил.
+    expect(await activeCellOf(order.id)).toBe(routeCell.id);
+  });
+
+  it('доступно складу и администратору, но не логисту и не курьеру', async () => {
+    // Права проверяются на HTTP-входе: спрятанная кнопка защитой не является.
+    const order = await seedOrder();
+    const cell = await seedCell('STORAGE');
+    const warehouse = await actorFor(['WAREHOUSE']);
+    await receiveOrder(
+      flow,
+      warehouse,
+      { orderNumber: order.number, cellCode: cell.code },
+      CONTEXT,
+    );
+
+    for (const roles of [['LOGISTICIAN'], ['COURIER']] as Role[][]) {
+      const token = await tokenFor(roles);
+      const response = await call('POST', '/api/warehouse/placements/withdraw', token, {
+        orderNumber: order.number,
+      });
+      expect([401, 403], roles.join()).toContain(response.statusCode);
+    }
+    // Заказ по-прежнему на складе: чужие роли ничего не сняли.
+    expect(await activeCellOf(order.id)).toBe(cell.id);
+
+    // Кладовщик снимает штатно.
+    const token = await tokenFor(['WAREHOUSE']);
+    const ok = await call('POST', '/api/warehouse/placements/withdraw', token, {
+      orderNumber: order.number,
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(await activeCellOf(order.id)).toBeNull();
+  });
+});
+
 // --- 5. Комплектование -------------------------------------------------------
 
 describe('комплектование', () => {

@@ -117,17 +117,22 @@ interface ActivePlacement {
   id: string;
   cellId: string;
   requiresRelocation: boolean;
+  cellKind: $Enums.StorageCellKind;
 }
 
 async function activePlacement(
   tx: TransactionClient,
   orderId: string,
 ): Promise<ActivePlacement | null> {
+  // Строка размещения блокируется через саму таблицу: `FOR UPDATE` по
+  // соединению заблокировал бы и строку ячейки, чего здесь не нужно, а вид
+  // ячейки берётся тем же запросом, чтобы не ходить в базу дважды.
   const rows = await tx.$queryRaw<ActivePlacement[]>`
-    SELECT "id", "cellId", "requiresRelocation"
-    FROM "OrderPlacement"
-    WHERE "orderId" = ${orderId}::uuid AND "releasedAt" IS NULL
-    FOR UPDATE
+    SELECT p."id", p."cellId", p."requiresRelocation", c."kind" AS "cellKind"
+    FROM "OrderPlacement" p
+    JOIN "StorageCell" c ON c."id" = p."cellId"
+    WHERE p."orderId" = ${orderId}::uuid AND p."releasedAt" IS NULL
+    FOR UPDATE OF p
   `;
   return rows[0] ?? null;
 }
@@ -367,15 +372,37 @@ export type WithdrawReason = 'REASSEMBLY' | 'WRITE_OFF';
 
 export interface WithdrawInput {
   orderNumber: string;
-  reason: WithdrawReason;
+  /**
+   * Причина изъятия — или её отсутствие.
+   *
+   * Заданная причина (`REASSEMBLY`/`WRITE_OFF`) описывает судьбу отменённого
+   * или бракованного букета: он поехал на пересборку либо в списание.
+   * Отсутствие причины — это простое «снять с хранения» из группы «В
+   * хранении»: коробку убрали с полки, и никакого особого исхода за этим
+   * нет. База допускает пустой `withdrawReason` при `releaseReason=WITHDRAWN`
+   * (CHECK `OrderPlacement_withdraw_reason_matches_release`), поэтому обе
+   * операции — одна и та же запись освобождения, а не два разных механизма.
+   */
+  reason?: WithdrawReason | undefined;
 }
 
 /**
- * Изъятие заказа со склада без выдачи: брак, отмена, возврат флористу.
+ * Изъятие заказа со склада без выдачи.
  *
- * Нужно затем, чтобы отменённый или требующий пересборки заказ имел штатный
- * выход из ячейки. Без него единственным способом «убрать» его осталась бы
- * выдача курьеру, то есть ложь в истории.
+ * Два повода делят один выход из ячейки:
+ *
+ *  * с причиной — отменённый или бракованный букет уходит на пересборку либо
+ *    в списание;
+ *  * без причины — обычная коробка снимается с хранения в группе «В хранении».
+ *
+ * Механизм один: активное размещение освобождается, ячейка сразу становится
+ * свободной, история и аудит остаются на месте. Без этого выхода единственным
+ * способом «убрать» коробку осталась бы выдача курьеру, то есть ложь в истории.
+ *
+ * МАРШРУТНЫЕ ЯЧЕЙКИ. «Снять с хранения» (без причины) действует ТОЛЬКО на
+ * ячейку хранения: коробка в маршрутной ячейке принадлежит комплектованию
+ * и выдаче, и убирать её этой кнопкой нельзя. Изъятие с причиной (отменённый
+ * букет) по-прежнему работает в любой ячейке — это его штатный сценарий.
  */
 export async function withdrawOrder(
   deps: FlowDeps,
@@ -383,7 +410,7 @@ export async function withdrawOrder(
   input: WithdrawInput,
   context: RequestContext,
 ): Promise<{ orderId: string; orderNumber: string; withdrawn: boolean }> {
-  const reason = input.reason;
+  const reason = input.reason ?? null;
 
   return deps.db.$transaction(async (tx: TransactionClient) => {
     const order = await resolveOrderByNumber(tx, input.orderNumber);
@@ -393,6 +420,17 @@ export async function withdrawOrder(
     if (current === null) {
       // Повтор изъятия: заказа на складе уже нет, и это не ошибка.
       return { orderId: order.id, orderNumber: order.number, withdrawn: false };
+    }
+
+    // «Снять с хранения» не трогает маршрутные размещения: у коробки в
+    // маршрутной ячейке свой путь — комплектование и выдача.
+    if (reason === null && current.cellKind !== 'STORAGE') {
+      throw new AppError('CONFLICT', {
+        message: 'withdraw without reason is limited to storage cells',
+        publicMessage:
+          'Снять с хранения можно только коробку в ячейке хранения. Маршрутную ячейку освобождают комплектованием или выдачей.',
+        conflict: { kind: 'PLACEMENT_NOT_IN_STORAGE' },
+      });
     }
 
     const withdrawnAt = new Date();
@@ -416,6 +454,8 @@ export async function withdrawOrder(
       actorRoles: actor.roles,
       source: 'api',
       oldValue: { cellId: current.cellId },
+      // Причина остаётся `null` у простого снятия с хранения: в журнале это
+      // отличает его от изъятия отменённого букета на пересборку или списание.
       newValue: { orderId: order.id, reason },
       ip: context.ip,
       userAgent: context.userAgent,

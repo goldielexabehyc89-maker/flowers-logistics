@@ -412,9 +412,10 @@ const receiveSchema = z.object({
 
 const withdrawSchema = z.object({
   orderNumber: orderNumberSchema,
-  // Ровно два значения: пересборка или списание. Третьего смысла у изъятия
-  // отменённого букета нет, а свободный текст нельзя посчитать.
-  reason: z.enum(['REASSEMBLY', 'WRITE_OFF']),
+  // Причина есть у изъятия отменённого букета — пересборка или списание, ровно
+  // два значения, свободный текст нельзя посчитать. У простого «снять с
+  // хранения» причины нет: коробку убрали с полки, особого исхода за этим нет.
+  reason: z.enum(['REASSEMBLY', 'WRITE_OFF']).optional(),
 });
 const bindSchema = z.object({ cellCode: cellCodeSchema });
 const pickSchema = z.object({

@@ -3648,6 +3648,100 @@ test('склад: «Требуется перемещение» и «Отмен�
   ).toHaveCount(0);
 });
 
+test('склад: «Снять с хранения» освобождает ячейку и убирает строку без F5', async ({
+  page,
+  request,
+  browser,
+}: {
+  page: Page;
+  request: APIRequestContext;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  await enableManualEntry(request);
+
+  // Своя ячейка и свой заказ: сценарий не делит состояние с соседями.
+  const auth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${token}` };
+
+  const cellCode = `RS-${Date.now() % 100_000}`;
+  const created = await request.post('/api/storage-cells', {
+    headers,
+    data: { code: cellCode, kind: 'STORAGE' },
+  });
+  expect(created.status()).toBe(201);
+  const normalizedCell = ((await created.json()) as { normalizedCode: string }).normalizedCode;
+
+  const orderNumber = seedOrders(1, { withPoint: false })[0] ?? '';
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Склад');
+  await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+  // Второй открытый склад: строка обязана исчезнуть и там, без перезагрузки.
+  const watcher = await browser.newContext();
+  const watcherPage = await watcher.newPage();
+  await login(watcherPage, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(watcherPage, 'Склад');
+  await expect(watcherPage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+
+  // 1. Приёмка заказа в ячейку хранения.
+  await page.getByTestId('wh-scan-order').fill(orderNumber);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  await page.getByTestId('wh-scan-cell').fill(normalizedCell);
+  await page.getByTestId('wh-place').click();
+  await expect(page.locator('.toast-region')).toContainText(orderNumber);
+
+  // 2. Заказ стоит в группе «В хранении», и у строки есть явная кнопка.
+  const storage = page.getByTestId('wh-group-storage');
+  const row = storage.locator('[data-testid="wh-placement-row"]', { hasText: orderNumber });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText(normalizedCell);
+  const remove = row.getByTestId('wh-remove-from-storage');
+  await expect(remove).toBeVisible();
+
+  // Он виден и во втором окне — доехал по realtime, без F5.
+  await expect(
+    watcherPage
+      .getByTestId('wh-group-storage')
+      .locator('[data-testid="wh-placement-row"]', { hasText: orderNumber }),
+  ).toBeVisible();
+
+  // 3. Подтверждение называет номер заказа и ячейку.
+  await remove.click();
+  const confirm = page.getByTestId('wh-remove-confirm');
+  await expect(confirm).toBeVisible();
+  await expect(confirm).toContainText(orderNumber);
+  await expect(confirm).toContainText(normalizedCell);
+
+  await page.getByTestId('wh-remove-confirm-submit').click();
+  await expect(page.locator('.toast-region')).toContainText('снят с хранения');
+
+  // 4. Строка исчезла в этом окне и во втором — обоим по realtime.
+  await expect(
+    page.locator('[data-testid="wh-placement-row"]', { hasText: orderNumber }),
+  ).toHaveCount(0);
+  await expect(
+    watcherPage.locator('[data-testid="wh-placement-row"]', { hasText: orderNumber }),
+  ).toHaveCount(0);
+
+  // 5. Ячейка сразу свободна: тот же заказ снова принимается в неё.
+  await page.getByTestId('wh-scan-order').fill(orderNumber);
+  await page.getByTestId('wh-scan-order').press('Enter');
+  await page.getByTestId('wh-scan-cell').fill(normalizedCell);
+  await page.getByTestId('wh-place').click();
+  await expect(
+    page.getByTestId('wh-group-storage').locator('[data-testid="wh-placement-row"]', {
+      hasText: orderNumber,
+    }),
+  ).toBeVisible();
+
+  await watcher.close();
+});
+
 test('печать: «Общие» показывают серверный набор за 48 часов, а не свой список', async ({
   page,
 }: {

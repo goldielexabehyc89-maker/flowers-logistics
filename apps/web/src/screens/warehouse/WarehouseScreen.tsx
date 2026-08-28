@@ -23,6 +23,7 @@ import {
   ErrorState,
   Field,
   LoadingState,
+  Modal,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
@@ -1108,13 +1109,25 @@ function PlacementGroups({
   const [closed, setClosed] = useState<Record<string, boolean>>({ cancelled: true });
   const toggle = (id: string): void => setClosed((prev) => ({ ...prev, [id]: prev[id] !== true }));
 
+  /*
+   * Коробка, которую собираются снять с хранения, — до подтверждения.
+   *
+   * Снятие с полки необратимо для места: ячейка тут же освобождается, и в неё
+   * может встать другой заказ. Поэтому сначала окно с номером заказа и ячейки,
+   * а не действие по одному нажатию.
+   */
+  const [removing, setRemoving] = useState<{ orderNumber: string; cellCode: string } | null>(null);
+
   const withdraw = useMutation({
-    mutationFn: (input: { orderNumber: string; reason: 'REASSEMBLY' | 'WRITE_OFF' }) =>
+    // Причина есть только у изъятия отменённого букета. У простого снятия
+    // с хранения её нет — сервер это отличает и по-разному пишет в историю.
+    mutationFn: (input: { orderNumber: string; reason?: 'REASSEMBLY' | 'WRITE_OFF' }) =>
       client.post<{ orderNumber: string; withdrawn: boolean }>(
         '/api/warehouse/placements/withdraw',
         input,
       ),
     onSuccess: async (result) => {
+      setRemoving(null);
       await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
       showToast(
         result.withdrawn
@@ -1161,6 +1174,8 @@ function PlacementGroups({
         items={groups.storage}
         open={closed.storage !== true}
         onToggle={() => toggle('storage')}
+        onRemove={(orderNumber, cellCode) => setRemoving({ orderNumber, cellCode })}
+        busy={withdraw.isPending}
       />
 
       <PlacementGroup
@@ -1173,6 +1188,50 @@ function PlacementGroups({
       />
 
       {more}
+
+      {/*
+        Подтверждение снятия с хранения.
+
+        В окне ровно то, что человек проверяет перед необратимым действием:
+        какой заказ и из какой ячейки уходит. Повторное нажатие безопасно —
+        сервер идемпотентен, — но спросить всё равно нужно: место освобождается
+        сразу, и ошибку уже не отменить.
+      */}
+      <Modal
+        open={removing !== null}
+        title="Снять с хранения"
+        onClose={() => setRemoving(null)}
+        testId="wh-remove-confirm"
+        footer={
+          removing !== null ? (
+            <div className="row">
+              <Button
+                variant="primary"
+                disabled={withdraw.isPending}
+                data-testid="wh-remove-confirm-submit"
+                onClick={() => withdraw.mutate({ orderNumber: removing.orderNumber })}
+              >
+                {withdraw.isPending ? 'Снимаем…' : 'Снять с хранения'}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={withdraw.isPending}
+                onClick={() => setRemoving(null)}
+              >
+                Отмена
+              </Button>
+            </div>
+          ) : undefined
+        }
+      >
+        {removing !== null && (
+          <p>
+            Снять заказ <strong>{removing.orderNumber}</strong> с хранения из ячейки{' '}
+            <strong>{removing.cellCode}</strong>? Ячейка сразу освободится, а заказ и история
+            останутся.
+          </p>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -1219,6 +1278,7 @@ function PlacementGroup({
   open = true,
   onToggle,
   onWithdraw,
+  onRemove,
   busy,
 }: {
   id: string;
@@ -1228,6 +1288,8 @@ function PlacementGroup({
   open?: boolean;
   onToggle?: () => void;
   onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
+  /** Простое снятие с хранения: одна кнопка и подтверждение с номером и ячейкой. */
+  onRemove?: (orderNumber: string, cellCode: string) => void;
   busy?: boolean;
 }): React.JSX.Element | null {
   if (items.length === 0) {
@@ -1259,6 +1321,7 @@ function PlacementGroup({
           items={items}
           kind={id}
           {...(onWithdraw === undefined ? {} : { onWithdraw })}
+          {...(onRemove === undefined ? {} : { onRemove })}
           {...(busy === undefined ? {} : { busy })}
         />
       )}
@@ -1270,14 +1333,17 @@ function PlacementTable({
   items,
   kind,
   onWithdraw,
+  onRemove,
   busy,
 }: {
   items: PlacedOrderView[];
   /** Вид группы: на телефоне он задаёт поверхность карточки. */
   kind: string;
   onWithdraw?: (orderNumber: string, reason: 'REASSEMBLY' | 'WRITE_OFF') => void;
+  onRemove?: (orderNumber: string, cellCode: string) => void;
   busy?: boolean;
 }): React.JSX.Element {
+  const hasAction = onWithdraw !== undefined || onRemove !== undefined;
   return (
     <div className="table-wrap">
       <table className="table">
@@ -1288,7 +1354,7 @@ function PlacementTable({
             <th>Маршрут</th>
             <th>Ячейка</th>
             <th>Пометки</th>
-            {onWithdraw !== undefined && <th>Снять с хранения</th>}
+            {hasAction && <th>Снять с хранения</th>}
           </tr>
         </thead>
         <tbody>
@@ -1366,6 +1432,23 @@ function PlacementTable({
                       Списать
                     </Button>
                   </div>
+                </td>
+              )}
+              {onRemove !== undefined && (
+                <td>
+                  {/*
+                    Явная кнопка, а не клик по строке: снятие с полки необратимо
+                    для места, и случайно задеть его нельзя. Подтверждение
+                    с номером и ячейкой — в окне выше.
+                  */}
+                  <Button
+                    variant="secondary"
+                    disabled={busy === true}
+                    data-testid="wh-remove-from-storage"
+                    onClick={() => onRemove(item.orderNumber, item.cellCode ?? '')}
+                  >
+                    Снять с хранения
+                  </Button>
                 </td>
               )}
             </tr>
