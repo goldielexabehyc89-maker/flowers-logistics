@@ -63,13 +63,15 @@ export function isPickupOrder(order: {
 }
 
 /**
- * Каким действием менеджер отдал коробку.
+ * Как менеджер вызвал выдачу.
  *
- * Различие не косметическое: ручная выдача разрешена только при включённой
- * общей настройке, и сервер обязан проверить это сам, а не полагаться на
- * спрятанную кнопку.
+ *  * `SCAN`   — обычный путь: отсканирован QR-код заказа;
+ *  * `MANUAL` — ручной ввод номера в поиске; требует включённого ручного ввода;
+ *  * `CARD`   — явная кнопка «Выдан» на карточке ожидающего. Заказ уже перед
+ *    менеджером в его очереди, поэтому настройки ручного ввода этот путь не
+ *    требует; складские проверки готовности при этом не ослабляются.
  */
-export type PickupIssueSource = 'SCAN' | 'MANUAL';
+export type PickupIssueSource = 'SCAN' | 'MANUAL' | 'CARD';
 
 export interface PickupIssueInput {
   orderNumber: string;
@@ -230,6 +232,20 @@ export async function issueToCustomer(
         });
       }
 
+      // Терминальный исход у самовывоза ровно один. Локально отменённый заказ
+      // выдать нельзя: карточку уже убрали из очереди осознанным действием.
+      const cancelled = await tx.orderPickupCancellation.findUnique({
+        where: { orderId: order.id },
+        select: { id: true },
+      });
+      if (cancelled !== null) {
+        throw new AppError('CONFLICT', {
+          message: 'pickup order cancelled locally',
+          publicMessage: 'Самовывоз отменён локально — выдавать нечего.',
+          conflict: { kind: 'PICKUP_CANCELLED_LOCALLY' },
+        });
+      }
+
       const placement = await tx.orderPlacement.findFirst({
         where: { orderId: order.id, releasedAt: null },
         select: { id: true, cell: { select: { id: true, code: true } } },
@@ -310,6 +326,147 @@ export async function issueToCustomer(
         publicMessage: 'Заказ уже выдан покупателю.',
         conflict: { kind: 'PICKUP_ALREADY_ISSUED' },
       });
+    }
+    throw error;
+  }
+}
+
+export interface PickupCancelInput {
+  orderNumber: string;
+}
+
+export interface PickupCancelResult {
+  orderId: string;
+  orderNumber: string;
+  cancellationId: string;
+  cancelledAt: string;
+  /** `true`, если отмена уже была: повтор идемпотентен, дубликата нет. */
+  alreadyCancelled: boolean;
+}
+
+/**
+ * «Отмена» — ЛОКАЛЬНОЕ исключение заказа из очереди самовывоза.
+ *
+ * Это НЕ глобальная отмена заказа и НЕ подтверждённая отмена логиста: статус
+ * заказа не меняется, `state` в МойСклад не уходит, задача синхронизации
+ * состояния не создаётся, бизнес-событие отмены не используется. Заказ, его
+ * импортированные данные и история остаются на месте — исчезает только
+ * карточка ожидающего.
+ *
+ * Долговечно и устойчиво к перезапуску и синхронизациям: строка живёт в базе,
+ * импорт её не трогает, и после повторной синхронизации заказ по-прежнему
+ * скрыт из очереди.
+ *
+ * Терминальный исход у самовывоза ровно один. Все пути — выдача, отмена,
+ * повторные запросы — сериализуются блокировкой строки заказа: первый
+ * подтверждённый результат побеждает, второй получает понятный конфликт,
+ * а повтор той же отмены идемпотентен.
+ */
+export async function cancelPickupLocally(
+  deps: PickupDeps,
+  actor: AuthenticatedActor,
+  input: PickupCancelInput,
+  context: RequestContext,
+): Promise<PickupCancelResult> {
+  try {
+    return await deps.db.$transaction(async (tx: TransactionClient) => {
+      const resolved = await resolveOrderByNumber(tx, input.orderNumber);
+      const order = await lockOrder(tx, resolved.id);
+
+      // Раздел только про самовывоз: доставочный заказ сюда не относится.
+      if (order.deliveryMethodId !== MOYSKLAD_IDS.deliveryMethodPickup) {
+        throw new AppError('CONFLICT', {
+          message: 'order is not a pickup order',
+          publicMessage: 'Это не самовывозный заказ: его везёт курьер.',
+          conflict: { kind: 'ORDER_NOT_PICKUP' },
+        });
+      }
+
+      // Выданный заказ отменить локально нельзя: коробка уже у покупателя.
+      const issued = await tx.orderPickupIssue.findUnique({
+        where: { orderId: order.id },
+        select: { id: true },
+      });
+      if (issued !== null) {
+        throw new AppError('CONFLICT', {
+          message: 'pickup order already issued',
+          publicMessage: 'Заказ уже выдан покупателю — отменять нечего.',
+          conflict: { kind: 'PICKUP_ALREADY_ISSUED' },
+        });
+      }
+
+      // Повтор той же отмены идемпотентен: возвращаем существующую запись,
+      // дубликата не создаём.
+      const existing = await tx.orderPickupCancellation.findUnique({
+        where: { orderId: order.id },
+        select: { id: true, cancelledAt: true },
+      });
+      if (existing !== null) {
+        return {
+          orderId: order.id,
+          orderNumber: order.number,
+          cancellationId: existing.id,
+          cancelledAt: existing.cancelledAt.toISOString(),
+          alreadyCancelled: true,
+        };
+      }
+
+      const created = await tx.orderPickupCancellation.create({
+        data: { orderId: order.id, cancelledById: actor.userId },
+        select: { id: true, cancelledAt: true },
+      });
+
+      await writeAudit(tx, {
+        action: 'PICKUP_CANCELLED_LOCALLY',
+        entityType: 'OrderPickupCancellation',
+        entityId: created.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        source: 'api',
+        oldValue: null,
+        // Только идентификаторы: ни номера, ни получателя. Роль исполнителя
+        // фиксируется здесь же (`actorRoles`), время — в самой записи.
+        newValue: { orderId: order.id },
+        ip: context.ip,
+        userAgent: context.userAgent,
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'pickup.cancelled_locally',
+        audienceRoles: [...PICKUP_AUDIENCE],
+        payload: { orderId: order.id },
+      });
+
+      return {
+        orderId: order.id,
+        orderNumber: order.number,
+        cancellationId: created.id,
+        cancelledAt: created.cancelledAt.toISOString(),
+        alreadyCancelled: false,
+      };
+    });
+  } catch (error) {
+    // Гонку двух одновременных отмен ловит уникальный индекс: проигравший
+    // получает тот же штатный итог, что и обычный повтор, без дубликата.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const existing = await deps.db.orderPickupCancellation.findUnique({
+        where: { orderId: (await resolveOrderByNumber(deps.db, input.orderNumber)).id },
+        select: {
+          id: true,
+          cancelledAt: true,
+          orderId: true,
+          order: { select: { externalName: true } },
+        },
+      });
+      if (existing !== null) {
+        return {
+          orderId: existing.orderId,
+          orderNumber: existing.order.externalName,
+          cancellationId: existing.id,
+          cancelledAt: existing.cancelledAt.toISOString(),
+          alreadyCancelled: true,
+        };
+      }
     }
     throw error;
   }

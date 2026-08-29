@@ -804,6 +804,30 @@ export async function readOrderTimeline(
     );
   }
 
+  // 8b. Локальная отмена самовывоза.
+  //
+  // Явно отделена от глобальной отмены заказа: заказ не отменён в источнике
+  // и статус его не менялся — карточку просто убрали из очереди самовывоза.
+  const pickupCancel = await db.orderPickupCancellation.findUnique({
+    where: { orderId: order.id },
+    select: { id: true, cancelledAt: true, cancelledById: true },
+  });
+  if (pickupCancel !== null) {
+    events.push(
+      event({
+        key: `39:pickup-cancel:${pickupCancel.id}`,
+        at: pickupCancel.cancelledAt,
+        group: 'DELIVERY',
+        kind: 'PICKUP_CANCELLED_LOCALLY',
+        title: 'Самовывоз отменён локально',
+        actor: userActor(pickupCancel.cancelledById),
+        details: [],
+        reverted: false,
+        route: null,
+      }),
+    );
+  }
+
   // 9. Участие в маршрутных листах.
   const participations = await db.routeOrder.findMany({
     where: { orderId: order.id },

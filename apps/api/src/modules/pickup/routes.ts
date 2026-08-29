@@ -18,7 +18,12 @@ import type { AppConfig } from '../../platform/config.js';
 import { authenticateWithRoles } from '../auth/guards.js';
 import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import { MAX_ORDER_NUMBER_LENGTH } from '../warehouse/order-lookup.js';
-import { PICKUP_ROLES, issueToCustomer, type RequestContext } from './service.js';
+import {
+  PICKUP_ROLES,
+  issueToCustomer,
+  cancelPickupLocally,
+  type RequestContext,
+} from './service.js';
 import {
   findPickupByNumber,
   listIssuedOfDay,
@@ -39,8 +44,10 @@ const scanQuerySchema = z.object({ number: numberSchema });
  */
 const issueSchema = z.object({
   orderNumber: numberSchema,
-  source: z.enum(['SCAN', 'MANUAL']),
+  source: z.enum(['SCAN', 'MANUAL', 'CARD']),
 });
+
+const cancelSchema = z.object({ orderNumber: numberSchema });
 
 const queueQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_QUEUE_PAGE_SIZE).optional(),
@@ -107,6 +114,25 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
       { db: deps.db },
       actor,
       { orderNumber: body.orderNumber, source: body.source },
+      contextOf(request),
+    );
+  });
+
+  /**
+   * «Отмена» — ЛОКАЛЬНОЕ исключение заказа из очереди самовывоза.
+   *
+   * Не глобальная отмена: статус заказа не меняется, в МойСклад ничего не
+   * уходит, задача синхронизации состояния не создаётся. Права те же, что
+   * у выдачи; посторонний получает 403 ещё на входе.
+   */
+  app.post('/api/pickup/cancellations', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, PICKUP_ROLES);
+    const body = cancelSchema.parse(request.body);
+
+    return cancelPickupLocally(
+      { db: deps.db },
+      actor,
+      { orderNumber: body.orderNumber },
       contextOf(request),
     );
   });

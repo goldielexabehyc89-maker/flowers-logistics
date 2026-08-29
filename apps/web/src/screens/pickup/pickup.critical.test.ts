@@ -16,8 +16,10 @@ import {
   canIssue,
   cellLabel,
   dayLabel,
+  pickupTimeLabel,
   primaryBlocker,
   printLabel,
+  type DeliveryIntervalView,
   type PickupCard,
 } from './pickup';
 
@@ -35,10 +37,19 @@ function card(overrides: Partial<PickupCard> = {}): PickupCard {
     cellCode: 'S-01',
     issuedAt: null,
     issuedById: null,
+    deliveryInterval: { kind: 'MISSING', startMinute: null, endMinute: null, raw: null },
     blockers: [],
     ...overrides,
   };
 }
+
+const interval = (o: Partial<DeliveryIntervalView>): DeliveryIntervalView => ({
+  kind: 'MISSING',
+  startMinute: null,
+  endMinute: null,
+  raw: null,
+  ...o,
+});
 
 describe('готовность к выдаче', () => {
   it('выдавать можно ровно тогда, когда причин отказа нет', () => {
@@ -63,6 +74,32 @@ describe('готовность к выдаче', () => {
       'ORDER_BLOCKED',
       'ORDER_CANCELLED',
     ]);
+  });
+});
+
+describe('время доставки на карточке', () => {
+  it('точное время — предлог «к» без придуманного окна', () => {
+    expect(pickupTimeLabel(interval({ kind: 'EXACT', startMinute: 600 }))).toBe('к 10:00');
+  });
+
+  it('диапазон — начало и конец через тире', () => {
+    expect(pickupTimeLabel(interval({ kind: 'RANGE', startMinute: 600, endMinute: 720 }))).toBe(
+      '10:00–12:00',
+    );
+  });
+
+  it('отсутствующее время названо честно, а не пустым местом', () => {
+    expect(pickupTimeLabel(interval({ kind: 'MISSING' }))).toBe('Время не указано');
+  });
+
+  it('нераспознанное время показывает исходную строку источника', () => {
+    expect(pickupTimeLabel(interval({ kind: 'UNRECOGNIZED', raw: 'после обеда' }))).toBe(
+      'Время не распознано: «после обеда»',
+    );
+    // Без исходной строки — общая отметка, а не пустое место.
+    expect(pickupTimeLabel(interval({ kind: 'UNRECOGNIZED', raw: null }))).toBe(
+      'Время не распознано',
+    );
   });
 });
 

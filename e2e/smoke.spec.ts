@@ -8064,6 +8064,58 @@ test('самовывоз: очередь без привязки к дню, сч
   ).toBeVisible();
 });
 
+/*
+ * Карточка самовывоза: время доставки и ручные действия «Выдан» и «Отмена».
+ *
+ * «Выдан» отдаёт коробку через существующую выдачу; «Отмена» локально убирает
+ * карточку из очереди, не трогая заказ и не уходя в МойСклад.
+ */
+test('самовывоз: время на карточке, кнопки «Выдан» и «Отмена» с подтверждением', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const stand = seedPickupStand();
+
+  await login(page, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await expect(page.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+
+  const rowOf = (number: string): Locator =>
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${number}"]`);
+
+  // 1. Время доставки показано у каждой карточки. У стенда его нет — значит
+  //    честная отметка «Время не указано», а не пустое место.
+  const todayRow = rowOf(stand['заказ сегодня'] ?? '');
+  await expect(todayRow).toContainText('Время не указано');
+
+  // 2. «Выдан» требует подтверждения с номером заказа и выдаёт через обычную выдачу.
+  await todayRow.getByTestId('pickup-row-issue').click();
+  const issueDialog = page.getByRole('dialog');
+  await expect(issueDialog).toContainText(stand['заказ сегодня'] ?? '');
+  await issueDialog.getByRole('button', { name: 'Выдан покупателю' }).click();
+
+  // Ушёл из ожидающих без F5 и появился среди выданных.
+  await expect(rowOf(stand['заказ сегодня'] ?? '')).toHaveCount(0);
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: stand['заказ сегодня'] ?? '' }),
+  ).toBeVisible();
+
+  // 3. «Отмена» — локальное исключение из очереди с подтверждением.
+  const cancelTarget = stand['заказ без ячейки'] ?? '';
+  await expect(rowOf(cancelTarget)).toBeVisible();
+  await rowOf(cancelTarget).getByTestId('pickup-row-cancel').click();
+  const cancelDialog = page.getByRole('dialog');
+  await expect(cancelDialog).toContainText(cancelTarget);
+  await cancelDialog.getByRole('button', { name: 'Отменить самовывоз' }).click();
+
+  // Карточка ушла из очереди без F5 и в справку выданных НЕ попала.
+  await expect(rowOf(cancelTarget)).toHaveCount(0);
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: cancelTarget }),
+  ).toHaveCount(0);
+});
+
 /**
  * Двойник камеры для прилавка.
  *

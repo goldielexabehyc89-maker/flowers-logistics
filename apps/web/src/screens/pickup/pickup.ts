@@ -6,10 +6,22 @@
  * «ещё не привезли со сборки» вместо пустого места здесь важнее любой анимации.
  */
 
+import { formatMinutesOfDay } from '@fl/shared';
+
 export type PickupBlocker =
   'NOT_PICKUP' | 'ORDER_CANCELLED' | 'ORDER_BLOCKED' | 'NOT_PLACED' | 'ALREADY_ISSUED';
 
 export type AssemblyState = 'NEW' | 'IN_ASSEMBLY' | 'ASSEMBLED' | 'NEEDS_REVIEW';
+
+/** Тип интервала доставки — тот же, что разобрал импорт. Второго парсера нет. */
+export type DeliveryIntervalKind = 'MISSING' | 'RANGE' | 'EXACT' | 'UNRECOGNIZED';
+
+export interface DeliveryIntervalView {
+  kind: DeliveryIntervalKind;
+  startMinute: number | null;
+  endMinute: number | null;
+  raw: string | null;
+}
 
 export interface PickupCard {
   orderId: string;
@@ -24,7 +36,35 @@ export interface PickupCard {
   cellCode: string | null;
   issuedAt: string | null;
   issuedById: string | null;
+  deliveryInterval: DeliveryIntervalView;
   blockers: PickupBlocker[];
+}
+
+/**
+ * Время доставки словами — тем же общим форматтером минут, что и везде.
+ *
+ *  * точное время — `к 10:00`;
+ *  * диапазон — `10:00–12:00`;
+ *  * отсутствующее — `Время не указано`;
+ *  * нераспознанное — отметка с исходной строкой источника.
+ *
+ * Собственного разбора времени здесь нет: тип и минуты приходят с сервера,
+ * разобранные единым импортом.
+ */
+export function pickupTimeLabel(interval: DeliveryIntervalView): string {
+  if (interval.kind === 'EXACT' && interval.startMinute !== null) {
+    // Точное время не достраивается в окно: «к 14:00» и «14:00–18:00» —
+    // разные обещания покупателю.
+    return `к ${formatMinutesOfDay(interval.startMinute)}`;
+  }
+  if (interval.kind === 'RANGE' && interval.startMinute !== null && interval.endMinute !== null) {
+    return `${formatMinutesOfDay(interval.startMinute)}–${formatMinutesOfDay(interval.endMinute)}`;
+  }
+  if (interval.kind === 'UNRECOGNIZED') {
+    const raw = interval.raw?.trim();
+    return raw ? `Время не распознано: «${raw}»` : 'Время не распознано';
+  }
+  return 'Время не указано';
 }
 
 /**
