@@ -29,8 +29,13 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from '../warehouse/service.js';
 import { receiveOrder, type FlowDeps } from '../warehouse/placement.js';
-import { isPickupOrder, issueToCustomer, type PickupDeps } from './service.js';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { cancelPickupLocally, isPickupOrder, issueToCustomer, type PickupDeps } from './service.js';
 import { findPickupByNumber, listIssuedOfDay, listPickupQueue } from './views.js';
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 let ctx: TestContext;
 let pickup: PickupDeps;
@@ -166,6 +171,22 @@ async function activeCellOf(orderId: string): Promise<string | null> {
     select: { cellId: true },
   });
   return row?.cellId ?? null;
+}
+
+async function setManualEntry(enabled: boolean): Promise<void> {
+  const { readWarehouseManualEntry, saveWarehouseManualEntry } =
+    await import('../settings/service.js');
+  const admin = await actorFor(['ADMIN']);
+  const current = await readWarehouseManualEntry(ctx.db);
+  if (current.value.enabled === enabled) {
+    return;
+  }
+  await saveWarehouseManualEntry(ctx.db, admin, {
+    value: { enabled },
+    expectedVersion: current.version,
+    ip: null,
+    userAgent: null,
+  });
 }
 
 // --- 1. Идентичность самовывоза ----------------------------------------------
@@ -731,5 +752,307 @@ describe('след выдачи', () => {
     expect(payload).not.toContain(order.number);
     expect(payload).not.toContain(cell.code);
     expect([...event.audienceRoles].sort()).toEqual(['ADMIN', 'MANAGER']);
+  });
+});
+
+// --- Локальная отмена самовывоза ---------------------------------------------
+
+/** Есть ли строка состояния синхронизации у заказа. `null` — событий не было. */
+async function moyskladStateOf(orderId: string): Promise<{ enqueuedSeq: number } | null> {
+  return ctx.db.orderMoyskladState.findUnique({
+    where: { orderId },
+    select: { enqueuedSeq: true },
+  });
+}
+
+async function isInQueue(orderNumber: string): Promise<boolean> {
+  const page = await listPickupQueue(ctx.db, { limit: 200 });
+  return page.items.some((item) => item.orderNumber === orderNumber);
+}
+
+describe('локальная отмена самовывоза', () => {
+  it('убирает карточку из очереди, сохраняя заказ, данные и историю', async () => {
+    const { order } = await placed();
+    const manager = await actorFor(['MANAGER']);
+
+    expect(await isInQueue(order.number)).toBe(true);
+
+    const result = await cancelPickupLocally(
+      pickup,
+      manager,
+      { orderNumber: order.number },
+      CONTEXT,
+    );
+    expect(result.alreadyCancelled).toBe(false);
+
+    // Ушёл из очереди.
+    expect(await isInQueue(order.number)).toBe(false);
+
+    // Сам заказ, его импортированные данные и статус на месте: локальная отмена
+    // их не трогает.
+    const kept = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { cancelledInSource: true, cancelledByLogistAt: true, externalStateId: true },
+    });
+    expect(kept.cancelledInSource).toBe(false);
+    expect(kept.cancelledByLogistAt).toBeNull();
+    expect(kept.externalStateId).toBeNull();
+
+    // В истории заказа — явная строка «Самовывоз отменён локально».
+    const cancellation = await ctx.db.orderPickupCancellation.findUnique({
+      where: { orderId: order.id },
+      select: { cancelledById: true, cancelledAt: true },
+    });
+    expect(cancellation?.cancelledById).toBe(manager.userId);
+    expect(cancellation?.cancelledAt).toBeInstanceOf(Date);
+  });
+
+  it('повтор отмены идемпотентен: тот же итог, без второй записи', async () => {
+    const { order } = await placed();
+    const manager = await actorFor(['MANAGER']);
+
+    const first = await cancelPickupLocally(
+      pickup,
+      manager,
+      { orderNumber: order.number },
+      CONTEXT,
+    );
+    const second = await cancelPickupLocally(
+      pickup,
+      manager,
+      { orderNumber: order.number },
+      CONTEXT,
+    );
+    expect(first.alreadyCancelled).toBe(false);
+    expect(second.alreadyCancelled).toBe(true);
+    expect(second.cancellationId).toBe(first.cancellationId);
+
+    const count = await ctx.db.orderPickupCancellation.count({ where: { orderId: order.id } });
+    expect(count).toBe(1);
+  });
+
+  it('переживает повторную синхронизацию: заказ остаётся скрытым', async () => {
+    const { order } = await placed();
+    const manager = await actorFor(['MANAGER']);
+    await cancelPickupLocally(pickup, manager, { orderNumber: order.number }, CONTEXT);
+    expect(await isInQueue(order.number)).toBe(false);
+
+    // Импорт обновил заказ (пришла delta): отмена — отдельная строка, её импорт
+    // не трогает, поэтому заказ по-прежнему вне очереди.
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { externalUpdated: new Date('2027-06-20T00:00:00.000Z') },
+    });
+    expect(await isInQueue(order.number)).toBe(false);
+  });
+
+  it('терминальный исход один: отменённый нельзя выдать, выданный нельзя отменить', async () => {
+    // Отмена, затем выдача — выдача отказывает.
+    const a = await placed();
+    const manager = await actorFor(['MANAGER']);
+    await cancelPickupLocally(pickup, manager, { orderNumber: a.order.number }, CONTEXT);
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: a.order.number, source: 'CARD' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'PICKUP_CANCELLED_LOCALLY' } });
+
+    // Выдача, затем отмена — отмена отказывает.
+    const b = await placed();
+    await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: b.order.number, source: 'CARD' },
+      CONTEXT,
+    );
+    await expect(
+      cancelPickupLocally(pickup, manager, { orderNumber: b.order.number }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'PICKUP_ALREADY_ISSUED' } });
+  });
+
+  it('одновременные выдача и отмена дают ровно один итог', async () => {
+    const { order } = await placed();
+    const manager = await actorFor(['MANAGER']);
+
+    const results = await Promise.allSettled([
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'CARD' }, CONTEXT),
+      cancelPickupLocally(pickup, manager, { orderNumber: order.number }, CONTEXT),
+    ]);
+
+    const issued = await ctx.db.orderPickupIssue.count({ where: { orderId: order.id } });
+    const cancelled = await ctx.db.orderPickupCancellation.count({ where: { orderId: order.id } });
+    // Ровно один терминальный факт: либо выдача, либо отмена, но не оба.
+    expect(issued + cancelled).toBe(1);
+    // Один из запросов победил, второй — понятный конфликт, а не второй факт.
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+  });
+
+  it('выдача с карточки не требует ручного ввода, но не обходит готовность', async () => {
+    // Ручной ввод выключен — карточная выдача всё равно работает для готового.
+    await setManualEntry(false);
+    const { order, cell } = await placed();
+    const manager = await actorFor(['MANAGER']);
+    const result = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: order.number, source: 'CARD' },
+      CONTEXT,
+    );
+    expect(result.cellCode).toBe(cell.code);
+
+    // А неготовый (без фактической ячейки) — отказ по складской проверке.
+    const notPlaced = await seedOrder();
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: notPlaced.number, source: 'CARD' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
+  });
+
+  it('право такое же, как у выдачи: посторонний получает 403', async () => {
+    const { order } = await placed();
+    for (const roles of [['WAREHOUSE'], ['FLORIST'], ['COURIER'], ['LOGISTICIAN']] as const) {
+      const token = await tokenFor([...roles]);
+      const denied = await call('POST', '/api/pickup/cancellations', token, {
+        orderNumber: order.number,
+      });
+      expect(denied.statusCode, roles.join(',')).toBe(403);
+    }
+    // Аноним — 401.
+    const anon = await call('POST', '/api/pickup/cancellations', null, {
+      orderNumber: order.number,
+    });
+    expect(anon.statusCode).toBe(401);
+
+    // Разрешённые роли проходят.
+    for (const roles of [['MANAGER'], ['ADMIN'], ['SUPERVISOR']] as const) {
+      const fresh = await placed();
+      const token = await tokenFor([...roles]);
+      const ok = await call('POST', '/api/pickup/cancellations', token, {
+        orderNumber: fresh.order.number,
+      });
+      expect(ok.statusCode, roles.join(',')).toBe(200);
+    }
+  });
+});
+
+// --- Время доставки на карточке ----------------------------------------------
+
+describe('карточка: время доставки', () => {
+  async function intervalOf(orderId: string, orderNumber: string) {
+    const card = await findPickupByNumber(ctx.db, orderNumber);
+    expect(card.orderId).toBe(orderId);
+    return card.deliveryInterval;
+  }
+
+  it('точное время', async () => {
+    const order = await seedOrder();
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { intervalKind: 'EXACT', intervalStartMinute: 600, intervalEndMinute: null },
+    });
+    expect(await intervalOf(order.id, order.number)).toMatchObject({
+      kind: 'EXACT',
+      startMinute: 600,
+    });
+  });
+
+  it('диапазон', async () => {
+    const order = await seedOrder();
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { intervalKind: 'RANGE', intervalStartMinute: 600, intervalEndMinute: 720 },
+    });
+    expect(await intervalOf(order.id, order.number)).toMatchObject({
+      kind: 'RANGE',
+      startMinute: 600,
+      endMinute: 720,
+    });
+  });
+
+  it('отсутствующее время', async () => {
+    const order = await seedOrder();
+    // По умолчанию intervalKind = MISSING.
+    expect(await intervalOf(order.id, order.number)).toMatchObject({ kind: 'MISSING' });
+  });
+
+  it('нераспознанное время сохраняет исходную строку', async () => {
+    const order = await seedOrder();
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { intervalKind: 'UNRECOGNIZED', intervalRaw: 'после обеда' },
+    });
+    expect(await intervalOf(order.id, order.number)).toMatchObject({
+      kind: 'UNRECOGNIZED',
+      raw: 'после обеда',
+    });
+  });
+
+  it('ручной интервал логиста сильнее источника', async () => {
+    const order = await seedOrder();
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        intervalKind: 'RANGE',
+        intervalStartMinute: 600,
+        intervalEndMinute: 720,
+        manualIntervalStartMinute: 900,
+        manualIntervalEndMinute: 1020,
+        manualIntervalSetAt: new Date(),
+      },
+    });
+    expect(await intervalOf(order.id, order.number)).toMatchObject({
+      kind: 'RANGE',
+      startMinute: 900,
+      endMinute: 1020,
+    });
+  });
+});
+
+// --- Защита МоегоСклада ------------------------------------------------------
+
+describe('самовывоз не пишет в МойСклад', () => {
+  it('выдача и локальная отмена не создают ни задачи состояния, ни строки синхронизации', async () => {
+    const before = await ctx.db.outboxMessage.count({ where: { topic: 'moysklad.order_state' } });
+
+    const manager = await actorFor(['MANAGER']);
+
+    const issuedOrder = await placed();
+    await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: issuedOrder.order.number, source: 'CARD' },
+      CONTEXT,
+    );
+
+    const cancelledOrder = await placed();
+    await cancelPickupLocally(
+      pickup,
+      manager,
+      { orderNumber: cancelledOrder.order.number },
+      CONTEXT,
+    );
+
+    // Ни у выданного, ни у локально отменённого нет строки состояния синхронизации:
+    // задача order_state не ставилась, состояние в МойСклад не уходило.
+    expect(await moyskladStateOf(issuedOrder.order.id)).toBeNull();
+    expect(await moyskladStateOf(cancelledOrder.order.id)).toBeNull();
+
+    // Общее число задач синхронизации состояния не изменилось.
+    const after = await ctx.db.outboxMessage.count({ where: { topic: 'moysklad.order_state' } });
+    expect(after).toBe(before);
+  });
+
+  it('модуль самовывоза не связан с синхронизацией состояния и клиентом МоегоСклада', async () => {
+    // Флаг MOYSKLAD_ORDER_STATE_SYNC_ENABLED живёт в клиенте МоегоСклада,
+    // которого модуль самовывоза не касается вовсе: включение флага изменить
+    // поведение выдачи и отмены не может по построению. Доказывается по исходнику.
+    const source = await readFile(path.join(MODULE_DIR, 'service.js'), 'utf8').catch(() =>
+      readFile(path.join(MODULE_DIR, 'service.ts'), 'utf8'),
+    );
+    expect(source).not.toContain('state-sync');
+    expect(source).not.toContain('enqueueOrderStateSync');
+    expect(source).not.toContain('orderMoyskladState');
+    expect(source).not.toContain('MoyskladClient');
+    expect(source).not.toContain('MOYSKLAD_ORDER_STATE_SYNC_ENABLED');
   });
 });

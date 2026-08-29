@@ -22,6 +22,7 @@ import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
 import {
   Button,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -37,6 +38,7 @@ import {
   canIssue,
   cellLabel,
   dayLabel,
+  pickupTimeLabel,
   primaryBlocker,
   printLabel,
   type PickupCard,
@@ -57,6 +59,10 @@ export function PickupScreen(): React.JSX.Element {
   const [manualOpen, setManualOpen] = useState(false);
   const [numberInput, setNumberInput] = useState('');
   const [card, setCard] = useState<PickupCard | null>(null);
+  /** Подтверждение выдачи или локальной отмены по конкретной карточке. */
+  const [confirm, setConfirm] = useState<{ kind: 'issue' | 'cancel'; card: PickupCard } | null>(
+    null,
+  );
   /** Сколько страниц очереди уже показано. Продолжение, а не «все сразу». */
   const [cursors, setCursors] = useState<string[]>([]);
 
@@ -102,17 +108,19 @@ export function PickupScreen(): React.JSX.Element {
   });
 
   const issue = useMutation({
-    mutationFn: (input: { orderNumber: string; source: 'SCAN' | 'MANUAL' }) =>
+    mutationFn: (input: { orderNumber: string; source: 'SCAN' | 'MANUAL' | 'CARD' }) =>
       client.post<{ orderNumber: string; cellCode: string }>('/api/pickup/issues', input),
     onSuccess: async (result) => {
       setCard(null);
       setManualOpen(false);
+      setConfirm(null);
       await refresh();
       showToast(`Заказ ${result.orderNumber} выдан покупателю`, 'success');
     },
     onError: async (error: unknown) => {
       // Карточка перезапрашивается: причина отказа могла появиться прямо сейчас
       // (заказ выдал другой менеджер, пришла отмена, коробку сняли с полки).
+      setConfirm(null);
       reportError(error, 'Не удалось отметить выдачу.');
       if (card !== null) {
         lookup.mutate(card.orderNumber);
@@ -120,6 +128,28 @@ export function PickupScreen(): React.JSX.Element {
       await refresh();
     },
   });
+
+  /**
+   * Локальная отмена самовывоза: карточка уходит из очереди, но заказ, его
+   * данные и история остаются, и в МойСклад ничего не уходит.
+   */
+  const cancel = useMutation({
+    mutationFn: (input: { orderNumber: string }) =>
+      client.post<{ orderNumber: string }>('/api/pickup/cancellations', input),
+    onSuccess: async (result) => {
+      setCard(null);
+      setConfirm(null);
+      await refresh();
+      showToast(`Самовывоз ${result.orderNumber} отменён локально`, 'success');
+    },
+    onError: async (error: unknown) => {
+      setConfirm(null);
+      reportError(error, 'Не удалось отменить самовывоз.');
+      await refresh();
+    },
+  });
+
+  const actionBusy = issue.isPending || cancel.isPending;
 
   return (
     <section className="stack">
@@ -263,22 +293,28 @@ export function PickupScreen(): React.JSX.Element {
         ) : (
           <ul className="pickup-queue">
             {queue.data.items.map((item) => (
-              <li key={item.orderId}>
+              <li
+                key={item.orderId}
+                className="pickup-item"
+                data-testid="pickup-waiting-row"
+                data-order-number={item.orderNumber}
+              >
                 {/*
-                  Вся строка нажимается: за прилавком целятся в кнопку одной
-                  рукой, держа коробку другой.
+                  Область сведений открывает карточку заказа; действия — рядом
+                  отдельными кнопками, чтобы «Выдан» и «Отмена» не срабатывали
+                  случайным касанием строки.
                 */}
                 <button
                   type="button"
                   className="pickup-row"
-                  data-testid="pickup-waiting-row"
-                  data-order-number={item.orderNumber}
+                  data-testid="pickup-row-open"
                   onClick={() => setCard(item)}
                 >
                   <span className="pickup-row__main">
                     <strong>{item.orderNumber}</strong>
                     <span className="muted text-sm">
-                      {dayLabel(item)} · {cellLabel(item)}
+                      {dayLabel(item)} · {pickupTimeLabel(item.deliveryInterval)} ·{' '}
+                      {cellLabel(item)}
                     </span>
                   </span>
                   <span className="pickup-row__badges">
@@ -291,6 +327,34 @@ export function PickupScreen(): React.JSX.Element {
                     )}
                   </span>
                 </button>
+
+                <div className="pickup-row__actions">
+                  {/*
+                    «Выдан» доступен только для готового к выдаче заказа. Причину
+                    отказа называет бейдж строки — складские проверки не обходятся.
+                  */}
+                  <Button
+                    variant="primary"
+                    data-testid="pickup-row-issue"
+                    disabled={!canIssue(item) || actionBusy}
+                    title={canIssue(item) ? undefined : (primaryBlocker(item) ?? undefined)}
+                    onClick={() => setConfirm({ kind: 'issue', card: item })}
+                  >
+                    Выдан
+                  </Button>
+                  {/*
+                    «Отмена» — локальное исключение из очереди: доступно всегда,
+                    даже для ещё не готового заказа.
+                  */}
+                  <Button
+                    variant="ghost"
+                    data-testid="pickup-row-cancel"
+                    disabled={actionBusy}
+                    onClick={() => setConfirm({ kind: 'cancel', card: item })}
+                  >
+                    Отмена
+                  </Button>
+                </div>
               </li>
             ))}
           </ul>
@@ -372,6 +436,43 @@ export function PickupScreen(): React.JSX.Element {
             }
           }}
           onClose={() => setScanning(false)}
+        />
+      )}
+
+      {/*
+        Подтверждение с номером заказа перед каждым терминальным действием.
+        «Выдан» отдаёт коробку, «Отмена» локально убирает карточку из очереди —
+        оба необратимы, и случайное касание не должно их запускать.
+      */}
+      {confirm !== null && (
+        <ConfirmDialog
+          open
+          title={confirm.kind === 'issue' ? 'Выдать заказ покупателю?' : 'Отменить самовывоз?'}
+          description={
+            confirm.kind === 'issue' ? (
+              <>
+                Заказ <strong>{confirm.card.orderNumber}</strong> будет отмечен выданным покупателю.
+                Действие необратимо.
+              </>
+            ) : (
+              <>
+                Самовывоз заказа <strong>{confirm.card.orderNumber}</strong> будет убран из очереди
+                локально. Сам заказ, его данные и история сохраняются, статус в источнике не
+                меняется.
+              </>
+            )
+          }
+          confirmLabel={confirm.kind === 'issue' ? 'Выдан покупателю' : 'Отменить самовывоз'}
+          destructive={confirm.kind === 'cancel'}
+          busy={actionBusy}
+          onConfirm={() => {
+            if (confirm.kind === 'issue') {
+              issue.mutate({ orderNumber: confirm.card.orderNumber, source: 'CARD' });
+            } else {
+              cancel.mutate({ orderNumber: confirm.card.orderNumber });
+            }
+          }}
+          onCancel={() => setConfirm(null)}
         />
       )}
     </section>

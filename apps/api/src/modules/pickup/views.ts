@@ -65,6 +65,18 @@ export interface PickupCard {
   cellCode: string | null;
   issuedAt: string | null;
   issuedById: string | null;
+  /**
+   * Время доставки: тип, минуты и исходная строка.
+   *
+   * Второго парсера времени здесь нет — значения разобраны единым импортом
+   * и хранятся в заказе. Клиент показывает их общим форматтером.
+   */
+  deliveryInterval: {
+    kind: $Enums.DeliveryIntervalKind;
+    startMinute: number | null;
+    endMinute: number | null;
+    raw: string | null;
+  };
   /** Пусто — заказ можно выдавать. */
   blockers: PickupBlocker[];
 }
@@ -81,6 +93,12 @@ const ORDER_SELECT = {
   cancelledByLogistAt: true,
   fulfillmentProcessState: true,
   fulfillmentAssembledAt: true,
+  intervalRaw: true,
+  intervalKind: true,
+  intervalStartMinute: true,
+  intervalEndMinute: true,
+  manualIntervalStartMinute: true,
+  manualIntervalEndMinute: true,
   placements: {
     where: { releasedAt: null },
     select: { cell: { select: { id: true, code: true } } },
@@ -103,6 +121,12 @@ type OrderRow = {
   cancelledByLogistAt: Date | null;
   fulfillmentProcessState: $Enums.OrderFulfillmentProcessState;
   fulfillmentAssembledAt: Date | null;
+  intervalRaw: string | null;
+  intervalKind: $Enums.DeliveryIntervalKind;
+  intervalStartMinute: number | null;
+  intervalEndMinute: number | null;
+  manualIntervalStartMinute: number | null;
+  manualIntervalEndMinute: number | null;
   placements: { cell: { id: string; code: string } }[];
   printJobs: { state: $Enums.PrintJobState }[];
   pickupIssue: { issuedAt: Date; issuedById: string; cell: { id: string; code: string } } | null;
@@ -168,7 +192,33 @@ function toCard(order: OrderRow): PickupCard {
     cellCode: placement?.cell.code ?? order.pickupIssue?.cell.code ?? null,
     issuedAt: order.pickupIssue?.issuedAt.toISOString() ?? null,
     issuedById: order.pickupIssue?.issuedById ?? null,
+    deliveryInterval: effectivePickupInterval(order),
     blockers,
+  };
+}
+
+/**
+ * Фактический интервал доставки заказа.
+ *
+ * Ручное исправление логиста сильнее текста источника — то же правило, что
+ * в «Сделках». Второго парсера здесь нет: тип, минуты и исходная строка уже
+ * разобраны единым импортом и просто читаются из заказа.
+ */
+function effectivePickupInterval(order: OrderRow): PickupCard['deliveryInterval'] {
+  if (order.manualIntervalStartMinute !== null && order.manualIntervalEndMinute !== null) {
+    const exact = order.manualIntervalStartMinute === order.manualIntervalEndMinute;
+    return {
+      kind: exact ? 'EXACT' : 'RANGE',
+      startMinute: order.manualIntervalStartMinute,
+      endMinute: exact ? null : order.manualIntervalEndMinute,
+      raw: order.intervalRaw,
+    };
+  }
+  return {
+    kind: order.intervalKind,
+    startMinute: order.intervalStartMinute,
+    endMinute: order.intervalEndMinute,
+    raw: order.intervalRaw,
   };
 }
 
@@ -264,6 +314,9 @@ export async function listPickupQueue(
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
+      -- Локально отменённый самовывоз убран из очереди навсегда: строка живёт
+      -- в базе и переживает перезапуск и повторные синхронизации.
+      AND NOT EXISTS (SELECT 1 FROM "OrderPickupCancellation" c WHERE c."orderId" = o."id")
       -- Наличие ячейки больше НЕ условие показа: самовывоз виден сразу после
       -- импорта. До приёмки складом у него не будет активного размещения —
       -- карточка назовёт это причиной «нет ячейки», но заказ не спрячется.

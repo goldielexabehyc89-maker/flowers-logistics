@@ -51,6 +51,35 @@
   gap: 4px;
 }
 
+/* Строка = сведения (кнопка открытия) + действия рядом. */
+.pickup-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.pickup-item > .pickup-row {
+  flex: 1 1 260px;
+}
+
+.pickup-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* На узком экране действия уезжают под сведения во всю ширину. */
+@media (max-width: 767px) {
+  .pickup-row__actions {
+    flex: 1 1 100%;
+  }
+
+  .pickup-row__actions > * {
+    flex: 1 1 auto;
+  }
+}
+
 /*
  * Очередь — плитки во вдавленном лотке.
  *

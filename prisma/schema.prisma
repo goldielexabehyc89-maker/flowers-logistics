@@ -145,6 +145,7 @@ model User {
   unboundRouteCells     RouteCellBinding[]            @relation("RouteCellReleasedBy")
   issuedRoutes          RouteIssueSession[]           @relation("IssueSessionCourier")
   pickupIssues          OrderPickupIssue[]            @relation("PickupIssuedBy")
+  pickupCancellations   OrderPickupCancellation[]    @relation("PickupCancelledBy")
   confirmedIssues       RouteIssueSession[]           @relation("IssueSessionConfirmedBy")
   cancelledIssues       RouteIssueSession[]           @relation("IssueSessionCancelledBy")
   deliveryAttempts      DeliveryAttempt[]             @relation("DeliveryAttemptCourier")
@@ -854,6 +855,7 @@ model DeliveryOrder {
   placements           OrderPlacement[]
   issueChecks          RouteIssueCheck[]
   pickupIssue          OrderPickupIssue?
+  pickupCancellation   OrderPickupCancellation?
   printForms           OrderPrintForm[]
   printJobs            OrderPrintJob[]
   deliveryAttempts     DeliveryAttempt[]
@@ -2506,6 +2508,32 @@ model OrderPickupIssue {
   issuedBy   User     @relation("PickupIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([issuedAt])
+}
+
+/// Локальная отмена самовывоза.
+///
+/// Исключение заказа ИЗ ОЧЕРЕДИ САМОВЫВОЗА и ничего больше. Это НЕ глобальная
+/// отмена заказа: статус заказа не меняется, `state` в МойСклад не уходит,
+/// задача синхронизации состояния не создаётся. Заказ, его импортированные
+/// данные и история сохраняются — исчезает только карточка ожидающего.
+///
+/// Долговечно и устойчиво к перезапуску и синхронизациям: строка живёт в базе,
+/// а импорт её не трогает, поэтому после повторной синхронизации заказ
+/// по-прежнему скрыт из очереди. Одна отмена на заказ — гарантируется
+/// уникальным индексом; терминальный исход у самовывоза ровно один: либо
+/// выдача (`OrderPickupIssue`), либо эта локальная отмена.
+model OrderPickupCancellation {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @unique @db.Uuid
+  order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Серверное время: спор о том, когда карточку убрали, решается этим полем.
+  cancelledAt   DateTime @default(now())
+  cancelledById String   @db.Uuid
+  cancelledBy   User     @relation("PickupCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([cancelledAt])
 }
 
 /// Справочник причин недоставки.

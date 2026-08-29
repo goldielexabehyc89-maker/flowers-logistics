@@ -378,6 +378,7 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['logistics-history'],
   ],
   'pickup.issued': [...PICKUP_SCREEN, ['warehouse-placements']],
+  'pickup.cancelled_locally': [...PICKUP_SCREEN],
   /*
    * Настройка ручного ввода меняет оба рабочих места сразу: у кладовщика
    * появляется поле номера, у менеджера — ручная выдача.
@@ -435,6 +436,7 @@ const ORDER_TIMELINE_TOPICS = new Set<string>([
   'delivery.result_recorded',
   'delivery.result_cancelled',
   'pickup.issued',
+  'pickup.cancelled_locally',
 ]);
 
 const ORDER_TIMELINE_KEY: string[] = ['order-timeline'];
