@@ -7,7 +7,26 @@
 
 import { REALTIME_TOPICS } from '@fl/shared';
 import { describe, expect, it } from 'vitest';
-import { collapseToFirstPage, invalidationKeysFor } from './stream';
+import { collapseToFirstPage, endsSession, invalidationKeysFor } from './stream';
+
+describe('завершение сессии', () => {
+  it('текущую сессию завершает ТОЛЬКО адресный session-closed', () => {
+    expect(endsSession('session-closed')).toBe(true);
+  });
+
+  it('историческое журнальное session.revoked живой вход не завершает', () => {
+    // Регрессия: доставка архива с прошлым session.revoked не должна выкидывать
+    // новую действующую сессию.
+    expect(endsSession('session.revoked')).toBe(false);
+    // И оно не перезапрашивает клиент: ключей на обновление у него нет.
+    expect(invalidationKeysFor('session.revoked')).toEqual([]);
+  });
+
+  it('обычные события сессию не трогают', () => {
+    expect(endsSession('order.updated')).toBe(false);
+    expect(endsSession('pickup.issued')).toBe(false);
+  });
+});
 
 describe('обновление данных по событиям', () => {
   it('событие заказа обновляет рабочий список «Сделок»', () => {

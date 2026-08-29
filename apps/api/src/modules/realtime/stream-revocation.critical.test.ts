@@ -130,6 +130,37 @@ describe('актуальность прав в открытом потоке', (
     }
   });
 
+  it('настоящий отзыв текущей сессии закрывает канал через session-closed', async () => {
+    // Регрессия: отзыв ИМЕННО этой сессии (снятие её семьи) обязан закрыть
+    // открытый поток адресным session-closed — независимо от журнального
+    // session.revoked, на которое клиент больше не реагирует.
+    const user = await seedUser(ctx.db, { roles: ['COURIER'] });
+    const familyId = await seedSession(user.id);
+    const cursor = await currentMaxId();
+    const writer = recordingWriter();
+
+    const stream = startEventStream(
+      { db: ctx.db, config: ctx.config, notifier: silentNotifier },
+      { userId: user.id, familyId, sessionVersion: 0 },
+      cursor,
+      writer,
+      { heartbeat: 60_000, poll: 50 },
+    );
+
+    try {
+      // Отзыв семьи текущей сессии: действующих сессий у неё не осталось.
+      await ctx.db.refreshSession.updateMany({
+        where: { familyId },
+        data: { revokedAt: new Date() },
+      });
+
+      await waitFor(() => writer.ended);
+      expect(writer.chunks.join('')).toContain('session-closed');
+    } finally {
+      stream.stop();
+    }
+  });
+
   it('заморозка закрывает канал до выдачи новых событий', async () => {
     const user = await seedUser(ctx.db, { roles: ['COURIER'] });
     const familyId = await seedSession(user.id);

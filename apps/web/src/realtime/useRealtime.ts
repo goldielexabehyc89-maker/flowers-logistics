@@ -12,6 +12,7 @@ import { useAuth } from '../auth/AuthContext';
 import { ApiError } from '../lib/api-client';
 import {
   collapseToFirstPage,
+  endsSession,
   invalidationKeysFor,
   parseEventBuffer,
   reconnectDelayMs,
@@ -62,9 +63,10 @@ export function useRealtime(): RealtimeState {
         lastEventIdRef.current = event.id;
       }
 
-      // session-closed приходит от сервера, session.revoked — из журнала событий
-      // и адресовано лично этому пользователю. Смысл один: доступа больше нет.
-      if (event.event === 'session-closed' || event.event === 'session.revoked') {
+      // Действующую сессию закрывает ТОЛЬКО адресный `session-closed` от сервера
+      // (см. `endsSession`): журнальное `session.revoked` может относиться к
+      // прошлой сессии и приходить с архивом, и выходом оно не является.
+      if (endsSession(event.event)) {
         loseSession();
         return;
       }

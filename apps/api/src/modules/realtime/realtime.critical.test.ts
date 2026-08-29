@@ -14,7 +14,12 @@ import {
   type TestContext,
 } from '../auth/testing/harness.js';
 import { managementAudienceFor, publishRealtimeEvent, RealtimePayloadLeakError } from './events.js';
-import { parseLastEventId, readEventsForViewer, VISIBILITY_LAG_MS } from './reader.js';
+import {
+  currentHeadEventId,
+  parseLastEventId,
+  readEventsForViewer,
+  VISIBILITY_LAG_MS,
+} from './reader.js';
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@fl/shared';
 
@@ -201,6 +206,49 @@ describe('аудитория событий по ролям', () => {
       afterLag(),
     );
     expect(seen.events.some((event) => event.topic === 'route.confirmed')).toBe(false);
+  });
+});
+
+describe('свежее подключение не воспроизводит накопленный архив', () => {
+  it('старт с головы журнала не отдаёт архив, включая историческое session.revoked', async () => {
+    const admin = await seedUser(ctx.db, { roles: ['ADMIN'] });
+    const viewer = { userId: admin.id, roles: ['ADMIN'] as const };
+
+    // Накопленный архив ДО подключения: обычное событие и историческое
+    // личное session.revoked этому же пользователю (например, прошлый выход).
+    await ctx.db.$transaction(async (tx) => {
+      await publishRealtimeEvent(tx, {
+        topic: 'user.updated',
+        payload: { userId: admin.id, n: 1 },
+        audienceRoles: ['ADMIN'],
+      });
+      await publishRealtimeEvent(tx, {
+        topic: 'session.revoked',
+        payload: { userId: admin.id },
+        audienceUserId: admin.id,
+      });
+    });
+
+    // Свежее подключение стартует с ГОЛОВЫ журнала.
+    const head = await currentHeadEventId(ctx.db);
+    expect(head).toBe(await currentMaxId());
+
+    const onConnect = await readEventsForViewer(ctx.db, viewer, head, afterLag());
+    // Ни одного накопленного события — ни рабочего, ни session.revoked:
+    // ни шторма перезапросов, ни ложного выхода.
+    expect(onConnect.events).toHaveLength(0);
+
+    // А то, что произойдёт ПОСЛЕ подключения, доходит как обычно.
+    await ctx.db.$transaction(async (tx) =>
+      publishRealtimeEvent(tx, {
+        topic: 'user.updated',
+        payload: { userId: admin.id, n: 2 },
+        audienceRoles: ['ADMIN'],
+      }),
+    );
+    const afterConnect = await readEventsForViewer(ctx.db, viewer, head, afterLag());
+    expect(afterConnect.events).toHaveLength(1);
+    expect(JSON.stringify(afterConnect.events[0]?.payload)).toContain('"n":2');
   });
 });
 
