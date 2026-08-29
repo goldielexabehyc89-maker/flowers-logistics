@@ -179,7 +179,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const [shift, activeOrders] = await Promise.all([
       ownShift(deps.db, actor.userId),
-      countActiveAssignments(deps.db, actor.userId),
+      countActiveAssignments(deps.db, actor.userId, deps.config.OPERATIONS_START_DATE),
     ]);
     return { shift, activeOrders };
   });
@@ -254,6 +254,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
         search: query.search ?? null,
         limit: query.limit,
         offset: query.offset,
+        operationsStartDate: deps.config.OPERATIONS_START_DATE,
       },
     );
   });

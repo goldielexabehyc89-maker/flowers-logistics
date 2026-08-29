@@ -28,7 +28,7 @@ import { moscowToday, type Role } from '@fl/shared';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from '../warehouse/service.js';
-import { receiveOrder, type FlowDeps } from '../warehouse/placement.js';
+import { receiveOrder, withdrawOrder, type FlowDeps } from '../warehouse/placement.js';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -321,14 +321,8 @@ describe('выдача покупателю', () => {
     expect(await ctx.db.orderPlacement.count({ where: { orderId: order.id } })).toBe(1);
   });
 
-  it('заказ без фактической ячейки, доставка, архив и пропажа отказывают', async () => {
+  it('доставка, чужой способ, архив и пропажа отказывают', async () => {
     const manager = await actorFor(['MANAGER']);
-
-    // Принят не был: выдавать нечего.
-    const notPlaced = await seedOrder();
-    await expect(
-      issueToCustomer(pickup, manager, { orderNumber: notPlaced.number, source: 'SCAN' }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
 
     // Обычная доставка: этот раздел не про неё.
     const delivery = await placed({ deliveryMethodId: MOYSKLAD_IDS.deliveryMethodDelivery });
@@ -901,11 +895,22 @@ describe('локальная отмена самовывоза', () => {
     );
     expect(result.cellCode).toBe(cell.code);
 
-    // А неготовый (без фактической ячейки) — отказ по складской проверке.
-    const notPlaced = await seedOrder();
+    // Заказ без ячейки теперь выдаётся с карточки: отсутствие ячейки не блокирует.
+    const noCell = await seedOrder();
+    const noCellResult = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: noCell.number, source: 'CARD' },
+      CONTEXT,
+    );
+    expect(noCellResult.cellCode).toBeNull();
+    expect(await ctx.db.orderPickupIssue.count({ where: { orderId: noCell.id } })).toBe(1);
+
+    // Но складские проверки не обходятся: проблемный (архивный) заказ отказывает.
+    const archived = await seedOrder({ sourceArchived: true });
     await expect(
-      issueToCustomer(pickup, manager, { orderNumber: notPlaced.number, source: 'CARD' }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
+      issueToCustomer(pickup, manager, { orderNumber: archived.number, source: 'CARD' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
   });
 
   it('право такое же, как у выдачи: посторонний получает 403', async () => {
@@ -1054,5 +1059,115 @@ describe('самовывоз не пишет в МойСклад', () => {
     expect(source).not.toContain('orderMoyskladState');
     expect(source).not.toContain('MoyskladClient');
     expect(source).not.toContain('MOYSKLAD_ORDER_STATE_SYNC_ENABLED');
+  });
+});
+
+// --- Выдача без ячейки и поиск ------------------------------------------------
+
+describe('выдача самовывоза без ячейки', () => {
+  it('непринятый заказ выдаётся без ячейки, уходит из очереди и идемпотентен', async () => {
+    const order = await seedOrder(); // ни разу не принят на полку — ячейки нет
+    const manager = await actorFor(['MANAGER']);
+    expect(await isInQueue(order.number)).toBe(true);
+
+    const result = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: order.number, source: 'CARD' },
+      CONTEXT,
+    );
+    expect(result.cellCode).toBeNull();
+    expect(result.cellId).toBeNull();
+
+    // Ушёл из очереди без F5.
+    expect(await isInQueue(order.number)).toBe(false);
+
+    // Факт выдачи зафиксирован БЕЗ размещения и ячейки (их не было).
+    const issue = await ctx.db.orderPickupIssue.findUniqueOrThrow({
+      where: { orderId: order.id },
+      select: { placementId: true, cellId: true },
+    });
+    expect(issue.placementId).toBeNull();
+    expect(issue.cellId).toBeNull();
+
+    // Повтор идемпотентен: второго факта нет.
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'CARD' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'PICKUP_ALREADY_ISSUED' } });
+    expect(await ctx.db.orderPickupIssue.count({ where: { orderId: order.id } })).toBe(1);
+
+    // Статус в МойСклад по этой кнопке не передаётся.
+    expect(await moyskladStateOf(order.id)).toBeNull();
+  });
+
+  it('заказ с ячейкой при выдаче штатно освобождает ячейку', async () => {
+    const { order, cell } = await placed();
+    const manager = await actorFor(['MANAGER']);
+    const result = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: order.number, source: 'CARD' },
+      CONTEXT,
+    );
+    expect(result.cellCode).toBe(cell.code);
+    expect(await activeCellOf(order.id)).toBeNull();
+  });
+
+  it('списанный заказ выдать нельзя даже без активной ячейки', async () => {
+    const { order } = await placed();
+    const keeper = await actorFor(['WAREHOUSE']);
+    await withdrawOrder(flow, keeper, { orderNumber: order.number, reason: 'WRITE_OFF' }, CONTEXT);
+    const manager = await actorFor(['MANAGER']);
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'CARD' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
+  });
+
+  it('скан заказа без ячейки отказывает: послабление только для ручной выдачи', async () => {
+    // Скан — выдача С ПОЛКИ: коробку берут из ячейки. Заказ без размещения там
+    // отсутствует, и сканер называет это прямо. Ручная же выдача (CARD) того же
+    // заказа проходит: покупатель уже пришёл, и менеджер отдаёт его кнопкой.
+    const order = await seedOrder();
+    const manager = await actorFor(['MANAGER']);
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
+    // Скан ничего не выдал — заказ остаётся в очереди.
+    expect(await isInQueue(order.number)).toBe(true);
+
+    // Ручная выдача того же заказа без ячейки — проходит.
+    const result = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: order.number, source: 'CARD' },
+      CONTEXT,
+    );
+    expect(result.cellCode).toBeNull();
+    expect(await isInQueue(order.number)).toBe(false);
+  });
+});
+
+describe('поиск в очереди самовывоза', () => {
+  it('ищет по всей очереди: частично, без регистра, с обрезкой пробелов; пустой — весь список', async () => {
+    const alpha = await placed({ number: 'PUFIND-ALPHA-1' });
+    const beta = await placed({ number: 'PUFIND-BETA-2' });
+
+    // Частичное совпадение, другой регистр и лишние пробелы находят альфу
+    // и не находят бету. Счётчик считает по ВСЕЙ очереди, а не по странице.
+    const found = await listPickupQueue(ctx.db, { limit: 200, search: '  pufind-alpha  ' });
+    const names = found.items.map((item) => item.orderNumber);
+    expect(names).toContain(alpha.order.number);
+    expect(names).not.toContain(beta.order.number);
+    expect(found.total).toBe(1);
+
+    // Общий префикс находит оба; поиск идёт по всей очереди даже при limit=1.
+    const both = await listPickupQueue(ctx.db, { limit: 1, search: 'PUFIND' });
+    expect(both.total).toBe(2);
+
+    // Пустой (и из одних пробелов) поиск — полный список: обе строки видны.
+    const full = await listPickupQueue(ctx.db, { limit: 200, search: '   ' });
+    const fullNames = full.items.map((item) => item.orderNumber);
+    expect(fullNames).toContain(alpha.order.number);
+    expect(fullNames).toContain(beta.order.number);
   });
 });

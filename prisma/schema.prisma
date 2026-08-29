@@ -145,7 +145,7 @@ model User {
   unboundRouteCells     RouteCellBinding[]            @relation("RouteCellReleasedBy")
   issuedRoutes          RouteIssueSession[]           @relation("IssueSessionCourier")
   pickupIssues          OrderPickupIssue[]            @relation("PickupIssuedBy")
-  pickupCancellations   OrderPickupCancellation[]    @relation("PickupCancelledBy")
+  pickupCancellations   OrderPickupCancellation[]     @relation("PickupCancelledBy")
   confirmedIssues       RouteIssueSession[]           @relation("IssueSessionConfirmedBy")
   cancelledIssues       RouteIssueSession[]           @relation("IssueSessionCancelledBy")
   deliveryAttempts      DeliveryAttempt[]             @relation("DeliveryAttemptCourier")
@@ -2491,15 +2491,18 @@ model OrderPickupIssue {
   orderId String        @unique @db.Uuid
   order   DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  /// Закрытое этой выдачей размещение. Одно размещение выдаётся один раз.
-  placementId String         @unique @db.Uuid
-  placement   OrderPlacement @relation(fields: [placementId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Закрытое этой выдачей размещение. `null`, если выдали заказ БЕЗ ячейки:
+  /// коробки на полке не было, а покупатель уже пришёл — выдача фиксируется и
+  /// без операции освобождения. Одно размещение выдаётся один раз (частичный
+  /// уникальный индекс не считает NULL за совпадение).
+  placementId String?         @unique @db.Uuid
+  placement   OrderPlacement? @relation(fields: [placementId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  /// Ячейка, из которой заказ забрали. Дублируется намеренно: история
-  /// размещений живёт своей жизнью, а вопрос «откуда отдали» обязан иметь
-  /// ответ и через год.
-  cellId String      @db.Uuid
-  cell   StorageCell @relation("PickupIssueCell", fields: [cellId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Ячейка, из которой заказ забрали; `null`, если ячейки не было. Дублируется
+  /// намеренно: история размещений живёт своей жизнью, а вопрос «откуда отдали»
+  /// обязан иметь ответ и через год.
+  cellId String?      @db.Uuid
+  cell   StorageCell? @relation("PickupIssueCell", fields: [cellId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   /// Серверное время. Клиентскому здесь верить нельзя: касса и планшет
   /// расходятся, а спор о времени выдачи решается этим полем.

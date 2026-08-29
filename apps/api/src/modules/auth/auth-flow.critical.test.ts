@@ -10,7 +10,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootstrapAdmin } from './bootstrap.js';
 import { activate, login, logout, logoutAll } from './service.js';
 import { hashSecretCode } from './crypto.js';
-import { LOCKOUT_THRESHOLDS, lockDurationFor } from './lockout.js';
 import { authenticate } from './guards.js';
 import {
   closeTestContext,
@@ -357,49 +356,81 @@ describe('секреты не хранятся и не публикуются в
   });
 });
 
-describe('вход и защита от перебора', () => {
-  it('пороги блокировки соответствуют утверждённым', () => {
-    expect(lockDurationFor(2)).toBeNull();
-    expect(lockDurationFor(3)).toBe(30 * 1000);
-    expect(lockDurationFor(4)).toBe(30 * 1000);
-    expect(lockDurationFor(5)).toBe(5 * 60 * 1000);
-    expect(lockDurationFor(7)).toBe(30 * 60 * 1000);
-    expect(lockDurationFor(10)).toBe(2 * 60 * 60 * 1000);
-    expect(lockDurationFor(25)).toBe(2 * 60 * 60 * 1000);
-    expect(LOCKOUT_THRESHOLDS).toHaveLength(4);
-  });
-
-  it('неверные PIN приводят к блокировке с 429 и Retry-After', async () => {
+describe('вход и активация: отказ без временных блокировок', () => {
+  it('сколько угодно неверных PIN подряд не создают блокировку, а верный сразу входит', async () => {
     const user = await seedActiveUser('1234', ['COURIER']);
-    const context = { ...CONTEXT, ip: `10.1.${Math.floor(Date.now() / 1000) % 250}.5` };
+    const context = { ...CONTEXT, ip: '10.1.0.5' };
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await expect(login(ctx, { phone: user.phone, pin: '9999' }, context)).rejects.toThrow();
+    // Много неудач подряд — временной блокировки нет, каждая просто отклоняется.
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await expect(login(ctx, { phone: user.phone, pin: '9999' }, context)).rejects.toMatchObject({
+        code: 'UNAUTHENTICATED',
+      });
     }
 
-    // После третьей неудачи включается блокировка — даже верный PIN отклоняется.
-    await expect(login(ctx, { phone: user.phone, pin: '1234' }, context)).rejects.toMatchObject({
-      code: 'RATE_LIMITED',
-    });
+    // Ни одной строки блокировки — ни по телефону, ни по IP, ни по их сочетанию.
+    expect(await ctx.db.authLockout.count()).toBe(0);
 
-    const lockout = await ctx.db.authLockout.findUniqueOrThrow({
-      where: { key: `phone:${user.phone}` },
-    });
-    expect(lockout.failedCount).toBeGreaterThanOrEqual(3);
-    expect(lockout.lockedUntil).not.toBeNull();
+    // Следующий верный PIN входит сразу, без ожидания.
+    const result = await login(ctx, { phone: user.phone, pin: '1234' }, context);
+    expect(result.user.phone).toBe(user.phone);
   });
 
-  it('успешный вход сбрасывает счётчик неудач', async () => {
-    const user = await seedActiveUser('5678', ['COURIER']);
-    const context = { ...CONTEXT, ip: '10.2.0.9' };
+  it('неудачные попытки продолжают фиксироваться в AuthAttempt', async () => {
+    const user = await seedActiveUser('1234', ['COURIER']);
+    const before = await ctx.db.authAttempt.count({ where: { userId: user.id, success: false } });
+    await expect(
+      login(ctx, { phone: user.phone, pin: '0000' }, { ...CONTEXT, ip: '10.1.0.6' }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+    const after = await ctx.db.authAttempt.count({ where: { userId: user.id, success: false } });
+    // Фиксация неудач сохранена: блокировки нет, но след попытки есть.
+    expect(after).toBe(before + 1);
+  });
 
-    await expect(login(ctx, { phone: user.phone, pin: '0000' }, context)).rejects.toThrow();
-    await login(ctx, { phone: user.phone, pin: '5678' }, context);
+  it('общий IP Wi-Fi не блокирует остальных сотрудников', async () => {
+    const ip = '10.9.9.9';
+    const attacked = await seedActiveUser('1111', ['COURIER']);
+    const colleague = await seedActiveUser('2222', ['COURIER']);
 
-    const lockout = await ctx.db.authLockout.findUnique({
-      where: { key: `phone:${user.phone}` },
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await expect(
+        login(ctx, { phone: attacked.phone, pin: '0000' }, { ...CONTEXT, ip }),
+      ).rejects.toThrow();
+    }
+
+    // Коллега с того же IP входит без препятствий.
+    const result = await login(ctx, { phone: colleague.phone, pin: '2222' }, { ...CONTEXT, ip });
+    expect(result.user.phone).toBe(colleague.phone);
+    expect(await ctx.db.authLockout.count()).toBe(0);
+  });
+
+  it('неверный код активации не блокирует, а верный сразу активирует', async () => {
+    const phone = uniquePhone();
+    const user = await ctx.db.user.create({
+      data: { phone, fullName: 'Активируемый', roles: { create: [{ role: 'COURIER' }] } },
+      select: { id: true },
     });
-    expect(lockout).toBeNull();
+    const code = '0417';
+    const codeHash = await hashSecretCode(code, TEST_SECRETS.AUTH_PIN_PEPPER);
+    await ctx.db.activationCode.create({
+      data: {
+        userId: user.id,
+        codeHash,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+        activeKey: user.id,
+      },
+    });
+    const context = { ...CONTEXT, ip: '10.1.0.7' };
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await expect(
+        activate(ctx, { phone, code: '9999', pin: '1234' }, context),
+      ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+    }
+    expect(await ctx.db.authLockout.count()).toBe(0);
+
+    const result = await activate(ctx, { phone, code, pin: '1234' }, context);
+    expect(result.user.status).toBe('ACTIVE');
   });
 
   it('неизвестный телефон не отличается от неверного PIN и проходит проверку-пустышку', async () => {

@@ -797,7 +797,8 @@ export async function readOrderTimeline(
         kind: 'PICKUP_ISSUED',
         title: 'Заказ выдан покупателю',
         actor: userActor(pickup.issuedById),
-        details: [{ label: 'Ячейка', value: pickup.cell.code }],
+        // Ячейки могло не быть: выдача без ячейки — штатный исход.
+        details: pickup.cell === null ? [] : [{ label: 'Ячейка', value: pickup.cell.code }],
         reverted: false,
         route: null,
       }),

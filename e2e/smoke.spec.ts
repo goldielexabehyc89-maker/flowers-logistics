@@ -4929,12 +4929,21 @@ test('«Сделки» на большом экране: доли, своя пр
     expect(geometryAfter[index]?.y).toBe(geometryBefore[index]?.y);
   }
 
-  // 9. Поля времени карты сужают только карту: список остаётся прежним.
+  // 9. Поля времени карты применяются кнопкой «Применить» или Enter, а не самим
+  //    вводом; и сужают они только карту — список остаётся прежним.
   const cardsBefore = await page.locator('[data-testid="deal-card"]').count();
   await page.getByTestId('deals-map-from').fill('20:00');
+  // Один только ввод ничего не применяет: карта показывает прежний отбор.
+  await expect(page.getByTestId('deals-map-head-count')).not.toContainText('скрыто фильтром');
+  // Enter в поле времени применяет значение — карта сужается.
+  await page.getByTestId('deals-map-from').press('Enter');
   await expect(page.getByTestId('deals-map-head-count')).toContainText('скрыто фильтром');
+  // Список при этом не изменился: время сужает только карту.
   expect(await page.locator('[data-testid="deal-card"]').count()).toBe(cardsBefore);
+  // Кнопка «Применить» существует и возвращает полный набор после очистки поля.
   await page.getByTestId('deals-map-from').fill('');
+  await page.getByTestId('deals-map-apply').click();
+  await expect(page.getByTestId('deals-map-head-count')).not.toContainText('скрыто фильтром');
 
   // 4а. Одна кнопка с двумя состояниями: выбрать весь отбор и снять его.
   const selectAll = page.getByTestId('deals-select-all');
@@ -8083,6 +8092,21 @@ test('самовывоз: время на карточке, кнопки «Вы�
 
   const rowOf = (number: string): Locator =>
     page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${number}"]`);
+
+  // 0. Поиск над очередью: по всей очереди, частичное совпадение, без учёта
+  //    регистра; пустой запрос возвращает полный список — всё без F5.
+  const target = stand['заказ сегодня'] ?? '';
+  await expect(rowOf(target)).toBeVisible();
+  const search = page.getByTestId('pickup-queue-search');
+  // Частичное совпадение по хвосту номера находит заказ.
+  await search.fill(target.slice(-4).toLowerCase());
+  await expect(rowOf(target)).toBeVisible();
+  // Заведомо отсутствующий номер очищает список — «Ничего не найдено».
+  await search.fill('нет-такого-номера');
+  await expect(page.locator('[data-testid="pickup-waiting-row"]')).toHaveCount(0);
+  // Очистка возвращает очередь целиком.
+  await search.fill('');
+  await expect(rowOf(target)).toBeVisible();
 
   // 1. Время доставки показано у каждой карточки. У стенда его нет — значит
   //    честная отметка «Время не указано», а не пустое место.

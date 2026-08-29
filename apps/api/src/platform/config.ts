@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { MAX_MATRIX_POINTS } from '../modules/geo/limits.js';
 import { isCalendarDate } from '../modules/integrations/moysklad/delivery-date.js';
+import { OPERATIONS_START_DATE as OPERATIONS_START_DATE_DEFAULT } from '../modules/orders/operations-window.js';
 
 /**
  * Необязательное значение, у которого пустая строка означает «не задано».
@@ -194,6 +195,34 @@ const configSchema = z.object({
       message:
         'MOYSKLAD_IMPORT_DELIVERY_DATE_FROM должен быть московской календарной датой ГГГГ-ММ-ДД',
     }),
+
+  /**
+   * Начало операционной работы: граница ДАТЫ ДОСТАВКИ рабочих списков.
+   *
+   * Рабочие выдачи («Самовывоз», очередь флориста, «Логистика → Сделки»)
+   * показывают заказы с датой доставки ОТ этого дня включительно; более ранние
+   * (в т.ч. 29.08.2026) из них исключаются на серверном уровне — при чтении,
+   * поэтому realtime и синхронизация их не возвращают. Заказы физически не
+   * трогаются и находятся в «Истории заказов».
+   *
+   * По умолчанию — фиксированная продакшн-граница {@link OPERATIONS_START_DATE_DEFAULT}
+   * (30.08.2026), общая для production и staging: переменную там НЕ задают.
+   * Значение существует лишь ради изоляции проверок: браузерному smoke и
+   * серверному стенду синтетические заказы заводятся текущим днём, и им граница
+   * ослабляется отдельной переменной, не затрагивая продакшн-поведение.
+   *
+   * Неверное значение роняет запуск: молча взять не тот день опаснее, чем
+   * не подняться.
+   */
+  OPERATIONS_START_DATE: z
+    .preprocess(
+      (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+      z.string().optional(),
+    )
+    .refine((value) => value === undefined || isCalendarDate(value), {
+      message: 'OPERATIONS_START_DATE должен быть московской календарной датой ГГГГ-ММ-ДД',
+    })
+    .transform((value) => value ?? OPERATIONS_START_DATE_DEFAULT),
 
   /**
    * Новый адресный контракт: город, улица и дом отдельно от деталей.

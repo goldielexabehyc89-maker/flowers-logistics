@@ -50,6 +50,7 @@ import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import type { Database } from '../../platform/db.js';
 import type { OrderFulfillmentProcessState } from '../../generated/prisma/enums.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { OPERATIONS_START_DATE } from '../orders/operations-window.js';
 import {
   normalizePageRequest,
   pageInfo,
@@ -164,6 +165,11 @@ export interface QueueQuery extends Partial<PageRequest> {
    * в поле превратил бы всю очередь в пустой список без видимой причины.
    */
   search?: string | null;
+  /**
+   * Эффективная граница начала операционной работы. Маршрут передаёт значение
+   * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
+   */
+  operationsStartDate?: string;
 }
 
 /**
@@ -292,6 +298,11 @@ function buildScopeWhere(input: {
   includePast?: boolean;
   assigneeId: string | null;
   search: string | null;
+  /**
+   * Эффективная граница начала операционной работы. Маршрут передаёт значение
+   * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
+   */
+  operationsStartDate?: string | undefined;
 }) {
   return {
     fulfillmentInScope: true,
@@ -308,6 +319,17 @@ function buildScopeWhere(input: {
         OR: [
           { externalStateId: null },
           { externalStateId: { not: MOYSKLAD_IDS.states.acceptedUnpaid } },
+        ],
+      },
+      // Начало операционной работы: заказы более ранних дней в очередь не идут.
+      // Лежит в `AND` по той же причине, что и состояние: у дня уже свой `OR`.
+      // Заказ без даты границей не отсекается.
+      {
+        OR: [
+          { deliveryDate: null },
+          {
+            deliveryDate: { gte: toDateColumn(input.operationsStartDate ?? OPERATIONS_START_DATE) },
+          },
         ],
       },
     ],
@@ -386,10 +408,14 @@ type ScopeWhere = ReturnType<typeof buildScopeWhere>;
  * пятидесяти строк, вкладка «Печать» без списка вовсе и вкладка «Очередь»
  * с чужими заказами дали бы три разных ответа на один вопрос.
  */
-export async function countActiveAssignments(db: Database, userId: string): Promise<number> {
+export async function countActiveAssignments(
+  db: Database,
+  userId: string,
+  operationsStartDate: string = OPERATIONS_START_DATE,
+): Promise<number> {
   return db.deliveryOrder.count({
     where: {
-      ...buildScopeWhere({ date: null, assigneeId: userId, search: null }),
+      ...buildScopeWhere({ date: null, assigneeId: userId, search: null, operationsStartDate }),
       fulfillmentProcessState: { in: [...MINE_WORK_STATES] },
     },
   });
@@ -432,6 +458,7 @@ export async function readQueue(
     includePast: !mine && query.day === 'today',
     assigneeId: mine ? viewer.userId : null,
     search,
+    operationsStartDate: query.operationsStartDate,
   });
 
   /**

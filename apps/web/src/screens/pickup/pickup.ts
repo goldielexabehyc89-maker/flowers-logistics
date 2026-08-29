@@ -157,7 +157,10 @@ export function printLabel(card: Pick<PickupCard, 'printJobs' | 'printedJobs'>):
  * отказ сервера, и кнопка, которая всегда даёт ошибку, хуже её отсутствия.
  */
 export function canIssue(card: PickupCard): boolean {
-  return card.blockers.length === 0;
+  // Отсутствие фактической ячейки (`NOT_PLACED`) выдаче НЕ мешает: покупатель
+  // пришёл, и менеджер отдаёт заказ и без ячейки. Все прочие причины —
+  // не самовывоз, отменён, уже выдан, проблемный — по-прежнему блокируют.
+  return card.blockers.every((blocker) => blocker === 'NOT_PLACED');
 }
 
 /** Первая причина отказа — та, которую показываем крупно. */

@@ -352,14 +352,17 @@ function contextOf(request: { ip: string; headers: Record<string, unknown> }): {
 }
 
 /** Отбор «Сделок» из проверенного запроса. День по умолчанию — московский сегодня. */
-function scopeOf(query: {
-  deliveryDate?: string | undefined;
-  search?: string | undefined;
-  fromMinute?: number | undefined;
-  toMinute?: number | undefined;
-  includeDrafts?: 'true' | 'false' | undefined;
-  group?: 'ROUTABLE' | 'ATTENTION' | 'ALL' | undefined;
-}): DealsScope {
+function scopeOf(
+  query: {
+    deliveryDate?: string | undefined;
+    search?: string | undefined;
+    fromMinute?: number | undefined;
+    toMinute?: number | undefined;
+    includeDrafts?: 'true' | 'false' | undefined;
+    group?: 'ROUTABLE' | 'ATTENTION' | 'ALL' | undefined;
+  },
+  operationsStartDate: string,
+): DealsScope {
   return {
     deliveryDate: query.deliveryDate ?? moscowCalendarDate(new Date()),
     search: query.search ?? null,
@@ -367,6 +370,7 @@ function scopeOf(query: {
     toMinute: query.toMinute ?? null,
     includeDrafts: query.includeDrafts === 'true',
     group: query.group ?? 'ALL',
+    operationsStartDate,
   };
 }
 
@@ -1094,7 +1098,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
   app.get('/api/deals', async (request) => {
     await authenticateWithRoles(request, deps, ORDER_ROLES);
     const query = dealsQuerySchema.parse(request.query);
-    const scope = scopeOf(query);
+    const scope = scopeOf(query, deps.config.OPERATIONS_START_DATE);
 
     const [ids, total, withoutPoint] = await Promise.all([
       dealsIds(deps.db, scope, { limit: query.limit, offset: query.offset }),
@@ -1124,7 +1128,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
   app.get('/api/deals/map', async (request) => {
     await authenticateWithRoles(request, deps, ORDER_ROLES);
     const query = dealsQuerySchema.parse(request.query);
-    const scope = scopeOf(query);
+    const scope = scopeOf(query, deps.config.OPERATIONS_START_DATE);
     const ids = await dealsIds(deps.db, scope);
 
     /*
@@ -1194,7 +1198,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     // Выбрать можно только пригодные: «Требует внимания» и заказы черновиков
     // в выбор не попадают ни при каком переключателе.
     const ids = await dealsIds(deps.db, {
-      ...scopeOf(query),
+      ...scopeOf(query, deps.config.OPERATIONS_START_DATE),
       includeDrafts: false,
       group: 'ROUTABLE',
     });

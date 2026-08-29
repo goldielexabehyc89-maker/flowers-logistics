@@ -54,7 +54,8 @@ const interval = (o: Partial<DeliveryIntervalView>): DeliveryIntervalView => ({
 describe('готовность к выдаче', () => {
   it('выдавать можно ровно тогда, когда причин отказа нет', () => {
     expect(canIssue(card())).toBe(true);
-    expect(canIssue(card({ blockers: ['NOT_PLACED'] }))).toBe(false);
+    // Отсутствие ячейки больше не блокирует выдачу: коробку отдают и без ячейки.
+    expect(canIssue(card({ blockers: ['NOT_PLACED'] }))).toBe(true);
     expect(canIssue(card({ blockers: ['ALREADY_ISSUED'] }))).toBe(false);
   });
 

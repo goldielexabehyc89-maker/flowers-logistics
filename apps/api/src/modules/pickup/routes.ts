@@ -52,6 +52,8 @@ const cancelSchema = z.object({ orderNumber: numberSchema });
 const queueQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_QUEUE_PAGE_SIZE).optional(),
   cursor: z.string().min(1).max(500).optional(),
+  /** Поиск по номеру заказа: полное и частичное совпадение, без учёта регистра. */
+  search: z.string().max(MAX_ORDER_NUMBER_LENGTH).optional(),
 });
 const dayQuerySchema = z.object({
   deliveryDate: z
@@ -80,7 +82,10 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
     const query = queueQuerySchema.parse(request.query);
 
     const [queue, manual] = await Promise.all([
-      listPickupQueue(deps.db, query),
+      listPickupQueue(deps.db, {
+        ...query,
+        operationsStartDate: deps.config.OPERATIONS_START_DATE,
+      }),
       readWarehouseManualEntry(deps.db),
     ]);
 
