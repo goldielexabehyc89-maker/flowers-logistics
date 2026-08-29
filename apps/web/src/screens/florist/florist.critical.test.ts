@@ -15,6 +15,7 @@ import {
   QUEUE_PAGE_SIZE,
   QUEUE_POLL_MS,
   availableActions,
+  groupAssembledByDate,
   groupQueueByRoute,
   queueGroupTitle,
   formatInterval,
@@ -148,7 +149,7 @@ describe('доступные действия', () => {
     expect(admin.canAssemble).toBe(false);
   });
 
-  it('возврат в работу — только администратору и только для собранного', () => {
+  it('возврат в работу: свой собранный на смене — флористу, любой — администратору', () => {
     const assembled = card({
       process: {
         state: 'ASSEMBLED',
@@ -159,15 +160,46 @@ describe('доступные действия', () => {
         assembledById: VIEWER,
       },
     });
+    const othersAssembled = card({
+      process: {
+        state: 'ASSEMBLED',
+        version: 2,
+        assignee: { id: 'someone-else', fullName: 'Коллега' },
+        assignedAt: null,
+        assembledAt: '2027-03-10T09:00:00.000Z',
+        assembledById: 'someone-else',
+      },
+    });
 
+    // Флорист: свой собранный на активной смене — можно.
     expect(
       availableActions({ card: assembled, viewerId: VIEWER, isAdmin: false, hasActiveShift: true })
         .canReopen,
-    ).toBe(false);
-    expect(
-      availableActions({ card: assembled, viewerId: VIEWER, isAdmin: true, hasActiveShift: true })
-        .canReopen,
     ).toBe(true);
+    // Флорист без активной смены — нельзя.
+    expect(
+      availableActions({ card: assembled, viewerId: VIEWER, isAdmin: false, hasActiveShift: false })
+        .canReopen,
+    ).toBe(false);
+    // Чужой собранный флористу — нельзя даже на смене.
+    expect(
+      availableActions({
+        card: othersAssembled,
+        viewerId: VIEWER,
+        isAdmin: false,
+        hasActiveShift: true,
+      }).canReopen,
+    ).toBe(false);
+    // Администратору — любой собранный.
+    expect(
+      availableActions({
+        card: othersAssembled,
+        viewerId: VIEWER,
+        isAdmin: true,
+        hasActiveShift: false,
+      }).canReopen,
+    ).toBe(true);
+    // Несобранный — никому.
     expect(
       availableActions({ card: card(), viewerId: VIEWER, isAdmin: true, hasActiveShift: true })
         .canReopen,
@@ -401,5 +433,72 @@ describe('имя файла этикетки', () => {
     expect(safeFileName('ЗАКАЗ-МСК-000123')).toBe('_____-___-000123');
     expect(safeFileName('A 1')).toBe('A_1');
     expect(safeFileName('A/1')).toBe('A_1');
+  });
+});
+
+describe('группировка собранных по датам доставки', () => {
+  // Московские «сегодня» = 2027-03-10, «завтра» = 2027-03-11 при этом времени.
+  const NOW = new Date('2027-03-10T09:00:00.000Z');
+
+  function assembledItem(id: string, deliveryDate: string | null): QueueItemView {
+    return {
+      id,
+      number: id,
+      deliveryDate,
+      startMinute: null,
+      endMinute: null,
+      overdue: false,
+      processState: 'ASSEMBLED',
+      assignee: null,
+      route: null,
+      hasPrintForm: true,
+      changedSinceClaim: false,
+    };
+  }
+
+  it('даты по возрастанию, бездатная внизу, метки Сегодня/Завтра/дата, счётчик серверный', () => {
+    // Строки перемешаны по датам — как в серверном порядке «последний собранный сверху».
+    const items = [
+      assembledItem('a', '2027-03-12'),
+      assembledItem('b', null),
+      assembledItem('c', '2027-03-10'),
+      assembledItem('d', '2027-03-11'),
+      assembledItem('e', '2027-03-10'),
+    ];
+    const counts = [
+      { date: '2027-03-10', count: 5 }, // серверный счётчик больше загруженного
+      { date: '2027-03-11', count: 1 },
+      { date: '2027-03-12', count: 1 },
+      { date: null, count: 1 },
+    ];
+
+    const groups = groupAssembledByDate(items, counts, NOW);
+
+    // Датированные по возрастанию, бездатная — в самом низу.
+    expect(groups.map((group) => group.date)).toEqual([
+      '2027-03-10',
+      '2027-03-11',
+      '2027-03-12',
+      null,
+    ]);
+    expect(groups[0]?.label).toBe('Сегодня, 10.03');
+    expect(groups[1]?.label).toBe('Завтра, 11.03');
+    expect(groups[2]?.label).toBe('12.03.2027');
+    expect(groups[3]?.label).toBe('Без даты');
+    // Счётчик — из серверного набора, а не число загруженных строк.
+    expect(groups[0]?.count).toBe(5);
+    // Внутри даты текущий порядок строк сохранён.
+    expect(groups[0]?.items.map((item) => item.id)).toEqual(['c', 'e']);
+  });
+
+  it('пустые группы не показываются: дата без загруженных строк не появляется', () => {
+    const items = [assembledItem('a', '2027-03-10')];
+    const counts = [
+      { date: '2027-03-10', count: 1 },
+      { date: '2027-03-15', count: 3 }, // есть на сервере, но строки ещё не загружены
+    ];
+
+    const groups = groupAssembledByDate(items, counts, NOW);
+    expect(groups.map((group) => group.date)).toEqual(['2027-03-10']);
   });
 });

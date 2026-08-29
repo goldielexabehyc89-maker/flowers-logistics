@@ -747,6 +747,30 @@ export async function reopenOrder(
   return db.$transaction(async (tx) => {
     const before = await readOrder(tx, input.orderId);
 
+    // Администратор и управляющий возвращают любой собранный заказ — их права
+    // не меняются. Флорист же возвращает только СВОЙ заказ и только на активной
+    // смене: это один шаг назад в его собственной работе, а не разбор чужих
+    // назначений. Смена берётся под блокировку ПЕРВОЙ — порядок блокировок
+    // `FloristShift → DeliveryOrder` тот же, что и у остальных операций.
+    const isManager = actor.roles.includes('ADMIN') || actor.roles.includes('SUPERVISOR');
+    if (!isManager) {
+      // Чужой заказ — это отказ доступа (403), и он проверяется ПЕРВЫМ: флорист
+      // не должен даже узнавать о состоянии смены по чужому заказу. Проверка —
+      // по прочитанной строке, без блокировки, поэтому порядок блокировок
+      // `FloristShift → DeliveryOrder` не нарушается.
+      if (before.fulfillmentAssigneeId !== actor.userId) {
+        throw new AppError('FORBIDDEN', {
+          message: 'order is not assigned to this florist',
+          publicMessage: 'Вернуть в работу можно только свой собранный заказ.',
+        });
+      }
+      // Свой заказ, но только на активной смене: смена берётся под блокировку.
+      const shift = await lockActiveShift(tx, actor.userId);
+      if (shift === null) {
+        throw shiftRequired();
+      }
+    }
+
     const updated = await tx.deliveryOrder.updateMany({
       where: {
         id: input.orderId,

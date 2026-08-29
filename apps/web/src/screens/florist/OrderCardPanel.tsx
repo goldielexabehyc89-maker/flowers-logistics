@@ -19,7 +19,7 @@
 
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
-import { Button, Modal, StatusBadge } from '../../ui/components';
+import { Button, ConfirmDialog, Modal, StatusBadge } from '../../ui/components';
 import {
   EMPTY_VALUE,
   availableActions,
@@ -192,6 +192,7 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
 
   const [reason, setReason] = useState('');
   const [target, setTarget] = useState('');
+  const [confirmReopen, setConfirmReopen] = useState(false);
 
   return (
     <div className="stack" data-testid="florist-card">
@@ -339,7 +340,7 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
         </div>
       )}
 
-      {props.isAdmin && actions.canReopen && (
+      {actions.canReopen && (
         <div className="row">
           <input
             className="input"
@@ -347,16 +348,37 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
             placeholder="Причина возврата в работу"
             value={reason}
             onChange={(event) => setReason(event.target.value)}
+            data-testid="florist-reopen-reason"
           />
           <Button
             variant="secondary"
             disabled={props.busy || reason.trim().length < 3}
-            onClick={() => props.onReopen(reason.trim())}
+            onClick={() => setConfirmReopen(true)}
+            data-testid="florist-reopen"
           >
             Вернуть в работу
           </Button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmReopen}
+        title="Вернуть заказ в работу?"
+        description={
+          <>
+            Заказ <strong>{card.number}</strong> вернётся на шаг назад — в сборку, за вами. Отметки
+            готовой сборки снимутся, прежний бланк и печать останутся историей, а новая печать
+            создастся только после следующего «Собран». Причина: «{reason.trim()}».
+          </>
+        }
+        confirmLabel="Вернуть в работу"
+        busy={props.busy}
+        onConfirm={() => {
+          setConfirmReopen(false);
+          props.onReopen(reason.trim());
+        }}
+        onCancel={() => setConfirmReopen(false)}
+      />
     </div>
   );
 }

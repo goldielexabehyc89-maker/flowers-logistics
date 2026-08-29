@@ -304,7 +304,10 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   });
 
   app.post('/api/florist/orders/:id/reopen', async (request) => {
-    const actor = await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
+    // Флорист тоже возвращает собранный заказ на шаг назад — но только СВОЙ и
+    // только на активной смене. Право флориста и ограничения проверяет
+    // `reopenOrder`; администратор и управляющий сохраняют прежние права.
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
     const body = reopenSchema.parse(request.body);
 
