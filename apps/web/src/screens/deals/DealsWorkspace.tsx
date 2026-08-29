@@ -98,10 +98,28 @@ export function DealsWorkspace(): React.JSX.Element {
   // День общий с «Маршрутизацией» и живёт в адресе: два независимых значения
   // на одном рабочем месте расходились молча.
   const { day: date, setDay: setDate } = useWorkspace();
+  // Черновик поля и ПРИМЕНЁННОЕ значение разделены: набор букв меняет только
+  // черновик и не трогает ни запросы, ни ключ, ни пагинацию, ни карту. В отбор
+  // (и, значит, в список, карту и «выбрать все») уходит только применённое
+  // значение — по кнопке «Найти» или Enter. Так экран не мигает на каждую букву.
+  const [searchDraft, setSearchDraft] = useState('');
   const [search, setSearch] = useState('');
   const [includeDrafts, setIncludeDrafts] = useState(false);
   /** Накопленные страницы: список продолжается, а не перезагружается целиком. */
   const [pages, setPages] = useState(1);
+
+  const applySearch = useCallback(() => {
+    // В отбор уходит применённое значение — один запрос с окончательной строкой.
+    setSearch(searchDraft.trim());
+    setPages(1);
+  }, [searchDraft]);
+
+  const clearSearch = useCallback(() => {
+    // Ровно одно обновление: чистим и черновик, и применённое значение.
+    setSearchDraft('');
+    setSearch('');
+    setPages(1);
+  }, []);
   const [selected, setSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<DealCard | null>(null);
@@ -445,14 +463,28 @@ export function DealsWorkspace(): React.JSX.Element {
               <TextInput
                 aria-label="Поиск в этом дне"
                 className="deals__search"
-                value={search}
+                value={searchDraft}
                 placeholder="Номер, адрес, получатель или комментарий"
                 data-testid="deals-search"
                 onChange={(event) => {
-                  setSearch(event.target.value);
-                  setPages(1);
+                  // Только черновик: ни запроса, ни ключа, ни сброса пагинации.
+                  setSearchDraft(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    applySearch();
+                  }
                 }}
               />
+              <Button variant="secondary" data-testid="deals-search-apply" onClick={applySearch}>
+                Найти
+              </Button>
+              {(search !== '' || searchDraft !== '') && (
+                <Button variant="ghost" data-testid="deals-search-clear" onClick={clearSearch}>
+                  Сбросить
+                </Button>
+              )}
             </div>
 
             <div className="deals__head-row deals__head-row--quiet">

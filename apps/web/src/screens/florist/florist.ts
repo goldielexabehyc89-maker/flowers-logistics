@@ -10,7 +10,7 @@
  * здесь решается только то, что показывать.
  */
 
-import { formatCalendarDate, formatMinutesOfDay } from '@fl/shared';
+import { formatCalendarDate, formatMinutesOfDay, moscowToday, shiftCalendarDate } from '@fl/shared';
 
 export type QueueDay = 'today' | 'tomorrow';
 export type QueueScope = 'general' | 'mine';
@@ -72,7 +72,96 @@ export interface QueueResponse extends PageMeta {
    * строки не загружены. `null` — область не «Мои заказы».
    */
   assembledTotal: number | null;
+  /**
+   * Собранные, разложенные по дате доставки. Каждый счётчик — по полному
+   * серверному набору (день и поиск учтены), а не по загруженной странице.
+   * `null` — область не «Мои заказы».
+   */
+  assembledByDate: AssembledDateCount[] | null;
   items: QueueItemView[];
+}
+
+/** Число собранных на одну дату доставки (`null` — заказы без даты). */
+export interface AssembledDateCount {
+  date: string | null;
+  count: number;
+}
+
+/** Группа собранных заказов одной даты доставки для показа с заголовком. */
+export interface AssembledDateGroup {
+  date: string | null;
+  label: string;
+  /** Счётчик ПОЛНОГО серверного набора этой даты (не загруженной страницы). */
+  count: number;
+  items: QueueItemView[];
+}
+
+/** «Сегодня, ДД.ММ» / «Завтра, ДД.ММ» / «ДД.ММ.ГГГГ» / «Без даты». */
+export function assembledDateLabel(date: string | null, today: string, tomorrow: string): string {
+  if (date === null) {
+    return 'Без даты';
+  }
+  const short = formatCalendarDate(date).slice(0, 5);
+  if (date === today) {
+    return `Сегодня, ${short}`;
+  }
+  if (date === tomorrow) {
+    return `Завтра, ${short}`;
+  }
+  return formatCalendarDate(date);
+}
+
+/**
+ * Раскладывает ЗАГРУЖЕННЫЕ собранные строки по дате доставки, а счётчики берёт
+ * из серверного набора `counts` (полного, с учётом поиска).
+ *
+ * Датированные группы идут по дате доставки ПО ВОЗРАСТАНИЮ (старые и ближайшие
+ * выше будущих), бездатная — в самом низу. Внутри даты порядок строк
+ * сохраняется тем, что пришёл с сервера. Пустые группы не создаются: заголовок
+ * появляется только у даты, чьи строки уже загружены.
+ */
+export function groupAssembledByDate(
+  items: QueueItemView[],
+  counts: AssembledDateCount[],
+  now: Date = new Date(),
+): AssembledDateGroup[] {
+  const today = moscowToday(now);
+  const tomorrow = shiftCalendarDate(today, 1);
+  const countByDate = new Map(counts.map((entry) => [entry.date, entry.count]));
+
+  const order: (string | null)[] = [];
+  const buckets = new Map<string | null, QueueItemView[]>();
+  for (const item of items) {
+    const key = item.deliveryDate;
+    const bucket = buckets.get(key);
+    if (bucket === undefined) {
+      buckets.set(key, [item]);
+      order.push(key);
+    } else {
+      bucket.push(item);
+    }
+  }
+
+  const dated: AssembledDateGroup[] = [];
+  let undated: AssembledDateGroup | null = null;
+  for (const key of order) {
+    const groupItems = buckets.get(key) ?? [];
+    const group: AssembledDateGroup = {
+      date: key,
+      label: assembledDateLabel(key, today, tomorrow),
+      count: countByDate.get(key) ?? groupItems.length,
+      items: groupItems,
+    };
+    if (key === null) {
+      undated = group;
+    } else {
+      dated.push(group);
+    }
+  }
+  dated.sort((a, b) =>
+    (a.date ?? '') < (b.date ?? '') ? -1 : (a.date ?? '') > (b.date ?? '') ? 1 : 0,
+  );
+  return undated === null ? dated : [...dated, undated];
 }
 
 export interface PrintJobsResponse extends PageMeta {
@@ -181,6 +270,12 @@ export interface PrintJobView {
   completedById: string | null;
   lastErrorCode: string | null;
   lastErrorAt: string | null;
+  /**
+   * Состояние автоматической доставки в спулер. `SENT_TO_PRINTER` означает, что
+   * наклейка ушла на печать сама, но бумага человеком ещё не подтверждена —
+   * задание остаётся в «Требуют внимания» с явной отметкой «Передано принтеру».
+   */
+  deliveryState: string | null;
 }
 
 export interface FloristOption {
@@ -309,7 +404,10 @@ export function availableActions(context: ActionContext): {
     canClaim: state === 'NEW' && hasActiveShift,
     canRelease: state === 'IN_ASSEMBLY' && (isAdmin || (mine && hasActiveShift)),
     canAssemble: state === 'IN_ASSEMBLY' && mine && hasActiveShift,
-    canReopen: (state === 'ASSEMBLED' || state === 'NEEDS_REVIEW') && isAdmin,
+    // Возврат собранного на шаг назад: администратору/управляющему — любой,
+    // флористу — только СВОЙ и только на активной смене (как сборка и снятие).
+    canReopen:
+      (state === 'ASSEMBLED' || state === 'NEEDS_REVIEW') && (isAdmin || (mine && hasActiveShift)),
     canReassign: (state === 'NEW' || state === 'IN_ASSEMBLY') && isAdmin,
     // Бланк существует с момента завершения сборки и остаётся доступным даже
     // после возврата заказа в работу: напечатанная бумага никуда не делась.

@@ -148,7 +148,24 @@ export interface QueueResult extends PageInfo {
    * `null` для общей очереди: там собранных нет по определению.
    */
   assembledTotal: number | null;
+  /**
+   * Собранные заказы флориста, разложенные по ДАТЕ ДОСТАВКИ.
+   *
+   * Каждый счётчик считается базой по ПОЛНОМУ серверному набору (день, область
+   * видимости и поиск учтены) — не по загруженной странице. Клиент рисует по
+   * ним заголовки дневных групп «Сегодня/Завтра/ДД.ММ.ГГГГ», а бездатные ведёт
+   * отдельной группой (`date === null`). Пустых записей здесь нет: группа без
+   * заказов в набор не попадает. `null` — как и у `assembledTotal`, для общей
+   * очереди.
+   */
+  assembledByDate: AssembledDateCount[] | null;
   items: QueueItem[];
+}
+
+/** Число собранных заказов флориста на одну дату доставки (`null` — без даты). */
+export interface AssembledDateCount {
+  date: string | null;
+  count: number;
 }
 
 export interface QueueQuery extends Partial<PageRequest> {
@@ -475,6 +492,21 @@ export async function readQueue(
       })
     : null;
 
+  // Собранные по датам доставки одним агрегатом по ПОЛНОМУ набору (с учётом
+  // поиска) — так дневные счётчики точны и не зависят от загруженной страницы.
+  const assembledByDate = mine
+    ? (
+        await db.deliveryOrder.groupBy({
+          by: ['deliveryDate'],
+          where: { ...scopeWhere, fulfillmentProcessState: 'ASSEMBLED' },
+          _count: { _all: true },
+        })
+      ).map((group_) => ({
+        date: group_.deliveryDate === null ? null : fromDateColumn(group_.deliveryDate),
+        count: group_._count._all,
+      }))
+    : null;
+
   if (group === 'assembled') {
     return readAssembledPage(db, {
       day: query.day,
@@ -486,6 +518,7 @@ export async function readQueue(
       context,
       scopeWhere,
       total: assembledTotal ?? 0,
+      byDate: assembledByDate ?? [],
     });
   }
 
@@ -555,6 +588,7 @@ export async function readQueue(
     includeAssigned: query.includeAssigned,
     search,
     assembledTotal,
+    assembledByDate,
     ...pageMeta,
     items: pageItems.map((entry) => {
       const row = byId.get(entry.id);
@@ -595,6 +629,7 @@ async function readAssembledPage(
     context: { viewDate: string; todayMoscow: string; nowMinuteMoscow: number };
     scopeWhere: ScopeWhere;
     total: number;
+    byDate: AssembledDateCount[];
   },
 ): Promise<QueueResult> {
   const rows = await db.deliveryOrder.findMany({
@@ -613,6 +648,7 @@ async function readAssembledPage(
     includeAssigned: input.includeAssigned,
     search: input.search,
     assembledTotal: input.total,
+    assembledByDate: input.byDate,
     ...pageInfo(input.page, input.total, rows.length),
     // Собранный заказ в приоритетную группу не входит: работа по нему
     // закончена, и поднимать его наверх незачем.

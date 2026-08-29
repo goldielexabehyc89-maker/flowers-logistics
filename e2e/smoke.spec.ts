@@ -663,6 +663,57 @@ test('администратор задаёт и меняет PIN сотрудн
   await context.close();
 });
 
+test('Сделки: адрес не обновляет экран на каждую букву — только по Enter или кнопке', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await expect(page.getByTestId('deals-list')).toBeVisible();
+
+  // Считаем ТОЛЬКО запросы списка сделок: `/api/deals?…` (не /map и не /selectable).
+  let listRequests = 0;
+  page.on('request', (request) => {
+    if (request.url().includes('/api/deals?')) {
+      listRequests += 1;
+    }
+  });
+
+  // Набор нескольких букв: черновик меняется, запросов нет.
+  const field = page.getByTestId('deals-search');
+  await field.click();
+  await page.waitForTimeout(400);
+  const baseline = listRequests;
+  for (const letter of ['м', 'о', 'с', 'к', 'в', 'а']) {
+    await page.keyboard.type(letter);
+  }
+  // Если бы буквы дергали сеть, за это время запрос бы успел уйти.
+  await page.waitForTimeout(700);
+  expect(listRequests).toBe(baseline);
+  await expect(field).toHaveValue('москва');
+
+  // Применение по Enter — ровно один запрос списка с окончательной строкой.
+  const beforeEnter = listRequests;
+  await field.press('Enter');
+  await expect.poll(() => listRequests).toBe(beforeEnter + 1);
+
+  // Кнопка «Найти» применяет так же — ещё один одиночный запрос.
+  const beforeButton = listRequests;
+  await page.getByTestId('deals-search-apply').click();
+  await expect.poll(() => listRequests).toBe(beforeButton + 1);
+
+  // «Сбросить» — одно обновление, поле пустеет.
+  const beforeClear = listRequests;
+  await page.getByTestId('deals-search-clear').click();
+  await expect(field).toHaveValue('');
+  await expect.poll(() => listRequests).toBe(beforeClear + 1);
+});
+
 test('Сделки: день, поиск, выбор из списка и ручной черновик', async ({ page }: { page: Page }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
   const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
@@ -684,6 +735,7 @@ test('Сделки: день, поиск, выбор из списка и руч
 
   // Поиск действует внутри выбранного дня.
   await page.getByLabel('Поиск в этом дне').fill(orderNumber);
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
   await expect(card).toBeVisible();
 
@@ -1329,6 +1381,7 @@ test('печатная версия листа не содержит навиг�
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const ownCard = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
   await expect(ownCard).toBeVisible();
   await ownCard.getByTestId('deal-pick').click();
@@ -3348,6 +3401,7 @@ test('отмена из МоегоСклада видна на стадиях, �
   // 1. Свободная сделка: отменённый заказ помечен и выбрать его нельзя.
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByTestId('deals-search').fill(freeOrder);
+  await page.getByTestId('deals-search').press('Enter');
   const freeCard = page.locator(`[data-testid="deal-card"][data-order-number="${freeOrder}"]`);
   await expect(freeCard).toBeVisible();
   await expect(freeCard.getByTestId('deal-blocked')).toHaveText('Заказ отменён');
@@ -3406,6 +3460,7 @@ test('отмена из МоегоСклада видна на стадиях, �
     // 8. В «Сделках» заказ вернулся обычным: пометки отмены больше нет.
     await page.getByRole('link', { name: 'Сделки' }).first().click();
     await page.getByTestId('deals-search').fill(draftOrder);
+    await page.getByTestId('deals-search').press('Enter');
     const returned = page.locator(`[data-testid="deal-card"][data-order-number="${draftOrder}"]`);
     await expect(returned).toBeVisible();
     /*
@@ -3449,6 +3504,7 @@ test('тот же букет: заказ возвращается в «Сдел�
 
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByTestId('deals-search').fill(orderNumber);
+  await page.getByTestId('deals-search').press('Enter');
 
   const cards = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
   // Ровно одна карточка: второго заказа не появилось ни под каким номером.
@@ -3483,6 +3539,7 @@ test('тот же букет: заказ возвращается в «Сдел�
    */
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByTestId('deals-search').fill(orderNumber);
+  await page.getByTestId('deals-search').press('Enter');
   // Заказы черновиков в рабочем списке скрыты — показываем их явно.
   await page.getByTestId('deals-include-drafts').check();
   const inDraft = page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`);
@@ -3557,6 +3614,7 @@ test('пересборка: заказ возвращается флористу
     // У логиста заказ снова в «Сделках» и ОДИН.
     await page.getByRole('link', { name: 'Сделки' }).first().click();
     await page.getByTestId('deals-search').fill(orderNumber);
+    await page.getByTestId('deals-search').press('Enter');
     await expect(
       page.locator(`[data-testid="deal-card"][data-order-number="${orderNumber}"]`),
     ).toHaveCount(1);
@@ -5083,6 +5141,7 @@ test('«Сделки»: правка интервала доходит до вт
     await target.getByRole('link', { name: 'Сделки' }).first().click();
     await expect(target.getByTestId('deals-workspace')).toBeVisible();
     await target.getByLabel('Поиск в этом дне').fill(number ?? '');
+    await target.getByLabel('Поиск в этом дне').press('Enter');
   };
 
   await openDeals(editor);
@@ -5317,6 +5376,7 @@ test('маршрутизация: линия идёт от склада и ме�
 
   for (const number of [first, second]) {
     await page.getByLabel('Поиск в этом дне').fill(number ?? '');
+    await page.getByLabel('Поиск в этом дне').press('Enter');
     const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
     await expect(card).toBeVisible();
     await card.getByTestId('deal-pick').click();
@@ -5460,6 +5520,7 @@ test('маршрутные листы: разделы, курьер, ручна�
 
   // 1. Сделки → диалог → сразу маршрутный лист (сквозной сценарий 2).
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
   await expect(card).toBeVisible();
   await card.getByTestId('deal-pick').click();
@@ -5600,6 +5661,7 @@ test('выбор курьера: открытие полем, фильтраци
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
   await expect(card).toBeVisible();
   await card.getByTestId('deal-pick').click();
@@ -5805,6 +5867,7 @@ test('история и отчёты: тариф, доставка, расчёт
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
   await expect(card).toBeVisible();
   await card.getByTestId('deal-pick').click();
@@ -9586,6 +9649,7 @@ test('история заказа: обновление без F5, только 
   await openSection(page, 'Логистика');
   await page.getByRole('link', { name: 'Сделки' }).first().click();
   await page.getByLabel('Поиск в этом дне').fill(dealNumber);
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const dealCard = page.locator(`[data-testid="deal-card"][data-order-number="${dealNumber}"]`);
   await expect(dealCard).toBeVisible();
   await dealCard.getByTestId('order-number').click();
@@ -9836,6 +9900,7 @@ const SA_LATE = process.env['E2E_SA_LATE'] ?? '';
 /** Карточка «Сделок» по номеру: поиск действует внутри выбранного дня. */
 async function dealCard(page: Page, number: string): Promise<Locator> {
   await page.getByLabel('Поиск в этом дне').fill(number);
+  await page.getByLabel('Поиск в этом дне').press('Enter');
   const card = page.locator(`[data-testid="deal-card"][data-order-number="${number}"]`);
   await expect(card).toBeVisible();
   return card;

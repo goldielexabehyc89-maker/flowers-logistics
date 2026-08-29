@@ -67,6 +67,7 @@ import {
   formatDay,
   formatInterval,
   latestJob,
+  groupAssembledByDate,
   mergePages,
   nextPageOffset,
   pageSummary,
@@ -286,6 +287,12 @@ export function FloristScreen(): React.JSX.Element {
   const assembledPages = assembledQuery.data?.pages ?? [];
   const assembledItems = assembledExpanded ? mergePages(assembledPages) : [];
   const assembledShownTotal = assembledPages[0]?.total ?? assembledTotal;
+  // Дневные группы: счётчики берём из серверного набора (полного, с учётом
+  // поиска), строки — из загруженных страниц. Число приходит с рабочим списком.
+  const assembledGroups = groupAssembledByDate(
+    assembledItems,
+    queuePages[0]?.assembledByDate ?? assembledPages[0]?.assembledByDate ?? [],
+  );
 
   const printPages = printQuery.data?.pages ?? [];
   const printItems = mergePages(printPages);
@@ -964,7 +971,24 @@ export function FloristScreen(): React.JSX.Element {
               {assembledQuery.isSuccess && assembledItems.length > 0 && (
                 <>
                   <ul className="florist__list" data-testid="florist-assembled">
-                    {assembledItems.map((item) => queueRow(item))}
+                    {assembledGroups.map((dateGroup) => (
+                      <li
+                        key={dateGroup.date ?? 'undated'}
+                        className="florist__date-group"
+                        data-testid="florist-assembled-date-group"
+                        data-date={dateGroup.date ?? 'none'}
+                      >
+                        <p
+                          className="florist__date-head muted text-sm"
+                          data-testid="florist-assembled-date-head"
+                        >
+                          {dateGroup.label} — {dateGroup.count}
+                        </p>
+                        <ul className="florist__list">
+                          {dateGroup.items.map((item) => queueRow(item))}
+                        </ul>
+                      </li>
+                    ))}
                   </ul>
                   <div className="florist__more">
                     <span className="muted text-sm" data-testid="florist-assembled-count">
@@ -1058,6 +1082,11 @@ export function FloristScreen(): React.JSX.Element {
                 >
                   {printStateLabel(job.state)}
                 </StatusBadge>
+                {job.deliveryState === 'SENT_TO_PRINTER' && (
+                  <StatusBadge tone="info" data-testid="print-delivery-state">
+                    Передано принтеру
+                  </StatusBadge>
+                )}
                 <span className="muted text-sm">попытка {job.attempt}</span>
                 {job.lastErrorCode !== null && (
                   <span className="muted text-sm">код {job.lastErrorCode}</span>

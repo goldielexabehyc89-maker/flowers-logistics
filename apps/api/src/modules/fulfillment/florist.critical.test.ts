@@ -713,6 +713,204 @@ describe('завершение сборки', () => {
   });
 });
 
+describe('флорист возвращает свой собранный заказ на шаг назад', () => {
+  async function reassemble(actor: AuthenticatedActor, orderId: string): Promise<void> {
+    const current = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { fulfillmentProcessVersion: true },
+    });
+    await assembleOrder(
+      ctx.db,
+      actor,
+      { orderId, expectedProcessVersion: current.fulfillmentProcessVersion },
+      CONTEXT,
+    );
+  }
+
+  it('свой собранный на активной смене → IN_ASSEMBLY, назначение прежнее, отметки сборки сняты', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+
+    const result = await reopenOrder(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'Переделать букет' },
+      CONTEXT,
+    );
+    expect(result.processState).toBe('IN_ASSEMBLY');
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: {
+        fulfillmentProcessState: true,
+        fulfillmentAssigneeId: true,
+        fulfillmentAssembledAt: true,
+        fulfillmentAssembledById: true,
+      },
+    });
+    expect(after.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+    // Один шаг назад: заказ остаётся за тем же флористом, а не уходит в очередь.
+    expect(after.fulfillmentAssigneeId).toBe(florist.userId);
+    // Отметки завершённой сборки сняты.
+    expect(after.fulfillmentAssembledAt).toBeNull();
+    expect(after.fulfillmentAssembledById).toBeNull();
+
+    // Действие и причина — в истории заказа.
+    const audit = await ctx.db.auditLog.findFirst({
+      where: { entityId: order.id, action: 'ORDER_FULFILLMENT_REOPENED' },
+      select: { newValue: true },
+    });
+    expect((audit?.newValue as { reason?: string }).reason).toContain('Переделать');
+  });
+
+  it('чужой собранный флорист вернуть не может (403), заказ не тронут', async () => {
+    const owner = await floristOnShift();
+    const order = await seedOrder();
+    await claimAndAssemble(owner, order.id);
+
+    const other = await floristOnShift();
+    await expect(
+      reopenOrder(ctx.db, other, { orderId: order.id, reason: 'Хочу переделать' }, CONTEXT),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    expect(
+      (
+        await ctx.db.deliveryOrder.findUniqueOrThrow({
+          where: { id: order.id },
+          select: { fulfillmentProcessState: true },
+        })
+      ).fulfillmentProcessState,
+    ).toBe('ASSEMBLED');
+  });
+
+  it('без активной смены свой заказ вернуть нельзя', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+    await closeOwnShift(ctx.db, florist, CONTEXT);
+
+    await expect(
+      reopenOrder(ctx.db, florist, { orderId: order.id, reason: 'Переделать' }, CONTEXT),
+    ).rejects.toBeTruthy();
+
+    expect(
+      (
+        await ctx.db.deliveryOrder.findUniqueOrThrow({
+          where: { id: order.id },
+          select: { fulfillmentProcessState: true },
+        })
+      ).fulfillmentProcessState,
+    ).toBe('ASSEMBLED');
+  });
+
+  it('прежний бланк и задание сохраняются, возврат ничего не печатает, а новый «Собран» создаёт новую попытку', async () => {
+    const florist = await floristOnShift();
+    const order = await seedOrder();
+    await claimAndAssemble(florist, order.id);
+
+    const formsBefore = await ctx.db.orderPrintForm.count({ where: { orderId: order.id } });
+    const jobsBefore = await ctx.db.orderPrintJob.findMany({
+      where: { orderId: order.id },
+      select: { id: true, attempt: true, deliveryState: true },
+    });
+    expect(jobsBefore).toHaveLength(1);
+
+    await reopenOrder(ctx.db, florist, { orderId: order.id, reason: 'Переделать' }, CONTEXT);
+
+    // Бланк и задание НЕ удалены и НЕ переписаны; возврат сам ничего не печатает.
+    expect(await ctx.db.orderPrintForm.count({ where: { orderId: order.id } })).toBe(formsBefore);
+    const jobsAfterReopen = await ctx.db.orderPrintJob.findMany({
+      where: { orderId: order.id },
+      select: { id: true, deliveryState: true },
+    });
+    expect(jobsAfterReopen).toHaveLength(1);
+    expect(jobsAfterReopen[0]?.id).toBe(jobsBefore[0]?.id);
+    expect(jobsAfterReopen[0]?.deliveryState).toBe(jobsBefore[0]?.deliveryState);
+
+    // Новый «Собран» создаёт НОВУЮ штатную попытку печати.
+    await reassemble(florist, order.id);
+    const jobsAfterAssemble = await ctx.db.orderPrintJob.findMany({
+      where: { orderId: order.id },
+      orderBy: { attempt: 'asc' },
+      select: { attempt: true },
+    });
+    expect(jobsAfterAssemble).toHaveLength(2);
+    expect(jobsAfterAssemble[1]?.attempt).toBe((jobsBefore[0]?.attempt ?? 0) + 1);
+  });
+});
+
+describe('собранные флориста разложены по датам доставки', () => {
+  it('дневные и общий счётчики точны по ПОЛНОМУ набору и пересчитываются при поиске', async () => {
+    const florist = await floristOnShift();
+    const first10 = await seedOrder({ day: '2027-03-10' });
+    const second10 = await seedOrder({ day: '2027-03-10' });
+    const only11 = await seedOrder({ day: '2027-03-11' });
+    for (const order of [first10, second10, only11]) {
+      await claimAndAssemble(florist, order.id);
+    }
+
+    // Полный набор: общий счётчик и счётчики дат считаются базой, а не страницей.
+    const page = await readQueue(
+      ctx.db,
+      { userId: florist.userId },
+      { day: 'today', scope: 'mine', group: 'assembled', includeAssigned: false, search: null },
+      NOW,
+    );
+    expect(page.assembledTotal).toBe(3);
+    const byDate = new Map((page.assembledByDate ?? []).map((entry) => [entry.date, entry.count]));
+    expect(byDate.get('2027-03-10')).toBe(2);
+    expect(byDate.get('2027-03-11')).toBe(1);
+
+    // Поиск сужает и счётчики: остаётся только найденная дата.
+    const searched = await readQueue(
+      ctx.db,
+      { userId: florist.userId },
+      {
+        day: 'today',
+        scope: 'mine',
+        group: 'assembled',
+        includeAssigned: false,
+        search: only11.number,
+      },
+      NOW,
+    );
+    expect(searched.assembledTotal).toBe(1);
+    const searchedByDate = new Map(
+      (searched.assembledByDate ?? []).map((entry) => [entry.date, entry.count]),
+    );
+    expect(searchedByDate.get('2027-03-11')).toBe(1);
+    expect(searchedByDate.has('2027-03-10')).toBe(false);
+  });
+
+  it('дневной счётчик не зависит от размера страницы', async () => {
+    const florist = await floristOnShift();
+    for (let index = 0; index < 3; index += 1) {
+      const order = await seedOrder({ day: '2027-03-12' });
+      await claimAndAssemble(florist, order.id);
+    }
+
+    // Страница в один заказ, а дневной счётчик всё равно называет полное число.
+    const page = await readQueue(
+      ctx.db,
+      { userId: florist.userId },
+      {
+        day: 'today',
+        scope: 'mine',
+        group: 'assembled',
+        includeAssigned: false,
+        search: null,
+        limit: 1,
+      },
+      NOW,
+    );
+    expect(page.items).toHaveLength(1);
+    const byDate = new Map((page.assembledByDate ?? []).map((entry) => [entry.date, entry.count]));
+    expect(byDate.get('2027-03-12')).toBe(3);
+    expect(page.assembledTotal).toBe(3);
+  });
+});
+
 // --- 4. PDF и QR -------------------------------------------------------------
 
 /**
@@ -939,12 +1137,16 @@ describe('автоматическая печать: назначение точ
     });
     expect(result.deliveryState).toBe('SENT_TO_PRINTER');
 
-    // Переданное принтеру уходит из рабочего списка «ожидает печати».
+    // Переданное принтеру задание ОСТАЁТСЯ в «Требуют внимания»: бланк всё ещё
+    // ждёт человеческого подтверждения выхода бумаги, а строка теперь несёт
+    // состояние «Передано принтеру».
     const after = await listPrintJobs(ctx.db, {
       filter: 'attention',
       actorUserId: florist.userId,
     });
-    expect(after.items.some((item) => item.orderNumber === order.number)).toBe(false);
+    const stillThere = after.items.find((item) => item.orderNumber === order.number);
+    expect(stillThere).toBeDefined();
+    expect(stillThere?.deliveryState).toBe('SENT_TO_PRINTER');
 
     // И об этом ушло realtime-событие — экран обновится без F5.
     expect(await ctx.db.realtimeEvent.count({ where: { topic: 'print_job.changed' } })).toBe(
