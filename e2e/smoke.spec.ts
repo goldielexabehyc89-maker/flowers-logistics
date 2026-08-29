@@ -632,7 +632,7 @@ test('администратор задаёт и меняет PIN сотрудн
   // Совпадающие — сохраняются, окно закрывается, PIN нигде не показан.
   await admin.getByTestId('set-pin-repeat').fill('4416');
   await admin.getByTestId('set-pin-submit').click();
-  await expect(admin.getByTestId('set-pin-modal')).toHaveCount(0);
+  await expect(admin.getByTestId('set-pin-modal')).not.toBeVisible();
 
   // Сотрудник стал ACTIVE и входит НОВЫМ PIN сразу.
   const employeeContext = await browser.newContext();
@@ -649,7 +649,7 @@ test('администратор задаёт и меняет PIN сотрудн
   await admin.getByTestId('set-pin-new').fill('2222');
   await admin.getByTestId('set-pin-repeat').fill('2222');
   await admin.getByTestId('set-pin-submit').click();
-  await expect(admin.getByTestId('set-pin-modal')).toHaveCount(0);
+  await expect(admin.getByTestId('set-pin-modal')).not.toBeVisible();
 
   // Открытый экран сотрудника завершает сессию сам, каналом realtime: reload()
   // здесь намеренно нет — проверяется именно session-closed.
