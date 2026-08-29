@@ -591,6 +591,78 @@ test('заморозка доходит до открытых сеансов б�
   await secondAdminContext.close();
 });
 
+test('администратор задаёт и меняет PIN сотрудника из карточки', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext();
+  const admin = await context.newPage();
+  await login(admin, ADMIN_PHONE, ADMIN_PIN);
+
+  // Заводим нового сотрудника (PENDING). Временный код НЕ используем: PIN
+  // задаст сам администратор — в этом и суть проверки.
+  const phone = uniquePhone();
+  const name = `Сотрудник PIN ${phone.slice(-4)}`;
+  await openSection(admin, 'Сотрудники и курьеры');
+  await admin.getByRole('button', { name: 'Добавить' }).click();
+  await admin.getByLabel('ФИО').fill(name);
+  await admin.getByLabel('Телефон').fill(phone);
+  await admin.getByRole('button', { name: 'Создать' }).click();
+  await admin.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // Находим сотрудника в списке ожидающих активации.
+  await admin.getByLabel('Статус').selectOption('PENDING_ACTIVATION');
+  const pendingRow = admin.getByRole('row', { name: new RegExp(name) });
+  await expect(pendingRow).toBeVisible({ timeout: 30_000 });
+
+  // Новый элемент интерфейса: «Задать PIN» (PIN ещё не задан).
+  await pendingRow.getByTestId('user-more').click();
+  await admin.getByRole('menuitem', { name: 'Задать PIN' }).click();
+  await expect(admin.getByTestId('set-pin-modal')).toBeVisible();
+
+  // Несовпадающие значения сервер не увидит вовсе — их отклоняет само окно.
+  await admin.getByTestId('set-pin-new').fill('4416');
+  await admin.getByTestId('set-pin-repeat').fill('4417');
+  await admin.getByTestId('set-pin-submit').click();
+  await expect(admin.getByTestId('set-pin-error')).toBeVisible();
+
+  // Совпадающие — сохраняются, окно закрывается, PIN нигде не показан.
+  await admin.getByTestId('set-pin-repeat').fill('4416');
+  await admin.getByTestId('set-pin-submit').click();
+  await expect(admin.getByTestId('set-pin-modal')).not.toBeVisible();
+
+  // Сотрудник стал ACTIVE и входит НОВЫМ PIN сразу.
+  const employeeContext = await browser.newContext();
+  const employee = await employeeContext.newPage();
+  await login(employee, phone, '4416');
+  await expect(employee.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  // Администратор меняет PIN действующему сотруднику при открытом его сеансе.
+  await admin.getByLabel('Статус').selectOption('ACTIVE');
+  const activeRow = admin.getByRole('row', { name: new RegExp(name) });
+  await expect(activeRow).toBeVisible({ timeout: 30_000 });
+  await activeRow.getByTestId('user-more').click();
+  await admin.getByRole('menuitem', { name: 'Изменить PIN' }).click();
+  await admin.getByTestId('set-pin-new').fill('2222');
+  await admin.getByTestId('set-pin-repeat').fill('2222');
+  await admin.getByTestId('set-pin-submit').click();
+  await expect(admin.getByTestId('set-pin-modal')).not.toBeVisible();
+
+  // Открытый экран сотрудника завершает сессию сам, каналом realtime: reload()
+  // здесь намеренно нет — проверяется именно session-closed.
+  await expect(employee).toHaveURL(/\/login$/, { timeout: 30_000 });
+
+  // Новый PIN действует сразу.
+  await login(employee, phone, '2222');
+  await expect(employee.getByRole('heading', { name: 'Активные', level: 1 })).toBeVisible();
+
+  await employeeContext.close();
+  await context.close();
+});
+
 test('Сделки: день, поиск, выбор из списка и ручной черновик', async ({ page }: { page: Page }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
   const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
