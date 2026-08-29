@@ -19,6 +19,7 @@ import {
   listUsers,
   reissueActivationCode,
   resetPin,
+  setEmployeePin,
   unfreezeUser,
   updateUser,
   type Actor,
@@ -42,6 +43,14 @@ const phoneSchema = z
 // бы валидацией как несуществующая.
 const roleSchema = z.enum(ROLES);
 const vehicleSchema = z.enum(['CAR', 'FOOT']);
+
+/** Ровно четыре цифры. Совпадение с повтором проверяет клиент до отправки. */
+const setPinSchema = z.object({
+  pin: z.string().regex(/^\d{4}$/, 'PIN должен состоять ровно из четырёх цифр'),
+});
+
+/** Задать/изменить PIN сотрудника может только администратор. */
+const ADMIN_ONLY = ['ADMIN'] as const;
 const uuidSchema = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'Некорректный id');
@@ -159,5 +168,15 @@ export async function registerUserRoutes(app: AppServer, deps: UsersDeps): Promi
     const { id } = idParamSchema.parse(request.params);
     reply.header('Cache-Control', 'no-store');
     return resetPin(deps, toActor(actor), id, metaOf(request));
+  });
+
+  // Прямое задание PIN сотрудника администратором: код сотруднику не передаётся.
+  // Право проверяет СЕРВЕР ролью ADMIN — управляющий и прочие получают 403.
+  app.post('/api/users/:id/pin', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, ADMIN_ONLY);
+    const { id } = idParamSchema.parse(request.params);
+    const body = setPinSchema.parse(request.body);
+    reply.header('Cache-Control', 'no-store');
+    return setEmployeePin(deps, toActor(actor), id, { pin: body.pin }, metaOf(request));
   });
 }

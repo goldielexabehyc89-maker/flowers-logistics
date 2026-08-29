@@ -38,6 +38,7 @@ import {
   type StatusTone,
 } from '../../ui/components';
 import { OneTimeCodeModal, type OneTimeCode } from './OneTimeCodeModal';
+import { SetPinModal } from './SetPinModal';
 import { UserFormModal, type UserFormValues } from './UserFormModal';
 import {
   ACTION_LABELS,
@@ -128,6 +129,8 @@ export function UsersScreen(): React.JSX.Element {
   const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
   const [oneTimeCode, setOneTimeCode] = useState<OneTimeCode | null>(null);
   const [historyFor, setHistoryFor] = useState<UserView | null>(null);
+  const [pinTarget, setPinTarget] = useState<UserView | null>(null);
+  const [pinError, setPinError] = useState<string | null>(null);
 
   const listKey = ['users', status, role, offset] as const;
 
@@ -278,6 +281,27 @@ export function UsersScreen(): React.JSX.Element {
       showToast(describe(error), 'error');
     },
   });
+
+  // Прямое задание PIN администратором. Сам PIN живёт только в state окна и
+  // уходит единственным телом запроса; в ответе, кэше и localStorage его нет.
+  const setPinMutation = useMutation({
+    mutationFn: async ({ user, pin }: { user: UserView; pin: string }) => {
+      await client.post(`/api/users/${user.id}/pin`, { pin });
+      return user;
+    },
+    onSuccess: async (user) => {
+      setPinTarget(null);
+      setPinError(null);
+      showToast(`PIN сотрудника ${user.fullName} сохранён`, 'success');
+      await invalidate();
+    },
+    onError: (error) => setPinError(describe(error)),
+  });
+
+  // Задать PIN может ТОЛЬКО администратор и только не администратору. Сервер это
+  // тоже проверяет; здесь — чтобы не показывать заведомо запретное действие.
+  const canSetPin = (user: UserView): boolean =>
+    actorRoles.includes('ADMIN') && !user.roles.includes('ADMIN');
 
   const historyQuery = useQuery({
     queryKey: ['user-history', historyFor?.id],
@@ -461,6 +485,17 @@ export function UsersScreen(): React.JSX.Element {
                         <ActionMenu
                           testId="user-more"
                           items={[
+                            ...(canSetPin(item)
+                              ? [
+                                  {
+                                    label: item.pinSetAt === null ? 'Задать PIN' : 'Изменить PIN',
+                                    onSelect: () => {
+                                      setPinError(null);
+                                      setPinTarget(item);
+                                    },
+                                  },
+                                ]
+                              : []),
                             ...(item.status !== 'FROZEN'
                               ? [
                                   {
@@ -577,6 +612,23 @@ export function UsersScreen(): React.JSX.Element {
       />
 
       <OneTimeCodeModal value={oneTimeCode} onClose={() => setOneTimeCode(null)} />
+
+      <SetPinModal
+        open={pinTarget !== null}
+        mode={pinTarget?.pinSetAt ? 'change' : 'set'}
+        employeeName={pinTarget?.fullName ?? ''}
+        busy={setPinMutation.isPending}
+        error={pinError}
+        onSubmit={(pin) => {
+          if (pinTarget !== null) {
+            setPinMutation.mutate({ user: pinTarget, pin });
+          }
+        }}
+        onClose={() => {
+          setPinTarget(null);
+          setPinError(null);
+        }}
+      />
 
       <Modal
         open={historyFor !== null}

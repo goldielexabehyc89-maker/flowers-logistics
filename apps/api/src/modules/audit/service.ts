@@ -27,6 +27,10 @@ export const AUDIT_ACTIONS = [
   'USER_FROZEN',
   'USER_UNFROZEN',
   'PIN_RESET',
+  // Администратор задал/изменил PIN сотрудника напрямую (код не передавался).
+  // В значениях — только статус и признак первого PIN; сам PIN, хеш и телефон
+  // не пишутся.
+  'USER_PIN_SET_BY_ADMIN',
   'OUTBOX_MESSAGE_RETRIED',
   // Системные действия синхронизации заказов. Автор — не пользователь,
   // поэтому actorUserId у них пуст, а source = 'worker'.

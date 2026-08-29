@@ -908,3 +908,97 @@ export async function resetPin(
 
   return { activationCode: prepared.code, expiresAt: prepared.expiresAt };
 }
+
+/**
+ * Администратор напрямую задаёт или меняет PIN сотрудника.
+ *
+ * Отличие от `resetPin`: код сотруднику не передаётся — администратор вводит
+ * сам PIN. Действие доступно ТОЛЬКО администратору (право проверяет сервер),
+ * и через него нельзя тронуть учётку с ролью ADMIN — ни чужую, ни свою:
+ * администраторские PIN этим путём не меняются.
+ *
+ * Переходы статуса:
+ *  * PENDING_ACTIVATION → ACTIVE: сотрудник входит новым PIN сразу, а прежние
+ *    коды активации становятся недействительными;
+ *  * ACTIVE → ACTIVE: прежний PIN перестаёт работать, новый работает сразу;
+ *  * FROZEN → FROZEN: PIN обновляется, но заморозка и запрет входа сохраняются.
+ *
+ * Во всех случаях `sessionVersion` растёт и все прежние сессии отзываются:
+ * открытые экраны сотрудника завершаются штатным `session-closed` (поток SSE
+ * видит новую версию сессии и закрывает её). Временной блокировки вход при
+ * этом не создаётся: пароль не проверяется, а задаётся.
+ */
+export async function setEmployeePin(
+  deps: Deps,
+  actor: Actor,
+  userId: string,
+  input: { pin: string },
+  meta: RequestMeta,
+): Promise<{ status: string; firstPin: boolean }> {
+  // Хеш считается ВНЕ транзакции: argon2 намеренно медленный, держать на нём
+  // открытую строку `FOR UPDATE` значило бы зря удлинять блокировку. Механизм
+  // хеширования — тот же, что у входа и активации; второго не заводим.
+  const pinHash = await hashSecretCode(input.pin, deps.config.AUTH_PIN_PEPPER);
+
+  return deps.db.$transaction(async (tx) => {
+    const target = await lockAndAuthorize(tx, actor, userId);
+
+    // Даже администратор не задаёт PIN администратору этим действием: карточка
+    // сотрудника не инструмент смены учётки другого админа или своей.
+    if (target.roles.includes('ADMIN')) {
+      throw forbidden('cannot set PIN of an administrator via this action');
+    }
+
+    const firstPin = target.pinSetAt === null;
+    // Заморозка сохраняется: обновляем PIN, но статус и запрет входа не трогаем.
+    const nextStatus = target.status === 'FROZEN' ? 'FROZEN' : 'ACTIVE';
+
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        pinHash,
+        pinSetAt: new Date(),
+        status: nextStatus,
+        version: { increment: 1 },
+        sessionVersion: { increment: 1 },
+      },
+    });
+
+    // Действующие коды активации сотрудника больше его не активируют.
+    await tx.activationCode.updateMany({
+      where: { userId, activeKey: { not: null } },
+      data: { activeKey: null, invalidatedAt: new Date() },
+    });
+
+    await revokeAllSessions(tx, userId, 'PIN_SET_BY_ADMIN');
+
+    // Аудит: кто, кому, когда и был ли это первый PIN. В ЗНАЧЕНИЯ (old/new) не
+    // попадают ни сам PIN, ни его хеш, ни телефон, ни IP — только статус и
+    // признак первого PIN. IP и user-agent — это метаданные запроса АДМИНА
+    // в штатных колонках, как у всякого чувствительного действия.
+    await writeAudit(tx, {
+      action: 'USER_PIN_SET_BY_ADMIN',
+      entityType: 'User',
+      entityId: userId,
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      oldValue: { status: target.status },
+      newValue: { status: nextStatus, firstPin },
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+    });
+
+    await publishRealtimeEvent(tx, {
+      topic: 'user.updated',
+      payload: { userId, status: nextStatus, reason: 'pin-set' },
+      audienceRoles: managementAudienceFor(target.roles),
+    });
+    await publishRealtimeEvent(tx, {
+      topic: 'session.revoked',
+      payload: { userId, reason: 'pin-set' },
+      audienceUserId: userId,
+    });
+
+    return { status: nextStatus, firstPin };
+  });
+}
