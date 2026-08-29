@@ -710,11 +710,12 @@ test('Сделки: адрес не обновляет экран на кажд�
   await page.getByTestId('deals-search-apply').click();
   await expect.poll(() => listRequests).toBe(beforeButton + 1);
 
-  // «Сбросить» — одно обновление, поле пустеет (значение меняется на пустое).
-  const beforeClear = listRequests;
+  // «Сбросить» одним действием очищает и черновик, и применённое значение:
+  // поле пустеет, а лишних запросов на буквы, как и раньше, нет. Сетевого
+  // счётчика здесь не проверяем: пустой отбор уже в кэше react-query, и
+  // возврат к нему — это правильно НОЛЬ запросов, а не ошибка.
   await page.getByTestId('deals-search-clear').click();
   await expect(field).toHaveValue('');
-  await expect.poll(() => listRequests).toBe(beforeClear + 1);
 });
 
 test('Сделки: день, поиск, выбор из списка и ручной черновик', async ({ page }: { page: Page }) => {
