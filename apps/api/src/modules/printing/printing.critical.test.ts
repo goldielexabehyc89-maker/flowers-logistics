@@ -49,6 +49,7 @@ import {
   recordHeartbeat,
   requestTestPrint,
   OFFLINE_AFTER_MS,
+  HEARTBEAT_INTERVAL_MS,
 } from './service.js';
 
 let ctx: TestContext;
@@ -625,5 +626,158 @@ describe('выдача заданий агенту', () => {
     expect(point.lastErrorText).toContain('XP-318B');
     // Секрет, случайно попавший в текст ошибки, до интерфейса не доходит.
     expect(point.lastErrorText).not.toContain('test-only-agent-token');
+  });
+});
+
+describe('период опроса очереди печати', () => {
+  /** Один опрос агентом через настоящий HTTP-контур с токеном агента. */
+  async function poll(
+    token: string,
+  ): Promise<{ heartbeatMs: number; job: { kind: string; jobId: string | null } | null }> {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/print-agent/poll',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json() as {
+      heartbeatMs: number;
+      job: { kind: string; jobId: string | null } | null;
+    };
+  }
+
+  const OFFLINE_BASE = {
+    id: 'x',
+    name: 'Стол',
+    computerName: null,
+    printerName: null,
+    isActive: true,
+    agentTokenHash: 'hash',
+    pairingExpiresAt: null,
+    lastErrorText: null,
+    testRequestedAt: null,
+    lastErrorAt: null,
+  };
+
+  it('пустая очередь: heartbeatMs=3000, задания нет', async () => {
+    const { token } = await pairedPoint();
+    const body = await poll(token);
+    expect(body.heartbeatMs).toBe(3000);
+    expect(body.job).toBeNull();
+  });
+
+  it('тестовая печать: heartbeatMs=3000 вместе с заданием TEST', async () => {
+    const { pointId, token } = await pairedPoint();
+    const admin = await actorFor(['ADMIN']);
+    await requestTestPrint(ctx.db, admin, pointId, CONTEXT);
+
+    const body = await poll(token);
+    expect(body.heartbeatMs).toBe(3000);
+    expect(body.job?.kind).toBe('TEST');
+  });
+
+  it('найденное задание: heartbeatMs=3000, и оно забирается за один период (≈3 с)', async () => {
+    const { pointId, token } = await pairedPoint();
+    await seedJob(pointId);
+
+    const body = await poll(token);
+    // Задание уходит агенту тем же ответом, а следующий опрос — через 3 с:
+    // после «Собран» наклейка подхватывается за пару секунд, а не за полминуты.
+    expect(body.heartbeatMs).toBe(3000);
+    expect(body.job?.kind).toBe('ORDER_LABEL');
+  });
+
+  it('период опроса — ровно три секунды', () => {
+    // Значение уходит агенту в ответе, агент спит его между опросами. Уже
+    // установленные агенты (в т.ч. Windows 7) читают его сами — их не меняем.
+    expect(HEARTBEAT_INTERVAL_MS).toBe(3_000);
+  });
+
+  it('за минуту непрерывного пустого опроса отметка пишется 2–3 раза, точка ONLINE', async () => {
+    const { pointId } = await pairedPoint();
+    // Предсказуемый старт: отметки ещё нет.
+    await ctx.db.printPoint.update({ where: { id: pointId }, data: { lastSeenAt: null } });
+
+    const start = new Date('2028-03-14T12:00:00.000Z');
+    const written = new Set<number>();
+    // 21 опрос по 3 с укладывается в минуту.
+    for (let second = 0; second <= 60; second += 3) {
+      const now = new Date(start.getTime() + second * 1000);
+      await recordHeartbeat(ctx.db, pointId, {}, now);
+      const point = await ctx.db.printPoint.findUniqueOrThrow({
+        where: { id: pointId },
+        select: { lastSeenAt: true },
+      });
+      if (point.lastSeenAt !== null) {
+        written.add(point.lastSeenAt.getTime());
+      }
+    }
+    // Двадцать опросов, но записей — единицы: обычная отметка живёт 30 с.
+    expect(written.size).toBeLessThanOrEqual(3);
+    expect(written.size).toBeGreaterThanOrEqual(1);
+
+    // При этом точка всё время ONLINE: последняя отметка моложе окна offline.
+    const last = Math.max(...written);
+    const atEnd = new Date(start.getTime() + 60 * 1000);
+    expect(pointState({ ...OFFLINE_BASE, lastSeenAt: new Date(last) }, atEnd)).toBe('ONLINE');
+  });
+
+  it('ошибка агента пишется немедленно, даже внутри окна экономии отметок', async () => {
+    const { pointId } = await pairedPoint();
+    const t0 = new Date('2028-03-14T12:00:00.000Z');
+    await recordHeartbeat(ctx.db, pointId, {}, t0);
+
+    // Через 2 с (внутри 30-секундного окна) приходит ошибка — она НЕ ждёт.
+    const t1 = new Date(t0.getTime() + 2000);
+    await recordHeartbeat(ctx.db, pointId, { error: 'Не найден принтер XP-318B' }, t1);
+
+    const point = await ctx.db.printPoint.findUniqueOrThrow({
+      where: { id: pointId },
+      select: { lastSeenAt: true, lastErrorAt: true, lastErrorText: true },
+    });
+    expect(point.lastErrorText).toContain('XP-318B');
+    expect(point.lastErrorAt?.getTime()).toBe(t1.getTime());
+    // Ошибка освежает и живость: отметка тоже на момент ошибки.
+    expect(point.lastSeenAt?.getTime()).toBe(t1.getTime());
+  });
+
+  it('окно offline остаётся 90 секунд и переживает короткий сетевой сбой', () => {
+    // Порог недоступности не сдвинулся вместе с ускорением опроса.
+    expect(OFFLINE_AFTER_MS).toBe(90_000);
+
+    const now = new Date('2028-03-14T12:00:00.000Z');
+
+    // Несколько подряд пропущенных опросов по 3 с (короткий сбой сети) — это
+    // ещё далеко не 90 с молчания: точка остаётся ONLINE.
+    const blip = new Date(now.getTime() - HEARTBEAT_INTERVAL_MS * 5);
+    expect(pointState({ ...OFFLINE_BASE, lastSeenAt: blip }, now)).toBe('ONLINE');
+
+    // У самой границы (чуть меньше окна) — ещё ONLINE.
+    const almost = new Date(now.getTime() - (OFFLINE_AFTER_MS - 1000));
+    expect(pointState({ ...OFFLINE_BASE, lastSeenAt: almost }, now)).toBe('ONLINE');
+
+    // Только молчание ДОЛЬШЕ окна гасит точку.
+    const stale = new Date(now.getTime() - OFFLINE_AFTER_MS - 1000);
+    expect(pointState({ ...OFFLINE_BASE, lastSeenAt: stale }, now)).toBe('OFFLINE');
+  });
+
+  it('параллельные опросы не выдают одно задание дважды', async () => {
+    const { pointId, token } = await pairedPoint();
+    const a = await seedJob(pointId);
+    const b = await seedJob(pointId);
+
+    // Два одновременных опроса одной точкой.
+    const [first, second] = await Promise.all([poll(token), poll(token)]);
+
+    const jobIds = [first.job?.jobId, second.job?.jobId].filter(
+      (value): value is string => typeof value === 'string',
+    );
+    // Ни одно задание не выдано дважды.
+    expect(new Set(jobIds).size).toBe(jobIds.length);
+    // Оба задания — из очереди этой точки (а не чужие).
+    for (const jobId of jobIds) {
+      expect([a.jobId, b.jobId]).toContain(jobId);
+    }
   });
 });
