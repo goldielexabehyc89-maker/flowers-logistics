@@ -460,3 +460,21 @@ export function invalidationKeysFor(topic: string): string[][] {
     ? [...keys, ORDER_TIMELINE_KEY, ORDER_HISTORY_SEARCH_KEY]
     : keys;
 }
+
+/** Адресный сигнал сервера о том, что действующей сессии больше нет. */
+export const SESSION_CLOSED_EVENT = 'session-closed';
+
+/**
+ * Завершает ли событие ТЕКУЩУЮ сессию.
+ *
+ * Только `session-closed`: сервер шлёт его именно этому открытому потоку,
+ * убедившись по снимку базы, что сессии больше нет (отзыв семьи, смена
+ * sessionVersion, заморозка, сброс PIN). Журнальное `session.revoked` выходом
+ * НЕ является — оно может относиться к прошлой сессии того же пользователя и
+ * приходить при доставке архива; реакция на него выкидывала бы новый, живой
+ * вход. Настоящий отзыв текущей сессии сервер всё равно закроет через
+ * `session-closed` не позже следующего опроса.
+ */
+export function endsSession(eventName: string): boolean {
+  return eventName === SESSION_CLOSED_EVENT;
+}

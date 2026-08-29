@@ -135,3 +135,24 @@ export function parseLastEventId(raw: string | undefined): bigint {
     return 0n;
   }
 }
+
+/**
+ * «Голова» журнала: наибольший идентификатор события; `0n`, если журнал пуст.
+ *
+ * Свежее подключение (без действительного `Last-Event-ID`) начинает отсюда, а
+ * не с нуля. Старт с нуля означал бы доставку всего накопленного архива разом:
+ * это и шторм перезапросов на клиенте (каждое событие сбрасывает свои списки),
+ * и повторная выдача исторических служебных событий вроде `session.revoked`.
+ * Начальное состояние экрана грузят его собственные запросы; realtime-канал
+ * нужен для того, что произойдёт ДАЛЬШЕ, а не для пересказа прошлого.
+ *
+ * Переподключение с действительным `Last-Event-ID` по-прежнему догоняет ровно
+ * пропущенное — на него это правило не влияет.
+ */
+export async function currentHeadEventId(db: TransactionClient): Promise<bigint> {
+  const newest = await db.realtimeEvent.findFirst({
+    orderBy: { id: 'desc' },
+    select: { id: true },
+  });
+  return newest === null ? 0n : newest.id;
+}

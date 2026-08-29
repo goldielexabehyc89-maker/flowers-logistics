@@ -12,7 +12,7 @@ import type { AppConfig } from '../../platform/config.js';
 import { readRoleAssignment } from '../../platform/role-assignments.js';
 import { authenticate } from '../auth/guards.js';
 import type { Notifier } from './notifier.js';
-import { parseLastEventId, readEventsForViewer } from './reader.js';
+import { currentHeadEventId, parseLastEventId, readEventsForViewer } from './reader.js';
 
 /** Периодичность heartbeat: комментарий SSE, не событие. */
 export const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -222,6 +222,23 @@ export async function registerRealtimeRoutes(app: AppServer, deps: RealtimeDeps)
     // Fastify больше не управляет этим ответом: пишем в сокет сами.
     reply.hijack();
 
+    /*
+     * Точка старта курсора.
+     *
+     * Действительный `Last-Event-ID` — это переподключение: догоняем ровно
+     * пропущенное. Заголовка нет или он мусорный — свежее подключение: стартуем
+     * с ГОЛОВЫ журнала, чтобы не воспроизводить накопленный архив (шторм
+     * перезапросов) и не доставлять исторические служебные события.
+     */
+    const rawLastEventId =
+      typeof request.headers['last-event-id'] === 'string'
+        ? request.headers['last-event-id']
+        : undefined;
+    const startCursor =
+      rawLastEventId !== undefined && /^\d+$/.test(rawLastEventId)
+        ? parseLastEventId(rawLastEventId)
+        : await currentHeadEventId(deps.db);
+
     const writer: StreamWriter = {
       write: (chunk) => {
         if (!reply.raw.writableEnded) {
@@ -245,11 +262,7 @@ export async function registerRealtimeRoutes(app: AppServer, deps: RealtimeDeps)
         familyId: actor.familyId,
         sessionVersion: user.sessionVersion,
       },
-      parseLastEventId(
-        typeof request.headers['last-event-id'] === 'string'
-          ? request.headers['last-event-id']
-          : undefined,
-      ),
+      startCursor,
       writer,
     );
 
