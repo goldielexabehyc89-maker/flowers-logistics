@@ -702,12 +702,15 @@ test('Сделки: адрес не обновляет экран на кажд�
   await field.press('Enter');
   await expect.poll(() => listRequests).toBe(beforeEnter + 1);
 
-  // Кнопка «Найти» применяет так же — ещё один одиночный запрос.
+  // Кнопка «Найти» применяет так же. Значение меняем на ДРУГОЕ: повтор той же
+  // строки запроса не создаёт — тот же отбор уже загружен, и это правильно.
+  await field.fill('садовая');
+  await page.waitForTimeout(300);
   const beforeButton = listRequests;
   await page.getByTestId('deals-search-apply').click();
   await expect.poll(() => listRequests).toBe(beforeButton + 1);
 
-  // «Сбросить» — одно обновление, поле пустеет.
+  // «Сбросить» — одно обновление, поле пустеет (значение меняется на пустое).
   const beforeClear = listRequests;
   await page.getByTestId('deals-search-clear').click();
   await expect(field).toHaveValue('');
