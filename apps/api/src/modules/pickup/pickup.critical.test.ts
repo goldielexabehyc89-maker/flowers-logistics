@@ -1122,6 +1122,29 @@ describe('выдача самовывоза без ячейки', () => {
       issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'CARD' }, CONTEXT),
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
   });
+
+  it('скан заказа без ячейки отказывает: послабление только для ручной выдачи', async () => {
+    // Скан — выдача С ПОЛКИ: коробку берут из ячейки. Заказ без размещения там
+    // отсутствует, и сканер называет это прямо. Ручная же выдача (CARD) того же
+    // заказа проходит: покупатель уже пришёл, и менеджер отдаёт его кнопкой.
+    const order = await seedOrder();
+    const manager = await actorFor(['MANAGER']);
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
+    // Скан ничего не выдал — заказ остаётся в очереди.
+    expect(await isInQueue(order.number)).toBe(true);
+
+    // Ручная выдача того же заказа без ячейки — проходит.
+    const result = await issueToCustomer(
+      pickup,
+      manager,
+      { orderNumber: order.number, source: 'CARD' },
+      CONTEXT,
+    );
+    expect(result.cellCode).toBeNull();
+    expect(await isInQueue(order.number)).toBe(false);
+  });
 });
 
 describe('поиск в очереди самовывоза', () => {

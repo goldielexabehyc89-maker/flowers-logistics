@@ -252,10 +252,10 @@ export async function issueToCustomer(
         select: { id: true, cell: { select: { id: true, code: true } } },
       });
 
-      // Отсутствие ячейки выдачу больше НЕ блокирует: покупатель пришёл, и
-      // менеджер отдаёт заказ. Но списанный заказ выдавать нельзя — коробки
-      // нет физически: признак списания это снятие с полки причиной WRITE_OFF
-      // без последующей приёмки (активного размещения).
+      // Отсутствие ячейки РУЧНОЙ выдаче больше НЕ мешает: покупатель пришёл, и
+      // менеджер отдаёт заказ кнопкой. Но списанный заказ выдавать нельзя —
+      // коробки нет физически: признак списания это снятие с полки причиной
+      // WRITE_OFF без последующей приёмки (активного размещения).
       if (placement === null) {
         const writtenOff = await tx.orderPlacement.findFirst({
           where: { orderId: order.id, withdrawReason: 'WRITE_OFF' },
@@ -266,6 +266,18 @@ export async function issueToCustomer(
             message: 'pickup order written off',
             publicMessage: 'Заказ списан — выдавать нечего.',
             conflict: { kind: 'ORDER_BLOCKED' },
+          });
+        }
+
+        // Скан — это выдача С ПОЛКИ: коробку берут из ячейки и сканируют. Заказа
+        // без активного размещения на полке нет, и сканер называет это прямо.
+        // Послабление «без ячейки» касается только ручной выдачи (`CARD`,
+        // `MANUAL`), где менеджер осознанно отдаёт заказ покупателю у прилавка.
+        if (input.source === 'SCAN') {
+          throw new AppError('CONFLICT', {
+            message: 'pickup order not placed in a cell',
+            publicMessage: 'Заказ не находится в ячейке.',
+            conflict: { kind: 'ORDER_NOT_PLACED' },
           });
         }
       }
