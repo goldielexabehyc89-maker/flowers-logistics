@@ -17,7 +17,6 @@ import {
   isValidFourDigitCode,
   verifySecretCode,
 } from './crypto.js';
-import { checkLockout, ipKey, phoneKey, registerFailure, resetFailures } from './lockout.js';
 import {
   createSession,
   revokeAllSessions,
@@ -68,14 +67,6 @@ function invalidCredentials(): AppError {
   return new AppError('UNAUTHENTICATED', {
     message: 'invalid credentials',
     publicMessage: 'Неверный телефон или PIN.',
-  });
-}
-
-function rateLimited(retryAfterSeconds: number): AppError {
-  return new AppError('RATE_LIMITED', {
-    message: 'lockout active',
-    publicMessage: `Слишком много попыток. Повторите через ${retryAfterSeconds} с.`,
-    details: { retryAfterSeconds },
   });
 }
 
@@ -146,12 +137,6 @@ export async function activate(
     });
   }
 
-  const keys = [phoneKey(input.phone), ...(context.ip === null ? [] : [ipKey(context.ip)])];
-  const lockout = await checkLockout(db, keys);
-  if (lockout.locked) {
-    throw rateLimited(lockout.retryAfterSeconds);
-  }
-
   const user = await db.user.findUnique({
     where: { phone: input.phone },
     select: {
@@ -198,7 +183,6 @@ export async function activate(
           reason: 'INVALID_ACTIVATION',
         },
       });
-      await registerFailure(tx, keys);
     });
     throw invalidCredentials();
   }
@@ -220,7 +204,6 @@ export async function activate(
           reason: 'INVALID_ACTIVATION',
         },
       });
-      await registerFailure(tx, keys);
     });
     throw invalidCredentials();
   }
@@ -316,8 +299,6 @@ export async function activate(
       userAgent: context.userAgent,
     });
 
-    await resetFailures(tx, keys);
-
     return { updated, session };
   });
 
@@ -342,12 +323,6 @@ export async function login(
   context: RequestContext,
 ): Promise<AuthResult> {
   const { db, config } = deps;
-
-  const keys = [phoneKey(input.phone), ...(context.ip === null ? [] : [ipKey(context.ip)])];
-  const lockout = await checkLockout(db, keys);
-  if (lockout.locked) {
-    throw rateLimited(lockout.retryAfterSeconds);
-  }
 
   const user = await db.user.findUnique({
     where: { phone: input.phone },
@@ -380,7 +355,6 @@ export async function login(
           reason: 'INVALID_CREDENTIALS',
         },
       });
-      await registerFailure(tx, keys);
     });
     throw invalidCredentials();
   }
@@ -450,7 +424,6 @@ export async function login(
     });
 
     // Счётчики сбрасываются только после действительно успешного входа.
-    await resetFailures(tx, keys);
 
     return { session: created, fresh };
   });

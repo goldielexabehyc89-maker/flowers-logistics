@@ -82,8 +82,9 @@ export interface PickupIssueResult {
   orderId: string;
   orderNumber: string;
   issueId: string;
-  cellId: string;
-  cellCode: string;
+  /** `null`, если заказ выдали без ячейки. */
+  cellId: string | null;
+  cellCode: string | null;
   issuedAt: string;
 }
 
@@ -250,30 +251,45 @@ export async function issueToCustomer(
         where: { orderId: order.id, releasedAt: null },
         select: { id: true, cell: { select: { id: true, code: true } } },
       });
+
+      // Отсутствие ячейки выдачу больше НЕ блокирует: покупатель пришёл, и
+      // менеджер отдаёт заказ. Но списанный заказ выдавать нельзя — коробки
+      // нет физически: признак списания это снятие с полки причиной WRITE_OFF
+      // без последующей приёмки (активного размещения).
       if (placement === null) {
-        throw new AppError('CONFLICT', {
-          message: 'order has no active placement',
-          publicMessage: 'Заказ не находится в ячейке: коробки на полке нет.',
-          conflict: { kind: 'ORDER_NOT_PLACED' },
+        const writtenOff = await tx.orderPlacement.findFirst({
+          where: { orderId: order.id, withdrawReason: 'WRITE_OFF' },
+          select: { id: true },
         });
+        if (writtenOff !== null) {
+          throw new AppError('CONFLICT', {
+            message: 'pickup order written off',
+            publicMessage: 'Заказ списан — выдавать нечего.',
+            conflict: { kind: 'ORDER_BLOCKED' },
+          });
+        }
       }
 
       const now = new Date();
 
-      await tx.orderPlacement.update({
-        where: { id: placement.id },
-        data: {
-          releasedAt: now,
-          releasedById: actor.userId,
-          releaseReason: 'ISSUED_TO_CUSTOMER',
-        },
-      });
+      // Активную ячейку освобождаем штатно; если ячейки нет — фиксируем выдачу
+      // без операции освобождения.
+      if (placement !== null) {
+        await tx.orderPlacement.update({
+          where: { id: placement.id },
+          data: {
+            releasedAt: now,
+            releasedById: actor.userId,
+            releaseReason: 'ISSUED_TO_CUSTOMER',
+          },
+        });
+      }
 
       const issue = await tx.orderPickupIssue.create({
         data: {
           orderId: order.id,
-          placementId: placement.id,
-          cellId: placement.cell.id,
+          placementId: placement?.id ?? null,
+          cellId: placement?.cell.id ?? null,
           issuedAt: now,
           issuedById: actor.userId,
         },
@@ -292,8 +308,8 @@ export async function issueToCustomer(
         // и способ действия.
         newValue: {
           orderId: order.id,
-          placementId: placement.id,
-          cellId: placement.cell.id,
+          placementId: placement?.id ?? null,
+          cellId: placement?.cell.id ?? null,
           source: input.source,
         },
         ip: context.ip,
@@ -310,8 +326,8 @@ export async function issueToCustomer(
         orderId: order.id,
         orderNumber: order.number,
         issueId: issue.id,
-        cellId: placement.cell.id,
-        cellCode: placement.cell.code,
+        cellId: placement?.cell.id ?? null,
+        cellCode: placement?.cell.code ?? null,
         issuedAt: issue.issuedAt.toISOString(),
       };
     });

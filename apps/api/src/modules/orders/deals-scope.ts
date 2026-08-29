@@ -16,6 +16,7 @@
 import { Prisma } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { OPERATIONS_START_DATE } from './operations-window.js';
 
 /** Что показывать: рабочие сделки, требующие внимания либо всё сразу. */
 export type DealsGroup = 'ROUTABLE' | 'ATTENTION' | 'ALL';
@@ -31,6 +32,11 @@ export interface DealsScope {
   /** Показывать ли заказы, уже включённые в черновики. Они только для чтения. */
   includeDrafts?: boolean;
   group?: DealsGroup;
+  /**
+   * Эффективная граница начала операционной работы. Маршрут передаёт значение
+   * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
+   */
+  operationsStartDate?: string;
 }
 
 /**
@@ -132,6 +138,9 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
     -- пока статус в источнике не станет допустимым. Сравнение по UUID состояния,
     -- не по строке. IS DISTINCT FROM оставляет заказы с неизвестным состоянием.
     AND o."externalStateId" IS DISTINCT FROM ${MOYSKLAD_IDS.states.acceptedUnpaid}
+    -- Начало операционной работы: заказы более ранних дней в «Сделки» не идут,
+    -- даже если выбрать такой день. Дата определяется по Москве.
+    AND o."deliveryDate" >= ${scope.operationsStartDate ?? OPERATIONS_START_DATE}::date
     AND o."deliveryDate" = ${scope.deliveryDate}::date
     AND NOT EXISTS (
       SELECT 1 FROM "RouteOrder" ro

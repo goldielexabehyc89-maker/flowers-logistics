@@ -24,6 +24,7 @@ import { AppError } from '../../platform/errors.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
+import { OPERATIONS_START_DATE } from '../orders/operations-window.js';
 
 /** Точный UUID способа получения «Самовывоз»: название ключом не является. */
 const PICKUP_METHOD_ID = MOYSKLAD_IDS.deliveryMethodPickup;
@@ -129,7 +130,11 @@ type OrderRow = {
   manualIntervalEndMinute: number | null;
   placements: { cell: { id: string; code: string } }[];
   printJobs: { state: $Enums.PrintJobState }[];
-  pickupIssue: { issuedAt: Date; issuedById: string; cell: { id: string; code: string } } | null;
+  pickupIssue: {
+    issuedAt: Date;
+    issuedById: string;
+    cell: { id: string; code: string } | null;
+  } | null;
 };
 
 /**
@@ -188,8 +193,8 @@ function toCard(order: OrderRow): PickupCard {
      * Действующего размещения у него уже нет, и «нет ячейки» в справке
      * о выдаче отвечало бы не на тот вопрос: спрашивают «откуда отдали».
      */
-    cellId: placement?.cell.id ?? order.pickupIssue?.cell.id ?? null,
-    cellCode: placement?.cell.code ?? order.pickupIssue?.cell.code ?? null,
+    cellId: placement?.cell.id ?? order.pickupIssue?.cell?.id ?? null,
+    cellCode: placement?.cell.code ?? order.pickupIssue?.cell?.code ?? null,
     issuedAt: order.pickupIssue?.issuedAt.toISOString() ?? null,
     issuedById: order.pickupIssue?.issuedById ?? null,
     deliveryInterval: effectivePickupInterval(order),
@@ -293,10 +298,32 @@ function decodeCursor(raw: string): QueueCursor {
  */
 export async function listPickupQueue(
   db: Database,
-  input: { limit?: number | undefined; cursor?: string | undefined } = {},
+  input: {
+    limit?: number | undefined;
+    cursor?: string | undefined;
+    search?: string | undefined;
+    /**
+     * Эффективная граница начала операционной работы. Маршрут передаёт значение
+     * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
+     */
+    operationsStartDate?: string | undefined;
+  } = {},
 ): Promise<PickupQueuePage> {
   const limit = Math.min(Math.max(input.limit ?? QUEUE_PAGE_SIZE, 1), MAX_QUEUE_PAGE_SIZE);
   const cursor = input.cursor === undefined ? null : decodeCursor(input.cursor);
+
+  // Поиск по номеру: полное и частичное совпадение, без учёта регистра, пробелы
+  // по краям игнорируются. Ищем по ВСЕЙ очереди (условием SQL), а не по
+  // показанному фрагменту; пустой поиск возвращает полный список. Спецсимволы
+  // ILIKE экранируются, чтобы «%» в номере искался буквально.
+  const term = (input.search ?? '').trim();
+  const searchClause =
+    term === ''
+      ? Prisma.empty
+      : Prisma.sql`AND o."externalName" ILIKE ${`%${term.replace(/[\\%_]/g, (m) => `\\${m}`)}%`}`;
+
+  // Начало операционной работы: заказы более ранних дней в очередь не попадают.
+  const windowClause = Prisma.sql`AND (o."deliveryDate" IS NULL OR o."deliveryDate" >= ${input.operationsStartDate ?? OPERATIONS_START_DATE}::date)`;
 
   /*
    * Отбор и порядок пишутся SQL целиком.
@@ -335,6 +362,8 @@ export async function listPickupQueue(
           WHERE p."orderId" = o."id" AND p."withdrawReason" = 'WRITE_OFF'
         )
       )
+      ${windowClause}
+      ${searchClause}
   `;
 
   const keyset =

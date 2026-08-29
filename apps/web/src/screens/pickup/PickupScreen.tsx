@@ -16,7 +16,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
@@ -49,6 +49,8 @@ import './pickup.css';
 
 const QUEUE_KEY = ['pickup-day'];
 const ISSUED_KEY = ['pickup-issued'];
+/** Задержка перед применением поиска: не запрос на каждую букву. */
+const SEARCH_DEBOUNCE_MS = 300;
 
 export function PickupScreen(): React.JSX.Element {
   const { client } = useAuth();
@@ -65,20 +67,39 @@ export function PickupScreen(): React.JSX.Element {
   );
   /** Сколько страниц очереди уже показано. Продолжение, а не «все сразу». */
   const [cursors, setCursors] = useState<string[]>([]);
+  /** Строка поиска в поле и её отложенное (debounce) применённое значение. */
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+
+  // Поиск применяется с задержкой и с начала очереди: набор символов не должен
+  // слать запрос на каждую букву и не должен листаться со старого места.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setCursors([]);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
 
   function reportError(error: unknown, fallback: string): void {
     showToast(error instanceof ApiError ? error.message : fallback, 'error');
   }
 
   const queue = useQuery({
-    queryKey: [...QUEUE_KEY, cursors.length],
+    // Поиск входит в ключ: другой запрос — другой кэш, и realtime обновляет
+    // ровно текущую выборку.
+    queryKey: [...QUEUE_KEY, search, cursors.length],
     queryFn: () => {
+      const params = new URLSearchParams();
       const cursor = cursors.at(-1);
-      return client.get<PickupQueueView>(
-        cursor === undefined
-          ? '/api/pickup/orders'
-          : `/api/pickup/orders?cursor=${encodeURIComponent(cursor)}`,
-      );
+      if (cursor !== undefined) {
+        params.set('cursor', cursor);
+      }
+      if (search !== '') {
+        params.set('search', search);
+      }
+      const qs = params.toString();
+      return client.get<PickupQueueView>(`/api/pickup/orders${qs === '' ? '' : `?${qs}`}`);
     },
   });
 
@@ -281,15 +302,40 @@ export function PickupScreen(): React.JSX.Element {
           </StatusBadge>
         </div>
 
+        {/*
+          Поиск по номеру над очередью: ищет по всей очереди на сервере, а не по
+          показанному фрагменту. Пустое поле возвращает полный список; счётчик и
+          результаты обновляются через realtime без перезагрузки.
+        */}
+        <Field label="Поиск по номеру заказа" hint="Полное или частичное совпадение">
+          {(fieldProps) => (
+            <TextInput
+              {...fieldProps}
+              value={searchInput}
+              data-testid="pickup-queue-search"
+              placeholder="Например, 140600"
+              inputMode="search"
+              onChange={(event) => setSearchInput(event.target.value)}
+            />
+          )}
+        </Field>
+
         {queue.isPending ? (
           <LoadingState title="Загружаем очередь…" />
         ) : queue.isError ? (
           <ErrorState title="Не удалось загрузить очередь" onRetry={() => void queue.refetch()} />
         ) : queue.data.items.length === 0 ? (
-          <EmptyState
-            title="Очередь пуста"
-            description="Самовывозный заказ появится здесь сразу после импорта, ещё до приёмки на склад."
-          />
+          search === '' ? (
+            <EmptyState
+              title="Очередь пуста"
+              description="Самовывозный заказ появится здесь сразу после импорта, ещё до приёмки на склад."
+            />
+          ) : (
+            <EmptyState
+              title="Ничего не найдено"
+              description="По этому номеру в очереди самовывоза заказов нет. Очистите поиск, чтобы увидеть всю очередь."
+            />
+          )
         ) : (
           <ul className="pickup-queue">
             {queue.data.items.map((item) => (

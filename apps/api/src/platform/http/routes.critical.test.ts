@@ -130,38 +130,33 @@ describe('охрана запросов', () => {
     expect(cookie).not.toContain(String(response.json().accessToken));
   });
 
-  it('при блокировке HTTP отвечает 429 с заголовком Retry-After и без деталей', async () => {
+  it('неверный PIN не создаёт временной блокировки: верный PIN сразу входит', async () => {
     const pin = '1234';
     const pinHash = await hashSecretCode(pin, TEST_SECRETS.AUTH_PIN_PEPPER);
     const user = await seedUser(ctx.db, { roles: ['COURIER'], status: 'ACTIVE', pinHash });
 
-    // Три неверные попытки включают первый порог блокировки.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await ctx.app.inject({
+    // Сколько бы неверных попыток ни было — временной блокировки нет.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const wrong = await ctx.app.inject({
         method: 'POST',
         url: '/api/auth/login',
         payload: { phone: user.phone, pin: '0000' },
       });
+      // Отказ по учётным данным сохраняется, но это не 429: код/PIN просто неверны.
+      expect(wrong.statusCode).not.toBe(429);
     }
 
-    const blocked = await ctx.app.inject({
+    // Следующий ВЕРНЫЙ PIN входит немедленно, без ожидания.
+    const ok = await ctx.app.inject({
       method: 'POST',
       url: '/api/auth/login',
       payload: { phone: user.phone, pin },
     });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toHaveProperty('accessToken');
 
-    expect(blocked.statusCode).toBe(429);
-
-    const retryAfter = blocked.headers['retry-after'];
-    expect(retryAfter).toBeDefined();
-    expect(Number(retryAfter)).toBeGreaterThan(0);
-    expect(Number(retryAfter)).toBeLessThanOrEqual(30);
-
-    // Тело содержит только код и понятный текст, без технических деталей.
-    const body = blocked.json();
-    expect(body).toMatchObject({ error: { code: 'RATE_LIMITED' } });
-    expect(body.error).not.toHaveProperty('details');
-    expect(blocked.body).not.toContain('retryAfterSeconds');
+    // Блокировок учётных данных в системе не заводится.
+    expect(await ctx.db.authLockout.count()).toBe(0);
   });
 
   it('ответ входа не содержит хешей и токена обновления', async () => {

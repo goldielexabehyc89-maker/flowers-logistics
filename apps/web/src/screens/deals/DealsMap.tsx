@@ -159,8 +159,18 @@ export function DealsMap({
    * и готовность, и заставляет первым делом нажимать «Показать отдельно».
    */
   const [zoomedOut, setZoomedOut] = useState(false);
+  // Черновик полей времени и ПРИМЕНЁННЫЕ значения. Фильтрует карту только
+  // применённое: набор в поле сам по себе ничего не пересчитывает. Так поведение
+  // одинаково во всех браузерах — `input type="time"` шлёт `change` по-разному
+  // (кто-то на каждую цифру, кто-то по завершении ввода).
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [appliedFrom, setAppliedFrom] = useState('');
+  const [appliedTo, setAppliedTo] = useState('');
+  const applyTimeFilter = useCallback((): void => {
+    setAppliedFrom(from);
+    setAppliedTo(to);
+  }, [from, to]);
   const [basemapFailed, setBasemapFailed] = useState(false);
 
   const query = useQuery({
@@ -223,8 +233,9 @@ export function DealsMap({
    * не меняется и не перезагружается: это отдельный, более узкий вопрос
    * «что я сейчас вижу на карте», а не смена рабочего отбора дня.
    */
-  const fromMinute = parseTimeFilter(from);
-  const toMinute = parseTimeFilter(to);
+  // Карта фильтруется по ПРИМЕНЁННЫМ значениям, а не по черновику полей.
+  const fromMinute = parseTimeFilter(appliedFrom);
+  const toMinute = parseTimeFilter(appliedTo);
   const points = useMemo(
     () => visiblePoints(all, { fromMinute, toMinute } satisfies TimeWindow),
     [all, fromMinute, toMinute],
@@ -303,12 +314,25 @@ export function DealsMap({
           <span className="deals-map__head-hint">Фильтр времени — только для карты</span>
           <div className="deals-map__head-time">
             {/*
+              Кнопка «Применить» слева от полей: значения времени вступают в силу
+              только по ней или по Enter внутри поля. До этого карта показывает
+              прежний подтверждённый диапазон.
+            */}
+            <button
+              type="button"
+              className="deals__link deals-map__time-apply"
+              data-testid="deals-map-apply"
+              onClick={applyTimeFilter}
+            >
+              Применить
+            </button>
+            {/*
           Счётчик и его пояснения занимают постоянное место: иначе поля времени
           и кнопка группировки прыгали бы при каждом фоновом обновлении.
         */}
             {/*
-          Два простых поля времени. Ничего не пересчитывают и никуда
-          не отправляются: только сужают то, что показано на карте.
+          Два простых поля времени. Набор значения ничего не пересчитывает —
+          фильтр применяется отдельно, кнопкой или по Enter.
         */}
             {/*
               Подписи «От» и «До» скрыты от глаз, но не от программы чтения.
@@ -326,6 +350,11 @@ export function DealsMap({
                 value={from}
                 data-testid="deals-map-from"
                 onChange={(event) => setFrom(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    applyTimeFilter();
+                  }
+                }}
               />
             </label>
             <span className="deals-map__time-dash" aria-hidden="true">
@@ -338,6 +367,11 @@ export function DealsMap({
                 value={to}
                 data-testid="deals-map-to"
                 onChange={(event) => setTo(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    applyTimeFilter();
+                  }
+                }}
               />
             </label>
           </div>
@@ -444,6 +478,9 @@ export function DealsMap({
                   onClick={() => {
                     setFrom('');
                     setTo('');
+                    // Очистка возвращает полный вид сразу: и черновик, и применённое.
+                    setAppliedFrom('');
+                    setAppliedTo('');
                   }}
                 >
                   Показать все часы
