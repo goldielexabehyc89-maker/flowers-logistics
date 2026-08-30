@@ -25,7 +25,7 @@ import {
 import { moscowCalendarDate } from '@fl/shared';
 import { listHistory, routeHistory } from '../history/service.js';
 import {
-  LEDGER_SETTING_KEY,
+  activateLedger,
   readLedgerActivation,
   resolveTariff,
   toTariffView,
@@ -794,35 +794,14 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const actor = await authenticateWithRoles(request, deps, ADMIN_ONLY);
     const body = activationSchema.parse(request.body);
 
+    const context = contextOf(request);
     await deps.db.$transaction(async (tx) => {
-      const previous = await tx.systemSetting.findFirst({
-        where: { key: LEDGER_SETTING_KEY },
-        orderBy: [{ version: 'desc' }],
-        select: { version: true },
-      });
-
-      await tx.systemSetting.updateMany({
-        where: { key: LEDGER_SETTING_KEY, currentKey: LEDGER_SETTING_KEY },
-        data: { currentKey: null },
-      });
-
-      await tx.systemSetting.create({
-        data: {
-          key: LEDGER_SETTING_KEY,
-          version: (previous?.version ?? 0) + 1,
-          value: { activeFrom: body.activeFrom },
-          currentKey: LEDGER_SETTING_KEY,
-          updatedById: actor.userId,
-        },
-      });
-
-      await writeAudit(tx, {
-        action: 'FINANCE_LEDGER_ACTIVATED',
-        entityType: 'SystemSetting',
+      await activateLedger(tx, {
+        activeFrom: body.activeFrom,
         actorUserId: actor.userId,
         actorRoles: actor.roles,
-        newValue: { activeFrom: body.activeFrom },
-        ...contextOf(request),
+        ip: context.ip,
+        userAgent: context.userAgent,
       });
     });
 

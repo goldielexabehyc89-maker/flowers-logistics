@@ -5074,9 +5074,22 @@ test('«Сделки» на большом экране: доли, своя пр
   await expect(page.getByTestId('deals-map-head-count')).toContainText('скрыто фильтром');
   // Список при этом не изменился: время сужает только карту.
   expect(await page.locator('[data-testid="deal-card"]').count()).toBe(cardsBefore);
-  // Кнопка «Применить» существует и возвращает полный набор после очистки поля.
-  await page.getByTestId('deals-map-from').fill('');
-  await page.getByTestId('deals-map-apply').click();
+
+  // Применённый фильтр переживает перезагрузку страницы: он сохранён по userId,
+  // а не живёт лишь в памяти вкладки.
+  await page.reload();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await expect(page.getByTestId('deals-map-from')).toHaveValue('20:00');
+  await expect(page.getByTestId('deals-map-head-count')).toContainText('скрыто фильтром');
+
+  // «Сбросить» очищает применённое значение и стирает сохранённое — и это тоже
+  // переживает перезагрузку: фильтр не возвращается.
+  await page.getByTestId('deals-map-reset').click();
+  await expect(page.getByTestId('deals-map-from')).toHaveValue('');
+  await expect(page.getByTestId('deals-map-head-count')).not.toContainText('скрыто фильтром');
+  await page.reload();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await expect(page.getByTestId('deals-map-from')).toHaveValue('');
   await expect(page.getByTestId('deals-map-head-count')).not.toContainText('скрыто фильтром');
 
   // 4а. Одна кнопка с двумя состояниями: выбрать весь отбор и снять его.

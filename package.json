@@ -48,7 +48,9 @@
     "snapshot:import": "node apps/api/dist/scripts/snapshot-import.js",
     "snapshot:import:dev": "tsx apps/api/src/scripts/snapshot-import.ts",
     "snapshot:retire": "node apps/api/dist/scripts/snapshot-retire.js",
-    "snapshot:retire:dev": "tsx apps/api/src/scripts/snapshot-retire.ts"
+    "snapshot:retire:dev": "tsx apps/api/src/scripts/snapshot-retire.ts",
+    "finance:recompute-2026-08-30": "node apps/api/dist/scripts/finance-recompute-2026-08-30.js",
+    "finance:recompute-2026-08-30:dev": "tsx apps/api/src/scripts/finance-recompute-2026-08-30.ts"
   },
   "dependencies": {
     "prisma": "7.9.1"
