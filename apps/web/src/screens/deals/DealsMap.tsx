@@ -10,7 +10,7 @@
  */
 
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { lazy, Suspense, useCallback, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ErrorState, LoadingState } from '../../ui/components';
 import type { MapConfig } from '../routing/geo';
@@ -23,6 +23,13 @@ import {
   type TimeWindow,
 } from './deals-view';
 import { parseTimeFilter, selectionNumber } from './selection';
+import {
+  clearTimeFilter,
+  parseTimeFilter as parseStoredTimeFilter,
+  readTimeFilter,
+  timeFilterStorageKey,
+  writeTimeFilter,
+} from './time-filter-storage';
 
 /**
  * Карта грузится отдельным куском: MapLibre и разбор тайлов — сотни килобайт,
@@ -150,7 +157,8 @@ export function DealsMap({
   withoutPoint,
   onFixAddresses,
 }: DealsMapProps): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
+  const userId = user?.id ?? null;
   /*
    * По умолчанию точки показываются ПООТДЕЛЬНОСТИ.
    *
@@ -163,14 +171,44 @@ export function DealsMap({
   // применённое: набор в поле сам по себе ничего не пересчитывает. Так поведение
   // одинаково во всех браузерах — `input type="time"` шлёт `change` по-разному
   // (кто-то на каждую цифру, кто-то по завершении ввода).
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
-  const [appliedFrom, setAppliedFrom] = useState('');
-  const [appliedTo, setAppliedTo] = useState('');
+  // Начальные значения берём из сохранённого применённого фильтра ЭТОГО
+  // пользователя: он переживает переходы, перезагрузку и повторный вход.
+  const [from, setFrom] = useState(() => readTimeFilter(userId).from);
+  const [to, setTo] = useState(() => readTimeFilter(userId).to);
+  const [appliedFrom, setAppliedFrom] = useState(() => readTimeFilter(userId).from);
+  const [appliedTo, setAppliedTo] = useState(() => readTimeFilter(userId).to);
   const applyTimeFilter = useCallback((): void => {
     setAppliedFrom(from);
     setAppliedTo(to);
-  }, [from, to]);
+    // Сохраняем ТОЛЬКО применённое значение, а не черновик.
+    writeTimeFilter(userId, { from, to });
+  }, [from, to, userId]);
+  const resetTimeFilter = useCallback((): void => {
+    setFrom('');
+    setTo('');
+    setAppliedFrom('');
+    setAppliedTo('');
+    clearTimeFilter(userId);
+  }, [userId]);
+
+  // Синхронизация между вкладками: применение или сброс в другой вкладке этого
+  // же пользователя доходит сюда без перезагрузки. Событие `storage` приходит
+  // только из ДРУГИХ вкладок, поэтому эхо-защита не нужна.
+  useEffect(() => {
+    const key = timeFilterStorageKey(userId);
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key !== key) {
+        return;
+      }
+      const next = parseStoredTimeFilter(event.newValue);
+      setFrom(next.from);
+      setTo(next.to);
+      setAppliedFrom(next.from);
+      setAppliedTo(next.to);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [userId]);
   const [basemapFailed, setBasemapFailed] = useState(false);
 
   const query = useQuery({
@@ -326,6 +364,16 @@ export function DealsMap({
             >
               Применить
             </button>
+            {(appliedFrom !== '' || appliedTo !== '') && (
+              <button
+                type="button"
+                className="deals__link deals-map__time-reset"
+                data-testid="deals-map-reset"
+                onClick={resetTimeFilter}
+              >
+                Сбросить
+              </button>
+            )}
             {/*
           Счётчик и его пояснения занимают постоянное место: иначе поля времени
           и кнопка группировки прыгали бы при каждом фоновом обновлении.
@@ -475,13 +523,7 @@ export function DealsMap({
                   type="button"
                   className="deals-map__empty-action"
                   data-testid="deals-map-empty-action"
-                  onClick={() => {
-                    setFrom('');
-                    setTo('');
-                    // Очистка возвращает полный вид сразу: и черновик, и применённое.
-                    setAppliedFrom('');
-                    setAppliedTo('');
-                  }}
+                  onClick={resetTimeFilter}
                 >
                   Показать все часы
                 </button>

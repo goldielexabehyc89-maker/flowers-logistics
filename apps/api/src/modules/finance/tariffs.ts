@@ -15,6 +15,9 @@
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import type { Role } from '@fl/shared';
+import type { TransactionClient } from '../auth/sessions.js';
+import { writeAudit } from '../audit/service.js';
 
 /** Ключ настройки включения учёта. Хранит только дату, без сумм. */
 export const LEDGER_SETTING_KEY = 'finance.ledger';
@@ -151,4 +154,71 @@ export function toTariffView(row: {
     note: row.note,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+/**
+ * Включение учёта с даты — единый доменный путь с аудитом.
+ *
+ * Идемпотентно: если учёт уже включён ровно с этой даты, новая версия
+ * настройки не создаётся и аудит не пишется — повторный запуск операторской
+ * процедуры не оставляет следов. Значение хранит только дату, без сумм.
+ */
+export interface ActivateLedgerInput {
+  activeFrom: string;
+  actorUserId: string;
+  actorRoles: Role[];
+  ip: string | null;
+  userAgent: string | null;
+}
+
+export async function activateLedger(
+  tx: TransactionClient,
+  input: ActivateLedgerInput,
+): Promise<{ changed: boolean; previousActiveFrom: string | null }> {
+  const current = await tx.systemSetting.findFirst({
+    where: { key: LEDGER_SETTING_KEY, currentKey: LEDGER_SETTING_KEY },
+    select: { value: true },
+  });
+  const rawCurrent = (current?.value ?? null) as { activeFrom?: unknown } | null;
+  const previousActiveFrom =
+    typeof rawCurrent?.activeFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawCurrent.activeFrom)
+      ? rawCurrent.activeFrom
+      : null;
+
+  if (previousActiveFrom === input.activeFrom) {
+    return { changed: false, previousActiveFrom };
+  }
+
+  const previous = await tx.systemSetting.findFirst({
+    where: { key: LEDGER_SETTING_KEY },
+    orderBy: [{ version: 'desc' }],
+    select: { version: true },
+  });
+
+  await tx.systemSetting.updateMany({
+    where: { key: LEDGER_SETTING_KEY, currentKey: LEDGER_SETTING_KEY },
+    data: { currentKey: null },
+  });
+
+  await tx.systemSetting.create({
+    data: {
+      key: LEDGER_SETTING_KEY,
+      version: (previous?.version ?? 0) + 1,
+      value: { activeFrom: input.activeFrom },
+      currentKey: LEDGER_SETTING_KEY,
+      updatedById: input.actorUserId,
+    },
+  });
+
+  await writeAudit(tx, {
+    action: 'FINANCE_LEDGER_ACTIVATED',
+    entityType: 'SystemSetting',
+    actorUserId: input.actorUserId,
+    actorRoles: input.actorRoles,
+    newValue: { activeFrom: input.activeFrom },
+    ip: input.ip,
+    userAgent: input.userAgent,
+  });
+
+  return { changed: true, previousActiveFrom };
 }
