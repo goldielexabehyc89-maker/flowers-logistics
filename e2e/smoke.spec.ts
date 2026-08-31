@@ -4023,33 +4023,10 @@ test('самовывоз: флорист собрал → склад приня�
   const floristContext = await browser.newContext();
   const floristPage = await floristContext.newPage();
   floristPage.on('pageerror', (error) => console.log('FLORIST_PAGEERROR:', error.message));
-  floristPage.on('console', (msg) => {
-    if (msg.type() === 'error') console.log('FLORIST_CONSOLE_ERROR:', msg.text());
+  floristPage.on('response', (res) => {
+    if (res.status() >= 400) console.log('FLORIST_HTTP', res.status(), res.url());
   });
-  floristPage.on('requestfailed', (req) =>
-    console.log('FLORIST_REQ_FAILED:', req.url(), req.failure()?.errorText),
-  );
   await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
-  await floristPage.waitForLoadState('networkidle').catch(() => undefined);
-  console.log(
-    'FLORIST_PROBE url=',
-    floristPage.url(),
-    'shiftStartCount=',
-    await floristPage.getByTestId('shift-start').count(),
-    'heading=',
-    await floristPage
-      .getByRole('heading', { level: 1 })
-      .first()
-      .innerText()
-      .catch(() => '<none>'),
-    'body=',
-    (
-      await floristPage
-        .locator('body')
-        .innerText()
-        .catch(() => '<none>')
-    ).slice(0, 400),
-  );
   await clickAndAwait(
     floristPage,
     floristPage.getByTestId('shift-start'),
