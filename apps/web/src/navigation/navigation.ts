@@ -59,11 +59,15 @@ export const APP_SECTIONS: readonly AppSection[] = [
     roles: ['ADMIN', 'FLORIST', 'SUPERVISOR'],
   },
   {
+    // MANAGER (менеджер выдачи) добавлен ради одной вкладки — «Ожидают приёмки»:
+    // ему нужно видеть, какие собранные заказы склад ещё не принял. Остальные
+    // вкладки склада ему не показываются (гейт по роли внутри экрана), а сервер
+    // подтверждает право и на раздел, и на каждый складской API отдельно.
     key: 'warehouse',
     path: '/warehouse',
     title: 'Склад',
     shortTitle: 'Склад',
-    roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'],
+    roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'],
   },
   {
     key: 'pickup',

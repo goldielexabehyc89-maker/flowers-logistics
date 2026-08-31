@@ -2291,11 +2291,18 @@ test('складские ячейки: администратор управля
   await activate(warehousePage, warehousePhone, warehouseCode, WAREHOUSE_PIN);
   await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
 
-  // У кладовщика рабочий экран с тремя вкладками (этап 6.5), а не заглушка.
-  for (const tab of ['storage', 'picking', 'issue']) {
+  // У кладовщика рабочий экран со всеми вкладками, а не заглушка. «Ожидают
+  // приёмки» стоит рядом с остальными: собранные заказы без ячейки.
+  for (const tab of ['storage', 'awaiting', 'picking', 'issue', 'returns']) {
     await expect(warehousePage.getByTestId(`wh-tab-${tab}`)).toBeVisible();
   }
   await expect(warehousePage.getByTestId('wh-scan-order')).toBeVisible();
+
+  // Вкладка «Ожидают приёмки» открывается и показывает свой раздел.
+  await warehousePage.getByTestId('wh-tab-awaiting').click();
+  await expect(warehousePage.getByTestId('wh-awaiting')).toBeVisible();
+  await expect(warehousePage.getByTestId('wh-awaiting-search')).toBeVisible();
+  await warehousePage.getByTestId('wh-tab-storage').click();
 
   // Но управления справочником ячеек у него нет: это раздел настроек.
   await expect(warehousePage.getByTestId('cell-create')).toHaveCount(0);

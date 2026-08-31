@@ -30,7 +30,9 @@ import {
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import { routeCellHint } from '../../scan/scan-machine';
 import { AssemblyTab } from './AssemblyTab';
+import { AwaitingTab } from './AwaitingTab';
 import { IssueTab } from './IssueTab';
+import type { Role } from '@fl/shared';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
   CELL_KIND_LABELS,
@@ -61,13 +63,25 @@ interface PlacementsPage {
   groupTotals: PlacementGroupTotals;
 }
 
-type Tab = 'storage' | 'picking' | 'issue' | 'returns';
+type Tab = 'storage' | 'awaiting' | 'picking' | 'issue' | 'returns';
 
-const TABS: readonly { key: Tab; title: string }[] = [
-  { key: 'storage', title: 'Склад' },
-  { key: 'picking', title: 'Сборка' },
-  { key: 'issue', title: 'Выдача' },
-  { key: 'returns', title: 'Возвраты' },
+/**
+ * Вкладки склада и роли, которым каждая видна.
+ *
+ * «Ожидают приёмки» видит и менеджер выдачи (`MANAGER`) — ему нужно знать, что
+ * собрано и ждёт полки. Остальные вкладки — рабочие места кладовщика, поэтому
+ * менеджеру не показываются. Право на API всё равно проверяет сервер.
+ */
+const TABS: readonly { key: Tab; title: string; roles: readonly Role[] }[] = [
+  { key: 'storage', title: 'Склад', roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] },
+  {
+    key: 'awaiting',
+    title: 'Ожидают приёмки',
+    roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'],
+  },
+  { key: 'picking', title: 'Сборка', roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] },
+  { key: 'issue', title: 'Выдача', roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] },
+  { key: 'returns', title: 'Возвраты', roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'] },
 ];
 
 /** Что сейчас с букетом, который не доставили. */
@@ -92,8 +106,13 @@ interface WarehouseReturnView {
 }
 
 export function WarehouseScreen(): React.JSX.Element {
-  const { client } = useAuth();
-  const [tab, setTab] = useState<Tab>('storage');
+  const { client, user } = useAuth();
+
+  // Вкладки фильтруются по роли на клиенте, но это лишь удобство: каждый
+  // складской API сервер закрывает своей проверкой ролей отдельно.
+  const roles = user?.roles ?? [];
+  const visibleTabs = TABS.filter((item) => item.roles.some((role) => roles.includes(role)));
+  const [tab, setTab] = useState<Tab>(() => visibleTabs[0]?.key ?? 'awaiting');
 
   /*
    * Ручной ввод разрешает администратор, а не экран.
@@ -116,7 +135,7 @@ export function WarehouseScreen(): React.JSX.Element {
         который приходит сюда работать, а не читать.
       */}
       <nav className="wh-tabs" aria-label="Разделы склада" data-testid="wh-tabs">
-        {TABS.map((item) => (
+        {visibleTabs.map((item) => (
           <button
             key={item.key}
             type="button"
@@ -131,6 +150,7 @@ export function WarehouseScreen(): React.JSX.Element {
       </nav>
 
       {tab === 'storage' && <StorageTab manualEntry={manualEntry} />}
+      {tab === 'awaiting' && <AwaitingTab manualEntry={manualEntry} />}
       {tab === 'picking' && <AssemblyTab manualEntry={manualEntry} />}
       {tab === 'issue' && <IssueTab manualEntry={manualEntry} />}
       {tab === 'returns' && <ReturnsTab manualEntry={manualEntry} />}
@@ -464,7 +484,7 @@ function ReturnsTable({
 }
 
 /** Поле, которое ведёт себя как приёмник сканера. */
-function ScanField({
+export function ScanField({
   label,
   hint,
   value,
@@ -593,7 +613,7 @@ function returnIntentHandler(
   };
 }
 
-function receiveIntentHandler(
+export function receiveIntentHandler(
   client: ReturnType<typeof useAuth>['client'],
   onPlaced: () => Promise<void>,
 ): (intent: ScanIntent) => Promise<ScanEvent> {
