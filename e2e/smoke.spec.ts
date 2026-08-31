@@ -4059,15 +4059,22 @@ test('самовывоз: флорист собрал → склад приня�
   const managerPage = await managerContext.newPage();
   await activate(managerPage, managerPhone, managerCode, MANAGER_PIN);
   await expect(managerPage.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
-  for (const foreign of [
-    'Настройки',
-    'Сотрудники и курьеры',
-    'Маршрутизация',
-    'Склад',
-    'Флорист',
-  ]) {
+  for (const foreign of ['Настройки', 'Сотрудники и курьеры', 'Маршрутизация', 'Флорист']) {
     await expect(managerPage.getByRole('link', { name: foreign })).toHaveCount(0);
   }
+
+  // «Склад» менеджеру выдачи открыт — но ровно ради одной вкладки «Ожидают
+  // приёмки»: рабочих вкладок кладовщика (Склад/Сборка/Выдача/Возвраты) у него
+  // нет. Дом при этом остался «Самовывозом» (проверено выше).
+  await openSection(managerPage, 'Склад');
+  await expect(managerPage.getByTestId('wh-tab-awaiting')).toBeVisible();
+  for (const hidden of ['storage', 'picking', 'issue', 'returns']) {
+    await expect(managerPage.getByTestId(`wh-tab-${hidden}`)).toHaveCount(0);
+  }
+  await expect(managerPage.getByTestId('wh-awaiting')).toBeVisible();
+  // Возврат к «Самовывозу» для продолжения сценария выдачи.
+  await openSection(managerPage, 'Самовывоз');
+  await expect(managerPage.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
 
   // Заказ ждёт выдачи и лежит в известной ячейке.
   const waiting = managerPage.locator('[data-testid="pickup-waiting-row"]', {
