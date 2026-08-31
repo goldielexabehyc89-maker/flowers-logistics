@@ -56,7 +56,10 @@ async function seedTariff(from: string, perOrder: bigint, perKm: bigint): Promis
       kind: 'REGULAR',
       effectiveFrom: toDateColumn(from),
       effectiveTo: null,
-      perOrderMinor: perOrder,
+      // До появления раздельных ставок обе равны прежней единой: пересчёт
+      // обязан дать те же начисления, что и до разделения тарифа.
+      perOrderWalkMinor: perOrder,
+      perOrderCarMinor: perOrder,
       perKmMinor: perKm,
       createdById: await adminId(),
     },

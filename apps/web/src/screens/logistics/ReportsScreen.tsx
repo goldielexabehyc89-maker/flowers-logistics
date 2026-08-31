@@ -25,7 +25,7 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
-import { formatMoscowDateTime, shiftCalendarDate } from '@fl/shared';
+import { formatMoscowDateTime, shiftCalendarDate, VEHICLE_TYPE_LABELS } from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
@@ -55,6 +55,7 @@ interface SettlementRow {
   cancelled: boolean;
   cashMinor: string;
   paymentTypeName: string | null;
+  vehicleType: 'CAR' | 'FOOT' | null;
   perOrderMinor: string | null;
   perKmMinor: string | null;
   beyondMkadKmTenths: number | null;
@@ -758,6 +759,15 @@ export function ReportsScreen(): React.JSX.Element {
                                 <td>{formatDate(row.deliveryDate)}</td>
                                 <td className="reports__detail-order">
                                   {row.routeNumber} · {row.orderNumber}
+                                  {row.vehicleType !== null && (
+                                    <span className="muted text-sm">
+                                      {' · '}
+                                      {VEHICLE_TYPE_LABELS[row.vehicleType]}
+                                      {row.perOrderMinor === null
+                                        ? ''
+                                        : ` · ставка ${formatMoney(row.perOrderMinor)}`}
+                                    </span>
+                                  )}
                                 </td>
                                 <td colSpan={2} />
                                 <td>

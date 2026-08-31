@@ -32,7 +32,8 @@ export interface TariffView {
   kind: 'REGULAR' | 'HOLIDAY';
   effectiveFrom: string;
   effectiveTo: string | null;
-  perOrderMinor: string;
+  perOrderWalkMinor: string;
+  perOrderCarMinor: string;
   perKmMinor: string;
   note: string | null;
   createdAt: string;
@@ -40,8 +41,19 @@ export interface TariffView {
 
 export interface TariffRates {
   tariffVersionId: string;
-  perOrderMinor: bigint;
+  perOrderWalkMinor: bigint;
+  perOrderCarMinor: bigint;
   perKmMinor: bigint;
+}
+
+/**
+ * Ставка «За заказ» под тип транспорта маршрута.
+ *
+ * Единственный источник выбора — тип маршрута (`DeliveryRoute.vehicleType`):
+ * FOOT берёт пешую ставку, CAR — автомобильную. Отдельного флага нет.
+ */
+export function perOrderForVehicle(rates: TariffRates, vehicleType: 'CAR' | 'FOOT'): bigint {
+  return vehicleType === 'FOOT' ? rates.perOrderWalkMinor : rates.perOrderCarMinor;
 }
 
 /**
@@ -86,7 +98,13 @@ export async function resolveTariff(
       OR: [{ effectiveTo: null }, { effectiveTo: { gte: day } }],
     },
     orderBy: [{ effectiveFrom: 'desc' }, { createdAt: 'desc' }],
-    select: { id: true, kind: true, perOrderMinor: true, perKmMinor: true },
+    select: {
+      id: true,
+      kind: true,
+      perOrderWalkMinor: true,
+      perOrderCarMinor: true,
+      perKmMinor: true,
+    },
   });
 
   const chosen = candidates.find((item) => item.kind === 'HOLIDAY') ?? candidates[0];
@@ -96,7 +114,8 @@ export async function resolveTariff(
 
   return {
     tariffVersionId: chosen.id,
-    perOrderMinor: chosen.perOrderMinor,
+    perOrderWalkMinor: chosen.perOrderWalkMinor,
+    perOrderCarMinor: chosen.perOrderCarMinor,
     perKmMinor: chosen.perKmMinor,
   };
 }
@@ -105,7 +124,8 @@ export interface CreateTariffInput {
   kind: 'REGULAR' | 'HOLIDAY';
   effectiveFrom: string;
   effectiveTo: string | null;
-  perOrderMinor: bigint;
+  perOrderWalkMinor: bigint;
+  perOrderCarMinor: bigint;
   perKmMinor: bigint;
   note: string | null;
 }
@@ -127,7 +147,7 @@ export function validateTariffPeriod(input: CreateTariffInput): void {
       publicMessage: 'У праздничного тарифа обязателен последний день периода.',
     });
   }
-  if (input.perOrderMinor < 0n || input.perKmMinor < 0n) {
+  if (input.perOrderWalkMinor < 0n || input.perOrderCarMinor < 0n || input.perKmMinor < 0n) {
     throw new AppError('VALIDATION_FAILED', {
       publicMessage: 'Ставка не может быть отрицательной.',
     });
@@ -139,7 +159,8 @@ export function toTariffView(row: {
   kind: string;
   effectiveFrom: Date;
   effectiveTo: Date | null;
-  perOrderMinor: bigint;
+  perOrderWalkMinor: bigint;
+  perOrderCarMinor: bigint;
   perKmMinor: bigint;
   note: string | null;
   createdAt: Date;
@@ -149,7 +170,8 @@ export function toTariffView(row: {
     kind: row.kind as 'REGULAR' | 'HOLIDAY',
     effectiveFrom: fromDateColumn(row.effectiveFrom),
     effectiveTo: row.effectiveTo === null ? null : fromDateColumn(row.effectiveTo),
-    perOrderMinor: row.perOrderMinor.toString(),
+    perOrderWalkMinor: row.perOrderWalkMinor.toString(),
+    perOrderCarMinor: row.perOrderCarMinor.toString(),
     perKmMinor: row.perKmMinor.toString(),
     note: row.note,
     createdAt: row.createdAt.toISOString(),

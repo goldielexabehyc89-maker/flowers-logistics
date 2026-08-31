@@ -47,6 +47,8 @@ export interface SettlementRow {
   cashCollectable: boolean;
   cashMinor: string;
   paymentTypeName: string | null;
+  /** Тип транспорта, по которому выбрана ставка. `null` — снимка нет. */
+  vehicleType: 'CAR' | 'FOOT' | null;
   /** Ставки маршрута. `null` — маршрут подтверждён до включения учёта. */
   perOrderMinor: string | null;
   perKmMinor: string | null;
@@ -183,7 +185,7 @@ export async function buildSettlementReport(
   const routeIds = [...new Set(facts.map((fact) => fact.routeId))];
   const snapshots = await db.routeTariffSnapshot.findMany({
     where: { routeId: { in: routeIds } },
-    select: { routeId: true, perOrderMinor: true, perKmMinor: true },
+    select: { routeId: true, vehicleType: true, perOrderMinor: true, perKmMinor: true },
   });
   const snapshotByRoute = new Map(snapshots.map((row) => [row.routeId, row]));
 
@@ -232,6 +234,7 @@ export async function buildSettlementReport(
         .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
         .toString(),
       paymentTypeName: fact.paymentTypeName,
+      vehicleType: snapshot === null ? null : (snapshot.vehicleType as 'CAR' | 'FOOT'),
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),
       beyondMkadKmTenths: distance?.roundedKmTenths ?? null,

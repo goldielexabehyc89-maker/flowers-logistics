@@ -32,7 +32,8 @@ interface TariffView {
   kind: 'REGULAR' | 'HOLIDAY';
   effectiveFrom: string;
   effectiveTo: string | null;
-  perOrderMinor: string;
+  perOrderWalkMinor: string;
+  perOrderCarMinor: string;
   perKmMinor: string;
   note: string | null;
   createdAt: string;
@@ -41,7 +42,12 @@ interface TariffView {
 interface TariffsResponse {
   items: TariffView[];
   activation: { activeFrom: string | null };
-  today: { date: string; perOrderMinor: string | null; perKmMinor: string | null };
+  today: {
+    date: string;
+    perOrderWalkMinor: string | null;
+    perOrderCarMinor: string | null;
+    perKmMinor: string | null;
+  };
 }
 
 interface RingVersion {
@@ -104,7 +110,8 @@ export function FinanceSettings(): React.JSX.Element {
   const [kind, setKind] = useState<'REGULAR' | 'HOLIDAY'>('REGULAR');
   const [effectiveFrom, setEffectiveFrom] = useState(today);
   const [effectiveTo, setEffectiveTo] = useState('');
-  const [perOrder, setPerOrder] = useState('');
+  const [perOrderWalk, setPerOrderWalk] = useState('');
+  const [perOrderCar, setPerOrderCar] = useState('');
   const [perKm, setPerKm] = useState('');
   const [note, setNote] = useState('');
   const [tariffError, setTariffError] = useState<string | null>(null);
@@ -122,17 +129,23 @@ export function FinanceSettings(): React.JSX.Element {
   });
 
   const createTariff = useMutation({
-    mutationFn: (input: { perOrderMinor: bigint; perKmMinor: bigint }) =>
+    mutationFn: (input: {
+      perOrderWalkMinor: bigint;
+      perOrderCarMinor: bigint;
+      perKmMinor: bigint;
+    }) =>
       client.post('/api/logistics/tariffs', {
         kind,
         effectiveFrom,
         effectiveTo: effectiveTo === '' ? null : effectiveTo,
-        perOrderMinor: input.perOrderMinor.toString(),
+        perOrderWalkMinor: input.perOrderWalkMinor.toString(),
+        perOrderCarMinor: input.perOrderCarMinor.toString(),
         perKmMinor: input.perKmMinor.toString(),
         note: note.trim() === '' ? null : note.trim(),
       }),
     onSuccess: () => {
-      setPerOrder('');
+      setPerOrderWalk('');
+      setPerOrderCar('');
       setPerKm('');
       setNote('');
       setTariffError(null);
@@ -154,18 +167,19 @@ export function FinanceSettings(): React.JSX.Element {
   });
 
   const submitTariff = (): void => {
-    const order = toMinor(perOrder);
+    const walk = toMinor(perOrderWalk);
+    const car = toMinor(perOrderCar);
     const km = toMinor(perKm);
-    if (order === null || km === null) {
+    if (walk === null || car === null || km === null) {
       setTariffError('Ставки задаются числом в рублях, например 250 или 250,50.');
       return;
     }
-    createTariff.mutate({ perOrderMinor: order, perKmMinor: km });
+    createTariff.mutate({ perOrderWalkMinor: walk, perOrderCarMinor: car, perKmMinor: km });
   };
 
   const activation = tariffs.data?.activation.activeFrom ?? null;
   const currentRates = tariffs.data?.today ?? null;
-  const tariffMissing = currentRates !== null && currentRates.perOrderMinor === null;
+  const tariffMissing = currentRates !== null && currentRates.perOrderCarMinor === null;
 
   return (
     <div className="stack" data-testid="finance-settings">
@@ -173,9 +187,10 @@ export function FinanceSettings(): React.JSX.Element {
         <div>
           <h2>Тарифы курьера</h2>
           <p className="muted text-sm">
-            Ставка за доставленный заказ и за километр за МКАД. Тариф выбирается по дате доставки и
-            фиксируется снимком при подтверждении маршрута: изменение ставок не пересчитывает уже
-            подтверждённые маршруты.
+            Ставки за доставленный заказ — отдельно пешая и автомобильная — и за километр за МКАД.
+            Какая из двух ставок «За заказ» применится, решает тип транспорта маршрута. Тариф
+            выбирается по дате доставки и фиксируется снимком при подтверждении маршрута: изменение
+            ставок не пересчитывает уже подтверждённые маршруты.
           </p>
         </div>
 
@@ -193,8 +208,9 @@ export function FinanceSettings(): React.JSX.Element {
                 </p>
               ) : (
                 <p className="finance__ok" role="status">
-                  Действует на {formatDate(currentRates?.date ?? today)}: за заказ{' '}
-                  {fromMinor(currentRates?.perOrderMinor ?? '0')}, за километр{' '}
+                  Действует на {formatDate(currentRates?.date ?? today)}: за заказ пеший{' '}
+                  {fromMinor(currentRates?.perOrderWalkMinor ?? '0')}, за заказ авто{' '}
+                  {fromMinor(currentRates?.perOrderCarMinor ?? '0')}, за километр{' '}
                   {fromMinor(currentRates?.perKmMinor ?? '0')}.
                 </p>
               )}
@@ -273,14 +289,25 @@ export function FinanceSettings(): React.JSX.Element {
                   />
                 )}
               </Field>
-              <Field label="За заказ, ₽">
+              <Field label="За заказ (пеший), ₽">
                 {(props) => (
                   <TextInput
                     {...props}
-                    value={perOrder}
+                    value={perOrderWalk}
                     inputMode="decimal"
-                    data-testid="tariff-per-order"
-                    onChange={(event) => setPerOrder(event.target.value)}
+                    data-testid="tariff-per-order-walk"
+                    onChange={(event) => setPerOrderWalk(event.target.value)}
+                  />
+                )}
+              </Field>
+              <Field label="За заказ (авто), ₽">
+                {(props) => (
+                  <TextInput
+                    {...props}
+                    value={perOrderCar}
+                    inputMode="decimal"
+                    data-testid="tariff-per-order-car"
+                    onChange={(event) => setPerOrderCar(event.target.value)}
                   />
                 )}
               </Field>
@@ -333,7 +360,8 @@ export function FinanceSettings(): React.JSX.Element {
                     <tr>
                       <th>Вид</th>
                       <th>Действует</th>
-                      <th>За заказ</th>
+                      <th>За заказ (пеший)</th>
+                      <th>За заказ (авто)</th>
                       <th>За километр</th>
                       <th>Пояснение</th>
                       <th>Создана</th>
@@ -353,7 +381,8 @@ export function FinanceSettings(): React.JSX.Element {
                             ? ' — бессрочно'
                             : ` — ${formatDate(item.effectiveTo)}`}
                         </td>
-                        <td>{fromMinor(item.perOrderMinor)}</td>
+                        <td>{fromMinor(item.perOrderWalkMinor)}</td>
+                        <td>{fromMinor(item.perOrderCarMinor)}</td>
                         <td>{fromMinor(item.perKmMinor)}</td>
                         <td>{item.note ?? '—'}</td>
                         <td>{formatMoscowDateTime(item.createdAt)}</td>

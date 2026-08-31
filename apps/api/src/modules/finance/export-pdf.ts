@@ -148,8 +148,10 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
         if (cursor < MARGIN + LINE * 2) {
           break;
         }
+        const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
+        const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
         const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
-        const right = `${group.orders} зак. · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)} · итог ${formatRubles(group.totalMinor)}`;
+        const right = `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)} · итог ${formatRubles(group.totalMinor)}`;
         page.drawText(left, {
           x: MARGIN,
           y: cursor,

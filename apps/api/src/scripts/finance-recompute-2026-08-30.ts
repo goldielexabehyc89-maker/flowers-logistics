@@ -40,7 +40,9 @@ function printSummary(title: string, summary: RecomputeSummary): void {
     `  режим: ${summary.dryRun ? 'сухой прогон (без записи)' : 'применение'}`,
     `  включение учёта с: ${summary.activation.activeFrom}` +
       ` (${summary.activation.changed ? 'изменено этим запуском' : 'без изменений'})`,
-    `  тариф: ${rub(summary.tariff.perOrderMinor)} за заказ, ${rub(summary.tariff.perKmMinor)} за км`,
+    `  тариф: ${rub(summary.tariff.perOrderWalkMinor)} за заказ (пеший), ` +
+      `${rub(summary.tariff.perOrderCarMinor)} за заказ (авто), ` +
+      `${rub(summary.tariff.perKmMinor)} за км`,
     `  создано снимков тарифа: ${summary.snapshotsCreated}`,
     `  обработано попыток: ${summary.attemptsProcessed}` +
       ` (доставлено ${summary.deliveredCount}, не доставлено ${summary.notDeliveredCount})`,

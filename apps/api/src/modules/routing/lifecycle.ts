@@ -370,7 +370,12 @@ export async function confirmWithinTransaction(
         conflict: { kind: 'ROUTE_TARIFF_REQUIRED' },
       });
     }
-    await captureRouteTariff(tx, { routeId, deliveryDate, rates });
+    await captureRouteTariff(tx, {
+      routeId,
+      deliveryDate,
+      vehicleType: route.vehicleType,
+      rates,
+    });
   }
 
   await applyTransition(tx, route, 'CONFIRMED', actor, now, null);

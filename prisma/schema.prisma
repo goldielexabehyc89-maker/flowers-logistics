@@ -2676,9 +2676,12 @@ model CourierTariffVersion {
   effectiveFrom DateTime  @db.Date
   effectiveTo   DateTime? @db.Date
 
-  /// Ставка за доставленный заказ и за километр за МКАД.
-  perOrderMinor BigInt
-  perKmMinor    BigInt
+  /// Ставки за доставленный заказ раздельно по типу перемещения курьера и за
+  /// километр за МКАД. Пеший и автомобильный тариф задаются отдельно; какой из
+  /// них применить, решает тип транспорта маршрута (DeliveryRoute.vehicleType).
+  perOrderWalkMinor BigInt
+  perOrderCarMinor  BigInt
+  perKmMinor        BigInt
 
   note String?
 
@@ -2707,8 +2710,14 @@ model RouteTariffSnapshot {
   tariffVersionId String               @db.Uuid
   tariffVersion   CourierTariffVersion @relation(fields: [tariffVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// Тип транспорта маршрута на момент подтверждения. Фиксируется вместе со
+  /// ставкой, чтобы в отчёте было видно, пеший это заказ или автомобильный, и
+  /// какая из двух ставок «За заказ» применена.
+  vehicleType VehicleType
+
   /// Значения копируются, а не читаются по ссылке: версия тарифа может быть
-  /// вытеснена более поздней, а снимок обязан остаться прежним.
+  /// вытеснена более поздней, а снимок обязан остаться прежним. `perOrderMinor`
+  /// — уже выбранная по типу транспорта ставка (пешая или автомобильная).
   perOrderMinor BigInt
   perKmMinor    BigInt
   deliveryDate  DateTime @db.Date

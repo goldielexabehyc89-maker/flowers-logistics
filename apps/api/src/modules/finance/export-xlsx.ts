@@ -12,6 +12,7 @@
  */
 
 import ExcelJS from 'exceljs';
+import { VEHICLE_TYPE_LABELS } from '@fl/shared';
 import type { SettlementReport } from './reports.js';
 
 /** Минорные единицы в рубли. Делится ровно один раз и в одном месте. */
@@ -91,6 +92,8 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Статус', key: 'outcome', width: 14 },
     { header: 'Способ оплаты', key: 'payment', width: 22 },
     { header: 'Наличные, ₽', key: 'cash', width: 14, style: { numFmt: '#,##0.00' } },
+    { header: 'Тип', key: 'vehicle', width: 12 },
+    { header: 'Ставка/заказ, ₽', key: 'rate', width: 16, style: { numFmt: '#,##0.00' } },
     { header: 'За заказ, ₽', key: 'fee', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'За МКАД, км', key: 'km', width: 12, style: { numFmt: '#,##0.0' } },
     { header: 'За МКАД, ₽', key: 'distance', width: 14, style: { numFmt: '#,##0.00' } },
@@ -140,6 +143,8 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           order: row.orderNumber,
           outcome: OUTCOME_LABELS[row.outcome] ?? row.outcome,
           payment: row.paymentTypeName ?? '—',
+          vehicle: row.vehicleType === null ? '—' : VEHICLE_TYPE_LABELS[row.vehicleType],
+          rate: row.perOrderMinor === null ? null : toRubles(row.perOrderMinor),
           cash: toRubles(row.cashMinor),
           fee: toRubles(row.deliveryFeeMinor),
           km: row.beyondMkadKmTenths === null ? null : row.beyondMkadKmTenths / 10,
