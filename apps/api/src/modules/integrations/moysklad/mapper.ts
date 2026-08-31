@@ -42,6 +42,7 @@ export interface OrderSnapshot {
   externalStateName: string | null;
   externalStateType: string | null;
   storeId: string | null;
+  salesChannelId: string | null;
   deliveryMethodId: string | null;
   deliveryDateRaw: string | null;
   /** Календарная дата Москвы `YYYY-MM-DD`; из неё пишется колонка типа DATE. */
@@ -117,6 +118,7 @@ const SNAPSHOT_FIELDS = {
   externalStateName: true,
   externalStateType: true,
   storeId: true,
+  salesChannelId: true,
   deliveryMethodId: true,
   deliveryDateRaw: true,
   deliveryDate: true,
@@ -333,6 +335,7 @@ export function mapOrder(
   regions: RegionNames = new Map(),
 ): MapOrderResult {
   const storeId = idFromHref(order.store?.meta.href);
+  const salesChannelId = idFromHref(order.salesChannel?.meta.href);
   const deliveryMethod = attribute(order, ids.deliveryMethodAttribute);
   const paymentType = attribute(order, ids.paymentTypeAttribute);
   const intervalAttribute = attribute(order, ids.intervalAttribute);
@@ -405,6 +408,7 @@ export function mapOrder(
     externalStateName: text(order.state?.name),
     externalStateType: text(order.state?.stateType),
     storeId,
+    salesChannelId,
     deliveryMethodId: deliveryMethod.id,
     deliveryDateRaw: deliveryDate.raw,
     deliveryDate: deliveryDate.date,

@@ -276,6 +276,7 @@ function orderData(
     externalStateName: snapshot.externalStateName,
     externalStateType: snapshot.externalStateType,
     storeId: snapshot.storeId,
+    salesChannelId: snapshot.salesChannelId,
     deliveryMethodId: snapshot.deliveryMethodId,
     deliveryDate: snapshot.deliveryDate === null ? null : toDateColumn(snapshot.deliveryDate),
     deliveryDateRaw: snapshot.deliveryDateRaw,
@@ -739,6 +740,7 @@ function scopeOnlyData(
   return {
     externalUpdated: parseMoscow(snapshot.externalUpdated),
     storeId: snapshot.storeId,
+    salesChannelId: snapshot.salesChannelId,
     deliveryMethodId: snapshot.deliveryMethodId,
     sourceArchived: snapshot.sourceArchived,
     inScope: false,
