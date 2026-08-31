@@ -195,7 +195,28 @@ export function isSectionVisible(roles: readonly Role[], path: string): boolean 
  * заведённая раньше своего раздела, не должна показывать пустой экран без выхода.
  */
 export function firstAvailablePath(roles: readonly Role[]): string | null {
-  return visibleSections(roles)[0]?.path ?? null;
+  const sections = visibleSections(roles);
+
+  /*
+   * Менеджер выдачи работает в «Самовывозе»; складскую вкладку «Ожидают
+   * приёмки» он лишь просматривает. Поэтому его дом остаётся «Самовывозом»,
+   * хотя «Склад» и стоит в меню раньше: приземлять его на чужой рабочий экран
+   * из-за одной обзорной вкладки нельзя. Правит дом только чистому менеджеру —
+   * у администратора и управляющего свой дом (`/logistics`) выше по списку.
+   */
+  const isManagerOnly =
+    roles.includes('MANAGER') &&
+    !roles.includes('ADMIN') &&
+    !roles.includes('SUPERVISOR') &&
+    !roles.includes('LOGISTICIAN');
+  if (isManagerOnly) {
+    const pickup = sections.find((section) => section.key === 'pickup');
+    if (pickup !== undefined) {
+      return pickup.path;
+    }
+  }
+
+  return sections[0]?.path ?? null;
 }
 
 /**

@@ -138,10 +138,11 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
   // Исключение канала продаж (например, Flowwow). Гейт по наличию настройки:
   // без неё условие пустое и поведение прежнее. IS DISTINCT FROM оставляет
   // заказы с неизвестным (NULL) каналом — исключается ровно заданный канал.
+  const channel = scope.excludedSalesChannelId;
   const channelClause =
-    scope.excludedSalesChannelId == null || scope.excludedSalesChannelId === ''
+    channel === undefined || channel === null || channel === ''
       ? Prisma.sql`TRUE`
-      : Prisma.sql`o."salesChannelId" IS DISTINCT FROM ${scope.excludedSalesChannelId}::uuid`;
+      : Prisma.sql`o."salesChannelId" IS DISTINCT FROM ${channel}::uuid`;
 
   return Prisma.sql`
     o."inScope" = true
