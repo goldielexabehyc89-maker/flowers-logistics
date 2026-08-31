@@ -484,7 +484,7 @@ function ReturnsTable({
 }
 
 /** Поле, которое ведёт себя как приёмник сканера. */
-export function ScanField({
+function ScanField({
   label,
   hint,
   value,
@@ -613,7 +613,7 @@ function returnIntentHandler(
   };
 }
 
-export function receiveIntentHandler(
+function receiveIntentHandler(
   client: ReturnType<typeof useAuth>['client'],
   onPlaced: () => Promise<void>,
 ): (intent: ScanIntent) => Promise<ScanEvent> {

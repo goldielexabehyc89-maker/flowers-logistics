@@ -7,11 +7,15 @@
  * (`POST /api/warehouse/placements`): заказ и ячейка проверяются на сервере,
  * второго пути приёмки здесь нет.
  *
+ * Модуль самодостаточен и НЕ импортирует ничего из `WarehouseScreen`: общий
+ * ввод ячейки описан здесь же маленьким полем. Это убирает круговую зависимость
+ * между экраном и вкладкой.
+ *
  * Группировка по дате доставки и полный счётчик приходят с сервера; экран лишь
  * раскладывает уже упорядоченный список по заголовкам дат.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   formatMinutesOfDay,
@@ -22,10 +26,15 @@ import {
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
-import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
-import { ScannerScreen } from '../../scan/ScannerScreen';
-import { SCAN_HINTS } from './warehouse-flow';
-import { ScanField, receiveIntentHandler } from './WarehouseScreen';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Field,
+  LoadingState,
+  StatusBadge,
+  TextInput,
+} from '../../ui/components';
 import { assembledDateLabel } from '../florist/florist';
 
 interface AwaitingCard {
@@ -59,6 +68,47 @@ function intervalLabel(card: AwaitingCard): string {
     return `к ${formatMinutesOfDay(card.startMinute)}`;
   }
   return 'интервал не указан';
+}
+
+/** Поле ввода кода ячейки: сканер-клавиатура вводит и подтверждает по Enter. */
+function CellField({
+  value,
+  onChange,
+  onSubmit,
+  disabled,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  disabled: boolean;
+}): React.JSX.Element {
+  const ref = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!disabled) {
+      ref.current?.focus();
+    }
+  }, [disabled]);
+  return (
+    <Field label="Ячейка хранения" hint="Отсканируйте или введите код ячейки">
+      {(props) => (
+        <TextInput
+          {...props}
+          ref={ref}
+          value={value}
+          disabled={disabled}
+          autoComplete="off"
+          data-testid="wh-awaiting-cell"
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+        />
+      )}
+    </Field>
+  );
 }
 
 interface DateGroup {
@@ -103,8 +153,6 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
   /** Заказ, который сейчас принимают: показывается поле ячейки. */
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [cellInput, setCellInput] = useState('');
-  /** Открыто ли окно камеры для приёмки (когда ручной ввод выключен). */
-  const [scanning, setScanning] = useState(false);
 
   const term = search.trim();
   const awaiting = useQuery({
@@ -115,18 +163,14 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
       ),
   });
 
-  const invalidate = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: ['warehouse-awaiting'] });
-    await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
-  };
-
   const accept = useMutation({
     mutationFn: (input: { orderNumber: string; cellCode: string }) =>
       client.post<{ orderNumber: string; cellCode: string }>('/api/warehouse/placements', input),
     onSuccess: async (result) => {
       setAcceptingId(null);
       setCellInput('');
-      await invalidate();
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-awaiting'] });
+      await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
       showToast(`Заказ ${result.orderNumber} принят в ячейку ${result.cellCode}`, 'success');
     },
     onError: (error: unknown) => {
@@ -143,17 +187,11 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
     [awaiting.data],
   );
 
-  if (scanning) {
-    return (
-      <ScannerScreen
-        resultWindow
-        chain="RECEIVE"
-        operation="Приёмка на склад"
-        onIntent={receiveIntentHandler(client, invalidate)}
-        onClose={() => setScanning(false)}
-      />
-    );
-  }
+  const submitCell = (orderNumber: string): void => {
+    if (cellInput.trim() !== '') {
+      accept.mutate({ orderNumber, cellCode: cellInput });
+    }
+  };
 
   return (
     <div className="stack" data-testid="wh-awaiting">
@@ -176,21 +214,6 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
-
-        {!manualEntry && (
-          <Button
-            variant="primary"
-            className="wh-scan__button"
-            data-testid="wh-awaiting-camera"
-            onClick={() => {
-              setAcceptingId(null);
-              setCellInput('');
-              setScanning(true);
-            }}
-          >
-            Сканировать приёмку
-          </Button>
-        )}
       </div>
 
       {awaiting.isPending ? (
@@ -242,13 +265,8 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
                         data-testid="wh-awaiting-accept"
                         disabled={accept.isPending}
                         onClick={() => {
-                          if (manualEntry) {
-                            setAcceptingId(card.orderId);
-                            setCellInput('');
-                          } else {
-                            // Ручной ввод выключен: приёмка идёт камерой.
-                            setScanning(true);
-                          }
+                          setAcceptingId(card.orderId);
+                          setCellInput('');
                         }}
                       >
                         Принять
@@ -256,24 +274,39 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
                     )}
                   </div>
 
-                  {acceptingId === card.orderId && manualEntry && (
-                    <ScanField
-                      label="Ячейка хранения"
-                      hint={SCAN_HINTS.CELL}
-                      value={cellInput}
-                      onChange={setCellInput}
-                      onSubmit={() => {
-                        if (cellInput.trim() !== '') {
-                          accept.mutate({
-                            orderNumber: card.orderNumber,
-                            cellCode: cellInput,
-                          });
-                        }
-                      }}
-                      autoFocus
-                      testId="wh-awaiting-cell"
-                      disabled={accept.isPending}
-                    />
+                  {acceptingId === card.orderId && (
+                    <div className="stack stack--tight">
+                      {!manualEntry && (
+                        <p className="muted text-sm" data-testid="wh-awaiting-scan-hint">
+                          Ручной ввод выключен администратором — отсканируйте ячейку сканером.
+                        </p>
+                      )}
+                      <CellField
+                        value={cellInput}
+                        onChange={setCellInput}
+                        onSubmit={() => submitCell(card.orderNumber)}
+                        disabled={accept.isPending}
+                      />
+                      <div className="row">
+                        <Button
+                          variant="primary"
+                          data-testid="wh-awaiting-accept-confirm"
+                          disabled={accept.isPending || cellInput.trim() === ''}
+                          onClick={() => submitCell(card.orderNumber)}
+                        >
+                          Принять в ячейку
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            setAcceptingId(null);
+                            setCellInput('');
+                          }}
+                        >
+                          Отмена
+                        </Button>
+                      </div>
+                    </div>
                   )}
                 </article>
               ))}
