@@ -1,0 +1,3112 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.719528,
+          55.753231
+        ]
+      },
+      "properties": {
+        "name": "Авиамоторная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.657768,
+          55.707345
+        ]
+      },
+      "properties": {
+        "name": "Автозаводская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.574749,
+          55.687376
+        ]
+      },
+      "properties": {
+        "name": "Академическая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.608683,
+          55.752403
+        ]
+      },
+      "properties": {
+        "name": "Александровский сад"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.639006,
+          55.809089
+        ]
+      },
+      "properties": {
+        "name": "Алексеевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.765935,
+          55.6328
+        ]
+      },
+      "properties": {
+        "name": "Алма-Атинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.587358,
+          55.897922
+        ]
+      },
+      "properties": {
+        "name": "Алтуфьево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.46497,
+          55.697175
+        ]
+      },
+      "properties": {
+        "name": "Аминьевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.596531,
+          55.582532
+        ]
+      },
+      "properties": {
+        "name": "Аннино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.603817,
+          55.751974
+        ]
+      },
+      "properties": {
+        "name": "Арбатская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.53315,
+          55.800397
+        ]
+      },
+      "properties": {
+        "name": "Аэропорт"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.287276,
+          55.607309
+        ]
+      },
+      "properties": {
+        "name": "Аэропорт Внуково"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.66411,
+          55.869634
+        ]
+      },
+      "properties": {
+        "name": "Бабушкинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.497737,
+          55.743732
+        ]
+      },
+      "properties": {
+        "name": "Багратионовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.579309,
+          55.761131
+        ]
+      },
+      "properties": {
+        "name": "Баррикадная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.680549,
+          55.773039
+        ]
+      },
+      "properties": {
+        "name": "Бауманская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.546657,
+          55.773716
+        ]
+      },
+      "properties": {
+        "name": "Беговая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.474877,
+          55.864964
+        ]
+      },
+      "properties": {
+        "name": "Беломорская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.583821,
+          55.77642
+        ]
+      },
+      "properties": {
+        "name": "Белорусская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.52568,
+          55.642777
+        ]
+      },
+      "properties": {
+        "name": "Беляево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.603554,
+          55.883871
+        ]
+      },
+      "properties": {
+        "name": "Бибирево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.610171,
+          55.751232
+        ]
+      },
+      "properties": {
+        "name": "Библиотека имени Ленина"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.556379,
+          55.600239
+        ]
+      },
+      "properties": {
+        "name": "Битцевский парк"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.743752,
+          55.633304
+        ]
+      },
+      "properties": {
+        "name": "Борисово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.607057,
+          55.750972
+        ]
+      },
+      "properties": {
+        "name": "Боровицкая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.370423,
+          55.647751
+        ]
+      },
+      "properties": {
+        "name": "Боровское шоссе"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.638246,
+          55.844845
+        ]
+      },
+      "properties": {
+        "name": "Ботанический сад"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.750669,
+          55.659739
+        ]
+      },
+      "properties": {
+        "name": "Братиславская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.543211,
+          55.545434
+        ]
+      },
+      "properties": {
+        "name": "Бульвар Адмирала Ушакова"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.576869,
+          55.569245
+        ]
+      },
+      "properties": {
+        "name": "Бульвар Дмитрия Донского"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.73434,
+          55.814682
+        ]
+      },
+      "properties": {
+        "name": "Бульвар Рокоссовского"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.516547,
+          55.538147
+        ]
+      },
+      "properties": {
+        "name": "Бунинская аллея"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.602529,
+          55.813373
+        ]
+      },
+      "properties": {
+        "name": "Бутырская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.540894,
+          55.684891
+        ]
+      },
+      "properties": {
+        "name": "Вавиловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.619502,
+          55.653334
+        ]
+      },
+      "properties": {
+        "name": "Варшавская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.641201,
+          55.820955
+        ]
+      },
+      "properties": {
+        "name": "ВДНХ"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.561345,
+          55.856113
+        ]
+      },
+      "properties": {
+        "name": "Верхние Лихоборы"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.589912,
+          55.847181
+        ]
+      },
+      "properties": {
+        "name": "Владыкино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.486711,
+          55.840059
+        ]
+      },
+      "properties": {
+        "name": "Водный стадион"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.498018,
+          55.819052
+        ]
+      },
+      "properties": {
+        "name": "Войковская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.686891,
+          55.725239
+        ]
+      },
+      "properties": {
+        "name": "Волгоградский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.753101,
+          55.690826
+        ]
+      },
+      "properties": {
+        "name": "Волжская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.382242,
+          55.835513
+        ]
+      },
+      "properties": {
+        "name": "Волоколамская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.559289,
+          55.710332
+        ]
+      },
+      "properties": {
+        "name": "Воробьёвы горы"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.53948,
+          55.658835
+        ]
+      },
+      "properties": {
+        "name": "Воронцовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.817923,
+          55.715644
+        ]
+      },
+      "properties": {
+        "name": "Выхино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.485772,
+          55.626205
+        ]
+      },
+      "properties": {
+        "name": "Генерала Тюленева"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.417239,
+          55.659552
+        ]
+      },
+      "properties": {
+        "name": "Говорово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.451743,
+          55.715144
+        ]
+      },
+      "properties": {
+        "name": "Давыдково"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.540273,
+          55.749601
+        ]
+      },
+      "properties": {
+        "name": "Деловой центр"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.558208,
+          55.78974
+        ]
+      },
+      "properties": {
+        "name": "Динамо"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.581907,
+          55.806561
+        ]
+      },
+      "properties": {
+        "name": "Дмитровская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.62442,
+          55.729107
+        ]
+      },
+      "properties": {
+        "name": "Добрынинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.718741,
+          55.610855
+        ]
+      },
+      "properties": {
+        "name": "Домодедовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.615074,
+          55.781461
+        ]
+      },
+      "properties": {
+        "name": "Достоевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.675541,
+          55.719209
+        ]
+      },
+      "properties": {
+        "name": "Дубровка"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.856294,
+          55.685438
+        ]
+      },
+      "properties": {
+        "name": "Жулебино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.645235,
+          55.696934
+        ]
+      },
+      "properties": {
+        "name": "ЗИЛ"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.573552,
+          55.655778
+        ]
+      },
+      "properties": {
+        "name": "Зюзино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.745179,
+          55.612235
+        ]
+      },
+      "properties": {
+        "name": "Зябликово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.781602,
+          55.787733
+        ]
+      },
+      "properties": {
+        "name": "Измайловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.540526,
+          55.657091
+        ]
+      },
+      "properties": {
+        "name": "Калужская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.656541,
+          55.635735
+        ]
+      },
+      "properties": {
+        "name": "Кантемировская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.598429,
+          55.652903
+        ]
+      },
+      "properties": {
+        "name": "Каховская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.648696,
+          55.655039
+        ]
+      },
+      "properties": {
+        "name": "Каширская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.565509,
+          55.744237
+        ]
+      },
+      "properties": {
+        "name": "Киевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.633312,
+          55.755619
+        ]
+      },
+      "properties": {
+        "name": "Китай-город"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.680734,
+          55.674487
+        ]
+      },
+      "properties": {
+        "name": "Кленовый бульвар"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.684618,
+          55.707587
+        ]
+      },
+      "properties": {
+        "name": "Кожуховская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.663925,
+          55.678481
+        ]
+      },
+      "properties": {
+        "name": "Коломенская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.467991,
+          55.574632
+        ]
+      },
+      "properties": {
+        "name": "Коммунарка"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.655262,
+          55.774895
+        ]
+      },
+      "properties": {
+        "name": "Комсомольская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.518977,
+          55.633147
+        ]
+      },
+      "properties": {
+        "name": "Коньково"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.478989,
+          55.598396
+        ]
+      },
+      "properties": {
+        "name": "Корниловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.851032,
+          55.703417
+        ]
+      },
+      "properties": {
+        "name": "Косино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.858513,
+          55.674218
+        ]
+      },
+      "properties": {
+        "name": "Котельники"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.744435,
+          55.613694
+        ]
+      },
+      "properties": {
+        "name": "Красногвардейская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.577329,
+          55.761185
+        ]
+      },
+      "properties": {
+        "name": "Краснопресненская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.667656,
+          55.780356
+        ]
+      },
+      "properties": {
+        "name": "Красносельская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.648987,
+          55.769024
+        ]
+      },
+      "properties": {
+        "name": "Красные Ворота"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.667478,
+          55.73317
+        ]
+      },
+      "properties": {
+        "name": "Крестьянская Застава"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.603807,
+          55.74543
+        ]
+      },
+      "properties": {
+        "name": "Кропоткинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.408139,
+          55.756595
+        ]
+      },
+      "properties": {
+        "name": "Крылатское"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.609394,
+          55.689732
+        ]
+      },
+      "properties": {
+        "name": "Крымская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.626143,
+          55.760751
+        ]
+      },
+      "properties": {
+        "name": "Кузнецкий Мост"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.765784,
+          55.705602
+        ]
+      },
+      "properties": {
+        "name": "Кузьминки"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.445996,
+          55.730103
+        ]
+      },
+      "properties": {
+        "name": "Кунцевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.658876,
+          55.757608
+        ]
+      },
+      "properties": {
+        "name": "Курская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.534386,
+          55.739991
+        ]
+      },
+      "properties": {
+        "name": "Кутузовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.586212,
+          55.707617
+        ]
+      },
+      "properties": {
+        "name": "Ленинский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.851973,
+          55.701625
+        ]
+      },
+      "properties": {
+        "name": "Лермонтовский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.576892,
+          55.582098
+        ]
+      },
+      "properties": {
+        "name": "Лесопарковая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.706738,
+          55.764734
+        ]
+      },
+      "properties": {
+        "name": "Лефортово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.544663,
+          55.898115
+        ]
+      },
+      "properties": {
+        "name": "Лианозово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.516236,
+          55.707142
+        ]
+      },
+      "properties": {
+        "name": "Ломоносовский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.627855,
+          55.759873
+        ]
+      },
+      "properties": {
+        "name": "Лубянка"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.901016,
+          55.70851
+        ]
+      },
+      "properties": {
+        "name": "Лухмановская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.761958,
+          55.675721
+        ]
+      },
+      "properties": {
+        "name": "Люблино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.653535,
+          55.741316
+        ]
+      },
+      "properties": {
+        "name": "Марксистская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.616361,
+          55.796028
+        ]
+      },
+      "properties": {
+        "name": "Марьина Роща"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.743147,
+          55.650016
+        ]
+      },
+      "properties": {
+        "name": "Марьино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.595087,
+          55.770171
+        ]
+      },
+      "properties": {
+        "name": "Маяковская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.66155,
+          55.887177
+        ]
+      },
+      "properties": {
+        "name": "Медведково"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.601981,
+          55.780961
+        ]
+      },
+      "properties": {
+        "name": "Менделеевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.496844,
+          55.724788
+        ]
+      },
+      "properties": {
+        "name": "Минская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.362226,
+          55.845754
+        ]
+      },
+      "properties": {
+        "name": "Митино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.484018,
+          55.688815
+        ]
+      },
+      "properties": {
+        "name": "Мичуринский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.471405,
+          55.761185
+        ]
+      },
+      "properties": {
+        "name": "Мнёвники"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.416939,
+          55.740757
+        ]
+      },
+      "properties": {
+        "name": "Молодёжная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.534231,
+          55.748305
+        ]
+      },
+      "properties": {
+        "name": "Москва-Сити"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.385295,
+          55.825203
+        ]
+      },
+      "properties": {
+        "name": "Мякинино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.622414,
+          55.682973
+        ]
+      },
+      "properties": {
+        "name": "Нагатинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.704303,
+          55.684331
+        ]
+      },
+      "properties": {
+        "name": "Нагатинский Затон"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.610274,
+          55.671943
+        ]
+      },
+      "properties": {
+        "name": "Нагорная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.485731,
+          55.775735
+        ]
+      },
+      "properties": {
+        "name": "Народное Ополчение"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.605622,
+          55.662651
+        ]
+      },
+      "properties": {
+        "name": "Нахимовский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.928178,
+          55.702891
+        ]
+      },
+      "properties": {
+        "name": "Некрасовка"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.729891,
+          55.73182
+        ]
+      },
+      "properties": {
+        "name": "Нижегородская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.521581,
+          55.670826
+        ]
+      },
+      "properties": {
+        "name": "Новаторская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.816745,
+          55.751769
+        ]
+      },
+      "properties": {
+        "name": "Новогиреево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.863773,
+          55.745087
+        ]
+      },
+      "properties": {
+        "name": "Новокосино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.629202,
+          55.741434
+        ]
+      },
+      "properties": {
+        "name": "Новокузнецкая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.466642,
+          55.560584
+        ]
+      },
+      "properties": {
+        "name": "Новомосковская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.355104,
+          55.639625
+        ]
+      },
+      "properties": {
+        "name": "Новопеределкино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.603475,
+          55.779853
+        ]
+      },
+      "properties": {
+        "name": "Новослободская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.554139,
+          55.600994
+        ]
+      },
+      "properties": {
+        "name": "Новоясеневская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.554698,
+          55.670279
+        ]
+      },
+      "properties": {
+        "name": "Новые Черёмушки"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.44873,
+          55.670505
+        ]
+      },
+      "properties": {
+        "name": "Озёрная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.573829,
+          55.846026
+        ]
+      },
+      "properties": {
+        "name": "Окружная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.781763,
+          55.718342
+        ]
+      },
+      "properties": {
+        "name": "Окская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.610154,
+          55.730137
+        ]
+      },
+      "properties": {
+        "name": "Октябрьская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.493812,
+          55.793366
+        ]
+      },
+      "properties": {
+        "name": "Октябрьское Поле"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.459359,
+          55.568621
+        ]
+      },
+      "properties": {
+        "name": "Ольховая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.694972,
+          55.613143
+        ]
+      },
+      "properties": {
+        "name": "Орехово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.604651,
+          55.863178
+        ]
+      },
+      "properties": {
+        "name": "Отрадное"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.61651,
+          55.757772
+        ]
+      },
+      "properties": {
+        "name": "Охотный ряд"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.637995,
+          55.731408
+        ]
+      },
+      "properties": {
+        "name": "Павелецкая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.592787,
+          55.735651
+        ]
+      },
+      "properties": {
+        "name": "Парк Культуры"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.518093,
+          55.736346
+        ]
+      },
+      "properties": {
+        "name": "Парк Победы"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.750993,
+          55.788503
+        ]
+      },
+      "properties": {
+        "name": "Партизанская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.799396,
+          55.794727
+        ]
+      },
+      "properties": {
+        "name": "Первомайская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.786482,
+          55.751197
+        ]
+      },
+      "properties": {
+        "name": "Перово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.557093,
+          55.791922
+        ]
+      },
+      "properties": {
+        "name": "Петровский парк"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.574623,
+          55.834839
+        ]
+      },
+      "properties": {
+        "name": "Петровско-Разумовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.727158,
+          55.694048
+        ]
+      },
+      "properties": {
+        "name": "Печатники"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.467136,
+          55.735988
+        ]
+      },
+      "properties": {
+        "name": "Пионерская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.436526,
+          55.860654
+        ]
+      },
+      "properties": {
+        "name": "Планерная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.683197,
+          55.747196
+        ]
+      },
+      "properties": {
+        "name": "Площадь Ильича"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.621784,
+          55.756651
+        ]
+      },
+      "properties": {
+        "name": "Площадь Революции"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.51929,
+          55.777509
+        ]
+      },
+      "properties": {
+        "name": "Полежаевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.6172,
+          55.738168
+        ]
+      },
+      "properties": {
+        "name": "Полянка"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.492621,
+          55.55264
+        ]
+      },
+      "properties": {
+        "name": "Потапово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.604524,
+          55.612374
+        ]
+      },
+      "properties": {
+        "name": "Пражская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.715347,
+          55.79637
+        ]
+      },
+      "properties": {
+        "name": "Преображенская площадь"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.433859,
+          55.586218
+        ]
+      },
+      "properties": {
+        "name": "Прокшино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.665879,
+          55.731857
+        ]
+      },
+      "properties": {
+        "name": "Пролетарская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.504997,
+          55.677829
+        ]
+      },
+      "properties": {
+        "name": "Проспект Вернадского"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.631867,
+          55.780242
+        ]
+      },
+      "properties": {
+        "name": "Проспект Мира"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.562904,
+          55.67793
+        ]
+      },
+      "properties": {
+        "name": "Профсоюзная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.607417,
+          55.765428
+        ]
+      },
+      "properties": {
+        "name": "Пушкинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.295668,
+          55.624503
+        ]
+      },
+      "properties": {
+        "name": "Пыхтино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.354202,
+          55.856143
+        ]
+      },
+      "properties": {
+        "name": "Пятницкое шоссе"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.498542,
+          55.697561
+        ]
+      },
+      "properties": {
+        "name": "Раменки"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.335086,
+          55.63403
+        ]
+      },
+      "properties": {
+        "name": "Рассказовка"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.476213,
+          55.855013
+        ]
+      },
+      "properties": {
+        "name": "Речной вокзал"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.635413,
+          55.793793
+        ]
+      },
+      "properties": {
+        "name": "Рижская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.683251,
+          55.746342
+        ]
+      },
+      "properties": {
+        "name": "Римская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.441585,
+          55.632954
+        ]
+      },
+      "properties": {
+        "name": "Румянцево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.793315,
+          55.716947
+        ]
+      },
+      "properties": {
+        "name": "Рязанский проспект"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.587468,
+          55.792408
+        ]
+      },
+      "properties": {
+        "name": "Савёловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.424187,
+          55.621922
+        ]
+      },
+      "properties": {
+        "name": "Саларьево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.652706,
+          55.855213
+        ]
+      },
+      "properties": {
+        "name": "Свиблово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.598434,
+          55.652674
+        ]
+      },
+      "properties": {
+        "name": "Севастопольская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.54718,
+          55.866612
+        ]
+      },
+      "properties": {
+        "name": "Селигерская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.721282,
+          55.783307
+        ]
+      },
+      "properties": {
+        "name": "Семёновская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.624829,
+          55.727953
+        ]
+      },
+      "properties": {
+        "name": "Серпуховская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.470788,
+          55.729596
+        ]
+      },
+      "properties": {
+        "name": "Славянский бульвар"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.582273,
+          55.748101
+        ]
+      },
+      "properties": {
+        "name": "Смоленская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.515053,
+          55.805267
+        ]
+      },
+      "properties": {
+        "name": "Сокол"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.679755,
+          55.789497
+        ]
+      },
+      "properties": {
+        "name": "Сокольники"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.3911,
+          55.649569
+        ]
+      },
+      "properties": {
+        "name": "Солнцево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.435752,
+          55.818304
+        ]
+      },
+      "properties": {
+        "name": "Спартак"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.564213,
+          55.723383
+        ]
+      },
+      "properties": {
+        "name": "Спортивная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.640087,
+          55.766988
+        ]
+      },
+      "properties": {
+        "name": "Сретенский бульвар"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.753248,
+          55.727018
+        ]
+      },
+      "properties": {
+        "name": "Стахановская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.403083,
+          55.803702
+        ]
+      },
+      "properties": {
+        "name": "Строгино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.54841,
+          55.73883
+        ]
+      },
+      "properties": {
+        "name": "Студенческая"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.631204,
+          55.772955
+        ]
+      },
+      "properties": {
+        "name": "Сухаревская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.439774,
+          55.850481
+        ]
+      },
+      "properties": {
+        "name": "Сходненская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.651612,
+          55.741065
+        ]
+      },
+      "properties": {
+        "name": "Таганская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.606313,
+          55.764895
+        ]
+      },
+      "properties": {
+        "name": "Тверская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.619191,
+          55.757507
+        ]
+      },
+      "properties": {
+        "name": "Театральная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.729988,
+          55.707933
+        ]
+      },
+      "properties": {
+        "name": "Текстильщики"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.508218,
+          55.618862
+        ]
+      },
+      "properties": {
+        "name": "Тёплый Стан"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.459644,
+          55.748029
+        ]
+      },
+      "properties": {
+        "name": "Терехово"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.664435,
+          55.693623
+        ]
+      },
+      "properties": {
+        "name": "Технопарк"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.576389,
+          55.817126
+        ]
+      },
+      "properties": {
+        "name": "Тимирязевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.627326,
+          55.7411
+        ]
+      },
+      "properties": {
+        "name": "Третьяковская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.472526,
+          55.645857
+        ]
+      },
+      "properties": {
+        "name": "Тропарёво"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.619551,
+          55.769114
+        ]
+      },
+      "properties": {
+        "name": "Трубная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.622817,
+          55.708665
+        ]
+      },
+      "properties": {
+        "name": "Тульская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.637467,
+          55.766492
+        ]
+      },
+      "properties": {
+        "name": "Тургеневская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.436976,
+          55.826529
+        ]
+      },
+      "properties": {
+        "name": "Тушинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.481085,
+          55.61905
+        ]
+      },
+      "properties": {
+        "name": "Тютчевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.561341,
+          55.764861
+        ]
+      },
+      "properties": {
+        "name": "Улица 1905 года"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.600436,
+          55.594986
+        ]
+      },
+      "properties": {
+        "name": "Улица Академика Янгеля"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.530718,
+          55.541695
+        ]
+      },
+      "properties": {
+        "name": "Улица Горчакова"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.880201,
+          55.710103
+        ]
+      },
+      "properties": {
+        "name": "Улица Дмитриевского"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.554625,
+          55.548108
+        ]
+      },
+      "properties": {
+        "name": "Улица Скобелевская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.576652,
+          55.568955
+        ]
+      },
+      "properties": {
+        "name": "Улица Старокачаловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.533285,
+          55.692663
+        ]
+      },
+      "properties": {
+        "name": "Университет"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.507143,
+          55.647937
+        ]
+      },
+      "properties": {
+        "name": "Университет дружбы народов"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.546576,
+          55.921662
+        ]
+      },
+      "properties": {
+        "name": "Физтех"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.407427,
+          55.601528
+        ]
+      },
+      "properties": {
+        "name": "Филатов Луг"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.483372,
+          55.739509
+        ]
+      },
+      "properties": {
+        "name": "Филёвский парк"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.514827,
+          55.746127
+        ]
+      },
+      "properties": {
+        "name": "Фили"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.587637,
+          55.822916
+        ]
+      },
+      "properties": {
+        "name": "Фонвизинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.57833,
+          55.726879
+        ]
+      },
+      "properties": {
+        "name": "Фрунзенская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.480854,
+          55.878153
+        ]
+      },
+      "properties": {
+        "name": "Ховрино"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.519137,
+          55.776695
+        ]
+      },
+      "properties": {
+        "name": "Хорошёвская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.669238,
+          55.621481
+        ]
+      },
+      "properties": {
+        "name": "Царицыно"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.61791,
+          55.770872
+        ]
+      },
+      "properties": {
+        "name": "Цветной бульвар"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.533201,
+          55.786561
+        ]
+      },
+      "properties": {
+        "name": "ЦСКА"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.745032,
+          55.803881
+        ]
+      },
+      "properties": {
+        "name": "Черкизовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.60669,
+          55.640455
+        ]
+      },
+      "properties": {
+        "name": "Чертановская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.609087,
+          55.764833
+        ]
+      },
+      "properties": {
+        "name": "Чеховская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.639028,
+          55.765871
+        ]
+      },
+      "properties": {
+        "name": "Чистые пруды"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.656998,
+          55.756702
+        ]
+      },
+      "properties": {
+        "name": "Чкаловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.607696,
+          55.719987
+        ]
+      },
+      "properties": {
+        "name": "Шаболовская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.743639,
+          55.621027
+        ]
+      },
+      "properties": {
+        "name": "Шипиловская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.749487,
+          55.757569
+        ]
+      },
+      "properties": {
+        "name": "Шоссе Энтузиастов"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.798573,
+          55.809337
+        ]
+      },
+      "properties": {
+        "name": "Щёлковская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.464701,
+          55.808461
+        ]
+      },
+      "properties": {
+        "name": "Щукинская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.703391,
+          55.780999
+        ]
+      },
+      "properties": {
+        "name": "Электрозаводская"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.818976,
+          55.705036
+        ]
+      },
+      "properties": {
+        "name": "Юго-Восточная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.483219,
+          55.663647
+        ]
+      },
+      "properties": {
+        "name": "Юго-Западная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.609219,
+          55.622256
+        ]
+      },
+      "properties": {
+        "name": "Южная"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.533407,
+          55.606306
+        ]
+      },
+      "properties": {
+        "name": "Ясенево"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          37.545442,
+          55.879882
+        ]
+      },
+      "properties": {
+        "name": "Яхромская"
+      }
+    }
+  ]
+}

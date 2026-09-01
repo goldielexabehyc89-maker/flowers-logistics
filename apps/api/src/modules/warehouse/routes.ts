@@ -77,6 +77,11 @@ const listQuerySchema = z.object({
 const awaitingQuerySchema = z.object({
   /** Поиск по номеру: частичное совпадение без учёта регистра. */
   search: z.string().trim().max(120).optional(),
+  /** Только счётчик вкладки: список не грузится, отдаётся полное число. */
+  countOnly: z
+    .enum(['0', '1'])
+    .optional()
+    .transform((value) => value === '1'),
 });
 
 const resolveQuerySchema = z.object({
@@ -486,7 +491,7 @@ export async function registerWarehouseFlowRoutes(
   app.get('/api/warehouse/awaiting', async (request) => {
     await authenticateWithRoles(request, deps, AWAITING_INTAKE_ROLES);
     const query = awaitingQuerySchema.parse(request.query);
-    return listAwaitingIntake(deps.db, { search: query.search });
+    return listAwaitingIntake(deps.db, { search: query.search, countOnly: query.countOnly });
   });
 
   /**

@@ -4650,6 +4650,98 @@ test('карта «Сделок»: подложка Москвы при нуле
 });
 
 /**
+ * Двухэтапная приёмка из «Ожидают приёмки»: заказ карточки, потом ячейка.
+ *
+ * «Принять» открывает тот же сканер, но заказ уже выбран карточкой. Другой
+ * заказ (даже реальный, из того же стенда) отвергается по устойчивому
+ * идентификатору, сканер остаётся на первом шаге и НИЧЕГО не записывает.
+ * Только точное совпадение открывает второй шаг — ячейку, — и лишь пара
+ * «заказ + ячейка» уходит на сервер прежним путём приёмки. Счётчик вкладки
+ * при этом уменьшается без перезагрузки.
+ *
+ * Камера подменяется двойником: настоящего устройства в CI нет, а проводку
+ * «карточка → совпадение → ячейка → сервер» доказать нужно.
+ */
+test('«Ожидают приёмки»: приёмка сверяет заказ карточки, потом ячейку', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await installCameraDouble(page);
+
+  const stand = seedWarehouseStand();
+  const target = stand['заказ ждёт приёмки'] ?? '';
+  const otherOrder = stand['заказ без размещения'] ?? '';
+  const storageCell = stand['ячейка хранения A'] ?? '';
+  expect(target).not.toBe('');
+  expect(otherOrder).not.toBe('');
+  expect(otherOrder).not.toBe(target);
+
+  const scan = async (code: string, until: () => Promise<void>): Promise<void> => {
+    await page.evaluate((value) => {
+      (globalThis as unknown as { __flScan: (code: string) => void }).__flScan(value);
+    }, code);
+    await until();
+    await page.evaluate(() => {
+      (globalThis as unknown as { __flClear: () => void }).__flClear();
+    });
+  };
+
+  await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('wh-tab-awaiting').click();
+
+  const card = page.locator(`[data-testid="wh-awaiting-card"][data-order-number="${target}"]`);
+  await expect(card).toBeVisible();
+
+  // Счётчик вкладки виден и считает весь набор, а не одну карточку.
+  const badge = page.getByTestId('wh-tab-awaiting-count');
+  await expect(badge).toBeVisible();
+  const before = Number((await badge.innerText()).trim());
+  expect(before).toBeGreaterThan(0);
+
+  await card.getByTestId('wh-awaiting-accept').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
+
+  // Ручной ввод по умолчанию выключен — рядом со сканером его поля нет.
+  await expect(page.getByTestId('scan-manual')).toHaveCount(0);
+
+  /*
+   * 1. Другой заказ отвергается: сканер называет оба номера, остаётся на
+   *    первом шаге и ничего не пишет — карточка всё ещё в списке.
+   */
+  await scan(otherOrder, async () => {
+    await expect(page.getByTestId('scan-error')).toBeVisible();
+  });
+  await expect(page.getByTestId('scan-result-text')).toContainText(target);
+  await page.getByTestId('scan-retry').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
+
+  /*
+   * 2. Точное совпадение открывает второй шаг. До ячейки записи нет: карточка
+   *    остаётся в списке.
+   */
+  await scan(target, async () => {
+    await expect(page.getByTestId('scan-success')).toContainText(`Заказ ${target} отсканирован`);
+  });
+  await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код ячейки');
+
+  /*
+   * 3. Ячейка завершает пару: только теперь заказ уходит на сервер. Сканер
+   *    закрывается, карточка исчезает из списка, счётчик уменьшается сам.
+   */
+  await scan(storageCell, async () => {
+    await expect(page.getByTestId('scan-success')).toContainText(`помещён в ячейку ${storageCell}`);
+  });
+
+  await expect(
+    page.locator(`[data-testid="wh-awaiting-card"][data-order-number="${target}"]`),
+  ).toHaveCount(0);
+  await expect(badge).toHaveText(String(before - 1));
+});
+
+/**
  * Рабочее место логиста на большом экране.
  *
  * Проверяется то, что раньше приходилось проверять глазами и о чём пришли

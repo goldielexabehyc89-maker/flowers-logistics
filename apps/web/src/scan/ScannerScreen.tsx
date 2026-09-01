@@ -75,6 +75,16 @@ export interface ScannerScreenProps {
    * поэтому это выбор вызывающего экрана, а не общее правило.
    */
   resultWindow?: boolean;
+  /**
+   * Разрешить ручной ввод рядом со сканером.
+   *
+   * Это решение администратора («Разрешить ручной ввод на складе и в
+   * самовывозе»), а не отдельный переключатель. Введённое значение проходит
+   * ровно тем же путём, что и распознанный камерой код: то же событие машины,
+   * та же проверка совпадения заказа и та же проверка ячейки. Когда ручной
+   * ввод выключен, поля нет и остаётся только сканирование.
+   */
+  manualEntry?: boolean;
 }
 
 export function ScannerScreen({
@@ -84,12 +94,15 @@ export function ScannerScreen({
   onIntent,
   onClose,
   resultWindow = false,
+  manualEntry = false,
 }: ScannerScreenProps): React.JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null);
   const sessionRef = useRef<CameraSession | null>(null);
   const stateRef = useRef<ScanState>(initialState(chain));
   const [state, setState] = useState<ScanState>(stateRef.current);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  /** Значение ручного ввода: одно поле на текущий шаг (заказ или ячейка). */
+  const [manualValue, setManualValue] = useState('');
   /*
    * Счётчик попыток запустить камеру.
    *
@@ -372,6 +385,49 @@ export function ScannerScreen({
           <p className="scanner__progress" data-testid="scan-progress">
             {state.progress.done} из {state.progress.total}
           </p>
+        )}
+
+        {/*
+          Ручной ввод рядом со сканером — только когда его разрешил
+          администратор и машина ждёт код (заказ или ячейку). Введённое
+          значение уходит тем же событием `scanned`, что и код с камеры,
+          поэтому проходит ту же проверку совпадения заказа и ту же проверку
+          ячейки. Пока открыт результат или идёт запрос, поле заблокировано —
+          как и камера: один код не должен дать две операции.
+        */}
+        {manualEntry && (state.step === 'ORDER' || state.step === 'CELL') && (
+          <form
+            className="scanner__manual"
+            data-testid="scan-manual"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = manualValue.trim();
+              if (value === '' || !canAccept(state)) {
+                return;
+              }
+              setManualValue('');
+              void dispatch({ type: 'scanned', code: value });
+            }}
+          >
+            <input
+              className="scanner__manual-input"
+              data-testid="scan-manual-input"
+              value={manualValue}
+              disabled={busy}
+              autoComplete="off"
+              placeholder={state.step === 'ORDER' ? 'Ввести номер заказа' : 'Ввести код ячейки'}
+              aria-label={state.step === 'ORDER' ? 'Ввести номер заказа' : 'Ввести код ячейки'}
+              onChange={(event) => setManualValue(event.target.value)}
+            />
+            <Button
+              type="submit"
+              variant="secondary"
+              data-testid="scan-manual-submit"
+              disabled={busy || manualValue.trim() === ''}
+            >
+              Ввести
+            </Button>
+          </form>
         )}
 
         {/* Результат читается программой чтения с экрана: ни цвет, ни звук

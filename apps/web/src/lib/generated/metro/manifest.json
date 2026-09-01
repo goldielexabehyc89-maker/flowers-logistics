@@ -1,0 +1,19 @@
+{
+  "geometry": "moscow-metro-2026-08-06.geo.json",
+  "geometryVersion": "2026-08-06",
+  "geometrySha256": "301320e4b45182346705d6d85a05b7a0ba7208f704629911f94ff8407cba4eeb",
+  "stationCount": 239,
+  "bbox": {
+    "minLon": 36.7,
+    "minLat": 55.1,
+    "maxLon": 38.2,
+    "maxLat": 56.1
+  },
+  "scriptVersion": "1.0.0",
+  "filter": "railway=station AND station=subway",
+  "dataDate": "2026-08-06",
+  "license": "ODbL-1.0",
+  "attribution": "© OpenStreetMap contributors",
+  "source": "https://download.geofabrik.de/russia/central-fed-district-260806.osm.pbf",
+  "snapshotSha256": "6fc383719c2bfaa2447dcb631090b0e43cfc06d3e56bb904fe708cbc5a02de5c"
+}

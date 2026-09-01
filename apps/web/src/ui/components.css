@@ -841,6 +841,26 @@ body:has(.scanner-backdrop) {
   text-align: center;
 }
 
+/* Ручной ввод рядом со сканером: поле кода и кнопка в одну строку. */
+.scanner__manual {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.scanner__manual-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  box-shadow: var(--shadow-in);
+}
+
 .scanner__live {
   display: contents;
 }

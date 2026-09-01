@@ -44,7 +44,16 @@ export interface AwaitingIntakeCard {
 }
 
 export interface AwaitingIntakePage {
+  /** Число заказов текущего отбора: с учётом поиска, если он задан. */
   total: number;
+  /**
+   * Полное число ожидающих приёмки — БЕЗ поиска.
+   *
+   * Это счётчик вкладки: он отвечает на вопрос «сколько всего коробок ждёт
+   * приёмки», а не «сколько нашлось по строке поиска». Считается тем же
+   * бизнес-условием, что и список, поэтому со списком не расходится.
+   */
+  fullTotal: number;
   items: AwaitingIntakeCard[];
 }
 
@@ -88,26 +97,50 @@ function filterSql(search: string | undefined): Prisma.Sql {
 
 export async function listAwaitingIntake(
   db: Database,
-  input: { search?: string | undefined } = {},
+  input: { search?: string | undefined; countOnly?: boolean } = {},
 ): Promise<AwaitingIntakePage> {
+  const term = (input.search ?? '').trim();
   const filter = filterSql(input.search);
 
-  const [counted, ordered] = await Promise.all([
-    db.$queryRaw<{ total: bigint }[]>`SELECT count(*)::bigint AS "total" ${filter}`,
-    // Порядок: по дате доставки (без даты — в конец), затем по номеру. Тем же
-    // ключом группируется экран, поэтому сортировку держит запрос.
-    db.$queryRaw<{ id: string }[]>`
+  // Полный счётчик считается без поиска тем же условием, что и список: с пустым
+  // поиском это тот же запрос, поэтому берём его один раз.
+  const fullFilter = term === '' ? filter : filterSql(undefined);
+
+  const counted = await db.$queryRaw<
+    {
+      total: bigint;
+    }[]
+  >`SELECT count(*)::bigint AS "total" ${filter}`;
+  const total = Number(counted[0]?.total ?? 0n);
+  const fullTotal =
+    term === ''
+      ? total
+      : Number(
+          (
+            await db.$queryRaw<
+              { total: bigint }[]
+            >`SELECT count(*)::bigint AS "total" ${fullFilter}`
+          )[0]?.total ?? 0n,
+        );
+
+  // Счётчик вкладки не грузит список: он обновляется на каждое складское
+  // событие, и тащить ради числа до пятисот строк — впустую.
+  if (input.countOnly === true) {
+    return { total, fullTotal, items: [] };
+  }
+
+  // Порядок: по дате доставки (без даты — в конец), затем по номеру. Тем же
+  // ключом группируется экран, поэтому сортировку держит запрос.
+  const ordered = await db.$queryRaw<{ id: string }[]>`
       SELECT o."id"
       ${filter}
       ORDER BY COALESCE(o."deliveryDate", DATE '9999-12-31') ASC, o."externalName" ASC, o."id" ASC
       LIMIT ${MAX_AWAITING}
-    `,
-  ]);
+    `;
 
-  const total = Number(counted[0]?.total ?? 0n);
   const ids = ordered.map((row) => row.id);
   if (ids.length === 0) {
-    return { total, items: [] };
+    return { total, fullTotal, items: [] };
   }
 
   const orders = await db.deliveryOrder.findMany({
@@ -146,5 +179,5 @@ export async function listAwaitingIntake(
       positionCount: order._count.fulfillmentPositions,
     }));
 
-  return { total, items };
+  return { total, fullTotal, items };
 }

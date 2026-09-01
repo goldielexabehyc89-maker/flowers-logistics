@@ -239,7 +239,7 @@ function parseGroup(buffer, frame, want, visit) {
   while (!reader.done) {
     const { field, wire } = reader.key();
     if (field === 2 && wire === 2 && want.nodes) {
-      parseDenseNodes(reader.bytes(), frame, visit);
+      parseDenseNodes(reader.bytes(), frame, visit, want.nodeTags === true);
     } else if (field === 3 && wire === 2 && want.ways) {
       parseWay(reader.bytes(), frame, visit);
     } else if (field === 4 && wire === 2 && want.relations) {
@@ -250,11 +250,16 @@ function parseGroup(buffer, frame, want, visit) {
   }
 }
 
-function parseDenseNodes(buffer, frame, visit) {
+function parseDenseNodes(buffer, frame, visit, wantTags) {
   const reader = new Reader(buffer);
   let ids = [];
   let lats = [];
   let lons = [];
+  // keys_vals — плоский поток индексов таблицы строк: на каждый узел идут
+  // пары (ключ, значение), а разделитель 0 закрывает узел. Разбираем его
+  // только когда метки нужны (метро), иначе узлов десятки миллионов и лишний
+  // проход — потраченное впустую время. Для МКАД поле не читается вовсе.
+  let keysVals = [];
 
   while (!reader.done) {
     const { field, wire } = reader.key();
@@ -264,6 +269,8 @@ function parseDenseNodes(buffer, frame, visit) {
       lats = packedSigned(reader.bytes());
     } else if (field === 9 && wire === 2) {
       lons = packedSigned(reader.bytes());
+    } else if (field === 10 && wire === 2 && wantTags === true) {
+      keysVals = packedVarints(reader.bytes()).map(Number);
     } else {
       reader.skip(wire);
     }
@@ -272,14 +279,37 @@ function parseDenseNodes(buffer, frame, visit) {
   let id = 0n;
   let lat = 0n;
   let lon = 0n;
+  let cursor = 0;
   for (let index = 0; index < ids.length; index += 1) {
     id += ids[index] ?? 0n;
     lat += lats[index] ?? 0n;
     lon += lons[index] ?? 0n;
+
+    // Метки узла берутся из общего потока по тому же курсору: пары (k, v)
+    // до нуля-разделителя. Без keys_vals (обычный проход) цикл не крутится.
+    let tags;
+    if (wantTags === true && keysVals.length > 0) {
+      const keys = [];
+      const vals = [];
+      while (cursor < keysVals.length) {
+        const key = keysVals[cursor] ?? 0;
+        cursor += 1;
+        if (key === 0) {
+          break;
+        }
+        const value = keysVals[cursor] ?? 0;
+        cursor += 1;
+        keys.push(key);
+        vals.push(value);
+      }
+      tags = tagsOf(keys, vals, frame.strings);
+    }
+
     visit.node?.(
       id,
       Number(frame.latOffset + BigInt(frame.granularity) * lat) / 1e9,
       Number(frame.lonOffset + BigInt(frame.granularity) * lon) / 1e9,
+      tags,
     );
   }
 }

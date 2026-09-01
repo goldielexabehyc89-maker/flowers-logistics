@@ -3,20 +3,27 @@
  *
  * Показывает собранные флористом заказы, которых ещё нет на полке: их склад
  * должен принять. Это ЭКРАН — он ничего не разрешает и статусов не заводит.
- * «Принять» переиспользует ту же физическую приёмку, что и вкладка «Склад»
- * (`POST /api/warehouse/placements`): заказ и ячейка проверяются на сервере,
- * второго пути приёмки здесь нет.
  *
- * Модуль самодостаточен и НЕ импортирует ничего из `WarehouseScreen`: общий
- * ввод ячейки описан здесь же маленьким полем. Это убирает круговую зависимость
- * между экраном и вкладкой.
+ * «Принять» на карточке открывает тот же сканер приёмки, что и вкладка
+ * «Склад», но с одним отличием: заказ на карточке уже выбран, и первый скан
+ * обязан совпасть ИМЕННО с ним. Совпадение проверяется по устойчивому
+ * идентификатору заказа (`orderId`), который возвращает штатный разбор
+ * отсканированного кода, — а не по похожей строке номера. Не тот заказ —
+ * сканер остаётся на первом шаге и ничего не записывает. После совпадения
+ * идёт второй шаг «ячейка», и только пара «заказ + ячейка» уходит на сервер
+ * прежним путём `receiveOrder` (`POST /api/warehouse/placements`). Второго
+ * пути размещения здесь нет.
  *
- * Группировка по дате доставки и полный счётчик приходят с сервера; экран лишь
+ * Ручной ввод рядом со сканером включает существующая настройка «Разрешить
+ * ручной ввод на складе и в самовывозе»; отдельного переключателя нет. Он
+ * проходит те же проверки, что и QR.
+ *
+ * Группировка по дате доставки и счётчик приходят с сервера; экран лишь
  * раскладывает уже упорядоченный список по заголовкам дат.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   formatMinutesOfDay,
   formatMoscowDateTime,
@@ -24,17 +31,10 @@ import {
   shiftCalendarDate,
 } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
-import { ApiError } from '../../lib/api-client';
-import { useToast } from '../../ui/ToastProvider';
-import {
-  Button,
-  EmptyState,
-  ErrorState,
-  Field,
-  LoadingState,
-  StatusBadge,
-  TextInput,
-} from '../../ui/components';
+import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
+import { ScannerScreen } from '../../scan/ScannerScreen';
+import type { ScanContext } from './warehouse-flow';
+import { createReceiveIntent } from './receive-intent';
 import { assembledDateLabel } from '../florist/florist';
 
 interface AwaitingCard {
@@ -52,6 +52,7 @@ interface AwaitingCard {
 
 interface AwaitingResponse {
   total: number;
+  fullTotal: number;
   items: AwaitingCard[];
 }
 
@@ -68,47 +69,6 @@ function intervalLabel(card: AwaitingCard): string {
     return `к ${formatMinutesOfDay(card.startMinute)}`;
   }
   return 'интервал не указан';
-}
-
-/** Поле ввода кода ячейки: сканер-клавиатура вводит и подтверждает по Enter. */
-function CellField({
-  value,
-  onChange,
-  onSubmit,
-  disabled,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  onSubmit: () => void;
-  disabled: boolean;
-}): React.JSX.Element {
-  const ref = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    if (!disabled) {
-      ref.current?.focus();
-    }
-  }, [disabled]);
-  return (
-    <Field label="Ячейка хранения" hint="Отсканируйте или введите код ячейки">
-      {(props) => (
-        <TextInput
-          {...props}
-          ref={ref}
-          value={value}
-          disabled={disabled}
-          autoComplete="off"
-          data-testid="wh-awaiting-cell"
-          onChange={(event) => onChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-        />
-      )}
-    </Field>
-  );
 }
 
 interface DateGroup {
@@ -147,12 +107,10 @@ function groupByDate(items: AwaitingCard[], now: Date): DateGroup[] {
 export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
-  const { showToast } = useToast();
 
   const [search, setSearch] = useState('');
-  /** Заказ, который сейчас принимают: показывается поле ячейки. */
-  const [acceptingId, setAcceptingId] = useState<string | null>(null);
-  const [cellInput, setCellInput] = useState('');
+  /** Карточка, которую сейчас принимают: открыт сканер именно на неё. */
+  const [acceptingCard, setAcceptingCard] = useState<AwaitingCard | null>(null);
 
   const term = search.trim();
   const awaiting = useQuery({
@@ -163,35 +121,42 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
       ),
   });
 
-  const accept = useMutation({
-    mutationFn: (input: { orderNumber: string; cellCode: string }) =>
-      client.post<{ orderNumber: string; cellCode: string }>('/api/warehouse/placements', input),
-    onSuccess: async (result) => {
-      setAcceptingId(null);
-      setCellInput('');
-      await queryClient.invalidateQueries({ queryKey: ['warehouse-awaiting'] });
-      await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
-      showToast(`Заказ ${result.orderNumber} принят в ячейку ${result.cellCode}`, 'success');
-    },
-    onError: (error: unknown) => {
-      // Заказ остаётся в списке: повторяется только ввод ячейки.
-      setCellInput('');
-      const message =
-        error instanceof ApiError ? error.message : 'Не удалось принять заказ на склад.';
-      showToast(message, 'error');
-    },
-  });
-
   const groups = useMemo(
     () => groupByDate(awaiting.data?.items ?? [], new Date()),
     [awaiting.data],
   );
 
-  const submitCell = (orderNumber: string): void => {
-    if (cellInput.trim() !== '') {
-      accept.mutate({ orderNumber, cellCode: cellInput });
+  /*
+   * Обработчик приёмки живёт ровно одну сессию сканирования одной карточки.
+   *
+   * У него есть внутреннее состояние (согласие на маршрутную ячейку), которое
+   * обязано пережить перерисовку списка от события реального времени. Поэтому
+   * он привязан к идентификатору принимаемого заказа, а не создаётся заново на
+   * каждый кадр. Проверка совпадения (`guard`) сверяет устойчивый `orderId`.
+   */
+  const acceptIntent = useMemo(() => {
+    const card = acceptingCard;
+    if (card === null) {
+      return null;
     }
-  };
+    return createReceiveIntent({
+      client,
+      onPlaced: async () => {
+        await queryClient.invalidateQueries({ queryKey: ['warehouse-awaiting'] });
+        await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+      },
+      guard: (context: ScanContext) =>
+        context.orderId === card.orderId
+          ? null
+          : {
+              type: 'failed',
+              text: `Отсканирован заказ ${context.orderNumber}, а нужен ${card.orderNumber}. Отсканируйте заказ с карточки.`,
+            },
+    });
+    // client и queryClient стабильны; пересобираем обработчик только на смену
+    // принимаемой карточки, чтобы его внутреннее состояние (согласие на
+    // маршрутную ячейку) пережило перерисовку списка.
+  }, [acceptingCard, client, queryClient]);
 
   return (
     <div className="stack" data-testid="wh-awaiting">
@@ -199,8 +164,8 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
         <div>
           <h3>Ожидают приёмки</h3>
           <p className="muted text-sm">
-            Собранные заказы, которых ещё нет на полке. «Принять» ставит заказ в ячейку тем же
-            путём, что и «Склад».
+            Собранные заказы, которых ещё нет на полке. «Принять» открывает сканер: сначала заказ с
+            карточки, затем ячейка — тем же путём, что и «Склад».
           </p>
         </div>
 
@@ -259,60 +224,35 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
                         {card.floristName === null ? '' : ` · ${card.floristName}`}
                       </div>
                     </div>
-                    {acceptingId !== card.orderId && (
-                      <Button
-                        variant="primary"
-                        data-testid="wh-awaiting-accept"
-                        disabled={accept.isPending}
-                        onClick={() => {
-                          setAcceptingId(card.orderId);
-                          setCellInput('');
-                        }}
-                      >
-                        Принять
-                      </Button>
-                    )}
+                    <Button
+                      variant="primary"
+                      data-testid="wh-awaiting-accept"
+                      onClick={() => setAcceptingCard(card)}
+                    >
+                      Принять
+                    </Button>
                   </div>
-
-                  {acceptingId === card.orderId && (
-                    <div className="stack stack--tight">
-                      {!manualEntry && (
-                        <p className="muted text-sm" data-testid="wh-awaiting-scan-hint">
-                          Ручной ввод выключен администратором — отсканируйте ячейку сканером.
-                        </p>
-                      )}
-                      <CellField
-                        value={cellInput}
-                        onChange={setCellInput}
-                        onSubmit={() => submitCell(card.orderNumber)}
-                        disabled={accept.isPending}
-                      />
-                      <div className="row">
-                        <Button
-                          variant="primary"
-                          data-testid="wh-awaiting-accept-confirm"
-                          disabled={accept.isPending || cellInput.trim() === ''}
-                          onClick={() => submitCell(card.orderNumber)}
-                        >
-                          Принять в ячейку
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          onClick={() => {
-                            setAcceptingId(null);
-                            setCellInput('');
-                          }}
-                        >
-                          Отмена
-                        </Button>
-                      </div>
-                    </div>
-                  )}
                 </article>
               ))}
             </section>
           ))}
         </div>
+      )}
+
+      {acceptingCard !== null && acceptIntent !== null && (
+        <ScannerScreen
+          resultWindow
+          manualEntry={manualEntry}
+          chain="RECEIVE"
+          operation={`Приёмка · заказ ${acceptingCard.orderNumber}`}
+          onIntent={acceptIntent}
+          onClose={() => {
+            setAcceptingCard(null);
+            // Список и счётчик подравниваем после закрытия: приёмка могла
+            // пройти в последнем кадре перед закрытием окна.
+            void queryClient.invalidateQueries({ queryKey: ['warehouse-awaiting'] });
+          }}
+        />
       )}
     </div>
   );
