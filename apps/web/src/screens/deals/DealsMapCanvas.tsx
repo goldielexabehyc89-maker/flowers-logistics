@@ -22,6 +22,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl';
 import type { StyleSpecification } from 'maplibre-gl';
+import { addMetroLayer } from '../../lib/metro-layer';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, registerPmtiles } from '../routing/map-runtime';
 import { resolveStyleUrls, type StyleDocument } from '../routing/style-urls';
@@ -282,7 +283,9 @@ export function DealsMapCanvas({
       }, BASEMAP_LOAD_TIMEOUT_MS);
       const markLoaded = (): void => {
         globalThis.clearTimeout(loadTimer);
-        if (!cancelled) {
+        if (!cancelled && map !== null) {
+          // Визуальный слой станций метро из уже существующего слоя подложки.
+          addMetroLayer(map);
           setMapReady(true);
         }
       };
