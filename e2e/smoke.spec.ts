@@ -7559,7 +7559,7 @@ test('два сеанса: самовывоз виден у менеджера �
  * Телефон: четыре вкладки склада читаются целиком и ничего не уезжает
  * за правый край.
  */
-test('телефон: четыре вкладки склада без выезда и без второго заголовка', async ({
+test('телефон: пять вкладок склада без выезда и без второго заголовка', async ({
   browser,
 }: {
   browser: Browser;
@@ -7586,7 +7586,13 @@ test('телефон: четыре вкладки склада без выезд
       page.locator('main').getByRole('heading', { name: 'Склад', exact: true }),
     ).toHaveCount(0);
 
-    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    const tabs = [
+      'wh-tab-storage',
+      'wh-tab-awaiting',
+      'wh-tab-picking',
+      'wh-tab-issue',
+      'wh-tab-returns',
+    ];
     const boxes = [];
     for (const id of tabs) {
       const box = await page.getByTestId(id).boundingBox();
@@ -7594,12 +7600,15 @@ test('телефон: четыре вкладки склада без выезд
       boxes.push(box!);
     }
 
-    // Все четыре вкладки стоят в один ряд и помещаются в экран.
-    const top = boxes[0]!.y;
+    // Все пять вкладок помещаются в экран без горизонтального выезда: длинное
+    // «Ожидают приёмки» на узком телефоне переносит вкладки не более чем в два
+    // ряда, но за край ни одна не выходит.
+    const rows = new Set<number>();
     for (const box of boxes) {
-      expect(Math.abs(box.y - top)).toBeLessThan(2);
       expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
+      rows.add(Math.round(box.y / 8));
     }
+    expect(rows.size, `рядов вкладок на ширине ${width}`).toBeLessThanOrEqual(2);
 
     for (const id of tabs) {
       await page.getByTestId(id).click();
