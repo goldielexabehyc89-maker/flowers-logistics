@@ -122,7 +122,7 @@ export interface LogisticsTab {
    * список постраничный, и число из него означало бы «столько видно», а не
    * «столько есть».
    */
-  counter?: 'resolutions';
+  counter?: 'resolutions' | 'notifications';
 }
 
 export const LOGISTICS_TABS: readonly LogisticsTab[] = [
@@ -137,6 +137,12 @@ export const LOGISTICS_TABS: readonly LogisticsTab[] = [
   },
   { key: 'history', path: '/logistics/history', title: 'История' },
   { key: 'reports', path: '/logistics/reports', title: 'Отчёты' },
+  {
+    key: 'notifications',
+    path: '/logistics/notifications',
+    title: 'Уведомления',
+    counter: 'notifications',
+  },
 ];
 
 export const LOGISTICS_DEFAULT_TAB = '/logistics/deals';

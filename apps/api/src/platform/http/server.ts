@@ -30,6 +30,7 @@ import {
 import { registerDeliveryRoutes } from '../../modules/delivery/routes.js';
 import { registerFinanceRoutes } from '../../modules/finance/routes.js';
 import { registerReturnRoutes } from '../../modules/returns/routes.js';
+import { registerNotificationRoutes } from '../../modules/notifications/routes.js';
 import { registerTestingRoutes } from '../../modules/testing/routes.js';
 import { registerFloristRoutes } from '../../modules/fulfillment/routes.js';
 import { registerPickupRoutes } from '../../modules/pickup/routes.js';
@@ -155,6 +156,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   await registerDeliveryRoutes(app, { db, config });
   await registerFinanceRoutes(app, { db, config });
   registerReturnRoutes(app, { db, config });
+  registerNotificationRoutes(app, { db, config });
 
   /*
    * Вход, воспроизводящий ВНЕШНИЙ сигнал отмены.

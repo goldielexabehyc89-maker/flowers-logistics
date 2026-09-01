@@ -146,6 +146,12 @@ export const AUDIT_ACTIONS = [
   'ORDER_FULFILLMENT_REASSIGNED',
   'ORDER_FULFILLMENT_ASSEMBLED',
   'ORDER_FULFILLMENT_REOPENED',
+  // Пересборка: назначение нового круга сборки конкретному флористу по решению
+  // логиста. В аудите только идентификаторы (кому назначено, круг) — без ПДн.
+  'ORDER_FULFILLMENT_REASSEMBLY_ASSIGNED',
+  // Решение «На пересборку» по уведомлению: кто решил, кому назначено, какие
+  // категории изменились. Без адреса, состава и ФИО.
+  'ORDER_REASSEMBLY_DECIDED',
   // Производственные данные изменились ПОСЛЕ сборки. Автор — синхронизация.
   'ORDER_FULFILLMENT_REVIEW_REQUIRED',
   // Печать бланка. Байты PDF и содержимое снимка в аудит не попадают:

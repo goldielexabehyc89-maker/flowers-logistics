@@ -182,6 +182,8 @@ export const CONFLICT_KINDS = [
   'ORDER_PROCESS_STATE_MISMATCH',
   /** У флориста нет активной смены: назначать заказ ему нельзя. */
   'FLORIST_NOT_ON_SHIFT',
+  /** Пересборку назначают только из собранного состояния; заказ уже не в нём. */
+  'REASSEMBLY_STATE_CONFLICT',
   /**
    * Назначение осталось от закрытой смены.
    *

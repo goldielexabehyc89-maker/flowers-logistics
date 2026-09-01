@@ -499,3 +499,145 @@
   justify-content: space-between;
   gap: var(--space-3);
 }
+
+/* --- Статистика смен: вдавленный заголовок, приподнятые карточки ---------- */
+
+/* Обёртка прокручивается сама на узком экране — страница вбок не едет. */
+.stats__wrap {
+  overflow-x: auto;
+}
+
+.stats__table {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 960px;
+}
+
+/* Общая колоночная сетка для заголовка и строк. */
+.stats__thead,
+.stats__row {
+  display: grid;
+  grid-template-columns:
+    minmax(150px, 1.6fr) repeat(2, minmax(64px, 0.8fr))
+    repeat(2, minmax(104px, 1.1fr)) minmax(64px, 0.7fr) minmax(104px, 1.2fr)
+    minmax(76px, 0.9fr) minmax(80px, 1fr) repeat(2, minmax(80px, 0.9fr))
+    minmax(72px, 0.8fr);
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* Заголовок колонок вдавлен в фон. */
+.stats__thead {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-in);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Карточка флориста приподнята. */
+.stats__row {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+/* Неполный период — тёплая заливка, как в приёмке отличается самовывоз. */
+.stats__row--incomplete {
+  background: var(--color-warning-soft);
+}
+
+.stats__cell {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats__cell--start {
+  text-align: left;
+  justify-self: start;
+}
+
+.stats__cell--end {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: right;
+  justify-self: end;
+}
+
+.stats__name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stats__tag {
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+/* Δ собрано: зелёный рост, красный спад, нейтральный ноль. */
+.stats__delta {
+  font-weight: 600;
+}
+
+.stats__delta--up {
+  color: var(--color-success);
+}
+
+.stats__delta--down {
+  color: var(--color-error);
+}
+
+.stats__delta--flat {
+  color: var(--color-text-muted);
+}
+
+/* Подпись колонки внутри карточки — только для узкого экрана. */
+.stats__colhead {
+  display: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/*
+ * Узкий экран: карточка флориста разворачивается в две колонки с подписями,
+ * общий заголовок прячется. Прокрутка обёртки при этом больше не нужна.
+ */
+@media (max-width: 720px) {
+  .stats__table {
+    min-width: 0;
+  }
+
+  .stats__thead {
+    display: none;
+  }
+
+  .stats__row {
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2) var(--space-3);
+  }
+
+  .stats__cell--start,
+  .stats__name {
+    grid-column: 1 / -1;
+  }
+
+  .stats__cell--end {
+    text-align: left;
+    justify-self: stretch;
+  }
+
+  .stats__colhead {
+    display: block;
+  }
+}
+
+/* Пересборки в ячейке «Собрано»: тихая подпись рядом с числом. */
+.stats__reassembly {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}

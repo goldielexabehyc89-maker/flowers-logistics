@@ -125,6 +125,11 @@ model User {
   addressHistoryItems     OrderAddressHistory[]         @relation("OrderAddressHistoryActor")
   structuredAddressEvents OrderStructuredAddressEvent[] @relation("OrderStructuredAddressActor")
 
+  /// Уведомления логистов: персональные отметки прочтения и решения о пересборке.
+  changeNotificationReads OrderChangeNotificationRead[]
+  reassemblyDecisions     OrderReassemblyDecision[]     @relation("ReassemblyDecidedBy")
+  assignedReassemblies    OrderReassemblyDecision[]     @relation("ReassemblyAssignedFlorist")
+
   floristShifts       FloristShift[]  @relation("FloristShiftUser")
   closedFloristShifts FloristShift[]  @relation("FloristShiftClosedBy")
   assignedFulfillment DeliveryOrder[] @relation("OrderFulfillmentAssignee")
@@ -688,6 +693,9 @@ model DeliveryOrder {
   /// Неизменяемая история локального адреса и разрешения конфликтов.
   addressHistory          OrderAddressHistory[]
   structuredAddressEvents OrderStructuredAddressEvent[]
+  /// Уведомления логистов об изменениях заказа и решения о пересборке.
+  changeNotifications     OrderChangeNotification[]
+  reassemblyDecisions     OrderReassemblyDecision[]
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
   recipient               String?
   /// Только «Комментарий по доставке». Необязателен.
@@ -3204,4 +3212,72 @@ model PrintPoint {
   shifts FloristShift[]
 
   @@index([isActive, name])
+}
+
+/// Бизнес-уведомление об изменении существующего заказа источником.
+///
+/// Создаётся при обновлении заказа (не при первом импорте и не на идентичном
+/// снимке), когда фактически изменилось нормализованное значение адреса,
+/// деталей адреса, даты, интервала или состава. Одно обновление — одно
+/// уведомление со всеми категориями. Запись неизменяема (append-only): отметки
+/// прочтения и решение о пересборке живут отдельными таблицами.
+///
+/// `payload` содержит старое и новое значения для показа авторизованному
+/// сотруднику в интерфейсе; в технические журналы и realtime они не уходят.
+model OrderChangeNotification {
+  id         String   @id @default(uuid()) @db.Uuid
+  orderId    String   @db.Uuid
+  order      DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  occurredAt DateTime @default(now())
+  /// Источник изменения: пока только синхронизация МоегоСклада.
+  source     String
+  /// Категории изменений: ADDRESS, DETAILS, DATE, INTERVAL, COMPOSITION.
+  categories String[]
+  /// INFO — обычное изменение; COMPOSITION_AFTER_ASSEMBLY — состав изменён
+  /// после того, как заказ уже прошёл сборку (нужно решение о пересборке).
+  kind       String
+  /// Старое → новое по полям и понятный diff состава. Только для интерфейса.
+  payload    Json
+  createdAt  DateTime @default(now())
+
+  reads    OrderChangeNotificationRead[]
+  decision OrderReassemblyDecision?
+
+  @@index([orderId])
+  @@index([occurredAt])
+}
+
+/// Персональная отметка прочтения уведомления. Прочтение одним логистом не
+/// скрывает уведомление у остальных: состояние прочтения — на пользователя.
+model OrderChangeNotificationRead {
+  id             String   @id @default(uuid()) @db.Uuid
+  notificationId String   @db.Uuid
+  notification   OrderChangeNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  userId         String   @db.Uuid
+  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  readAt         DateTime @default(now())
+
+  @@unique([notificationId, userId])
+  @@index([userId])
+}
+
+/// Глобальное идемпотентное решение «На пересборку» по уведомлению.
+///
+/// Одно решение на уведомление (уникальность по notificationId): гонка двух
+/// логистов и повторное нажатие не создают две пересборки. Хранит, кто решил,
+/// какому флористу назначено и в каком круге сборки (`assemblyRound`).
+model OrderReassemblyDecision {
+  id                String   @id @default(uuid()) @db.Uuid
+  notificationId    String   @unique @db.Uuid
+  notification      OrderChangeNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  orderId           String   @db.Uuid
+  order             DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  decidedById       String   @db.Uuid
+  decidedBy         User     @relation("ReassemblyDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  assignedFloristId String   @db.Uuid
+  assignedFlorist   User     @relation("ReassemblyAssignedFlorist", fields: [assignedFloristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  assemblyRound     Int
+  decidedAt         DateTime @default(now())
+
+  @@index([orderId])
 }

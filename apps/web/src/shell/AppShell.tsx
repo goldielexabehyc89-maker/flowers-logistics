@@ -46,6 +46,7 @@ import {
 import { Button, ICON_SIZE, Modal } from '../ui/components';
 import { useRealtime } from '../realtime/useRealtime';
 import { ConnectionIndicator } from './ConnectionIndicator';
+import { NotificationPopups } from '../screens/notifications/NotificationPopups';
 import './shell.css';
 
 /**
@@ -112,6 +113,11 @@ export function AppShell(): React.JSX.Element {
     queryFn: () => client.get<{ unresolved: number }>('/api/logistics/resolutions/count'),
     enabled: logisticsVisible,
   });
+  const unreadNotifications = useQuery({
+    queryKey: ['notifications-count'],
+    queryFn: () => client.get<{ unread: number }>('/api/logistics/notifications/count'),
+    enabled: logisticsVisible,
+  });
   /*
    * До ответа сервера счётчика нет вовсе.
    *
@@ -120,6 +126,7 @@ export function AppShell(): React.JSX.Element {
    */
   const counters: Readonly<Record<string, number | undefined>> = {
     resolutions: unresolved.data?.unresolved,
+    notifications: unreadNotifications.data?.unread,
   };
   const mobile = splitMobileNavigation(roles);
 
@@ -448,6 +455,13 @@ export function AppShell(): React.JSX.Element {
           <Outlet />
         </div>
       </main>
+
+      {/*
+        Всплывающие уведомления логистов рисуются поверх любого экрана, поэтому
+        живут в оболочке, а не во вкладке. Монтируются только у логистов — у
+        остальных ролей события им не адресованы.
+      */}
+      {logisticsVisible && <NotificationPopups />}
 
       {!singleSection && (
         <nav className="shell__bottombar" aria-label="Навигация">

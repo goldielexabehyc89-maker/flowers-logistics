@@ -438,6 +438,134 @@ export async function reassignOrder(
   });
 }
 
+/**
+ * Назначение ПЕРЕСБОРКИ конкретному флористу.
+ *
+ * Отличается от `reassignOrder` тем, что работает по заказу, который уже прошёл
+ * сборку (`ASSEMBLED`/`NEEDS_REVIEW`), и открывает НОВЫЙ круг сборки
+ * (`assemblyRound + 1`) — как `decideReassemble`, но не в общую свободную
+ * очередь, а сразу выбранному флористу. Физическое состояние заказа не
+ * трогается: размещения, маршрутные ячейки, лист и курьер остаются как были —
+ * их отвязывает сравнение кругов, а не эта операция. «Собран» нового круга
+ * штатно создаёт новый бланк и печать через `assembleOrder`.
+ *
+ * Идемпотентность обеспечивает вызывающий (одно решение на уведомление) плюс
+ * условный `updateMany` по состоянию: второй заход застаёт заказ уже в
+ * `IN_ASSEMBLY` и получает 0 строк.
+ */
+export async function assignReassembly(
+  db: Database,
+  actor: Actor,
+  input: { orderId: string; floristId: string },
+  context: RequestContext,
+): Promise<{ result: ProcessResult; assemblyRound: number; floristId: string }> {
+  return db.$transaction((tx) => assignReassemblyTx(tx, actor, input, context));
+}
+
+/**
+ * Тело назначения пересборки внутри уже открытой транзакции.
+ *
+ * Отдельная точка нужна вызывающему решению «На пересборку»: оно создаёт запись
+ * решения и назначает пересборку ОДНОЙ транзакцией, чтобы гонка двух логистов
+ * и повторное нажатие не создали две пересборки — сериализует их условный
+ * `updateMany` по состоянию заказа (проигравший получает 0 строк) и уникальность
+ * записи решения.
+ */
+export async function assignReassemblyTx(
+  tx: TransactionClient,
+  actor: Actor,
+  input: { orderId: string; floristId: string },
+  context: RequestContext,
+): Promise<{ result: ProcessResult; assemblyRound: number; floristId: string }> {
+  const target = await tx.user.findUnique({
+    where: { id: input.floristId },
+    select: { id: true, status: true, roles: { select: { role: true } } },
+  });
+  if (target === null || target.status !== 'ACTIVE') {
+    throw new AppError('NOT_FOUND', {
+      message: 'florist not found',
+      publicMessage: 'Сотрудник не найден или заморожен.',
+    });
+  }
+  const canAssemble = target.roles.some((row) => row.role === 'FLORIST' || row.role === 'ADMIN');
+  if (!canAssemble) {
+    throw new AppError('VALIDATION_FAILED', {
+      message: 'user is not a florist',
+      publicMessage: 'Пересборку можно назначить только флористу.',
+    });
+  }
+
+  {
+    const shift = await lockActiveShift(tx, input.floristId);
+    if (shift === null) {
+      throw new AppError('CONFLICT', {
+        message: 'target florist has no active shift',
+        publicMessage: 'У выбранного флориста нет активной смены.',
+        conflict: { kind: 'FLORIST_NOT_ON_SHIFT' },
+      });
+    }
+
+    const before = await readOrder(tx, input.orderId);
+    const updated = await tx.deliveryOrder.updateMany({
+      where: {
+        id: input.orderId,
+        // Пересборка возможна только у уже собранного заказа.
+        fulfillmentProcessState: { in: ['ASSEMBLED', 'NEEDS_REVIEW'] },
+      },
+      data: {
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        fulfillmentAssigneeId: input.floristId,
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentShiftId: shift.id,
+        // Новый круг сборки. Прежние бланк, печать, размещение и история
+        // остаются — их «отвязывает» сравнение кругов, а не эта запись.
+        assemblyRound: { increment: 1 },
+        // Отметки завершённой сборки снимаются: заказ снова в работе.
+        fulfillmentAssembledAt: null,
+        fulfillmentAssembledById: null,
+        fulfillmentAssembledRevisionId: null,
+        fulfillmentProcessVersion: { increment: 1 },
+      },
+    });
+
+    if (updated.count === 0) {
+      // Заказ не в собранном состоянии (например, пересборка уже назначена
+      // другим логистом и заказ снова в работе) — честный конфликт.
+      throw new AppError('CONFLICT', {
+        message: 'order is not in an assembled state for reassembly',
+        publicMessage: 'Заказ не в состоянии, из которого назначают пересборку.',
+        conflict: { kind: 'REASSEMBLY_STATE_CONFLICT' },
+      });
+    }
+
+    const refreshed = await tx.deliveryOrder.findUniqueOrThrow({
+      where: { id: input.orderId },
+      select: { assemblyRound: true },
+    });
+    const order = await readOrder(tx, input.orderId);
+
+    await writeProcessAudit(tx, 'ORDER_FULFILLMENT_REASSEMBLY_ASSIGNED', order, actor, context, {
+      toUserId: input.floristId,
+      ...(before.fulfillmentAssigneeId === null
+        ? {}
+        : { fromUserId: before.fulfillmentAssigneeId }),
+      assemblyRound: refreshed.assemblyRound,
+    });
+
+    await publishProcessEvent(tx, order, actor.userId);
+    if (before.fulfillmentAssigneeId !== null && before.fulfillmentAssigneeId !== input.floristId) {
+      await publishPersonalProcessEvent(tx, order, before.fulfillmentAssigneeId);
+    }
+    await publishPersonalProcessEvent(tx, order, input.floristId);
+
+    return {
+      result: toResult(order),
+      assemblyRound: refreshed.assemblyRound,
+      floristId: input.floristId,
+    };
+  }
+}
+
 export interface AssembleResult extends ProcessResult {
   printFormId: string;
   printJobId: string;
@@ -711,6 +839,9 @@ export async function assembleOrder(
       // так как bigint в JSON аудита недопустим.
       shiftId,
       assembledSumMinor: order.sumMinor.toString(),
+      // Круг сборки: статистика считает пересборку (round > 1) отдельной
+      // выполненной работой и отличает её от первой сборки.
+      assemblyRound: order.assemblyRound,
     });
     await writeAudit(tx, {
       action: 'ORDER_PRINT_JOB_CREATED',

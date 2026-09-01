@@ -524,6 +524,11 @@ export function FloristScreen(): React.JSX.Element {
       >
         <div className="florist__row-main">
           <span className="florist__number">{item.number}</span>
+          {item.reassembly === true && (
+            <StatusBadge tone="warning" data-testid="florist-reassembly">
+              Пересборка
+            </StatusBadge>
+          )}
           <span className="florist__time">{formatInterval(item)}</span>
           {item.overdue && <StatusBadge tone="error">Просрочен</StatusBadge>}
           {routeLabel(item) !== null && <StatusBadge tone="info">{routeLabel(item)}</StatusBadge>}

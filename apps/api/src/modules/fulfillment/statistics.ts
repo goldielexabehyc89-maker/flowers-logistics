@@ -32,6 +32,8 @@ export interface FloristStatComparison {
   idleWithQueueMinutes: number | null;
   idleWithoutQueueMinutes: number | null;
   uniqueAssembledCount: number;
+  /** Из них пересборки (круг сборки > 1): отдельный учёт выполненной работы. */
+  reassemblyCount: number;
   totalSumMinor: string | null;
   ordersPerHour: number;
   rublesPerHour: number | null;
@@ -251,7 +253,10 @@ function computeForFlorist(
   let shiftDurationMs = 0;
   const assemblySpans: Span[] = [];
   const cycleMinutes: number[] = [];
+  // Ключ — заказ И круг сборки: пересборка (новый круг того же заказа) считается
+  // отдельной выполненной работой, а не сливается с первой сборкой.
   const uniqueOrders = new Set<string>();
+  const reassemblyKeys = new Set<string>();
   let sumMinor = 0n;
   let moneyIncomplete = false;
   let idleWithQueueMs = 0;
@@ -272,9 +277,17 @@ function computeForFlorist(
   for (const a of assembles) {
     if (a.entityId === null) continue;
     const ta = a.occurredAt.getTime();
-    uniqueOrders.add(a.entityId);
 
-    const value = (a.newValue ?? {}) as { assembledSumMinor?: unknown };
+    const value = (a.newValue ?? {}) as { assembledSumMinor?: unknown; assemblyRound?: unknown };
+    // Круг сборки: старые аудиты без него — первый круг. Ключ (заказ, круг)
+    // даёт +1 за пересборку и не двоит обычную сборку.
+    const round =
+      typeof value.assemblyRound === 'number' && value.assemblyRound > 0 ? value.assemblyRound : 1;
+    const key = `${a.entityId}:${round}`;
+    uniqueOrders.add(key);
+    if (round > 1) {
+      reassemblyKeys.add(key);
+    }
     if (typeof value.assembledSumMinor === 'string' && /^\d+$/.test(value.assembledSumMinor)) {
       sumMinor += BigInt(value.assembledSumMinor);
     } else {
@@ -326,6 +339,7 @@ function computeForFlorist(
     idleWithQueueMinutes: idleKnown ? round1(idleWithQueueMs / MIN) : null,
     idleWithoutQueueMinutes: idleKnown ? round1(idleWithoutQueueMs / MIN) : null,
     uniqueAssembledCount: uniqueCount,
+    reassemblyCount: reassemblyKeys.size,
     totalSumMinor: moneyIncomplete ? null : sumMinor.toString(),
     ordersPerHour: hours > 0 ? round1(uniqueCount / hours) : 0,
     rublesPerHour: moneyIncomplete || hours <= 0 ? null : round1(Number(sumMinor) / 100 / hours),
@@ -439,6 +453,7 @@ export async function buildFloristStatistics(
       idleWithQueueMinutes: null,
       idleWithoutQueueMinutes: null,
       uniqueAssembledCount: 0,
+      reassemblyCount: 0,
       totalSumMinor: null,
       ordersPerHour: 0,
       rublesPerHour: null,
@@ -464,6 +479,7 @@ export async function buildFloristStatistics(
       idleIncomplete: stat.idleUnknownMs > 0,
       moneyIncomplete: stat.moneyIncomplete,
       uniqueAssembledCount: stat.uniqueAssembledCount,
+      reassemblyCount: stat.reassemblyCount,
       totalSumMinor: stat.totalSumMinor,
       ordersPerHour: stat.ordersPerHour,
       rublesPerHour: stat.rublesPerHour,
