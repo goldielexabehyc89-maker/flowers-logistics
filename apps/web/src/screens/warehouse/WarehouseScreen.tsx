@@ -32,6 +32,7 @@ import { routeCellHint } from '../../scan/scan-machine';
 import { AssemblyTab } from './AssemblyTab';
 import { AwaitingTab } from './AwaitingTab';
 import { IssueTab } from './IssueTab';
+import { createReceiveIntent } from './receive-intent';
 import type { Role } from '@fl/shared';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
@@ -126,6 +127,25 @@ export function WarehouseScreen(): React.JSX.Element {
   });
   const manualEntry = settings.data?.manualEntry ?? false;
 
+  /*
+   * Счётчик вкладки «Ожидают приёмки».
+   *
+   * Полное число по всему отбору, а не по загруженной странице и не по строке
+   * поиска: запрос идёт с `countOnly` и без поиска, поэтому счётчик не зависит
+   * от того, что набрал кладовщик в поиске. Ключ начинается с
+   * `warehouse-awaiting`, и те же складские и производственные события, что
+   * обновляют список, обновляют и его — сборка добавляет, приёмка, возврат,
+   * отмена и списание убавляют, всё без перезагрузки. Список и счётчик считает
+   * одно бизнес-условие на сервере, поэтому они не расходятся.
+   */
+  const awaitingVisible = visibleTabs.some((item) => item.key === 'awaiting');
+  const awaitingCount = useQuery({
+    queryKey: ['warehouse-awaiting', 'count'],
+    queryFn: () => client.get<{ fullTotal: number }>('/api/warehouse/awaiting?countOnly=1'),
+    enabled: awaitingVisible,
+  });
+  const awaitingBadge = awaitingCount.data?.fullTotal ?? null;
+
   return (
     <section className="stack warehouse" data-testid="warehouse-screen">
       {/*
@@ -145,6 +165,11 @@ export function WarehouseScreen(): React.JSX.Element {
             onClick={() => setTab(item.key)}
           >
             {item.title}
+            {item.key === 'awaiting' && awaitingBadge !== null && awaitingBadge > 0 && (
+              <span className="wh-tabs__badge" data-testid="wh-tab-awaiting-count">
+                {awaitingBadge}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -545,10 +570,6 @@ function failureText(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
 }
 
-function conflictKind(error: unknown): string | null {
-  return error instanceof ApiError ? (error.conflict?.kind ?? null) : null;
-}
-
 function useApiError(): (error: unknown, fallback: string) => void {
   const { showToast } = useToast();
   return (error: unknown, fallback: string) => {
@@ -609,94 +630,6 @@ function returnIntentHandler(
       return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
     } catch (error) {
       return { type: 'failed', text: failureText(error, 'Не удалось принять возврат.') };
-    }
-  };
-}
-
-function receiveIntentHandler(
-  client: ReturnType<typeof useAuth>['client'],
-  onPlaced: () => Promise<void>,
-): (intent: ScanIntent) => Promise<ScanEvent> {
-  let consentedCell: string | null = null;
-  let routeNumber: string | null = null;
-
-  return async (intent) => {
-    try {
-      if (intent.kind === 'resolveOrder') {
-        const context = await client.get<ScanContext>(
-          `/api/warehouse/scan/order?number=${encodeURIComponent(intent.code)}`,
-        );
-        if (context.route !== null) {
-          routeNumber = context.route.number;
-          return {
-            type: 'routeChoiceRequired',
-            orderNumber: context.orderNumber,
-            route: {
-              routeId: context.route.id,
-              routeNumber: context.route.number,
-              cells: context.route.routeCells,
-            },
-          };
-        }
-        routeNumber = null;
-        return { type: 'orderResolved', orderNumber: context.orderNumber };
-      }
-
-      if (intent.kind === 'submitPair' && intent.target === 'ROUTE') {
-        /*
-         * «В сборку»: назначение полки и перенос коробки — одна транзакция.
-         *
-         * Раздельные шаги оставляли бы лист с занятой полкой, на которой
-         * ничего не стоит, если кладовщика позвали между ними.
-         */
-        const result = await client.post<{
-          orderNumber: string;
-          cellCode: string;
-          picked: number;
-          total: number;
-        }>(`/api/warehouse/routes/${intent.routeId ?? ''}/pick`, {
-          orderNumber: intent.orderNumber,
-          cellCode: intent.cellCode,
-          ...(intent.allowNewCell ? { bindIfFree: true } : {}),
-        });
-        await onPlaced();
-        return {
-          type: 'succeeded',
-          text: `Заказ ${result.orderNumber} перемещён в ячейку ${result.cellCode} для МЛ ${routeNumber ?? ''}`.trim(),
-          progress: { done: result.picked, total: result.total },
-          final: true,
-        };
-      }
-
-      if (intent.kind === 'submitPair') {
-        const agreed = consentedCell === intent.cellCode;
-        const result = await client.post<{ orderNumber: string; cellCode: string }>(
-          '/api/warehouse/placements',
-          {
-            orderNumber: intent.orderNumber,
-            cellCode: intent.cellCode,
-            ...(agreed ? { allowRouteCell: true } : {}),
-          },
-        );
-        consentedCell = null;
-        await onPlaced();
-        return {
-          type: 'succeeded',
-          text: `Заказ ${result.orderNumber} помещён в ячейку ${result.cellCode}`,
-          final: true,
-        };
-      }
-      return { type: 'failed', text: 'Неподдерживаемый шаг сканирования.' };
-    } catch (error) {
-      if (
-        intent.kind === 'submitPair' &&
-        intent.target === 'STORAGE' &&
-        conflictKind(error) === 'ROUTE_CELL_REQUIRES_CHOICE'
-      ) {
-        consentedCell = intent.cellCode;
-        return { type: 'consentRequired', cellCode: intent.cellCode };
-      }
-      return { type: 'failed', text: failureText(error, 'Не удалось разместить заказ.') };
     }
   };
 }
@@ -868,8 +801,11 @@ function StorageTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
         resultWindow
         chain="RECEIVE"
         operation="Приёмка на склад"
-        onIntent={receiveIntentHandler(client, async () => {
-          await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+        onIntent={createReceiveIntent({
+          client,
+          onPlaced: async () => {
+            await queryClient.invalidateQueries({ queryKey: ['warehouse-placements'] });
+          },
         })}
         onClose={() => setScanning(false)}
       />

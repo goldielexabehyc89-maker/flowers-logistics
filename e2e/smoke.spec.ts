@@ -8206,6 +8206,104 @@ async function disableManualEntry(request: APIRequestContext): Promise<void> {
   expect(saved.status()).toBe(200);
 }
 
+/**
+ * Двухэтапная приёмка из «Ожидают приёмки»: заказ карточки, потом ячейка.
+ *
+ * «Принять» открывает тот же сканер, но заказ уже выбран карточкой. Другой
+ * заказ (даже реальный, из того же стенда) отвергается по устойчивому
+ * идентификатору, сканер остаётся на первом шаге и НИЧЕГО не записывает.
+ * Только точное совпадение открывает второй шаг — ячейку, — и лишь пара
+ * «заказ + ячейка» уходит на сервер прежним путём приёмки. Счётчик вкладки
+ * при этом уменьшается без перезагрузки.
+ *
+ * Камера подменяется двойником: настоящего устройства в CI нет, а проводку
+ * «карточка → совпадение → ячейка → сервер» доказать нужно.
+ */
+test('«Ожидают приёмки»: приёмка сверяет заказ карточки, потом ячейку', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await installCameraDouble(page);
+
+  const stand = seedWarehouseStand();
+  const target = stand['заказ ждёт приёмки'] ?? '';
+  const otherOrder = stand['заказ без размещения'] ?? '';
+  const storageCell = stand['ячейка хранения A'] ?? '';
+  expect(target).not.toBe('');
+  expect(otherOrder).not.toBe('');
+  expect(otherOrder).not.toBe(target);
+
+  const scan = async (code: string, until: () => Promise<void>): Promise<void> => {
+    await page.evaluate((value) => {
+      (globalThis as unknown as { __flScan: (code: string) => void }).__flScan(value);
+    }, code);
+    await until();
+    await page.evaluate(() => {
+      (globalThis as unknown as { __flClear: () => void }).__flClear();
+    });
+  };
+
+  await login(page, stand['кладовщик'] ?? '', stand['пин'] ?? '');
+  await page.getByTestId('wh-tab-awaiting').click();
+
+  const card = page.locator(`[data-testid="wh-awaiting-card"][data-order-number="${target}"]`);
+  await expect(card).toBeVisible();
+
+  // Счётчик вкладки виден и считает весь набор, а не одну карточку.
+  const badge = page.getByTestId('wh-tab-awaiting-count');
+  await expect(badge).toBeVisible();
+  const before = Number((await badge.innerText()).trim());
+  expect(before).toBeGreaterThan(0);
+
+  await card.getByTestId('wh-awaiting-accept').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
+
+  /*
+   * 1. Другой заказ (реальный, из того же стенда) отвергается: сверка идёт по
+   *    устойчивому id, сканер называет оба номера, остаётся на первом шаге и
+   *    ничего не пишет.
+   */
+  await scan(otherOrder, async () => {
+    await expect(page.getByTestId('scan-error')).toBeVisible();
+  });
+  await expect(page.getByTestId('scan-result-text')).toContainText(target);
+  await page.getByTestId('scan-retry').click();
+  await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
+
+  /*
+   * 2. Точное совпадение принимается. Заказ входит в подтверждённый лист без
+   *    ячейки, поэтому сканер спрашивает: в сборку или в хранение. До этого
+   *    момента записи нет — карточка всё ещё в списке.
+   */
+  await scan(target, async () => {
+    await expect(page.getByTestId('scan-route-choice')).toBeVisible();
+  });
+  await expect(
+    page.locator(`[data-testid="wh-awaiting-card"][data-order-number="${target}"]`),
+  ).toBeVisible();
+
+  // Кладём в обычное хранение — второй шаг спрашивает ячейку.
+  await page.getByTestId('scan-route-storage').click();
+  await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код ячейки');
+
+  /*
+   * 3. Ячейка завершает пару: только теперь заказ уходит на сервер прежним
+   *    путём приёмки. Сканер закрывается, карточка исчезает из списка,
+   *    счётчик уменьшается сам.
+   */
+  await scan(storageCell, async () => {
+    await expect(page.getByTestId('scan-success')).toContainText(`помещён в ячейку ${storageCell}`);
+  });
+
+  await expect(
+    page.locator(`[data-testid="wh-awaiting-card"][data-order-number="${target}"]`),
+  ).toHaveCount(0);
+  await expect(badge).toHaveText(String(before - 1));
+});
+
 /*
  * Очередь прилавка: состав, счётчик и блокирующие состояния.
  *

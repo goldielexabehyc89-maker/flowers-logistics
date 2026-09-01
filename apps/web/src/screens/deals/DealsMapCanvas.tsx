@@ -284,7 +284,7 @@ export function DealsMapCanvas({
       const markLoaded = (): void => {
         globalThis.clearTimeout(loadTimer);
         if (!cancelled && map !== null) {
-          // Визуальный слой станций метро из уже существующего слоя подложки.
+          // Визуальный слой станций метро (общий набор generated/metro).
           addMetroLayer(map);
           setMapReady(true);
         }

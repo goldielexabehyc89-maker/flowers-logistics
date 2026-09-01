@@ -211,7 +211,7 @@ export function OrdersMap({
 
       instance.on('load', () => {
         globalThis.clearTimeout(loadTimer);
-        // Визуальный слой станций метро из уже существующего слоя подложки.
+        // Визуальный слой станций метро (общий набор generated/metro).
         addMetroLayer(instance);
         markState('ready');
       });

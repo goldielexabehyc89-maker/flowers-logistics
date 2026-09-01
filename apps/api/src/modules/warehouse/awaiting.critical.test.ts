@@ -280,3 +280,47 @@ describe('состав списка «Ожидают приёмки»', () => {
     expect(await awaitingNumbers('нет-такого-номера-zzz')).toEqual([]);
   });
 });
+
+describe('счётчик вкладки «Ожидают приёмки»', () => {
+  it('полный счётчик не зависит от строки поиска', async () => {
+    const order = await seedAssembled();
+
+    const full = await listAwaitingIntake(ctx.db);
+    // Поиск сужает список и его total, но полный счётчик остаётся прежним:
+    // это число всех ожидающих, а не найденных по строке.
+    const searched = await listAwaitingIntake(ctx.db, { search: order.number });
+    expect(searched.total).toBe(1);
+    expect(searched.items.map((item) => item.orderNumber)).toEqual([order.number]);
+    expect(searched.fullTotal).toBe(full.fullTotal);
+    expect(full.fullTotal).toBe(full.total);
+  });
+
+  it('countOnly отдаёт полное число без списка, тем же условием', async () => {
+    const order = await seedAssembled();
+
+    const list = await listAwaitingIntake(ctx.db);
+    const count = await listAwaitingIntake(ctx.db, { countOnly: true });
+    expect(count.items).toEqual([]);
+    // Счётчик и список считает одно бизнес-условие — числа совпадают.
+    expect(count.fullTotal).toBe(list.fullTotal);
+    expect(count.total).toBe(list.total);
+
+    // Даже с поиском countOnly отдаёт ПОЛНОЕ число ожидающих, а не найденных.
+    const countWithSearch = await listAwaitingIntake(ctx.db, {
+      countOnly: true,
+      search: order.number,
+    });
+    expect(countWithSearch.fullTotal).toBe(count.fullTotal);
+  });
+
+  it('приёмка уменьшает полный счётчик', async () => {
+    const keeper = await actorFor(['WAREHOUSE']);
+    const order = await seedAssembled();
+    const cell = await seedCell();
+
+    const before = await listAwaitingIntake(ctx.db, { countOnly: true });
+    await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
+    const after = await listAwaitingIntake(ctx.db, { countOnly: true });
+    expect(after.fullTotal).toBe(before.fullTotal - 1);
+  });
+});
