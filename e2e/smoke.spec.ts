@@ -4708,8 +4708,9 @@ test('«Ожидают приёмки»: приёмка сверяет зака�
   await expect(page.getByTestId('scan-manual')).toHaveCount(0);
 
   /*
-   * 1. Другой заказ отвергается: сканер называет оба номера, остаётся на
-   *    первом шаге и ничего не пишет — карточка всё ещё в списке.
+   * 1. Другой заказ (реальный, из того же стенда) отвергается: сверка идёт по
+   *    устойчивому id, сканер называет оба номера, остаётся на первом шаге и
+   *    ничего не пишет.
    */
   await scan(otherOrder, async () => {
     await expect(page.getByTestId('scan-error')).toBeVisible();
@@ -4719,17 +4720,25 @@ test('«Ожидают приёмки»: приёмка сверяет зака�
   await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
 
   /*
-   * 2. Точное совпадение открывает второй шаг. До ячейки записи нет: карточка
-   *    остаётся в списке.
+   * 2. Точное совпадение принимается. Заказ входит в подтверждённый лист без
+   *    ячейки, поэтому сканер спрашивает: в сборку или в хранение. До этого
+   *    момента записи нет — карточка всё ещё в списке.
    */
   await scan(target, async () => {
-    await expect(page.getByTestId('scan-success')).toContainText(`Заказ ${target} отсканирован`);
+    await expect(page.getByTestId('scan-route-choice')).toBeVisible();
   });
+  await expect(
+    page.locator(`[data-testid="wh-awaiting-card"][data-order-number="${target}"]`),
+  ).toBeVisible();
+
+  // Кладём в обычное хранение — второй шаг спрашивает ячейку.
+  await page.getByTestId('scan-route-storage').click();
   await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код ячейки');
 
   /*
-   * 3. Ячейка завершает пару: только теперь заказ уходит на сервер. Сканер
-   *    закрывается, карточка исчезает из списка, счётчик уменьшается сам.
+   * 3. Ячейка завершает пару: только теперь заказ уходит на сервер прежним
+   *    путём приёмки. Сканер закрывается, карточка исчезает из списка,
+   *    счётчик уменьшается сам.
    */
   await scan(storageCell, async () => {
     await expect(page.getByTestId('scan-success')).toContainText(`помещён в ячейку ${storageCell}`);
