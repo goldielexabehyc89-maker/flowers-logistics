@@ -290,6 +290,15 @@ async function activate(page: Page, phone: string, code: string, pin: string): P
   await page.getByLabel('Новый PIN').fill(pin);
   await page.getByLabel('Повторите PIN').fill(pin);
   await page.getByRole('button', { name: 'Установить PIN и войти' }).click();
+  /*
+   * Как и обычный вход, активация считается завершённой лишь когда экран
+   * активации сменился рабочим разделом. Без ожидания следующее действие
+   * успевало уйти раньше ответа на вход, cookie обновления ещё не стояла, и
+   * проактивный refresh получал «refresh cookie missing»: сценарий откатывался
+   * к форме, а раздел «не отрисовывался». Под нагрузкой последнего теста гонка
+   * проявлялась стабильно.
+   */
+  await page.waitForURL((url) => !url.pathname.startsWith('/first-login'), { timeout: 20_000 });
 }
 
 async function login(page: Page, phone: string, pin: string): Promise<void> {
@@ -4022,10 +4031,6 @@ test('самовывоз: флорист собрал → склад приня�
   // 2. Флорист собирает самовывозный заказ: маршрута у него нет, сборка обычная.
   const floristContext = await browser.newContext();
   const floristPage = await floristContext.newPage();
-  floristPage.on('pageerror', (error) => console.log('FLORIST_PAGEERROR:', error.message));
-  floristPage.on('response', (res) => {
-    if (res.status() >= 400) console.log('FLORIST_HTTP', res.status(), res.url());
-  });
   await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
   await clickAndAwait(
     floristPage,
