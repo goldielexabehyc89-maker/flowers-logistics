@@ -9,9 +9,18 @@ ALTER TABLE "CourierTariffVersion"
   ADD COLUMN "perOrderWalkMinor" BIGINT,
   ADD COLUMN "perOrderCarMinor" BIGINT;
 
+-- Заполнение новых столбцов — это UPDATE по уже существующим строкам, а версии
+-- тарифа неизменяемы (триггер CourierTariffVersion_no_update). Значения не
+-- меняются по смыслу (обе ставки равны прежней), поэтому на время засыпки
+-- триггер снимается и сразу возвращается. На пустой таблице (свежая база) UPDATE
+-- строк не трогает, но снятие/возврат безвредны и там.
+ALTER TABLE "CourierTariffVersion" DISABLE TRIGGER "CourierTariffVersion_no_update";
+
 UPDATE "CourierTariffVersion"
   SET "perOrderWalkMinor" = "perOrderMinor",
       "perOrderCarMinor" = "perOrderMinor";
+
+ALTER TABLE "CourierTariffVersion" ENABLE TRIGGER "CourierTariffVersion_no_update";
 
 ALTER TABLE "CourierTariffVersion"
   ALTER COLUMN "perOrderWalkMinor" SET NOT NULL,
@@ -33,10 +42,17 @@ ALTER TABLE "CourierTariffVersion"
 ALTER TABLE "RouteTariffSnapshot"
   ADD COLUMN "vehicleType" "VehicleType";
 
+-- Снимок тоже неизменяем (RouteTariffSnapshot_no_update). vehicleType — чистая
+-- справка из связанного маршрута, замороженные ставки не трогаются; на время
+-- засыпки триггер снимается и возвращается.
+ALTER TABLE "RouteTariffSnapshot" DISABLE TRIGGER "RouteTariffSnapshot_no_update";
+
 UPDATE "RouteTariffSnapshot" s
   SET "vehicleType" = r."vehicleType"
   FROM "DeliveryRoute" r
   WHERE r."id" = s."routeId";
+
+ALTER TABLE "RouteTariffSnapshot" ENABLE TRIGGER "RouteTariffSnapshot_no_update";
 
 ALTER TABLE "RouteTariffSnapshot"
   ALTER COLUMN "vehicleType" SET NOT NULL;
