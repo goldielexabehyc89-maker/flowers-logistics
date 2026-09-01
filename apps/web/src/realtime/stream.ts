@@ -406,6 +406,13 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
   'finance.ledger_changed': [['settlements'], ['operations-report'], ['logistics-history']],
   'integration.status_changed': [['status']],
   'outbox.message_failed': [['outbox-failures']],
+  // Уведомления логистов: список и счётчик обновляются вместе. Всплывающее окно
+  // рисуется отдельно по живому событию `notification.created` (см. шину
+  // событий), а не по инвалидации — чтобы после переподключения архив не
+  // воспроизводил старые окна.
+  'notification.created': [['notifications'], ['notifications-count']],
+  'notification.decided': [['notifications'], ['notifications-count']],
+  'notification.read': [['notifications'], ['notifications-count']],
 };
 
 /**

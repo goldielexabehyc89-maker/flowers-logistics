@@ -19,6 +19,7 @@ interface Comparison {
   idleWithQueueMinutes: number | null;
   idleWithoutQueueMinutes: number | null;
   uniqueAssembledCount: number;
+  reassemblyCount: number;
   totalSumMinor: string | null;
   ordersPerHour: number;
   rublesPerHour: number | null;
@@ -229,7 +230,18 @@ export function StatisticsTab(): React.JSX.Element {
                       row.idleIncomplete,
                     ),
                   )}
-                  {cell('Собрано', <strong>{row.uniqueAssembledCount}</strong>)}
+                  {cell(
+                    'Собрано',
+                    <span>
+                      <strong>{row.uniqueAssembledCount}</strong>
+                      {row.reassemblyCount > 0 && (
+                        <span className="stats__reassembly" data-testid="stats-reassembly">
+                          {' '}
+                          · {row.reassemblyCount} пересб.
+                        </span>
+                      )}
+                    </span>,
+                  )}
                   {cell('Сумма', row.moneyIncomplete ? 'неполно' : formatRubles(row.totalSumMinor))}
                   {cell('Заказов/ч', row.ordersPerHour.toFixed(1))}
                   {cell('₽/ч', row.moneyIncomplete ? '—' : (row.rublesPerHour?.toFixed(0) ?? '—'))}

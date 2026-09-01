@@ -116,6 +116,8 @@ export interface QueueItem {
   hasPrintForm: boolean;
   /** Производственные данные изменились после того, как заказ взяли в работу. */
   changedSinceClaim: boolean;
+  /** Пересборка: новый круг сборки (assemblyRound > 1). Показывается «Пересборка». */
+  reassembly: boolean;
   /** Заказ отменён: собирать его нельзя, и это видно прямо в очереди. */
   cancelled: boolean;
   /**
@@ -707,6 +709,8 @@ function toQueueItem(
           },
     hasPrintForm: row.printForms.some((form) => form.assemblyRound === row.assemblyRound),
     changedSinceClaim: hasChangedSinceClaim(row),
+    // Пересборка — второй и последующие круги сборки того же заказа.
+    reassembly: row.assemblyRound > 1,
     // Отменённый заказ остаётся в списке, но собирать его нельзя: исчезнувший
     // из очереди заказ выглядит как потерянный, а не как отменённый.
     cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,

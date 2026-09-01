@@ -1,0 +1,66 @@
+/* Вкладка «Уведомления» и всплывающие окна. */
+
+.notif--read {
+  opacity: 0.7;
+}
+
+.row--tight {
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.notif__fields,
+.notif__diff {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.notif__field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.notif__field-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.notif__old {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+.notif__new {
+  font-weight: 600;
+}
+
+.notif__composition {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.notif__diff-add {
+  color: var(--color-success);
+}
+
+.notif__diff-remove {
+  color: var(--color-error);
+}
+
+.notif__state {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+}
+
+.notif__decision {
+  color: var(--color-accent-text);
+  font-size: var(--font-size-sm);
+}

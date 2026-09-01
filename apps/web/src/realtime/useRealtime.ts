@@ -10,6 +10,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { ApiError } from '../lib/api-client';
+import { dispatchRealtimeEvent } from './event-bus';
 import {
   collapseToFirstPage,
   endsSession,
@@ -94,6 +95,11 @@ export function useRealtime(): RealtimeState {
         }
         void queryClient.invalidateQueries({ queryKey: key });
       }
+
+      // Живое событие уходит и в шину: всплывающие окна логиста рисуются по
+      // самому факту события, а не по инвалидации. Это только живые события —
+      // после reconnect архив не воспроизводится, поэтому окна не дублируются.
+      dispatchRealtimeEvent(event.event, event.data);
     };
 
     const connect = async (): Promise<void> => {

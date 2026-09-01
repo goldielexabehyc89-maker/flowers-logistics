@@ -100,6 +100,17 @@ export const REALTIME_TOPICS = [
   'finance.ledger_changed',
   'integration.status_changed',
   'outbox.message_failed',
+  // Уведомления логистов об изменении заказа (этап 6). Адресуется ADMIN,
+  // LOGISTICIAN и SUPERVISOR ролевым событием; персональная отметка прочтения —
+  // адресным событием пользователю. В payload только идентификаторы заказа и
+  // уведомления и вид уведомления: ни адреса, ни состава, ни ФИО там нет.
+  'notification.created',
+  // Решение «На пересборку» принято: список обновляется у всех логистов, чтобы
+  // видеть назначенного флориста. Адресуется той же тройке ролей.
+  'notification.decided',
+  // Персональная отметка прочтения изменилась: счётчик обновляется у самого
+  // пользователя. Адресное событие, в payload только идентификатор уведомления.
+  'notification.read',
 ] as const;
 
 export type RealtimeTopic = (typeof REALTIME_TOPICS)[number];

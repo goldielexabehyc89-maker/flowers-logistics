@@ -41,6 +41,7 @@ import type { MoyskladOrderDto } from './dto.js';
 import { parseMoscow } from './moscow-time.js';
 import { applyFulfillmentSnapshot } from '../../fulfillment/service.js';
 import type { FulfillmentSnapshot } from '../../fulfillment/composition.js';
+import { recordOrderChangeNotification } from '../../notifications/change-notify.js';
 
 export const PROVIDER = 'moysklad';
 /** Размер страницы. Больше нельзя: `expand` разрешён для выборки не более 100. */
@@ -493,21 +494,37 @@ async function applyRows(
         importDeliveryDateFrom: deps.importDeliveryDateFrom,
       });
 
-      if (composition === null) {
-        return { orderResult, fulfillment: null };
+      const fulfillment =
+        composition === null
+          ? null
+          : await applyFulfillmentSnapshot(
+              tx,
+              {
+                externalId: snapshot.externalId,
+                externalUpdated: parseMoscow(snapshot.externalUpdated),
+                texts: composition.texts,
+                snapshot: composition.snapshot,
+                failure: composition.failure,
+              },
+              now,
+            );
+
+      // Уведомление логистов об изменении заказа: создаётся в той же транзакции
+      // по уже посчитанным diff'ам (первый импорт и идентичный снимок его не
+      // создают — это решают исходы применения снимка).
+      const orderRow = await tx.deliveryOrder.findFirst({
+        where: { externalId: snapshot.externalId },
+        select: { id: true },
+      });
+      if (orderRow !== null) {
+        await recordOrderChangeNotification(tx, {
+          orderId: orderRow.id,
+          orderOutcome: orderResult.outcome,
+          orderChangedFields: orderResult.changedFields,
+          fulfillmentOutcome: fulfillment?.outcome ?? null,
+        });
       }
 
-      const fulfillment = await applyFulfillmentSnapshot(
-        tx,
-        {
-          externalId: snapshot.externalId,
-          externalUpdated: parseMoscow(snapshot.externalUpdated),
-          texts: composition.texts,
-          snapshot: composition.snapshot,
-          failure: composition.failure,
-        },
-        now,
-      );
       return { orderResult, fulfillment };
     });
 

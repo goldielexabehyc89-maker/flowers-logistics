@@ -30,6 +30,8 @@ export interface QueueItemView {
   route: { id: string; number: string; position: number | null } | null;
   hasPrintForm: boolean;
   changedSinceClaim: boolean;
+  /** Пересборка: новый круг сборки. Карточка показывает «Пересборка». */
+  reassembly?: boolean;
   /** Заказ отменён: собирать нельзя. Из списка при этом не исчезает. */
   cancelled?: boolean;
   /**

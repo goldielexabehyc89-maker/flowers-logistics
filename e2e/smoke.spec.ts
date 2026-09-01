@@ -5059,7 +5059,14 @@ test('«Сделки» на большом экране: доли, своя пр
   // 8а. Верхняя строка — сама навигация раздела, второго ряда нет.
   const tabs = page.getByTestId('logistics-tabs');
   await expect(tabs).toBeVisible();
-  for (const name of ['Сделки', 'Маршрутизация', 'Маршрутные листы', 'История', 'Отчёты']) {
+  for (const name of [
+    'Сделки',
+    'Маршрутизация',
+    'Маршрутные листы',
+    'История',
+    'Отчёты',
+    'Уведомления',
+  ]) {
     await expect(tabs.getByRole('link', { name, exact: true })).toBeVisible();
   }
   await expect(tabs.getByRole('link', { name: 'Сделки', exact: true })).toHaveAttribute(

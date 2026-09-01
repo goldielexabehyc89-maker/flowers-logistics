@@ -27,6 +27,7 @@ import { HistoryScreen } from './screens/delivery/HistoryScreen';
 import { HistoryScreen as LogisticsHistoryScreen } from './screens/logistics/HistoryScreen';
 import { ReportsScreen } from './screens/logistics/ReportsScreen';
 import { ResolutionsScreen } from './screens/logistics/ResolutionsScreen';
+import { NotificationsScreen } from './screens/notifications/NotificationsScreen';
 import { OrderHistoryScreen } from './screens/logistics/OrderHistoryScreen';
 import { OrderHistorySearchScreen } from './screens/history/OrderHistorySearchScreen';
 import { DealsWorkspace } from './screens/deals/DealsWorkspace';
@@ -159,6 +160,7 @@ export function App(): React.JSX.Element {
           <Route path="resolutions" element={<ResolutionsScreen />} />
           <Route path="history" element={<LogisticsHistoryScreen />} />
           <Route path="reports" element={<ReportsScreen />} />
+          <Route path="notifications" element={<NotificationsScreen />} />
         </Route>
         {/*
           «История заказов» — самостоятельный раздел приложения.

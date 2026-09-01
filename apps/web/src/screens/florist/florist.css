@@ -635,3 +635,9 @@
     display: block;
   }
 }
+
+/* Пересборки в ячейке «Собрано»: тихая подпись рядом с числом. */
+.stats__reassembly {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
