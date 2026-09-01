@@ -5870,7 +5870,11 @@ test('история и отчёты: тариф, доставка, расчёт
   await expect(page.getByTestId('finance-settings')).toBeVisible();
 
   await page.getByTestId('tariff-from').fill(today);
-  await page.getByTestId('tariff-per-order').fill('200');
+  // Ставка «За заказ» разделена на пешую и автомобильную; за километр — как
+  // прежде. Обе задаём равными, чтобы начисление не зависело от типа маршрута,
+  // а раздельность ставок доказывают критические проверки финансов.
+  await page.getByTestId('tariff-per-order-walk').fill('200');
+  await page.getByTestId('tariff-per-order-car').fill('200');
   await page.getByTestId('tariff-per-km').fill('30');
   await page.getByTestId('tariff-note').fill('проверочный тариф');
   await page.getByTestId('tariff-submit').click();
