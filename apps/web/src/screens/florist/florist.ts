@@ -16,7 +16,7 @@ export type QueueDay = 'today' | 'tomorrow';
 export type QueueScope = 'general' | 'mine';
 /** Область «Моих заказов»: работа или уже собранные заказы. */
 export type QueueGroup = 'work' | 'assembled';
-export type FloristTab = 'queue' | 'mine' | 'print';
+export type FloristTab = 'queue' | 'mine' | 'print' | 'stats';
 
 export interface QueueItemView {
   id: string;

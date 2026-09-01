@@ -40,6 +40,7 @@ import {
   PRINT_TEMPLATE_VERSION,
   type StoredPosition,
 } from './print-form.js';
+import { recordQueueAvailability } from './stats-capture.js';
 import {
   FULFILLMENT_AUDIENCE,
   MIN_REASON_LENGTH,
@@ -281,6 +282,8 @@ export async function claimOrder(
       shiftId: shift.id,
     });
     await publishProcessEvent(tx, order, actor.userId);
+    // Взятие убрало строку из общей очереди — фиксируем переход доступности.
+    await recordQueueAvailability(tx);
     return toResult(order);
   });
 }
@@ -345,6 +348,8 @@ export async function releaseOrder(
     const order = await readOrder(tx, orderId);
     await writeProcessAudit(tx, 'ORDER_FULFILLMENT_RELEASED', order, actor, context, {});
     await publishProcessEvent(tx, order, actor.userId);
+    // Возврат вернул строку в общую очередь — фиксируем переход доступности.
+    await recordQueueAvailability(tx);
     return toResult(order);
   });
 }
@@ -560,6 +565,9 @@ export async function assembleOrder(
         sourceArchived: true,
         sourceMissing: true,
         assemblyRound: true,
+        // Деньги в МОМЕНТ сборки: синхронизация переписывает sumMinor позже,
+        // поэтому статистика берёт зафиксированное здесь значение, а не живое.
+        sumMinor: true,
       },
     });
 
@@ -698,6 +706,11 @@ export async function assembleOrder(
       revisionId: revision.id,
       printFormId: printForm.id,
       templateVersion: PRINT_TEMPLATE_VERSION,
+      // Накопление вперёд для статистики смен: смена исполнителя и деньги в
+      // момент сборки. У администратора без смены shiftId пуст; сумма строкой,
+      // так как bigint в JSON аудита недопустим.
+      shiftId,
+      assembledSumMinor: order.sumMinor.toString(),
     });
     await writeAudit(tx, {
       action: 'ORDER_PRINT_JOB_CREATED',

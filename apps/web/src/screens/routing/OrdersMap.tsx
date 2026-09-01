@@ -20,6 +20,7 @@ import {
   type StyleSpecification,
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { addMetroLayer } from '../../lib/metro-layer';
 import { markerContentOf, toLngLat, type MapPoint } from './geo';
 // Тот же визуальный контракт, что и на карте «Сделок»: одна карта продукта.
 import {
@@ -210,6 +211,8 @@ export function OrdersMap({
 
       instance.on('load', () => {
         globalThis.clearTimeout(loadTimer);
+        // Визуальный слой станций метро из уже существующего слоя подложки.
+        addMetroLayer(instance);
         markState('ready');
       });
 

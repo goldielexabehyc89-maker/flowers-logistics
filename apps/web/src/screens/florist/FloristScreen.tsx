@@ -61,6 +61,7 @@ import {
   StatusBadge,
 } from '../../ui/components';
 import { OrderCardPanel } from './OrderCardPanel';
+import { StatisticsTab } from './StatisticsTab';
 import {
   QUEUE_PAGE_SIZE,
   QUEUE_POLL_MS,
@@ -106,6 +107,9 @@ const TABS: { key: FloristTab; title: string }[] = [
   { key: 'print', title: 'Печать' },
 ];
 
+// «Статистика» — только у администратора (не управляющего). Стоит последней.
+const STATS_TAB: { key: FloristTab; title: string } = { key: 'stats', title: 'Статистика' };
+
 export function FloristScreen(): React.JSX.Element {
   const { client, user } = useAuth();
   const queryClient = useQueryClient();
@@ -116,6 +120,10 @@ export function FloristScreen(): React.JSX.Element {
   // подтверждает это тем же `FLORIST_ADMIN_ROLES`.
   const isAdmin =
     user?.roles.includes('ADMIN') === true || user?.roles.includes('SUPERVISOR') === true;
+  // Статистика — строго администратор: управляющему её не видно, сервер тоже
+  // отвечает 403. Поэтому отдельный признак, а не общий `isAdmin`.
+  const isStrictAdmin = user?.roles.includes('ADMIN') === true;
+  const visibleTabs = isStrictAdmin ? [...TABS, STATS_TAB] : TABS;
   const viewerId = user?.id ?? '';
 
   const [tab, setTab] = useState<FloristTab>('queue');
@@ -188,7 +196,7 @@ export function FloristScreen(): React.JSX.Element {
     queryFn: ({ pageParam }) => client.get<QueueResponse>(queueUrl('work', pageParam)),
     initialPageParam: 0,
     getNextPageParam: (last: QueueResponse) => nextPageOffset(last) ?? undefined,
-    enabled: tab !== 'print',
+    enabled: tab !== 'print' && tab !== 'stats',
     /*
      * Короткий опрос очереди — из-за хода времени, а не из-за событий.
      *
@@ -764,7 +772,7 @@ export function FloristScreen(): React.JSX.Element {
         label="Разделы флориста"
         value={tab}
         onChange={setTab}
-        options={TABS.map((item) => ({
+        options={visibleTabs.map((item) => ({
           value: item.key,
           label: item.title,
           testId: `florist-tab-${item.key}`,
@@ -778,7 +786,9 @@ export function FloristScreen(): React.JSX.Element {
         }))}
       />
 
-      {tab !== 'print' && (
+      {tab === 'stats' && isStrictAdmin && <StatisticsTab />}
+
+      {tab !== 'print' && tab !== 'stats' && (
         <div className="florist__filters card">
           {/*
             День выбирается только в «Очереди».
@@ -837,14 +847,16 @@ export function FloristScreen(): React.JSX.Element {
         </div>
       )}
 
-      {tab !== 'print' && queueQuery.isPending && <LoadingState title="Загружаем очередь…" />}
-      {tab !== 'print' && queueQuery.isError && (
+      {tab !== 'print' && tab !== 'stats' && queueQuery.isPending && (
+        <LoadingState title="Загружаем очередь…" />
+      )}
+      {tab !== 'print' && tab !== 'stats' && queueQuery.isError && (
         <ErrorState
           description="Очередь не загрузилась."
           onRetry={() => void queueQuery.refetch()}
         />
       )}
-      {tab !== 'print' && queueQuery.isSuccess && queueItems.length === 0 && (
+      {tab !== 'print' && tab !== 'stats' && queueQuery.isSuccess && queueItems.length === 0 && (
         <EmptyState
           title={
             search !== ''
@@ -879,6 +891,7 @@ export function FloristScreen(): React.JSX.Element {
         сервер: раньше время первой остановки — выше лист.
       */}
       {tab !== 'print' &&
+        tab !== 'stats' &&
         queueQuery.isSuccess &&
         queueItems.length > 0 &&
         groupQueueByRoute(queueItems).map((group) => (
@@ -907,7 +920,7 @@ export function FloristScreen(): React.JSX.Element {
        * и заказ, оставшийся за границей страницы, просто не существует для того,
        * кто на него смотрит.
        */}
-      {tab !== 'print' && queueQuery.isSuccess && queueItems.length > 0 && (
+      {tab !== 'print' && tab !== 'stats' && queueQuery.isSuccess && queueItems.length > 0 && (
         <div className="florist__more">
           <span className="muted text-sm" data-testid="florist-queue-count">
             {pageSummary(queueItems.length, queueTotal)}

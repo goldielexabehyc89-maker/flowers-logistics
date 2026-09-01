@@ -20,6 +20,8 @@ import type { AppConfig } from '../../platform/config.js';
 import { authenticateWithRoles } from '../auth/guards.js';
 import { MoyskladClient } from '../integrations/moysklad/client.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { AppError } from '../../platform/errors.js';
+import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import { readOrderCard } from './card.js';
 import { MAX_SEARCH_LENGTH, countActiveAssignments, readQueue } from './queue-service.js';
 import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from './paging.js';
@@ -34,6 +36,7 @@ import {
   retryPrint,
 } from './print.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
+import { buildFloristStatistics } from './statistics.js';
 import {
   FLORIST_ADMIN_ROLES,
   FLORIST_ROLES,
@@ -110,6 +113,16 @@ const printQuerySchema = z.object({
   /** «Общие»: задания всех флористов за последние двое суток. */
   general: z.enum(['true', 'false']).default('false'),
   ...pageQueryShape,
+});
+
+const statDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Ожидается дата ГГГГ-ММ-ДД')
+  .refine(isCalendarDate, 'Ожидается существующая дата');
+
+const statisticsQuerySchema = z.object({
+  from: statDateSchema,
+  to: statDateSchema,
 });
 
 export interface FloristRouteDeps {
@@ -227,6 +240,21 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   app.get('/api/florist/florists', async (request) => {
     await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
     return { items: await listAssignableFlorists(deps.db) };
+  });
+
+  /**
+   * Статистика смен флориста. ТОЛЬКО администратор: управляющему и остальным —
+   * 403. Право проверяет сервер отдельным ролевым набором, а не скрытой кнопкой.
+   */
+  app.get('/api/florist/statistics', async (request) => {
+    await authenticateWithRoles(request, deps, ['ADMIN']);
+    const query = statisticsQuerySchema.parse(request.query);
+    if (query.to < query.from) {
+      throw new AppError('VALIDATION_FAILED', {
+        publicMessage: 'Конец периода раньше его начала.',
+      });
+    }
+    return buildFloristStatistics(deps.db, { from: query.from, to: query.to });
   });
 
   app.post('/api/florist/shifts/:id/force-close', async (request) => {
