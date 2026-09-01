@@ -198,25 +198,24 @@ export function firstAvailablePath(roles: readonly Role[]): string | null {
   const sections = visibleSections(roles);
 
   /*
-   * Менеджер выдачи работает в «Самовывозе»; складскую вкладку «Ожидают
-   * приёмки» он лишь просматривает. Поэтому его дом остаётся «Самовывозом»,
-   * хотя «Склад» и стоит в меню раньше: приземлять его на чужой рабочий экран
-   * из-за одной обзорной вкладки нельзя. Правит дом только чистому менеджеру —
-   * у администратора и управляющего свой дом (`/logistics`) выше по списку.
+   * Складская вкладка «Ожидают приёмки» открывает «Склад» менеджеру выдачи, но
+   * домом это не делает: если «Склад» доступен только через роль MANAGER (без
+   * настоящей складской роли WAREHOUSE/ADMIN/SUPERVISOR), он не считается
+   * стартовым разделом. Дом менеджера — следующий его раздел, «Самовывоз».
+   *
+   * Важно НЕ трогать чужой дом: у флориста с флаг-ролью менеджера (бывает в
+   * проверках) первым разделом остаётся «Флорист», а не «Самовывоз», и приземлять
+   * его на пункт выдачи нельзя. Поэтому пропускается ровно «Склад», а не выбор
+   * между другими разделами.
    */
-  const isManagerOnly =
+  const warehouseIsManagerOnly =
     roles.includes('MANAGER') &&
+    !roles.includes('WAREHOUSE') &&
     !roles.includes('ADMIN') &&
-    !roles.includes('SUPERVISOR') &&
-    !roles.includes('LOGISTICIAN');
-  if (isManagerOnly) {
-    const pickup = sections.find((section) => section.key === 'pickup');
-    if (pickup !== undefined) {
-      return pickup.path;
-    }
-  }
+    !roles.includes('SUPERVISOR');
+  const home = sections.find((section) => !(warehouseIsManagerOnly && section.key === 'warehouse'));
 
-  return sections[0]?.path ?? null;
+  return home?.path ?? sections[0]?.path ?? null;
 }
 
 /**

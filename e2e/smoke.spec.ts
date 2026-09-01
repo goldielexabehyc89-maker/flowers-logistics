@@ -4031,28 +4031,7 @@ test('самовывоз: флорист собрал → склад приня�
   // 2. Флорист собирает самовывозный заказ: маршрута у него нет, сборка обычная.
   const floristContext = await browser.newContext();
   const floristPage = await floristContext.newPage();
-  floristPage.on('request', (r) => {
-    if (r.url().includes('/shift/start') || r.url().includes('/auth/refresh'))
-      console.log('FREQ', r.method(), r.url());
-  });
-  floristPage.on('response', (r) => {
-    if (r.url().includes('/shift/start') || r.url().includes('/auth/refresh'))
-      console.log('FRES', r.status(), r.url());
-  });
-  floristPage.on('requestfailed', (r) => {
-    if (r.url().includes('/shift/start') || r.url().includes('/auth/refresh'))
-      console.log('FFAIL', r.url(), r.failure()?.errorText);
-  });
-  floristPage.on('framenavigated', (f) => {
-    if (f === floristPage.mainFrame()) console.log('FNAV', f.url());
-  });
   await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
-  console.log('FPROBE post-activate url=', floristPage.url());
-  await floristPage.getByTestId('shift-start').waitFor({ state: 'visible', timeout: 10_000 });
-  console.log(
-    'FPROBE shift-start visible, disabled=',
-    await floristPage.getByTestId('shift-start').isDisabled(),
-  );
   await clickAndAwait(
     floristPage,
     floristPage.getByTestId('shift-start'),

@@ -168,6 +168,15 @@ describe('видимость разделов', () => {
     expect(firstAvailablePath(['FLORIST'])).toBe('/florist');
     expect(firstAvailablePath(['WAREHOUSE'])).toBe('/warehouse');
     expect(firstAvailablePath(['MANAGER'])).toBe('/pickup');
+
+    // Складская вкладка «Ожидают приёмки» открывает «Склад» менеджеру выдачи, но
+    // дом от этого не переезжает: у самого менеджера — «Самовывоз», а у флориста,
+    // которому вдобавок отметили роль менеджера, домом остаётся «Флорист».
+    // «Склад» не перехватывает старт ни у того, ни у другого.
+    expect(firstAvailablePath(['FLORIST', 'MANAGER'])).toBe('/florist');
+    expect(firstAvailablePath(['MANAGER', 'FLORIST'])).toBe('/florist');
+    // Настоящему кладовщику «Склад» — законный дом.
+    expect(firstAvailablePath(['WAREHOUSE', 'MANAGER'])).toBe('/warehouse');
   });
 
   it('у каждой роли есть хотя бы один раздел', () => {
