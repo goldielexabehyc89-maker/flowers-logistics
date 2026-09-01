@@ -18,8 +18,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { addMetroLayer, METRO_LABEL_LAYER, METRO_STATION_LAYER } from './metro-layer';
-import stations from './generated/metro/moscow-metro-2026-08-06.geo.json';
-import manifest from './generated/metro/manifest.json';
+import stations from './metro-stations/moscow-metro-2026-08-06.geo.json';
+import manifest from './metro-stations/manifest.json';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BBOX = { minLon: 36.7, minLat: 55.1, maxLon: 38.2, maxLat: 56.1 };

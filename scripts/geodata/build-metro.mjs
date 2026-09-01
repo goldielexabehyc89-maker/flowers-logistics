@@ -22,7 +22,7 @@
  *     --snapshot-url <точный URL датированного снимка> \
  *     --snapshot-md5 <опубликованная контрольная сумма снимка> \
  *     --data-date <дата данных, YYYY-MM-DD> \
- *     --out apps/web/src/lib/generated/metro
+ *     --out apps/web/src/lib/metro-stations
  */
 
 import { createHash } from 'node:crypto';

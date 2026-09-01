@@ -5,7 +5,7 @@
  * прежде слой строился поверх `poi` подложки, где под тот же фильтр попадали
  * входы в метро (1273 узла против 273 станций), и вокруг настоящей станции
  * появлялось по несколько меток, смещённых от неё. Теперь источник —
- * версионируемый набор `generated/metro`, собранный из датированного снимка
+ * версионируемый набор `lib/metro-stations`, собранный из датированного снимка
  * OpenStreetMap (`railway=station` + `station=subway`) скриптом
  * `scripts/geodata/build-metro.mjs`: по одной точке на станцию, пересадочные
  * узлы сведены в одну метку.
@@ -19,7 +19,7 @@
 
 import type { Map as MapLibreMap, GeoJSONSourceSpecification } from 'maplibre-gl';
 import type { FeatureCollection, Point } from 'geojson';
-import stationsData from './generated/metro/moscow-metro-2026-08-06.geo.json';
+import stationsData from './metro-stations/moscow-metro-2026-08-06.geo.json';
 
 /** Набор станций как GeoJSON. Тип сужается явно: JSON приходит как unknown-форма. */
 const STATIONS = stationsData as unknown as FeatureCollection<Point, { name: string }>;
