@@ -5059,16 +5059,12 @@ test('«Сделки» на большом экране: доли, своя пр
   // 8а. Верхняя строка — сама навигация раздела, второго ряда нет.
   const tabs = page.getByTestId('logistics-tabs');
   await expect(tabs).toBeVisible();
-  for (const name of [
-    'Сделки',
-    'Маршрутизация',
-    'Маршрутные листы',
-    'История',
-    'Отчёты',
-    'Уведомления',
-  ]) {
+  for (const name of ['Сделки', 'Маршрутизация', 'Маршрутные листы', 'История', 'Отчёты']) {
     await expect(tabs.getByRole('link', { name, exact: true })).toBeVisible();
   }
+  // «Уведомления» несут счётчик (как «Требуют решения»), поэтому имя ссылки
+  // может включать число — проверяем видимость по адресу, а не по точному имени.
+  await expect(tabs.locator('a[href$="/logistics/notifications"]')).toBeVisible();
   await expect(tabs.getByRole('link', { name: 'Сделки', exact: true })).toHaveAttribute(
     'aria-current',
     'page',
