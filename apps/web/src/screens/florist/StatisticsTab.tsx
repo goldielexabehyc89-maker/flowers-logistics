@@ -30,6 +30,8 @@ interface Comparison {
 interface StatRow extends Comparison {
   floristId: string;
   floristName: string;
+  /** Московская дата начала самой ранней смены периода — под именем. */
+  firstShiftDate: string | null;
   idleIncomplete: boolean;
   moneyIncomplete: boolean;
   idleWithQueuePercent: number | null;
@@ -93,21 +95,41 @@ function idleLabel(minutes: number | null, percent: number | null, incomplete: b
   return `${formatDuration(minutes ?? 0)} · ${percent ?? 0}%`;
 }
 
-/** Столбцы таблицы: подпись и класс выравнивания. */
+/**
+ * Столбцы таблицы. Связанные показатели объединены в один столбец с главным
+ * значением и подписью под ним — как на эталоне: «Смена / работа», «Простой:
+ * очередь / пусто», «Сборка: ср. / медиана».
+ */
 const STAT_COLUMNS: readonly { label: string; align: 'start' | 'end' }[] = [
   { label: 'Флорист', align: 'start' },
-  { label: 'Смена', align: 'end' },
-  { label: 'Работа', align: 'end' },
-  { label: 'Простой, очередь', align: 'end' },
-  { label: 'Простой, пусто', align: 'end' },
+  { label: 'Смена / работа', align: 'end' },
+  { label: 'Простой: очередь / пусто', align: 'end' },
   { label: 'Собрано', align: 'end' },
   { label: 'Сумма', align: 'end' },
   { label: 'Заказов/ч', align: 'end' },
   { label: '₽/ч', align: 'end' },
-  { label: 'Ср. сборка', align: 'end' },
-  { label: 'Медиана', align: 'end' },
+  { label: 'Сборка: ср. / медиана', align: 'end' },
   { label: 'Δ собрано', align: 'end' },
 ];
+
+/** Ячейка с главным значением и подписью под ним (второй показатель группы). */
+function groupCell(main: React.ReactNode, sub: React.ReactNode): React.JSX.Element {
+  return (
+    <div className="stats__cell stats__cell--end">
+      <span className="stats__big">{main}</span>
+      <span className="stats__sub">{sub}</span>
+    </div>
+  );
+}
+
+/** Ячейка с одним значением. */
+function valueCell(value: React.ReactNode): React.JSX.Element {
+  return (
+    <div className="stats__cell stats__cell--end">
+      <span className="stats__big">{value}</span>
+    </div>
+  );
+}
 
 export function StatisticsTab(): React.JSX.Element {
   const { client } = useAuth();
@@ -178,11 +200,14 @@ export function StatisticsTab(): React.JSX.Element {
       ) : stats.data.rows.length === 0 ? (
         <EmptyState title="Смен нет" description="За выбранный период смен не было." />
       ) : (
-        <div className="stats__wrap">
-          <div className="stats__table" data-testid="stats-table">
-            <div className="stats__thead" aria-hidden="true">
+        <div className="stats__scroll" data-testid="stats-table">
+          <div className="stats__grid">
+            <div className="stats__head">
               {STAT_COLUMNS.map((col) => (
-                <span key={col.label} className={`stats__cell stats__cell--${col.align}`}>
+                <span
+                  key={col.label}
+                  className={`stats__cell stats__cell--${col.align} stats__colhead`}
+                >
                   {col.label}
                 </span>
               ))}
@@ -191,12 +216,6 @@ export function StatisticsTab(): React.JSX.Element {
             {stats.data.rows.map((row) => {
               const d = deltaParts(row.uniqueAssembledCount, row.comparison.uniqueAssembledCount);
               const incomplete = row.idleIncomplete || row.moneyIncomplete;
-              const cell = (label: string, value: React.ReactNode): React.JSX.Element => (
-                <div className="stats__cell stats__cell--end">
-                  <span className="stats__colhead">{label}</span>
-                  <span>{value}</span>
-                </div>
-              );
               return (
                 <article
                   key={row.floristId}
@@ -206,50 +225,50 @@ export function StatisticsTab(): React.JSX.Element {
                 >
                   <div className="stats__cell stats__cell--start stats__name">
                     <strong>{row.floristName}</strong>
-                    {incomplete && (
-                      <span className="stats__tag" data-testid="stats-incomplete">
-                        неполные
-                      </span>
-                    )}
+                    <span className="stats__submeta">
+                      {row.firstShiftDate === null ? '—' : formatCalendarDate(row.firstShiftDate)}
+                      {incomplete && (
+                        <span className="stats__tag" data-testid="stats-incomplete">
+                          {' · неполные'}
+                        </span>
+                      )}
+                    </span>
                   </div>
-                  {cell('Смена', formatDuration(row.shiftDurationMinutes))}
-                  {cell('Работа', formatDuration(row.workingMinutes))}
-                  {cell(
-                    'Простой, очередь',
+                  {groupCell(
+                    formatDuration(row.workingMinutes),
+                    `смена ${formatDuration(row.shiftDurationMinutes)}`,
+                  )}
+                  {groupCell(
                     idleLabel(
                       row.idleWithQueueMinutes,
                       row.idleWithQueuePercent,
                       row.idleIncomplete,
                     ),
-                  )}
-                  {cell(
-                    'Простой, пусто',
                     idleLabel(
                       row.idleWithoutQueueMinutes,
                       row.idleWithoutQueuePercent,
                       row.idleIncomplete,
                     ),
                   )}
-                  {cell(
-                    'Собрано',
-                    <span>
-                      <strong>{row.uniqueAssembledCount}</strong>
-                      {row.reassemblyCount > 0 && (
-                        <span className="stats__reassembly" data-testid="stats-reassembly">
-                          {' '}
-                          · {row.reassemblyCount} пересб.
-                        </span>
-                      )}
-                    </span>,
+                  {groupCell(
+                    <strong>{row.uniqueAssembledCount}</strong>,
+                    row.reassemblyCount > 0 ? (
+                      <span data-testid="stats-reassembly">{row.reassemblyCount} пересб.</span>
+                    ) : (
+                      ''
+                    ),
                   )}
-                  {cell('Сумма', row.moneyIncomplete ? 'неполно' : formatRubles(row.totalSumMinor))}
-                  {cell('Заказов/ч', row.ordersPerHour.toFixed(1))}
-                  {cell('₽/ч', row.moneyIncomplete ? '—' : (row.rublesPerHour?.toFixed(0) ?? '—'))}
-                  {cell('Ср. сборка', formatMinutes(row.avgAssemblyMinutes))}
-                  {cell('Медиана', formatMinutes(row.medianAssemblyMinutes))}
+                  {valueCell(row.moneyIncomplete ? 'неполно' : formatRubles(row.totalSumMinor))}
+                  {valueCell(row.ordersPerHour.toFixed(1))}
+                  {valueCell(row.moneyIncomplete ? '—' : (row.rublesPerHour?.toFixed(0) ?? '—'))}
+                  {groupCell(
+                    formatMinutes(row.avgAssemblyMinutes),
+                    `мед. ${formatMinutes(row.medianAssemblyMinutes)}`,
+                  )}
                   <div className="stats__cell stats__cell--end">
-                    <span className="stats__colhead">Δ собрано</span>
-                    <span className={`stats__delta stats__delta--${d.direction}`}>{d.text}</span>
+                    <span className={`stats__big stats__delta stats__delta--${d.direction}`}>
+                      {d.text}
+                    </span>
                   </div>
                 </article>
               );

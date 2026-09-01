@@ -103,6 +103,8 @@ describe('агрегация статистики смен', () => {
 
     const row = stats.rows.find((r) => r.floristId === florist.id);
     expect(row).toBeDefined();
+    // Дата начала смены — под именем, по московскому дню (смена началась 09:00).
+    expect(row?.firstShiftDate).toBe(`2029-05-${day}`);
     expect(row?.shiftDurationMinutes).toBe(480);
     // Рабочее время — объединение [09:10–09:30] и [10:00–10:15] = 35 минут.
     expect(row?.workingMinutes).toBe(35);

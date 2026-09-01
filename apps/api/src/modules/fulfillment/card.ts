@@ -81,6 +81,13 @@ export interface OrderCard {
   };
   /** Производственные данные изменились после того, как заказ взяли в работу. */
   changedSinceClaim: boolean;
+  /**
+   * Заказ покинул производственную область МоегоСклада (исчез из источника или
+   * выведен из области) уже ПОСЛЕ того, как попал в работу. Карточка всё равно
+   * открывается — исполнитель физически держит заказ, — но интерфейс показывает
+   * безопасную причину, а не делает вид, что всё штатно.
+   */
+  outOfScope: boolean;
   print: {
     formId: string | null;
     jobs: CardPrintJob[];
@@ -161,10 +168,28 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
     throw new AppError('NOT_FOUND', { message: 'order not found' });
   }
 
-  // Заказ вне производственной области карточкой флориста не является:
-  // отдавать его состав и тексты по прямому адресу нельзя.
-  if (!order.fulfillmentInScope) {
-    throw new AppError('NOT_FOUND', { message: 'order is out of fulfillment scope' });
+  /*
+   * Заказ вне производственной области по прямому адресу не отдаётся — КРОМЕ
+   * того случая, когда он уже в активной работе.
+   *
+   * Свободный заказ вне области карточкой флориста не является: его состав по
+   * прямой ссылке недоступен. Но заказ, который ПОСЛЕ назначения исчез из
+   * источника (`sourceMissing`) или был выведен из области, остаётся у
+   * исполнителя физически: он числится за флористом, показан в «Моей работе»,
+   * и запретить его открыть значило бы бросить человека с заказом, который
+   * невозможно даже посмотреть. Такой заказ открывается, а признак `outOfScope`
+   * говорит интерфейсу показать безопасную причину.
+   */
+  const activeWork =
+    order.fulfillmentProcessState === 'IN_ASSEMBLY' ||
+    order.fulfillmentProcessState === 'NEEDS_REVIEW' ||
+    order.fulfillmentProcessState === 'ASSEMBLED' ||
+    order.fulfillmentAssignee !== null;
+  if (!order.fulfillmentInScope && !activeWork) {
+    throw new AppError('NOT_FOUND', {
+      message: 'order is out of fulfillment scope',
+      publicMessage: 'Заказ вне производственной области — карточка недоступна.',
+    });
   }
 
   const minutes = effectiveMinutes(order);
@@ -219,6 +244,7 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
       assembledById: order.fulfillmentAssembledById,
     },
     changedSinceClaim,
+    outOfScope: !order.fulfillmentInScope,
     print: {
       formId: order.printForms[0]?.id ?? null,
       jobs: order.printJobs.map((job) => ({

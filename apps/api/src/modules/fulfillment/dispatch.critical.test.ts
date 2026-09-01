@@ -30,7 +30,8 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { snapshotHash, type FulfillmentSnapshot } from './composition.js';
 import { startShift } from './shifts.js';
 import { claimOrder } from './assembly.js';
-import { readQueue } from './queue-service.js';
+import { listDispatchableOrderIds, readQueue } from './queue-service.js';
+import { readOrderCard } from './card.js';
 import { dispatchFlorists } from './dispatch.js';
 import {
   floristDispatchStatus,
@@ -38,6 +39,7 @@ import {
   setFinishAfterCurrent,
   requestRefusal,
   decideRefusal,
+  listPendingRefusalNotificationIds,
 } from './dispatch-florist.js';
 import { readFloristDispatchMode, saveFloristDispatchMode } from '../settings/service.js';
 
@@ -470,5 +472,180 @@ describe('отказ', () => {
     const state = await processState(order.id);
     expect(state.fulfillmentProcessState).toBe('IN_ASSEMBLY');
     expect(state.fulfillmentAssigneeId).toBe(target.userId);
+  });
+});
+
+/** Выводит заказ из области (исчез из источника) — как ORDER_SOURCE_MISSING. */
+async function makeOutOfScope(orderId: string): Promise<void> {
+  await ctx.db.deliveryOrder.update({
+    where: { id: orderId },
+    data: { inScope: false, fulfillmentInScope: false, sourceMissing: true },
+  });
+}
+
+describe('застрявший назначенный заказ', () => {
+  it('карточка открывается, а руководитель находит заказ поиском, даже вне области', async () => {
+    const order = await seedOrder();
+    const florist = await floristReady('Держит застрявший', NOW);
+    await claimOrder(ctx.db, florist, order.id, CONTEXT);
+    // Заказ исчез из МоегоСклада уже ПОСЛЕ того, как попал в работу.
+    await makeOutOfScope(order.id);
+
+    // 1. Карточка открывается (не 404) и помечена как вне области.
+    const card = await readOrderCard(ctx.db, order.id);
+    expect(card.process.state).toBe('IN_ASSEMBLY');
+    expect(card.process.assignee?.id).toBe(florist.userId);
+    expect(card.outOfScope).toBe(true);
+
+    // 2. Флорист видит заказ в «Моей работе», несмотря на выход из области.
+    const mine = await readQueue(
+      ctx.db,
+      { userId: florist.userId, roles: ['FLORIST'] },
+      { day: 'today', scope: 'mine', includeAssigned: false },
+      NOW,
+    );
+    expect(mine.items.some((item) => item.id === order.id)).toBe(true);
+
+    // 3. Руководитель находит его поиском по номеру и видит исполнителя.
+    const found = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false, search: order.number },
+      NOW,
+    );
+    const row = found.items.find((item) => item.id === order.id);
+    expect(row, 'заказ найден поиском руководителя').toBeDefined();
+    expect(row?.assignee?.id).toBe(florist.userId);
+  });
+
+  it('свободный заказ вне области карточкой по прямой ссылке НЕ отдаётся', async () => {
+    const order = await seedOrder();
+    await isolate([]); // остаётся NEW, но выводим из области ниже
+    await makeOutOfScope(order.id);
+    await expect(readOrderCard(ctx.db, order.id)).rejects.toThrow();
+  });
+});
+
+describe('единый источник очереди', () => {
+  it('свободная очередь руководителя и кандидаты автораздачи — один список и порядок', async () => {
+    const a = await seedOrder(600);
+    const b = await seedOrder(660);
+    const c = await seedOrder(720);
+    await isolate([a.id, b.id, c.id]);
+
+    const candidates = await listDispatchableOrderIds(ctx.db, NOW);
+    const queue = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false },
+      NOW,
+    );
+    // Тот же набор и тот же порядок: кандидаты раздачи == видимая очередь.
+    expect(candidates).toEqual(queue.items.map((item) => item.id));
+    expect(candidates.slice(0, 3)).toEqual([a.id, b.id, c.id]);
+  });
+});
+
+describe('регрессия: два флориста, отказ, возврат в очередь', () => {
+  it('A→первому; отказ подтверждён; A уходит второму; первому — B; все находятся и открываются', async () => {
+    const a = await seedOrder(600);
+    const b = await seedOrder(660);
+    const c = await seedOrder(720);
+    const flor1 = await floristOnShift('Первый');
+    const flor2 = await floristOnShift('Второй');
+    await isolate([a.id, b.id, c.id]);
+
+    // Сначала готов только первый — ему достаётся верхний A.
+    await makeReady(flor1.shiftId, new Date('2029-05-15T05:00:00.000Z'));
+    await setAuto(true);
+    await dispatchFlorists(ctx.db, NOW);
+    expect((await processState(a.id)).fulfillmentAssigneeId).toBe(flor1.userId);
+
+    // Первый отказывается от A; руководитель подтверждает — A возвращается в NEW.
+    const req = await requestRefusal(
+      ctx.db,
+      flor1,
+      { orderId: a.id, reason: 'INSUFFICIENT_GOODS', comment: null },
+      CONTEXT,
+    );
+    const notificationId = await ctx.db.orderRefusalRequest
+      .findFirstOrThrow({ where: { id: req.id }, select: { notificationId: true } })
+      .then((row) => row.notificationId ?? '');
+    const decision = await decideRefusal(
+      ctx.db,
+      admin,
+      { notificationId, action: 'APPROVE', floristId: null },
+      CONTEXT,
+    );
+    expect(decision.state).toBe('APPROVED');
+    expect((await processState(a.id)).fulfillmentProcessState).toBe('NEW');
+
+    // A снова первый в общей очереди.
+    const queue = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false },
+      NOW,
+    );
+    expect(queue.items[0]?.id).toBe(a.id);
+
+    // Второй становится готов; раздача идёт снова: A уходит второму (первому —
+    // нельзя, отказ одобрен), первому достаётся следующий свободный — B.
+    await makeReady(flor2.shiftId, new Date('2029-05-15T05:10:00.000Z'));
+    await dispatchFlorists(ctx.db, NOW);
+
+    const aState = await processState(a.id);
+    const bState = await processState(b.id);
+    expect(aState.fulfillmentAssigneeId).toBe(flor2.userId);
+    expect(bState.fulfillmentAssigneeId).toBe(flor1.userId);
+    // C остаётся свободным — флористов больше нет.
+    expect((await processState(c.id)).fulfillmentProcessState).toBe('NEW');
+
+    // Все три заказа находятся руководителем поиском и открываются.
+    for (const order of [a, b, c]) {
+      const found = await readQueue(
+        ctx.db,
+        { userId: admin.userId, roles: ['ADMIN'] },
+        { day: 'today', scope: 'general', includeAssigned: false, search: order.number },
+        NOW,
+      );
+      expect(
+        found.items.some((item) => item.id === order.id),
+        `найден ${order.number}`,
+      ).toBe(true);
+      const card = await readOrderCard(ctx.db, order.id);
+      expect(card.number).toBe(order.number);
+    }
+  });
+});
+
+describe('догоняющие окна отказов', () => {
+  it('открытый отказ попадает в догоняющий список, решённый — нет', async () => {
+    const order = await seedOrder();
+    const florist = await floristReady('Отказ для догона', NOW);
+    await claimOrder(ctx.db, florist, order.id, CONTEXT);
+    const req = await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'CANNOT_ASSEMBLE', comment: null },
+      CONTEXT,
+    );
+    const notificationId = await ctx.db.orderRefusalRequest
+      .findFirstOrThrow({ where: { id: req.id }, select: { notificationId: true } })
+      .then((row) => row.notificationId ?? '');
+
+    // Пока PENDING — уведомление в догоняющем списке (всплывёт после входа).
+    const pending = await listPendingRefusalNotificationIds(ctx.db);
+    expect(pending).toContain(notificationId);
+
+    // После решения — из списка исчезает и повторно не всплывает.
+    await decideRefusal(
+      ctx.db,
+      admin,
+      { notificationId, action: 'REJECT', floristId: null },
+      CONTEXT,
+    );
+    const afterDecision = await listPendingRefusalNotificationIds(ctx.db);
+    expect(afterDecision).not.toContain(notificationId);
   });
 });

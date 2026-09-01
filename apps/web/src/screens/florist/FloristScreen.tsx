@@ -1315,7 +1315,12 @@ export function FloristScreen(): React.JSX.Element {
         {cardQuery.isPending && <LoadingState title="Открываем карточку…" />}
         {cardQuery.isError && (
           <ErrorState
-            description="Карточка не загрузилась."
+            title="Карточка не загрузилась"
+            description={
+              cardQuery.error instanceof ApiError
+                ? cardQuery.error.message
+                : 'Попробуйте открыть карточку ещё раз.'
+            }
             onRetry={() => void cardQuery.refetch()}
           />
         )}

@@ -4,8 +4,16 @@
  * Появляются поверх текущего экрана по ЖИВОМУ realtime-событию
  * `notification.created` (через шину событий), а не по инвалидации: после
  * переподключения и перезагрузки старый архив не воспроизводится, поэтому окна
- * не всплывают повторно. Одно и то же событие показывается один раз (дедуп по
- * id). Несколько уведомлений показываются ПОСЛЕДОВАТЕЛЬНО, а не стопкой.
+ * изменений заказов не всплывают повторно. Одно и то же событие показывается
+ * один раз (дедуп по id). Несколько уведомлений показываются ПОСЛЕДОВАТЕЛЬНО.
+ *
+ * ОТКАЗЫ — ИСКЛЮЧЕНИЕ, И ОНО ОСОЗНАННОЕ. Отказ ждёт решения руководителя, и
+ * пропустить его нельзя. Живое событие видит только тот, кто был онлайн в
+ * момент отказа; кто вошёл позже, получает НЕрешённые (`PENDING`) отказы
+ * догоняющим запросом при входе и видит их окнами. Решённые в этот список не
+ * попадают и повторно не всплывают. Живой и догоняющий пути делят один дедуп
+ * по id, поэтому один отказ не покажется дважды. Решение из окна и из вкладки
+ * идёт одним и тем же серверным обработчиком.
  *
  * «Ок» закрывает окно и отмечает уведомление прочитанным ТОЛЬКО у текущего
  * пользователя. Для изменения состава после сборки есть «На пересборку».
@@ -30,6 +38,15 @@ export function NotificationPopups(): React.JSX.Element | null {
   const canDecideRefusal =
     user?.roles.includes('ADMIN') === true || user?.roles.includes('SUPERVISOR') === true;
 
+  /** Ставит уведомление в очередь окон, если оно ещё не показывалось. */
+  const enqueueOnce = (id: string): void => {
+    if (shownRef.current.has(id)) {
+      return;
+    }
+    shownRef.current.add(id);
+    setQueue((current) => [...current, id]);
+  };
+
   useEffect(() => {
     return subscribeRealtimeEvents((event, data) => {
       if (event !== 'notification.created') {
@@ -39,16 +56,37 @@ export function NotificationPopups(): React.JSX.Element | null {
         const parsed = JSON.parse(data) as { notificationId?: string };
         const id = parsed.notificationId;
         // Дедуп: одно событие — одно окно, даже если пришло повторно.
-        if (typeof id !== 'string' || shownRef.current.has(id)) {
-          return;
+        if (typeof id === 'string') {
+          enqueueOnce(id);
         }
-        shownRef.current.add(id);
-        setQueue((current) => [...current, id]);
       } catch {
         // Плохой payload не должен ломать поток.
       }
     });
   }, []);
+
+  /**
+   * Догоняющий список открытых отказов при входе.
+   *
+   * Кто был офлайн в момент отажа, не получил живого события — здесь он видит
+   * все НЕрешённые отказы и показывает их окнами. Тот же дедуп, что и у живого
+   * пути, не даёт показать отказ дважды. Обновляется по событиям отказов
+   * (`florist.dispatch_changed` инвалидирует ключ `notifications`), поэтому
+   * список догоняющих остаётся актуальным без перезагрузки.
+   */
+  const pendingRefusals = useQuery({
+    queryKey: ['notifications', 'pending-refusals'],
+    queryFn: () =>
+      client.get<{ notificationIds: string[] }>('/api/logistics/notifications/pending-refusals'),
+    enabled: canDecideRefusal,
+  });
+
+  useEffect(() => {
+    for (const id of pendingRefusals.data?.notificationIds ?? []) {
+      enqueueOnce(id);
+    }
+    // Зависимость — только данные догоняющего запроса; enqueueOnce дедупит.
+  }, [pendingRefusals.data]);
 
   const currentId = queue[0] ?? null;
 

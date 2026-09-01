@@ -21,7 +21,10 @@ import {
   listReassemblyFlorists,
   markRead,
 } from './service.js';
-import { decideRefusal } from '../fulfillment/dispatch-florist.js';
+import {
+  decideRefusal,
+  listPendingRefusalNotificationIds,
+} from '../fulfillment/dispatch-florist.js';
 
 const idParamSchema = z.object({ id: z.string().uuid() });
 const listQuerySchema = z.object({
@@ -106,6 +109,19 @@ export function registerNotificationRoutes(app: AppServer, deps: NotificationDep
       { notificationId: id, floristId: body.floristId },
       contextOf(request),
     );
+  });
+
+  /**
+   * Догоняющий список НЕрешённых отказов для всплывающих окон руководителя.
+   *
+   * Живое событие видит только тот, кто был онлайн в момент отказа. Кто вошёл
+   * позже, получает открытые (`PENDING`) отказы здесь и показывает их окнами —
+   * решённые сюда не попадают и повторно не всплывают. Только ADMIN/SUPERVISOR:
+   * решение по отказу принимают они.
+   */
+  app.get('/api/logistics/notifications/pending-refusals', async (request) => {
+    await authenticateWithRoles(request, deps, REFUSAL_DECISION_ROLES);
+    return { notificationIds: await listPendingRefusalNotificationIds(deps.db) };
   });
 
   /**

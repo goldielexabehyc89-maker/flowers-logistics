@@ -301,6 +301,12 @@ export interface OrderCardView {
   changedSinceClaim: boolean;
   /** Заказ отменён: собирать нельзя. Из списка при этом не исчезает. */
   cancelled?: boolean;
+  /**
+   * Заказ вышел из производственной области (исчез из МоегоСклада или выведен)
+   * уже после того, как попал в работу. Карточка открывается, но показывает
+   * безопасную причину — почему заказа «нет» в очереди и справочнике.
+   */
+  outOfScope?: boolean;
   print: { formId: string | null; jobs: CardPrintJobView[] };
 }
 
