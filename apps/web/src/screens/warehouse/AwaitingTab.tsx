@@ -4,6 +4,11 @@
  * Показывает собранные флористом заказы, которых ещё нет на полке: их склад
  * должен принять. Это ЭКРАН — он ничего не разрешает и статусов не заводит.
  *
+ * Вид — таблица по дням: заголовок дня вдавлен (группа), заказы приподняты
+ * (карточки-строки), день сворачивается и разворачивается. Справа от поиска —
+ * чипы «Все / Доставка / Самовывоз» со счётчиками; поиск вдавлен в фон.
+ * Самовывоз слегка отличается заливкой строки.
+ *
  * «Принять» на карточке открывает тот же сканер приёмки, что и вкладка
  * «Склад», но с одним отличием: заказ на карточке уже выбран, и первый скан
  * обязан совпасть ИМЕННО с ним. Совпадение проверяется по устойчивому
@@ -15,11 +20,7 @@
  * пути размещения здесь нет.
  *
  * Ручной ввод рядом со сканером включает существующая настройка «Разрешить
- * ручной ввод на складе и в самовывозе»; отдельного переключателя нет. Он
- * проходит те же проверки, что и QR.
- *
- * Группировка по дате доставки и счётчик приходят с сервера; экран лишь
- * раскладывает уже упорядоченный список по заголовкам дат.
+ * ручной ввод на складе и в самовывозе»; отдельного переключателя нет.
  */
 
 import { useMemo, useState } from 'react';
@@ -35,6 +36,7 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanContext } from './warehouse-flow';
 import { createReceiveIntent } from './receive-intent';
+import { awaitingTypeCounts, filterAwaitingByType, type AwaitingTypeFilter } from './awaiting-view';
 import { assembledDateLabel } from '../florist/florist';
 
 interface AwaitingCard {
@@ -104,11 +106,68 @@ function groupByDate(items: AwaitingCard[], now: Date): DateGroup[] {
   return groups;
 }
 
+const TYPE_FILTERS: readonly { key: AwaitingTypeFilter; title: string }[] = [
+  { key: 'all', title: 'Все' },
+  { key: 'delivery', title: 'Доставка' },
+  { key: 'pickup', title: 'Самовывоз' },
+];
+
+/** Одна строка-заказ: приподнятая карточка в табличной сетке. */
+function AwaitingRow({
+  card,
+  onAccept,
+}: {
+  card: AwaitingCard;
+  onAccept: () => void;
+}): React.JSX.Element {
+  return (
+    <article
+      className={card.isPickup ? 'wh-awaiting__row wh-awaiting__row--pickup' : 'wh-awaiting__row'}
+      data-testid="wh-awaiting-card"
+      data-order-number={card.orderNumber}
+    >
+      <div className="wh-awaiting__cell wh-awaiting__cell--order">
+        <span className="wh-awaiting__colhead">Заказ</span>
+        <strong className="wh-awaiting__number">{card.orderNumber}</strong>
+      </div>
+      <div className="wh-awaiting__cell wh-awaiting__cell--type">
+        <span className="wh-awaiting__colhead">Тип</span>
+        <StatusBadge tone={card.isPickup ? 'info' : 'neutral'}>
+          {card.isPickup ? 'Самовывоз' : 'Доставка'}
+        </StatusBadge>
+      </div>
+      <div className="wh-awaiting__cell wh-awaiting__cell--interval">
+        <span className="wh-awaiting__colhead">Интервал</span>
+        <span>{intervalLabel(card)}</span>
+      </div>
+      <div className="wh-awaiting__cell wh-awaiting__cell--count">
+        <span className="wh-awaiting__colhead">Позиций</span>
+        <span>{card.positionCount}</span>
+      </div>
+      <div className="wh-awaiting__cell wh-awaiting__cell--assembled">
+        <span className="wh-awaiting__colhead">Собран</span>
+        <span className="muted text-sm">
+          {card.assembledAt === null ? '—' : formatMoscowDateTime(card.assembledAt)}
+          {card.floristName === null ? '' : ` · ${card.floristName}`}
+        </span>
+      </div>
+      <div className="wh-awaiting__cell wh-awaiting__cell--action">
+        <Button variant="primary" data-testid="wh-awaiting-accept" onClick={onAccept}>
+          Принять
+        </Button>
+      </div>
+    </article>
+  );
+}
+
 export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Element {
   const { client } = useAuth();
   const queryClient = useQueryClient();
 
   const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState<AwaitingTypeFilter>('all');
+  /** Свёрнутые дни: ключ группы. По умолчанию все развёрнуты. */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   /** Карточка, которую сейчас принимают: открыт сканер именно на неё. */
   const [acceptingCard, setAcceptingCard] = useState<AwaitingCard | null>(null);
 
@@ -121,10 +180,24 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
       ),
   });
 
+  const items = useMemo(() => awaiting.data?.items ?? [], [awaiting.data]);
+  const counts = useMemo(() => awaitingTypeCounts(items), [items]);
   const groups = useMemo(
-    () => groupByDate(awaiting.data?.items ?? [], new Date()),
-    [awaiting.data],
+    () => groupByDate(filterAwaitingByType(items, typeFilter), new Date()),
+    [items, typeFilter],
   );
+
+  const toggleDay = (key: string): void => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
 
   /*
    * Обработчик приёмки живёт ровно одну сессию сканирования одной карточки.
@@ -160,25 +233,46 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
 
   return (
     <div className="stack" data-testid="wh-awaiting">
-      <div className="card stack">
-        <div>
+      <div className="wh-awaiting__panel">
+        <div className="wh-awaiting__intro">
           <h3>Ожидают приёмки</h3>
           <p className="muted text-sm">
-            Собранные заказы, которых ещё нет на полке. «Принять» открывает сканер: сначала заказ с
-            карточки, затем ячейка — тем же путём, что и «Склад».
+            Собранные заказы, которых ещё нет на полке. «Принять» открывает сканер: сначала заказ,
+            затем ячейка.
           </p>
         </div>
 
-        <input
-          className="wh-search"
-          type="search"
-          inputMode="search"
-          placeholder="Поиск по номеру заказа"
-          aria-label="Поиск по номеру заказа"
-          data-testid="wh-awaiting-search"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
+        <div className="wh-awaiting__controls">
+          <input
+            className="wh-awaiting__search"
+            type="search"
+            inputMode="search"
+            placeholder="Номер заказа"
+            aria-label="Поиск по номеру заказа"
+            data-testid="wh-awaiting-search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <div className="wh-awaiting__filters" role="group" aria-label="Тип получения">
+            {TYPE_FILTERS.map((filter) => (
+              <button
+                key={filter.key}
+                type="button"
+                className={
+                  filter.key === typeFilter
+                    ? 'wh-awaiting__chip wh-awaiting__chip--active'
+                    : 'wh-awaiting__chip'
+                }
+                aria-pressed={filter.key === typeFilter}
+                data-testid={`wh-awaiting-filter-${filter.key}`}
+                onClick={() => setTypeFilter(filter.key)}
+              >
+                {filter.title}
+                <span className="wh-awaiting__chip-count">{counts[filter.key]}</span>
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {awaiting.isPending ? (
@@ -194,48 +288,74 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
               : 'По этому номеру ничего не найдено.'
           }
         />
+      ) : groups.length === 0 ? (
+        <EmptyState
+          title="Пусто"
+          description={
+            typeFilter === 'pickup'
+              ? 'Среди ожидающих нет самовывоза.'
+              : 'Среди ожидающих нет доставки.'
+          }
+        />
       ) : (
         <div className="stack" data-testid="wh-awaiting-list">
           <p className="muted text-sm" data-testid="wh-awaiting-total">
             Всего: {awaiting.data.total}
           </p>
-          {groups.map((group) => (
-            <section key={group.key} className="card stack" data-awaiting-group={group.key}>
-              <h4 className="wh-awaiting__date">{group.label}</h4>
-              {group.items.map((card) => (
-                <article
-                  key={card.orderId}
-                  className="wh-awaiting__card"
-                  data-testid="wh-awaiting-card"
-                  data-order-number={card.orderNumber}
+          {groups.map((group) => {
+            const isCollapsed = collapsed.has(group.key);
+            return (
+              <section
+                key={group.key}
+                className="wh-awaiting__group"
+                data-awaiting-group={group.key}
+                data-testid="wh-awaiting-group"
+              >
+                <button
+                  type="button"
+                  className="wh-awaiting__group-head"
+                  aria-expanded={!isCollapsed}
+                  data-testid="wh-awaiting-group-toggle"
+                  onClick={() => toggleDay(group.key)}
                 >
-                  <div className="row">
-                    <div className="stack stack--tight">
-                      <strong>{card.orderNumber}</strong>
-                      <div className="muted text-sm">
-                        <StatusBadge tone={card.isPickup ? 'info' : 'neutral'}>
-                          {card.isPickup ? 'Самовывоз' : 'Доставка'}
-                        </StatusBadge>{' '}
-                        · {intervalLabel(card)} · {card.positionCount} поз.
-                      </div>
-                      <div className="muted text-sm">
-                        Собран:{' '}
-                        {card.assembledAt === null ? '—' : formatMoscowDateTime(card.assembledAt)}
-                        {card.floristName === null ? '' : ` · ${card.floristName}`}
-                      </div>
-                    </div>
-                    <Button
-                      variant="primary"
-                      data-testid="wh-awaiting-accept"
-                      onClick={() => setAcceptingCard(card)}
+                  <span className="wh-awaiting__group-date">{group.label}</span>
+                  <span className="wh-awaiting__group-meta">
+                    <span className="wh-awaiting__group-count">{group.items.length}</span>
+                    <span
+                      className={
+                        isCollapsed
+                          ? 'wh-awaiting__chevron'
+                          : 'wh-awaiting__chevron wh-awaiting__chevron--open'
+                      }
+                      aria-hidden="true"
                     >
-                      Принять
-                    </Button>
+                      ▾
+                    </span>
+                  </span>
+                </button>
+
+                {!isCollapsed && (
+                  <div className="wh-awaiting__table">
+                    <div className="wh-awaiting__thead" aria-hidden="true">
+                      <span className="wh-awaiting__cell--order">Заказ</span>
+                      <span className="wh-awaiting__cell--type">Тип</span>
+                      <span className="wh-awaiting__cell--interval">Интервал</span>
+                      <span className="wh-awaiting__cell--count">Позиций</span>
+                      <span className="wh-awaiting__cell--assembled">Собран</span>
+                      <span className="wh-awaiting__cell--action" />
+                    </div>
+                    {group.items.map((card) => (
+                      <AwaitingRow
+                        key={card.orderId}
+                        card={card}
+                        onAccept={() => setAcceptingCard(card)}
+                      />
+                    ))}
                   </div>
-                </article>
-              ))}
-            </section>
-          ))}
+                )}
+              </section>
+            );
+          })}
         </div>
       )}
 

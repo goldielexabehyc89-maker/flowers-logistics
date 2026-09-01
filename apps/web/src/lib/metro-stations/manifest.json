@@ -1,16 +1,18 @@
 {
   "geometry": "moscow-metro-2026-08-06.geo.json",
   "geometryVersion": "2026-08-06",
-  "geometrySha256": "301320e4b45182346705d6d85a05b7a0ba7208f704629911f94ff8407cba4eeb",
-  "stationCount": 239,
+  "geometrySha256": "9c986254f626c325c4c3c3063683d448589bf00500f76125af51033c1e9aa0e8",
+  "pointCount": 273,
+  "stationNameCount": 239,
   "bbox": {
     "minLon": 36.7,
     "minLat": 55.1,
     "maxLon": 38.2,
     "maxLat": 56.1
   },
-  "scriptVersion": "1.0.0",
+  "scriptVersion": "2.0.0",
   "filter": "railway=station AND station=subway",
+  "averaging": "none — каждый узел линии сохранён отдельной точкой",
   "dataDate": "2026-08-06",
   "license": "ODbL-1.0",
   "attribution": "© OpenStreetMap contributors",

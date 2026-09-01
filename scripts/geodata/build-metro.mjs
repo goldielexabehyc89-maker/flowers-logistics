@@ -3,20 +3,27 @@
  *
  * Слой станций метро на картах «Сделки» и «Маршрутизация» — только визуальный,
  * но его положение обязано совпадать с настоящими станциями, а не «где-то
- * рядом». Прежде метки брались из слоя `poi` подложки, где станций 273, а
- * ВХОДОВ в метро — 1273: пять входов на станцию давали пять меток вокруг
- * настоящего места. Поэтому источник здесь один и явный: узлы OSM
- * `railway=station` + `station=subway` — это сами станции, а не их входы.
+ * рядом» и не в искусственной точке между платформами.
+ *
+ * ПОЭТОМУ УСРЕДНЕНИЯ НЕТ. Каждый узел OSM `railway=station` + `station=subway`
+ * переносится КАК ЕСТЬ: своя координата, свой устойчивый идентификатор (id
+ * узла OSM) и свой цвет линии (тег `colour`). Пересадочный узел — это
+ * несколько станций разных линий рядом; в OSM это отдельные узлы, и мы
+ * оставляем их отдельными точками, а не сводим по одинаковому названию в
+ * выдуманную середину. Близость точек пересадки — забота отрисовки, а не
+ * повод пересчитывать координату.
+ *
+ * Источник — HeadHunter (`api.hh.ru/metro`) использовать нельзя: его
+ * пользовательское соглашение (п. 4.3, 4.6) запрещает извлекать данные для
+ * формирования другой базы и передавать их сторонним сервисам, то есть
+ * складывать снимок в бандл приложения. Остаётся OpenStreetMap под ODbL:
+ * снимок датирован, у него есть контрольная сумма и атрибуция.
  *
  * Результат детерминирован: один и тот же снимок всегда даёт побайтово
- * одинаковый файл. Станции упорядочены, координаты округлены до микроградусов,
- * одноимённые узлы пересадочных узлов сведены в одну точку — как их показывает
- * визуальный ориентир (Яндекс Карты): один пункт на одну названную станцию.
+ * одинаковый файл. Координаты не округляются и не вычисляются — что в снимке,
+ * то и в наборе.
  *
- * Данные ниоткуда не додумываются: если у снимка нет станций или их
- * подозрительно мало — скрипт останавливается, а не выдумывает точки.
- *
- * Запуск:
+ * Запуск (операторская команда обновления, НЕ при открытии карты):
  *   node scripts/geodata/build-metro.mjs \
  *     --pbf <путь к снимку .osm.pbf> \
  *     --snapshot-url <точный URL датированного снимка> \
@@ -31,10 +38,7 @@ import path from 'node:path';
 import { scan } from './osm-pbf.mjs';
 
 /** Отпечаток самого скрипта: по нему видно, чем именно собран файл. */
-const SCRIPT_VERSION = '1.0.0';
-
-/** Микроградусы: в этой точности координаты живут в наборе и считается отпечаток. */
-const MICRO = 1_000_000;
+const SCRIPT_VERSION = '2.0.0';
 
 /**
  * Границы отбора — Москва и ближайшие пригороды с метро.
@@ -49,20 +53,30 @@ const BBOX = { minLon: 36.7, minLat: 55.1, maxLon: 38.2, maxLat: 56.1 };
  * Ожидаемые пределы результата.
  *
  * Не подгонка под алгоритм, а страховка от молчаливой чепухи: пустой набор или
- * десяток станций означают сломанный снимок или неверный тег, и по такому
- * набору карту рисовать нельзя.
+ * десяток точек означают сломанный снимок или неверный тег. Без усреднения
+ * точек больше, чем станций (пересадки — по узлу на линию).
  */
-const EXPECTED = { minStations: 180, maxStations: 400 };
+const EXPECTED = { minPoints: 200, maxPoints: 400 };
 
 /**
- * Одноимённые станции сводятся в одну точку только вблизи друг друга.
- *
- * Пересадочный узел в OSM — это несколько узлов с одним названием (по одному
- * на линию), стоящих рядом. Их и сводим. Если два одинаковых имени окажутся
- * дальше этого предела — это не пересадка, а совпадение названий, и скрипт
- * остановится: сводить далёкие точки в одну — это выдумка.
+ * Разрешённые имена цветов линий (валидный CSS). Всё остальное — либо hex,
+ * либо заменяется нейтральным серым, чтобы отрисовка не получила негодный цвет.
  */
-const SAME_NAME_MERGE_METERS = 1500;
+const NAMED_COLOURS = new Set([
+  'red',
+  'orange',
+  'green',
+  'blue',
+  'violet',
+  'yellow',
+  'lightblue',
+  'brown',
+  'grey',
+  'gray',
+]);
+
+/** Нейтральный цвет для узла без распознанного цвета линии. */
+const DEFAULT_COLOUR = '#8a8d91';
 
 function args() {
   const parsed = {};
@@ -97,17 +111,22 @@ async function digests(filePath) {
   return { sha256: sha256.digest('hex'), md5: md5.digest('hex') };
 }
 
-/** Приблизительное расстояние между точками в метрах (для местного масштаба). */
-function metersBetween(a, b) {
-  const meanLat = ((a.lat + b.lat) / 2) * (Math.PI / 180);
-  const dLat = (a.lat - b.lat) * 111_320;
-  const dLon = (a.lon - b.lon) * 111_320 * Math.cos(meanLat);
-  return Math.hypot(dLat, dLon);
-}
-
-/** Округление до микроградуса: одно и то же значение при каждом запуске. */
-function roundMicro(value) {
-  return Math.round(value * MICRO) / MICRO;
+/**
+ * Приводит тег `colour` к безопасному для отрисовки значению.
+ *
+ * Берётся первый токен (в OSM встречается «green;#82C0C0»). Hex — как есть в
+ * нижнем регистре; известное имя — как есть; иначе нейтральный серый. Значение
+ * не «вычисляется» из координат, это перенос исходного цвета линии.
+ */
+function normalizeColour(raw) {
+  const first = (raw ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+  if (/^#[0-9a-f]{3,8}$/.test(first)) {
+    return first;
+  }
+  if (NAMED_COLOURS.has(first)) {
+    return first;
+  }
+  return DEFAULT_COLOUR;
 }
 
 async function main() {
@@ -143,12 +162,13 @@ async function main() {
   }
 
   process.stdout.write('Читаю узлы станций метро…\n');
-  const nodes = [];
+  const stations = [];
+  const seenIds = new Set();
   await scan(
     pbf,
     { nodes: true, nodeTags: true },
     {
-      node(_id, lat, lon, tags) {
+      node(id, lat, lon, tags) {
         if (tags === undefined) {
           return;
         }
@@ -162,57 +182,38 @@ async function main() {
         }
         const name = (tags.name ?? '').trim();
         if (name === '') {
-          // Станция без названия подписать нечем — это дефект снимка, а не точка
-          // на карту. Останавливаемся, чтобы не рисовать безымянный кружок.
-          fail('станция метро без названия', `узел на ${lat},${lon}`);
+          fail('станция метро без названия', `узел ${id} на ${lat},${lon}`);
         }
-        nodes.push({ name, lat, lon });
+        const stationId = String(id);
+        if (seenIds.has(stationId)) {
+          fail('повтор идентификатора узла OSM', stationId);
+        }
+        seenIds.add(stationId);
+        // Координаты переносятся как есть: ни округления, ни пересчёта.
+        stations.push({ id: stationId, name, colour: normalizeColour(tags.colour), lat, lon });
       },
     },
   );
 
-  process.stdout.write(`  узлов станций: ${nodes.length}\n`);
+  process.stdout.write(`  узлов станций (без усреднения): ${stations.length}\n`);
 
-  // Сводим одноимённые узлы пересадочного узла в одну точку — их центр.
-  const byName = new Map();
-  for (const node of nodes) {
-    const list = byName.get(node.name) ?? [];
-    list.push(node);
-    byName.set(node.name, list);
-  }
-
-  const stations = [];
-  for (const [name, group] of byName) {
-    // Все узлы одного имени обязаны стоять рядом: иначе это не пересадка.
-    for (const node of group) {
-      const far = group.find((other) => metersBetween(node, other) > SAME_NAME_MERGE_METERS);
-      if (far !== undefined) {
-        fail(
-          `одноимённые станции «${name}» слишком далеко друг от друга`,
-          `${node.lat},${node.lon} и ${far.lat},${far.lon} — сводить их в одну точку нельзя.`,
-        );
-      }
-    }
-    const lat = roundMicro(group.reduce((sum, n) => sum + n.lat, 0) / group.length);
-    const lon = roundMicro(group.reduce((sum, n) => sum + n.lon, 0) / group.length);
-    stations.push({ name, lat, lon });
-  }
-
-  if (stations.length < EXPECTED.minStations || stations.length > EXPECTED.maxStations) {
+  if (stations.length < EXPECTED.minPoints || stations.length > EXPECTED.maxPoints) {
     fail(
-      `неправдоподобное число станций: ${stations.length}`,
-      `ожидалось от ${EXPECTED.minStations} до ${EXPECTED.maxStations}. Снимок или тег не те.`,
+      `неправдоподобное число точек: ${stations.length}`,
+      `ожидалось от ${EXPECTED.minPoints} до ${EXPECTED.maxPoints}. Снимок или тег не те.`,
     );
   }
 
-  // Порядок детерминированный: по названию, затем по координатам. Локаль для
-  // сортировки задаём явно, чтобы результат не зависел от окружения.
-  stations.sort((a, b) => a.name.localeCompare(b.name, 'ru') || a.lon - b.lon || a.lat - b.lat);
+  // Порядок детерминированный: по названию, затем по устойчивому id. Локаль
+  // задана явно, чтобы результат не зависел от окружения.
+  stations.sort(
+    (a, b) => a.name.localeCompare(b.name, 'ru') || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
 
   const features = stations.map((station) => ({
     type: 'Feature',
     geometry: { type: 'Point', coordinates: [station.lon, station.lat] },
-    properties: { name: station.name },
+    properties: { id: station.id, name: station.name, colour: station.colour },
   }));
 
   const collection = { type: 'FeatureCollection', features };
@@ -226,10 +227,12 @@ async function main() {
     geometry: geoName,
     geometryVersion: dataDate,
     geometrySha256: geoSha256,
-    stationCount: stations.length,
+    pointCount: stations.length,
+    stationNameCount: new Set(stations.map((s) => s.name)).size,
     bbox: BBOX,
     scriptVersion: SCRIPT_VERSION,
     filter: 'railway=station AND station=subway',
+    averaging: 'none — каждый узел линии сохранён отдельной точкой',
     dataDate,
     license: 'ODbL-1.0',
     attribution: '© OpenStreetMap contributors',
@@ -244,7 +247,7 @@ async function main() {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
   process.stdout.write(
-    `\nГотово: ${stations.length} станций\n  ${geoPath}\n  sha256 набора: ${geoSha256}\n  ${manifestPath}\n`,
+    `\nГотово: ${stations.length} точек (${manifest.stationNameCount} названий)\n  ${geoPath}\n  sha256 набора: ${geoSha256}\n  ${manifestPath}\n`,
   );
 }
 

@@ -11,14 +11,7 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { formatCalendarDate, moscowToday, shiftCalendarDate } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
-import {
-  EmptyState,
-  ErrorState,
-  Field,
-  LoadingState,
-  StatusBadge,
-  TextInput,
-} from '../../ui/components';
+import { EmptyState, ErrorState, Field, LoadingState, TextInput } from '../../ui/components';
 
 interface Comparison {
   shiftDurationMinutes: number;
@@ -74,14 +67,46 @@ function formatRubles(minor: string | null): string {
   return `${(Number(minor) / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`;
 }
 
-/** Дельта числа к предыдущему периоду: абсолют и процент. */
-function delta(current: number, previous: number): string {
+/** Знаковая дельта числа к предыдущему периоду и её направление для цвета. */
+function deltaParts(
+  current: number,
+  previous: number,
+): {
+  text: string;
+  direction: 'up' | 'down' | 'flat';
+} {
   const abs = current - previous;
+  const rounded = abs.toFixed(abs % 1 === 0 ? 0 : 1);
   const sign = abs > 0 ? '+' : '';
-  const pct = previous === 0 ? (current === 0 ? 0 : 100) : (abs / previous) * 100;
-  const pctText = previous === 0 && current !== 0 ? '—' : `${sign}${pct.toFixed(0)}%`;
-  return `${sign}${abs.toFixed(abs % 1 === 0 ? 0 : 1)} (${pctText})`;
+  return {
+    text: `${sign}${rounded}`,
+    direction: abs > 0 ? 'up' : abs < 0 ? 'down' : 'flat',
+  };
 }
+
+/** Простой словами: длительность и доля, либо «неполно», если данных нет. */
+function idleLabel(minutes: number | null, percent: number | null, incomplete: boolean): string {
+  if (incomplete) {
+    return 'неполно';
+  }
+  return `${formatDuration(minutes ?? 0)} · ${percent ?? 0}%`;
+}
+
+/** Столбцы таблицы: подпись и класс выравнивания. */
+const STAT_COLUMNS: readonly { label: string; align: 'start' | 'end' }[] = [
+  { label: 'Флорист', align: 'start' },
+  { label: 'Смена', align: 'end' },
+  { label: 'Работа', align: 'end' },
+  { label: 'Простой, очередь', align: 'end' },
+  { label: 'Простой, пусто', align: 'end' },
+  { label: 'Собрано', align: 'end' },
+  { label: 'Сумма', align: 'end' },
+  { label: 'Заказов/ч', align: 'end' },
+  { label: '₽/ч', align: 'end' },
+  { label: 'Ср. сборка', align: 'end' },
+  { label: 'Медиана', align: 'end' },
+  { label: 'Δ собрано', align: 'end' },
+];
 
 export function StatisticsTab(): React.JSX.Element {
   const { client } = useAuth();
@@ -152,61 +177,72 @@ export function StatisticsTab(): React.JSX.Element {
       ) : stats.data.rows.length === 0 ? (
         <EmptyState title="Смен нет" description="За выбранный период смен не было." />
       ) : (
-        <div className="finance__table-wrap">
-          <table className="finance__table" data-testid="stats-table">
-            <thead>
-              <tr>
-                <th>Флорист</th>
-                <th>Смена</th>
-                <th>Работа</th>
-                <th>Простой с очередью</th>
-                <th>Простой без очереди</th>
-                <th>Собрано</th>
-                <th>Сумма</th>
-                <th>Заказов/ч</th>
-                <th>₽/ч</th>
-                <th>Ср. сборка</th>
-                <th>Медиана</th>
-                <th>Δ собрано (к пред.)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.data.rows.map((row) => (
-                <tr key={row.floristId} data-testid="stats-row" data-florist={row.floristId}>
-                  <td>{row.floristName}</td>
-                  <td>{formatDuration(row.shiftDurationMinutes)}</td>
-                  <td>{formatDuration(row.workingMinutes)}</td>
-                  <td>
-                    {row.idleIncomplete ? (
-                      <StatusBadge tone="warning">неполно</StatusBadge>
-                    ) : (
-                      `${formatDuration(row.idleWithQueueMinutes ?? 0)} · ${row.idleWithQueuePercent ?? 0}%`
-                    )}
-                  </td>
-                  <td>
-                    {row.idleIncomplete ? (
-                      <StatusBadge tone="warning">неполно</StatusBadge>
-                    ) : (
-                      `${formatDuration(row.idleWithoutQueueMinutes ?? 0)} · ${row.idleWithoutQueuePercent ?? 0}%`
-                    )}
-                  </td>
-                  <td>{row.uniqueAssembledCount}</td>
-                  <td>
-                    {row.moneyIncomplete ? (
-                      <StatusBadge tone="warning">неполно</StatusBadge>
-                    ) : (
-                      formatRubles(row.totalSumMinor)
-                    )}
-                  </td>
-                  <td>{row.ordersPerHour.toFixed(1)}</td>
-                  <td>{row.moneyIncomplete ? '—' : (row.rublesPerHour?.toFixed(0) ?? '—')}</td>
-                  <td>{formatMinutes(row.avgAssemblyMinutes)}</td>
-                  <td>{formatMinutes(row.medianAssemblyMinutes)}</td>
-                  <td>{delta(row.uniqueAssembledCount, row.comparison.uniqueAssembledCount)}</td>
-                </tr>
+        <div className="stats__wrap">
+          <div className="stats__table" data-testid="stats-table">
+            <div className="stats__thead" aria-hidden="true">
+              {STAT_COLUMNS.map((col) => (
+                <span key={col.label} className={`stats__cell stats__cell--${col.align}`}>
+                  {col.label}
+                </span>
               ))}
-            </tbody>
-          </table>
+            </div>
+
+            {stats.data.rows.map((row) => {
+              const d = deltaParts(row.uniqueAssembledCount, row.comparison.uniqueAssembledCount);
+              const incomplete = row.idleIncomplete || row.moneyIncomplete;
+              const cell = (label: string, value: React.ReactNode): React.JSX.Element => (
+                <div className="stats__cell stats__cell--end">
+                  <span className="stats__colhead">{label}</span>
+                  <span>{value}</span>
+                </div>
+              );
+              return (
+                <article
+                  key={row.floristId}
+                  className={incomplete ? 'stats__row stats__row--incomplete' : 'stats__row'}
+                  data-testid="stats-row"
+                  data-florist={row.floristId}
+                >
+                  <div className="stats__cell stats__cell--start stats__name">
+                    <strong>{row.floristName}</strong>
+                    {incomplete && (
+                      <span className="stats__tag" data-testid="stats-incomplete">
+                        неполные
+                      </span>
+                    )}
+                  </div>
+                  {cell('Смена', formatDuration(row.shiftDurationMinutes))}
+                  {cell('Работа', formatDuration(row.workingMinutes))}
+                  {cell(
+                    'Простой, очередь',
+                    idleLabel(
+                      row.idleWithQueueMinutes,
+                      row.idleWithQueuePercent,
+                      row.idleIncomplete,
+                    ),
+                  )}
+                  {cell(
+                    'Простой, пусто',
+                    idleLabel(
+                      row.idleWithoutQueueMinutes,
+                      row.idleWithoutQueuePercent,
+                      row.idleIncomplete,
+                    ),
+                  )}
+                  {cell('Собрано', <strong>{row.uniqueAssembledCount}</strong>)}
+                  {cell('Сумма', row.moneyIncomplete ? 'неполно' : formatRubles(row.totalSumMinor))}
+                  {cell('Заказов/ч', row.ordersPerHour.toFixed(1))}
+                  {cell('₽/ч', row.moneyIncomplete ? '—' : (row.rublesPerHour?.toFixed(0) ?? '—'))}
+                  {cell('Ср. сборка', formatMinutes(row.avgAssemblyMinutes))}
+                  {cell('Медиана', formatMinutes(row.medianAssemblyMinutes))}
+                  <div className="stats__cell stats__cell--end">
+                    <span className="stats__colhead">Δ собрано</span>
+                    <span className={`stats__delta stats__delta--${d.direction}`}>{d.text}</span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

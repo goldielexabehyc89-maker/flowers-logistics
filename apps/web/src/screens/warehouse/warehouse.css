@@ -1075,27 +1075,231 @@
 }
 
 /* «Ожидают приёмки»: поиск и карточки собранных заказов без ячейки. */
-.wh-search {
+/* --- «Ожидают приёмки»: вдавленные дни, приподнятые заказы --------------- */
+
+/* Шапка раздела — вдавленная панель: поиск и чипы «утоплены» в фон. */
+.wh-awaiting__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-in);
+}
+
+.wh-awaiting__intro h3 {
+  margin: 0 0 var(--space-1);
+}
+
+.wh-awaiting__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* Поиск вдавлен в цвет фона: не карточка, а углубление. */
+.wh-awaiting__search {
+  flex: 1 1 240px;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  box-shadow: var(--shadow-in);
+}
+
+.wh-awaiting__search::placeholder {
+  color: var(--color-text-disabled);
+}
+
+/* Чипы типа справа от поиска: приподнятые, активный — акцентом. */
+.wh-awaiting__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.wh-awaiting__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font: inherit;
+  box-shadow: var(--shadow-out);
+  cursor: pointer;
+}
+
+.wh-awaiting__chip--active {
+  color: var(--color-accent-text);
+  font-weight: 600;
+  box-shadow: var(--shadow-in);
+}
+
+.wh-awaiting__chip-count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+}
+
+.wh-awaiting__chip--active .wh-awaiting__chip-count {
+  background: var(--color-accent);
+  color: var(--color-on-accent, #ffffff);
+}
+
+/* День — вдавленная группа. */
+.wh-awaiting__group {
+  padding: var(--space-2);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-in);
+}
+
+.wh-awaiting__group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
-  box-sizing: border-box;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--border, #d0d5dd);
-  border-radius: 8px;
-  font-size: 1rem;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
 }
 
-.wh-awaiting__date {
-  margin: 0 0 0.25rem;
-  font-size: 0.95rem;
+.wh-awaiting__group-date {
+  font-weight: 600;
 }
 
-.wh-awaiting__card {
-  padding: 0.65rem 0;
-  border-top: 1px solid var(--border, #e4e7ec);
+.wh-awaiting__group-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--color-text-muted);
 }
 
-.wh-awaiting__card:first-of-type {
-  border-top: 0;
+.wh-awaiting__group-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.wh-awaiting__chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  transform: rotate(-90deg);
+}
+
+.wh-awaiting__chevron--open {
+  transform: rotate(0deg);
+}
+
+/* Тело дня: строки-заказы в общей колоночной сетке. */
+.wh-awaiting__table {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-1) var(--space-2);
+}
+
+.wh-awaiting__row,
+.wh-awaiting__thead {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 1.3fr) minmax(96px, 0.9fr) minmax(96px, 1fr)
+    minmax(64px, 0.6fr) minmax(150px, 1.6fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* Заголовок колонок — один на день, только на широком экране. */
+.wh-awaiting__thead {
+  padding: 0 var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Строка-заказ приподнята над вдавленным днём. */
+.wh-awaiting__row {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out);
+}
+
+/* Самовывоз слегка отличается заливкой. */
+.wh-awaiting__row--pickup {
+  background: var(--color-accent-soft);
+}
+
+.wh-awaiting__cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wh-awaiting__cell--action {
+  align-items: flex-end;
+}
+
+.wh-awaiting__number {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Подпись колонки внутри строки — только для узкого экрана. */
+.wh-awaiting__colhead {
+  display: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/*
+ * Узкий телефон: таблица разворачивается в карточку. Общий заголовок колонок
+ * прячется, вместо него у каждой ячейки своя подпись, а кнопка «Принять»
+ * встаёт на всю ширину.
+ */
+@media (max-width: 720px) {
+  .wh-awaiting__thead {
+    display: none;
+  }
+
+  .wh-awaiting__row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .wh-awaiting__colhead {
+    display: block;
+  }
+
+  .wh-awaiting__cell--order,
+  .wh-awaiting__cell--assembled,
+  .wh-awaiting__cell--action {
+    grid-column: 1 / -1;
+  }
+
+  .wh-awaiting__cell--action {
+    align-items: stretch;
+  }
+
+  .wh-awaiting__cell--action .btn {
+    width: 100%;
+  }
 }
 
 .stack--tight {
