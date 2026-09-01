@@ -25,16 +25,19 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const BBOX = { minLon: 36.7, minLat: 55.1, maxLon: 38.2, maxLat: 56.1 };
 
 /** Минимальный двойник карты MapLibre: помнит источники и слои. */
+interface FakeLayer {
+  type: string;
+  source: string;
+  layout: Record<string, unknown> | undefined;
+}
+
 function fakeMap(): {
   map: Parameters<typeof addMetroLayer>[0];
   sources: Map<string, unknown>;
-  layers: Map<string, { type: string; source: string; layout?: Record<string, unknown> }>;
+  layers: Map<string, FakeLayer>;
 } {
   const sources = new Map<string, unknown>();
-  const layers = new Map<
-    string,
-    { type: string; source: string; layout?: Record<string, unknown> }
-  >();
+  const layers = new Map<string, FakeLayer>();
   const map = {
     getSource: (id: string) => sources.get(id),
     addSource: (id: string, spec: unknown) => sources.set(id, spec),
