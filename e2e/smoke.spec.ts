@@ -7716,8 +7716,8 @@ test('сборка: последовательная проверка, пауз�
  * Пять размеров экрана: от узкого телефона до настольного.
  *
  * Проверяется не «красиво», а работоспособно: ничего не уезжает за правый
- * край, четыре вкладки помещаются в один ряд, окно отгрузки целиком внутри
- * экрана, нижняя кнопка доступна, а длинные имя курьера, номер листа
+ * край, пять вкладок помещаются не более чем в два ряда, окно отгрузки целиком
+ * внутри экрана, нижняя кнопка доступна, а длинные имя курьера, номер листа
  * и номер заказа разметку не рвут.
  */
 test('склад на пяти размерах: вкладки, окна, длинные значения и поля', async ({
@@ -7762,20 +7762,27 @@ test('склад на пяти размерах: вкладки, окна, дл�
         'document.documentElement.scrollWidth - document.documentElement.clientWidth',
       );
 
-    // 1. Четыре вкладки: один ряд, целиком в экране, ничего не уезжает.
-    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    // 1. Пять вкладок: не более двух рядов, целиком в экране, ничего не уезжает.
+    const tabs = [
+      'wh-tab-storage',
+      'wh-tab-awaiting',
+      'wh-tab-picking',
+      'wh-tab-issue',
+      'wh-tab-returns',
+    ];
     const boxes = [];
     for (const id of tabs) {
       const box = await page.getByTestId(id).boundingBox();
       expect(box, `${id} ${label}`).not.toBeNull();
       boxes.push(box!);
     }
-    const top = boxes[0]!.y;
+    const tabRows = new Set<number>();
     for (const box of boxes) {
-      expect(Math.abs(box.y - top), `вкладки в один ряд ${label}`).toBeLessThan(2);
       expect(box.x, label).toBeGreaterThanOrEqual(-1);
       expect(box.x + box.width, label).toBeLessThanOrEqual(size.width + 1);
+      tabRows.add(Math.round(box.y / 8));
     }
+    expect(tabRows.size, `рядов вкладок ${label}`).toBeLessThanOrEqual(2);
 
     /*
      * Название вкладки не обрезано.

@@ -300,6 +300,10 @@ time {
   font: inherit;
   font-size: var(--font-size-md);
   text-align: center;
+  /* Длинное «Ожидают приёмки» переносится по словам внутри плитки, а не
+     обрезается по краю: целиком читаемое название важнее одной строки. */
+  white-space: normal;
+  line-height: 1.15;
   box-shadow: var(--shadow-out);
   cursor: pointer;
 }
