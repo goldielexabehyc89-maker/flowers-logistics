@@ -641,3 +641,78 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
 }
+
+/* ---------------------------------------------------------------------------
+   Панель авто-раздачи
+
+   Режим AUTO: у флориста нет свободной очереди — он нажимает «Готов» и ждёт
+   назначения. Панель крупная и спокойная: весь день перед глазами один блок,
+   а не список.
+   --------------------------------------------------------------------------- */
+.florist-auto {
+  gap: var(--space-4);
+}
+
+.florist-auto__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.florist-auto__title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.florist-auto__ready {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.florist-auto__waiting {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+}
+
+.florist-auto__finish {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+}
+
+.florist-auto__order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  flex-wrap: wrap;
+}
+
+.florist-auto__order-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.florist-auto__order-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+@media (max-width: 767px) {
+  .florist-auto__order {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

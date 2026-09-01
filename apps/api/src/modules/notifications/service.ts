@@ -141,6 +141,58 @@ export interface NotificationView {
     assemblyRound: number;
     decidedAt: string;
   } | null;
+  /**
+   * Запрос отказа флориста (kind `REFUSAL_REQUEST`). Живёт рядом с решением
+   * «На пересборку», но это другое событие: у него своя таблица и свой набор
+   * действий (Отклонить / Подтвердить / Передать).
+   */
+  refusal: {
+    state: 'PENDING' | 'REJECTED' | 'APPROVED' | 'TRANSFERRED';
+    reason: string;
+    comment: string | null;
+    floristId: string;
+    floristName: string;
+    decidedByName: string | null;
+    decidedAt: string | null;
+  } | null;
+}
+
+/** Общая форма записи отказа для показа. Пусто — уведомление не об отказе. */
+const REFUSAL_SELECT = {
+  select: {
+    state: true,
+    reason: true,
+    comment: true,
+    floristId: true,
+    decidedAt: true,
+    florist: { select: { fullName: true } },
+    decidedBy: { select: { fullName: true } },
+  },
+} as const;
+
+function mapRefusal(
+  row: {
+    state: 'PENDING' | 'REJECTED' | 'APPROVED' | 'TRANSFERRED';
+    reason: string;
+    comment: string | null;
+    floristId: string;
+    decidedAt: Date | null;
+    florist: { fullName: string };
+    decidedBy: { fullName: string } | null;
+  } | null,
+): NotificationView['refusal'] {
+  if (row === null) {
+    return null;
+  }
+  return {
+    state: row.state,
+    reason: row.reason,
+    comment: row.comment,
+    floristId: row.floristId,
+    floristName: row.florist.fullName,
+    decidedByName: row.decidedBy?.fullName ?? null,
+    decidedAt: row.decidedAt === null ? null : row.decidedAt.toISOString(),
+  };
 }
 
 const LIST_LIMIT = 100;
@@ -178,6 +230,7 @@ export async function listNotifications(
             decidedBy: { select: { fullName: true } },
           },
         },
+        refusalRequest: REFUSAL_SELECT,
       },
     }),
   ]);
@@ -206,6 +259,7 @@ export async function listNotifications(
                 assemblyRound: row.decision.assemblyRound,
                 decidedAt: row.decision.decidedAt.toISOString(),
               },
+        refusal: mapRefusal(row.refusalRequest),
       };
     }),
   );
@@ -239,6 +293,7 @@ export async function getNotification(
           decidedBy: { select: { fullName: true } },
         },
       },
+      refusalRequest: REFUSAL_SELECT,
     },
   });
   if (row === null) {
@@ -266,6 +321,7 @@ export async function getNotification(
             assemblyRound: row.decision.assemblyRound,
             decidedAt: row.decision.decidedAt.toISOString(),
           },
+    refusal: mapRefusal(row.refusalRequest),
   };
 }
 

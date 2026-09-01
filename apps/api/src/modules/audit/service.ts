@@ -152,6 +152,14 @@ export const AUDIT_ACTIONS = [
   // Решение «На пересборку» по уведомлению: кто решил, кому назначено, какие
   // категории изменились. Без адреса, состава и ФИО.
   'ORDER_REASSEMBLY_DECIDED',
+  // Автораспределение: система назначила заказ флористу. Автор — система (null).
+  'ORDER_FULFILLMENT_AUTO_ASSIGNED',
+  // Флорист сменил готовность к автозаказам / «закончить после текущего».
+  'FLORIST_DISPATCH_READY_CHANGED',
+  'FLORIST_DISPATCH_FINISH_AFTER_CURRENT',
+  // Запрос отказа от автоназначенного заказа и решение по нему.
+  'ORDER_REFUSAL_REQUESTED',
+  'ORDER_REFUSAL_DECIDED',
   // Производственные данные изменились ПОСЛЕ сборки. Автор — синхронизация.
   'ORDER_FULFILLMENT_REVIEW_REQUIRED',
   // Печать бланка. Байты PDF и содержимое снимка в аудит не попадают:

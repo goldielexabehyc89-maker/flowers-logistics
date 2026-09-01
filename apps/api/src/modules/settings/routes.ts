@@ -18,11 +18,14 @@ import { authenticateWithRoles } from '../auth/guards.js';
 import {
   manualIssueSchema,
   warehouseManualEntrySchema,
+  floristDispatchModeSchema,
   readManualIssue,
   readWarehouseManualEntry,
+  readFloristDispatchMode,
   readServiceTime,
   saveManualIssue,
   saveWarehouseManualEntry,
+  saveFloristDispatchMode,
   readShift,
   saveServiceTime,
   saveShift,
@@ -51,6 +54,11 @@ const shiftBodySchema = z.object({
 
 const warehouseManualEntryBodySchema = z.object({
   value: warehouseManualEntrySchema,
+  expectedVersion: z.number().int().min(0),
+});
+
+const floristDispatchModeBodySchema = z.object({
+  value: floristDispatchModeSchema,
   expectedVersion: z.number().int().min(0),
 });
 
@@ -86,14 +94,21 @@ export async function registerSettingsRoutes(app: AppServer, deps: SettingsDeps)
   app.get('/api/settings/planning', async (request) => {
     await authenticateWithRoles(request, deps, SETTINGS_READ_ROLES);
 
-    const [shift, serviceTime, manualIssue, warehouseManualEntry] = await Promise.all([
-      readShift(deps.db),
-      readServiceTime(deps.db),
-      readManualIssue(deps.db),
-      readWarehouseManualEntry(deps.db),
-    ]);
+    const [shift, serviceTime, manualIssue, warehouseManualEntry, floristDispatchMode] =
+      await Promise.all([
+        readShift(deps.db),
+        readServiceTime(deps.db),
+        readManualIssue(deps.db),
+        readWarehouseManualEntry(deps.db),
+        readFloristDispatchMode(deps.db),
+      ]);
 
     return {
+      // Режим распределения читают логист и управляющий, меняет администратор.
+      floristDispatchMode: {
+        value: floristDispatchMode.value,
+        version: floristDispatchMode.version,
+      },
       /*
        * Ручная отгрузка видна логисту, но меняется только администратором:
        * читать состояние обязаны оба, иначе кнопка появлялась бы и исчезала
@@ -159,6 +174,22 @@ export async function registerSettingsRoutes(app: AppServer, deps: SettingsDeps)
     const context = contextOf(request);
 
     const saved = await saveWarehouseManualEntry(deps.db, actor, {
+      value: body.value,
+      expectedVersion: body.expectedVersion,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+
+    return { value: body.value, version: saved.version };
+  });
+
+  /** Режим распределения заказов флористам: меняет ТОЛЬКО администратор. */
+  app.put('/api/settings/florist/dispatch-mode', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, SETTINGS_WRITE_ROLES);
+    const body = floristDispatchModeBodySchema.parse(request.body);
+    const context = contextOf(request);
+
+    const saved = await saveFloristDispatchMode(deps.db, actor, {
       value: body.value,
       expectedVersion: body.expectedVersion,
       ip: context.ip,

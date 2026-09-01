@@ -36,6 +36,12 @@ import {
   retryPrint,
 } from './print.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
+import {
+  floristDispatchStatus,
+  setDispatchReady,
+  setFinishAfterCurrent,
+  requestRefusal,
+} from './dispatch-florist.js';
 import { buildFloristStatistics } from './statistics.js';
 import {
   FLORIST_ADMIN_ROLES,
@@ -273,7 +279,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
 
     return readQueue(
       deps.db,
-      { userId: actor.userId },
+      { userId: actor.userId, roles: actor.roles },
       {
         day: query.day,
         scope: query.scope,
@@ -291,6 +297,54 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
     return { card: await readOrderCard(deps.db, id) };
+  });
+
+  // --- Автоматическое распределение (рабочее место флориста) ----------------
+
+  /** Состояние распределения: режим, готовность, назначение, ожидающие. */
+  app.get('/api/florist/dispatch/status', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    return floristDispatchStatus(deps.db, actor);
+  });
+
+  /** «Готов к заказам» / выход из готовности. */
+  app.post('/api/florist/dispatch/ready', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { ready } = z.object({ ready: z.boolean() }).parse(request.body);
+    await setDispatchReady(deps.db, actor, ready, contextOf(request));
+    return { ok: true };
+  });
+
+  /** «Закончить после текущего». */
+  app.post('/api/florist/dispatch/finish-after-current', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { value } = z.object({ value: z.boolean() }).parse(request.body);
+    await setFinishAfterCurrent(deps.db, actor, value, contextOf(request));
+    return { ok: true };
+  });
+
+  /** Запрос отказа от назначенного заказа с обязательной причиной. */
+  app.post('/api/florist/orders/:id/refusal', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = z
+      .object({
+        reason: z.enum([
+          'INSUFFICIENT_GOODS',
+          'CANNOT_ASSEMBLE',
+          'PHYSICALLY_IMPOSSIBLE',
+          'WRONG_ASSIGNMENT',
+          'OTHER',
+        ]),
+        comment: z.string().trim().max(1000).nullish(),
+      })
+      .parse(request.body);
+    return requestRefusal(
+      deps.db,
+      actor,
+      { orderId: id, reason: body.reason, comment: body.comment ?? null },
+      contextOf(request),
+    );
   });
 
   app.post('/api/florist/orders/:id/claim', async (request) => {

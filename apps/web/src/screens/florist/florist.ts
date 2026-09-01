@@ -16,7 +16,92 @@ export type QueueDay = 'today' | 'tomorrow';
 export type QueueScope = 'general' | 'mine';
 /** Область «Моих заказов»: работа или уже собранные заказы. */
 export type QueueGroup = 'work' | 'assembled';
-export type FloristTab = 'queue' | 'mine' | 'print' | 'stats';
+export type FloristTab = 'queue' | 'auto' | 'mine' | 'print' | 'stats';
+
+/** Режим распределения свободных заказов. Ручной — очередь; авто — раздаёт сервер. */
+export type DispatchMode = 'MANUAL' | 'AUTO';
+
+/** Причина отказа флориста. Совпадает с серверным enum `OrderRefusalReason`. */
+export type RefusalReason =
+  'INSUFFICIENT_GOODS' | 'CANNOT_ASSEMBLE' | 'PHYSICALLY_IMPOSSIBLE' | 'WRONG_ASSIGNMENT' | 'OTHER';
+
+export const REFUSAL_REASONS: RefusalReason[] = [
+  'INSUFFICIENT_GOODS',
+  'CANNOT_ASSEMBLE',
+  'PHYSICALLY_IMPOSSIBLE',
+  'WRONG_ASSIGNMENT',
+  'OTHER',
+];
+
+export const REFUSAL_REASON_LABELS: Record<RefusalReason, string> = {
+  INSUFFICIENT_GOODS: 'Не хватает товара',
+  CANNOT_ASSEMBLE: 'Не могу собрать',
+  PHYSICALLY_IMPOSSIBLE: 'Физически невозможно',
+  WRONG_ASSIGNMENT: 'Ошибочное назначение',
+  OTHER: 'Другое',
+};
+
+export function refusalReasonLabel(reason: string): string {
+  return REFUSAL_REASON_LABELS[reason as RefusalReason] ?? reason;
+}
+
+/** Состояние запроса отказа: совпадает с серверным `OrderRefusalState`. */
+export const REFUSAL_STATE_LABELS: Record<string, string> = {
+  PENDING: 'Ожидает решения',
+  REJECTED: 'Отклонён',
+  APPROVED: 'Отказ подтверждён',
+  TRANSFERRED: 'Передан другому',
+};
+
+export function refusalStateLabel(state: string): string {
+  return REFUSAL_STATE_LABELS[state] ?? state;
+}
+
+/**
+ * Ответ `/api/florist/dispatch/status` — рабочее место в режиме авто.
+ *
+ * `mode` считает сервер по общей настройке. Когда `AUTO`, свободная очередь
+ * флористу не отдаётся вовсе (сервер возвращает пустой список): флорист не
+ * выбирает заказ, а нажимает «Готов» и ждёт назначения.
+ */
+export interface FloristDispatchStatus {
+  mode: DispatchMode;
+  hasActiveShift: boolean;
+  /** Нажата ли «Готов к заказам». Требует активной смены. */
+  ready: boolean;
+  readyAt: string | null;
+  /** «Закончить после текущего»: новых автоназначений не будет. */
+  finishAfterCurrent: boolean;
+  /** Сколько заказов ждёт раздачи прямо сейчас (по полному серверному набору). */
+  waitingCount: number;
+  /** Текущий назначенный заказ или `null`. */
+  activeOrder: { id: string; number: string; reassembly: boolean } | null;
+  /** Есть открытый запрос отказа по текущему заказу — ждёт решения руководителя. */
+  pendingRefusal: boolean;
+}
+
+/**
+ * Что показать в панели авто-раздачи одной строкой состояния.
+ *
+ * Это подпись, а не право: любое действие всё равно проверяет сервер. Порядок
+ * проверок повторяет серверный, чтобы человек видел near ту же причину, по
+ * которой сервер не даёт новый заказ.
+ */
+export function dispatchStateLabel(status: FloristDispatchStatus): string {
+  if (!status.hasActiveShift) {
+    return 'Откройте смену, чтобы принимать заказы';
+  }
+  if (status.activeOrder !== null) {
+    return status.pendingRefusal ? 'Заказ на решении руководителя' : 'Собирается текущий заказ';
+  }
+  if (status.finishAfterCurrent) {
+    return 'Готовность снята: новых заказов не будет';
+  }
+  if (!status.ready) {
+    return 'Нажмите «Готов», чтобы получить заказ';
+  }
+  return status.waitingCount > 0 ? 'Ожидаем назначения…' : 'Свободных заказов пока нет';
+}
 
 export interface QueueItemView {
   id: string;

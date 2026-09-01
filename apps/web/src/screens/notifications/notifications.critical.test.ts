@@ -6,7 +6,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { hasCompositionChange, orderStateLabel } from './notifications';
+import {
+  hasCompositionChange,
+  orderStateLabel,
+  refusalReasonLabel,
+  refusalStateLabel,
+} from './notifications';
 
 describe('подпись текущего состояния', () => {
   it('в маршрутном листе — с номером листа', () => {
@@ -61,5 +66,19 @@ describe('признак изменения состава', () => {
         parameterChanged: [],
       }),
     ).toBe(true);
+  });
+});
+
+describe('подписи отказа', () => {
+  it('причины переведены, неизвестная возвращается как есть', () => {
+    expect(refusalReasonLabel('INSUFFICIENT_GOODS')).toBe('Не хватает товара');
+    expect(refusalReasonLabel('OTHER')).toBe('Другое');
+    expect(refusalReasonLabel('WHAT')).toBe('WHAT');
+  });
+
+  it('состояния решения переведены, неизвестное возвращается как есть', () => {
+    expect(refusalStateLabel('PENDING')).toBe('Ожидает решения');
+    expect(refusalStateLabel('APPROVED')).toBe('Отказ подтверждён');
+    expect(refusalStateLabel('ZZZ')).toBe('ZZZ');
   });
 });

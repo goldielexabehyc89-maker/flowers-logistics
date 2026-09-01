@@ -37,6 +37,7 @@ export const SETTING_KEYS = {
   serviceTime: 'planning.serviceTime',
   manualIssue: 'routing.manualIssue',
   warehouseManualEntry: 'warehouse.manualEntry',
+  floristDispatchMode: 'fulfillment.dispatchMode',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -198,6 +199,69 @@ export async function readWarehouseManualEntry(
     value: parsed.success ? parsed.data : DEFAULT_WAREHOUSE_MANUAL_ENTRY,
     version: current.version,
   };
+}
+
+/**
+ * Режим распределения заказов флористам.
+ *
+ * `auto: false` (по умолчанию и при отсутствии записи) — самостоятельный выбор:
+ * прежнее поведение. `auto: true` — система назначает заказы сама, общая очередь
+ * скрыта от флористов. Хранится булевым признаком, чтобы уложиться в плоское
+ * значение настройки.
+ */
+export const floristDispatchModeSchema = z.object({ auto: z.boolean() });
+
+export type FloristDispatchMode = z.infer<typeof floristDispatchModeSchema>;
+
+export const DEFAULT_FLORIST_DISPATCH_MODE: FloristDispatchMode = { auto: false };
+
+export interface FloristDispatchModeSetting {
+  value: FloristDispatchMode;
+  version: number;
+}
+
+/** Текущий режим распределения. Отсутствие записи означает ручной режим. */
+export async function readFloristDispatchMode(
+  client: Database | TransactionClient,
+): Promise<FloristDispatchModeSetting> {
+  const current = await readCurrent(client, SETTING_KEYS.floristDispatchMode);
+  if (current === null) {
+    return { value: DEFAULT_FLORIST_DISPATCH_MODE, version: 0 };
+  }
+  const parsed = floristDispatchModeSchema.safeParse(current.value);
+  return {
+    value: parsed.success ? parsed.data : DEFAULT_FLORIST_DISPATCH_MODE,
+    version: current.version,
+  };
+}
+
+export async function saveFloristDispatchMode(
+  db: Database,
+  actor: AuthenticatedActor,
+  input: {
+    value: FloristDispatchMode;
+    expectedVersion: number;
+    ip: string | null;
+    userAgent: string | null;
+  },
+): Promise<{ version: number }> {
+  const saved = await writeSetting(db, actor, {
+    key: SETTING_KEYS.floristDispatchMode,
+    value: { auto: input.value.auto },
+    expectedVersion: input.expectedVersion,
+    ip: input.ip,
+    userAgent: input.userAgent,
+  });
+
+  // Режим меняет и рабочее место флориста, и списки руководителей: узнают без
+  // перезапуска. В событии только признак авто — ни автора, ни версии.
+  await publishRealtimeEvent(db, {
+    topic: 'settings.florist_dispatch_mode_changed',
+    payload: { auto: input.value.auto },
+    audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR', 'FLORIST'],
+  });
+
+  return saved;
 }
 
 export async function saveWarehouseManualEntry(

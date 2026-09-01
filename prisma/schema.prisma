@@ -130,6 +130,10 @@ model User {
   reassemblyDecisions     OrderReassemblyDecision[]     @relation("ReassemblyDecidedBy")
   assignedReassemblies    OrderReassemblyDecision[]     @relation("ReassemblyAssignedFlorist")
 
+  /// Запросы отказа от автоназначенных заказов и решения по ним.
+  orderRefusalRequests OrderRefusalRequest[] @relation("OrderRefusalFlorist")
+  decidedRefusals      OrderRefusalRequest[] @relation("OrderRefusalDecidedBy")
+
   floristShifts       FloristShift[]  @relation("FloristShiftUser")
   closedFloristShifts FloristShift[]  @relation("FloristShiftClosedBy")
   assignedFulfillment DeliveryOrder[] @relation("OrderFulfillmentAssignee")
@@ -696,6 +700,7 @@ model DeliveryOrder {
   /// Уведомления логистов об изменениях заказа и решения о пересборке.
   changeNotifications     OrderChangeNotification[]
   reassemblyDecisions     OrderReassemblyDecision[]
+  refusalRequests         OrderRefusalRequest[]     @relation("OrderRefusalOrder")
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
   recipient               String?
   /// Только «Комментарий по доставке». Необязателен.
@@ -1160,8 +1165,69 @@ model FloristShift {
 
   assignments DeliveryOrder[] @relation("OrderFulfillmentShift")
 
+  /// Автораспределение: момент нажатия «Готов к заказам». `null` — флорист ещё
+  /// не подтвердил готовность (начало смены само по себе заказ не назначает).
+  /// При равной готовности заказ достаётся тому, кто готов дольше.
+  dispatchReadyAt DateTime? @db.Timestamptz(3)
+
+  /// «Закончить после текущего»: новое автоназначение после завершения не идёт.
+  dispatchFinishAfterCurrent Boolean @default(false)
+
   @@index([userId, startedAt])
   @@index([closedAt])
+  @@index([dispatchReadyAt])
+}
+
+/// Причина запроса отказа от автоматически назначенного заказа.
+enum OrderRefusalReason {
+  INSUFFICIENT_GOODS
+  CANNOT_ASSEMBLE
+  PHYSICALLY_IMPOSSIBLE
+  WRONG_ASSIGNMENT
+  OTHER
+}
+
+/// Состояние запроса отказа.
+enum OrderRefusalState {
+  /// Ждёт решения руководителя.
+  PENDING
+  /// «Отклонить»: заказ остаётся у флориста.
+  REJECTED
+  /// «Подтвердить отказ»: заказ возвращён в очередь.
+  APPROVED
+  /// «Передать другому»: заказ назначен выбранному флористу.
+  TRANSFERRED
+}
+
+/// Запрос отказа флориста от автоматически назначенного заказа.
+///
+/// Флорист сам заказ не возвращает: он запрашивает отказ с причиной, а решение
+/// принимает ADMIN/SUPERVISOR через «Логистика → Уведомления». Пока запрос
+/// открыт, заказ остаётся у флориста и нового ему не назначают. Один открытый
+/// запрос на пару (заказ, флорист) — повтор не создаёт дубль.
+model OrderRefusalRequest {
+  id        String @id @default(uuid()) @db.Uuid
+  orderId   String @db.Uuid
+  order     DeliveryOrder @relation("OrderRefusalOrder", fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  floristId String @db.Uuid
+  florist   User   @relation("OrderRefusalFlorist", fields: [floristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  reason    OrderRefusalReason
+  comment   String?
+  state     OrderRefusalState  @default(PENDING)
+
+  createdAt   DateTime  @default(now())
+  decidedById String?   @db.Uuid
+  decidedBy   User?     @relation("OrderRefusalDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  decidedAt   DateTime?
+
+  /// Уведомление руководителям об этом запросе (общая система уведомлений).
+  notificationId String? @unique @db.Uuid
+  notification   OrderChangeNotification? @relation(fields: [notificationId], references: [id], onDelete: SetNull, onUpdate: Restrict)
+
+  @@index([orderId])
+  @@index([floristId])
+  @@index([state])
 }
 
 /// Неизменяемая история доступности ОБЩЕЙ очереди флориста.
@@ -3240,8 +3306,9 @@ model OrderChangeNotification {
   payload    Json
   createdAt  DateTime @default(now())
 
-  reads    OrderChangeNotificationRead[]
-  decision OrderReassemblyDecision?
+  reads        OrderChangeNotificationRead[]
+  decision     OrderReassemblyDecision?
+  refusalRequest OrderRefusalRequest?
 
   @@index([orderId])
   @@index([occurredAt])

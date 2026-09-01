@@ -15,6 +15,8 @@ import { Button, Modal } from '../../ui/components';
 import {
   hasCompositionChange,
   orderStateLabel,
+  refusalReasonLabel,
+  refusalStateLabel,
   sourceLabel,
   type NotificationView,
 } from './notifications';
@@ -22,6 +24,46 @@ import './notifications.css';
 
 /** Тело уведомления: что изменилось (старое → новое) и где заказ сейчас. */
 export function NotificationBody({ item }: { item: NotificationView }): React.JSX.Element {
+  /*
+   * Запрос отказа — не изменение полей заказа, а обращение флориста. У него
+   * своя форма: кто отказывается, по какой причине, с каким комментарием и чем
+   * закончилось. Поэтому рисуется отдельно и раньше, чем поля/состав: их у
+   * такого уведомления нет вовсе.
+   */
+  if (item.refusal !== null) {
+    const refusal = item.refusal;
+    return (
+      <div className="stack stack--tight" data-testid="notif-refusal">
+        <div className="muted text-sm">
+          {sourceLabel(item.source)} · {formatMoscowDateTime(item.occurredAt)}
+        </div>
+        <div className="notif__field">
+          <span className="notif__field-label">Флорист</span>
+          <span>{refusal.floristName}</span>
+        </div>
+        <div className="notif__field">
+          <span className="notif__field-label">Причина</span>
+          <span>{refusalReasonLabel(refusal.reason)}</span>
+        </div>
+        {refusal.comment !== null && refusal.comment.trim() !== '' && (
+          <div className="notif__field">
+            <span className="notif__field-label">Комментарий</span>
+            <span>{refusal.comment}</span>
+          </div>
+        )}
+        <div className="notif__state" data-testid="notif-state">
+          <span className="notif__field-label">Сейчас</span> {orderStateLabel(item.currentState)}
+        </div>
+        {refusal.state !== 'PENDING' && (
+          <div className="notif__decision" data-testid="notif-refusal-decision">
+            {refusalStateLabel(refusal.state)}
+            {refusal.decidedByName === null ? '' : ` (решение: ${refusal.decidedByName})`}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const composition = item.payload.composition;
   return (
     <div className="stack stack--tight">
@@ -185,6 +227,140 @@ export function ReassemblyDialog({
             Отмена
           </Button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Диалог решения по запросу отказа: Отклонить / Подтвердить отказ / Передать.
+ *
+ * Решают только ADMIN и SUPERVISOR — сервер проверяет роль, кнопка её не
+ * заменяет. Решение глобальное и идемпотентное: первый решивший фиксирует
+ * итог, второй руководитель увидит его уже принятым.
+ *
+ *  * «Отклонить» — заказ остаётся у флориста;
+ *  * «Подтвердить отказ» — заказ возвращается в раздачу, тому же флористу
+ *    в этой попытке не выдаётся;
+ *  * «Передать другому» — заказ атомарно назначается выбранному флористу
+ *    (появляется выбор со списком смен).
+ */
+export function RefusalDialog({
+  item,
+  onClose,
+}: {
+  item: NotificationView;
+  onClose: () => void;
+}): React.JSX.Element {
+  const { client } = useAuth();
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [floristId, setFloristId] = useState<string>('');
+
+  const florists = useQuery({
+    queryKey: ['notifications-florists'],
+    queryFn: () => client.get<{ items: Florist[] }>('/api/logistics/notifications/florists'),
+    enabled: transferOpen,
+  });
+
+  const decide = useMutation({
+    mutationFn: (input: { action: 'REJECT' | 'APPROVE' | 'TRANSFER'; floristId?: string }) =>
+      client.post<{ state: string; alreadyDecided: boolean }>(
+        `/api/logistics/notifications/${item.id}/refusal-decision`,
+        input,
+      ),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      await queryClient.invalidateQueries({ queryKey: ['notifications-count'] });
+      const message = result.alreadyDecided
+        ? `Решение уже было принято: заказ ${item.orderNumber}`
+        : `Решение по заказу ${item.orderNumber} сохранено`;
+      showToast(message, 'success');
+      onClose();
+    },
+    onError: (error: unknown) => {
+      showToast(
+        error instanceof ApiError ? error.message : 'Не удалось сохранить решение.',
+        'error',
+      );
+    },
+  });
+
+  return (
+    <Modal
+      open
+      title={`Отказ по заказу ${item.orderNumber}`}
+      onClose={onClose}
+      testId="refusal-dialog"
+    >
+      <div className="stack">
+        <NotificationBody item={item} />
+
+        {transferOpen ? (
+          <>
+            {florists.isError ? (
+              <p className="field__error">Не удалось загрузить флористов.</p>
+            ) : (
+              <label className="stack stack--tight">
+                <span className="field__label">Кому передать</span>
+                <select
+                  className="input"
+                  data-testid="refusal-transfer-florist"
+                  value={floristId}
+                  onChange={(event) => setFloristId(event.target.value)}
+                >
+                  <option value="">— выберите флориста на смене —</option>
+                  {(florists.data?.items ?? []).map((florist) => (
+                    <option key={florist.id} value={florist.id}>
+                      {florist.fullName} · в работе: {florist.openAssignments}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <div className="row">
+              <Button
+                variant="primary"
+                data-testid="refusal-transfer-confirm"
+                disabled={floristId === '' || decide.isPending}
+                onClick={() => decide.mutate({ action: 'TRANSFER', floristId })}
+              >
+                Передать
+              </Button>
+              <Button variant="ghost" onClick={() => setTransferOpen(false)}>
+                Назад
+              </Button>
+            </div>
+          </>
+        ) : (
+          <div className="row">
+            <Button
+              variant="secondary"
+              data-testid="refusal-reject"
+              disabled={decide.isPending}
+              onClick={() => decide.mutate({ action: 'REJECT' })}
+            >
+              Отклонить
+            </Button>
+            <Button
+              variant="danger"
+              data-testid="refusal-approve"
+              disabled={decide.isPending}
+              onClick={() => decide.mutate({ action: 'APPROVE' })}
+            >
+              Подтвердить отказ
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="refusal-transfer"
+              disabled={decide.isPending}
+              onClick={() => setTransferOpen(true)}
+            >
+              Передать другому
+            </Button>
+          </div>
+        )}
       </div>
     </Modal>
   );

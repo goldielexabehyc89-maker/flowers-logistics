@@ -15,12 +15,17 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
 import { type NotificationView, type NotificationsResponse } from './notifications';
-import { NotificationBody, ReassemblyDialog } from './NotificationParts';
+import { NotificationBody, ReassemblyDialog, RefusalDialog } from './NotificationParts';
 
 export function NotificationsScreen(): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
   const queryClient = useQueryClient();
   const [reassembly, setReassembly] = useState<NotificationView | null>(null);
+  const [refusal, setRefusal] = useState<NotificationView | null>(null);
+  // Решения по отказам — только руководителю. Сервер тоже проверяет роль;
+  // здесь решается лишь, показывать ли кнопку.
+  const canDecideRefusal =
+    user?.roles.includes('ADMIN') === true || user?.roles.includes('SUPERVISOR') === true;
 
   const list = useQuery({
     queryKey: ['notifications'],
@@ -58,6 +63,10 @@ export function NotificationsScreen(): React.JSX.Element {
           {list.data.items.map((item) => {
             const offersReassembly =
               item.kind === 'COMPOSITION_AFTER_ASSEMBLY' && item.decision === null;
+            const offersRefusal =
+              canDecideRefusal &&
+              item.kind === 'REFUSAL_REQUEST' &&
+              item.refusal?.state === 'PENDING';
             return (
               <article
                 key={item.id}
@@ -93,6 +102,15 @@ export function NotificationsScreen(): React.JSX.Element {
                       На пересборку
                     </Button>
                   )}
+                  {offersRefusal && (
+                    <Button
+                      variant="primary"
+                      data-testid="notif-refusal"
+                      onClick={() => setRefusal(item)}
+                    >
+                      Решить по отказу
+                    </Button>
+                  )}
                   {!item.read && (
                     <Button
                       variant="ghost"
@@ -113,6 +131,8 @@ export function NotificationsScreen(): React.JSX.Element {
       {reassembly !== null && (
         <ReassemblyDialog item={reassembly} onClose={() => setReassembly(null)} />
       )}
+
+      {refusal !== null && <RefusalDialog item={refusal} onClose={() => setRefusal(null)} />}
     </section>
   );
 }
