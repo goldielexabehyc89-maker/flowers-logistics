@@ -37,6 +37,11 @@ export interface DealsScope {
    * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
    */
   operationsStartDate?: string;
+  /**
+   * UUID канала продаж, заказы которого исключаются из «Сделок» (например,
+   * Flowwow). Значение приходит из конфигурации. Не задано — исключения нет.
+   */
+  excludedSalesChannelId?: string | null;
 }
 
 /**
@@ -130,6 +135,15 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
         WHERE ro."orderId" = o."id" AND ro."removedAt" IS NULL
       )`;
 
+  // Исключение канала продаж (например, Flowwow). Гейт по наличию настройки:
+  // без неё условие пустое и поведение прежнее. IS DISTINCT FROM оставляет
+  // заказы с неизвестным (NULL) каналом — исключается ровно заданный канал.
+  const channel = scope.excludedSalesChannelId;
+  const channelClause =
+    channel === undefined || channel === null || channel === ''
+      ? Prisma.sql`TRUE`
+      : Prisma.sql`o."salesChannelId" IS DISTINCT FROM ${channel}::uuid`;
+
   return Prisma.sql`
     o."inScope" = true
     AND o."sourceArchived" = false
@@ -153,6 +167,7 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
         )})
     )
     AND ${draftsClause}
+    AND ${channelClause}
     AND ${searchCondition(scope.search)}
     AND ${intervalCondition(scope.fromMinute, scope.toMinute)}
     AND ${groupCondition(group)}

@@ -130,6 +130,10 @@ const ROUTING_SCREEN: string[][] = [
 ];
 const WAREHOUSE_SCREEN: string[][] = [
   ['warehouse-placements'],
+  // «Ожидают приёмки»: заказ, который флорист только что собрал, обязан
+  // появиться у склада сам, а принятый в ячейку — исчезнуть. Ключ обновляется
+  // теми же событиями склада и производства, что и остальной экран.
+  ['warehouse-awaiting'],
   ['warehouse-routes'],
   ['warehouse-route'],
   // Доска сборки: подтверждённый лист, назначенная ячейка и переставленная
@@ -378,7 +382,8 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['logistics-history'],
   ],
   'pickup.issued': [...PICKUP_SCREEN, ['warehouse-placements']],
-  'pickup.cancelled_locally': [...PICKUP_SCREEN],
+  // Локальная отмена самовывоза убирает собранный заказ и из «Ожидают приёмки».
+  'pickup.cancelled_locally': [...PICKUP_SCREEN, ['warehouse-awaiting']],
   /*
    * Настройка ручного ввода меняет оба рабочих места сразу: у кладовщика
    * появляется поле номера, у менеджера — ручная выдача.

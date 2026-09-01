@@ -77,6 +77,11 @@ export const moyskladOrderSchema = z.looseObject({
   archived: z.boolean().optional(),
   store: linkSchema.optional(),
   /**
+   * Канал продаж — ссылка. Разворачивать не нужно: UUID берётся из `meta.href`,
+   * а по названию канал не опознаём (регистр и текст ненадёжны).
+   */
+  salesChannel: linkSchema.optional(),
+  /**
    * Статус запрашивается развёрнутым (`expand=state`), поэтому здесь есть и `name`,
    * и `stateType`. Без expand приходила бы только ссылка, и `stateType` навсегда
    * остался бы пустым.

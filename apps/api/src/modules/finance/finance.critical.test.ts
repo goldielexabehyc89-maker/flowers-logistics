@@ -66,7 +66,10 @@ async function seedTariff(input: {
   kind?: 'REGULAR' | 'HOLIDAY';
   from: string;
   to?: string | null;
+  /** Единая ставка «За заказ»: если не заданы раздельные, обе равны ей. */
   perOrder: bigint;
+  perOrderWalk?: bigint;
+  perOrderCar?: bigint;
   perKm: bigint;
 }): Promise<string> {
   const admin = await actorFor(['ADMIN']);
@@ -75,7 +78,8 @@ async function seedTariff(input: {
       kind: input.kind ?? 'REGULAR',
       effectiveFrom: toDateColumn(input.from),
       effectiveTo: input.to === undefined || input.to === null ? null : toDateColumn(input.to),
-      perOrderMinor: input.perOrder,
+      perOrderWalkMinor: input.perOrderWalk ?? input.perOrder,
+      perOrderCarMinor: input.perOrderCar ?? input.perOrder,
       perKmMinor: input.perKm,
       createdById: admin.userId,
     },
@@ -89,6 +93,7 @@ async function seedRouteWithOrder(input: {
   day: string;
   cash?: bigint;
   cashCollectable?: boolean;
+  vehicleType?: 'CAR' | 'FOOT';
 }): Promise<{ routeId: string; routeOrderId: string; orderId: string }> {
   const creator = await actorFor(['ADMIN']);
   const order = await ctx.db.deliveryOrder.create({
@@ -114,7 +119,7 @@ async function seedRouteWithOrder(input: {
       number: unique('RF'),
       deliveryDate: toDateColumn(input.day),
       state: 'ACTIVE',
-      vehicleType: 'CAR',
+      vehicleType: input.vehicleType ?? 'CAR',
       createdById: creator.userId,
       courierUserId: input.courierId,
     },
@@ -258,7 +263,7 @@ describe('неизменяемость учёта', () => {
     await expect(
       ctx.db.courierTariffVersion.update({
         where: { id: tariffId },
-        data: { perOrderMinor: 1n },
+        data: { perOrderWalkMinor: 1n },
       }),
     ).rejects.toThrow(/неизменяема/);
   });
@@ -351,8 +356,8 @@ describe('тарифы и отсутствие ретропересчёта', ()
     const regular = await resolveTariff(ctx.db, EARLIER);
     const holiday = await resolveTariff(ctx.db, DAY);
 
-    expect(regular?.perOrderMinor).toBe(10_000n);
-    expect(holiday?.perOrderMinor).toBe(30_000n);
+    expect(regular?.perOrderCarMinor).toBe(10_000n);
+    expect(holiday?.perOrderCarMinor).toBe(30_000n);
   });
 
   it('праздничный тариф без конца периода не принимается', () => {
@@ -361,7 +366,8 @@ describe('тарифы и отсутствие ретропересчёта', ()
         kind: 'HOLIDAY',
         effectiveFrom: DAY,
         effectiveTo: null,
-        perOrderMinor: 1n,
+        perOrderWalkMinor: 1n,
+        perOrderCarMinor: 1n,
         perKmMinor: 1n,
         note: null,
       }),
@@ -386,6 +392,7 @@ describe('тарифы и отсутствие ретропересчёта', ()
     await captureRouteTariff(ctx.db, {
       routeId: seeded.routeId,
       deliveryDate: day,
+      vehicleType: 'CAR',
       rates: rates!,
     });
 
@@ -408,6 +415,79 @@ describe('тарифы и отсутствие ретропересчёта', ()
       select: { amountMinor: true },
     });
     expect(fee?.amountMinor).toBe(-15_000n);
+  });
+
+  it('тип маршрута выбирает ставку: пеший берёт пешую, авто — автомобильную', async () => {
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-25';
+    await activateLedger(EARLIER);
+    // Пешая и автомобильная ставки заведомо разные — иначе выбор недоказуем.
+    await seedTariff({ from: day, perOrderWalk: 12_000n, perOrderCar: 30_000n, perKm: 0n });
+    const rates = await resolveTariff(ctx.db, day);
+    expect(rates).not.toBeNull();
+
+    const walkRoute = await seedRouteWithOrder({
+      courierId: courier.userId,
+      day,
+      cash: 0n,
+      vehicleType: 'FOOT',
+    });
+    const carRoute = await seedRouteWithOrder({
+      courierId: courier.userId,
+      day,
+      cash: 0n,
+      vehicleType: 'CAR',
+    });
+    await captureRouteTariff(ctx.db, {
+      routeId: walkRoute.routeId,
+      deliveryDate: day,
+      vehicleType: 'FOOT',
+      rates: rates!,
+    });
+    await captureRouteTariff(ctx.db, {
+      routeId: carRoute.routeId,
+      deliveryDate: day,
+      vehicleType: 'CAR',
+      rates: rates!,
+    });
+
+    // Снимок фиксирует и тип, и уже выбранную по нему ставку.
+    const walkSnapshot = await ctx.db.routeTariffSnapshot.findUnique({
+      where: { routeId: walkRoute.routeId },
+      select: { vehicleType: true, perOrderMinor: true },
+    });
+    const carSnapshot = await ctx.db.routeTariffSnapshot.findUnique({
+      where: { routeId: carRoute.routeId },
+      select: { vehicleType: true, perOrderMinor: true },
+    });
+    expect(walkSnapshot).toEqual({ vehicleType: 'FOOT', perOrderMinor: 12_000n });
+    expect(carSnapshot).toEqual({ vehicleType: 'CAR', perOrderMinor: 30_000n });
+
+    // Начисление идёт по выбранной ставке для каждого типа.
+    const activation = await readLedgerActivation(ctx.db);
+    for (const seeded of [walkRoute, carRoute]) {
+      const attemptId = await seedAttempt({ ...seeded, courierId: courier.userId });
+      await accrueDeliveryResult(ctx.db, activation, {
+        attemptId,
+        routeOrderId: seeded.routeOrderId,
+        routeId: seeded.routeId,
+        orderId: seeded.orderId,
+        courierUserId: courier.userId,
+        actorUserId: logist.userId,
+        outcome: 'DELIVERED',
+      });
+    }
+    const walkFee = await ctx.db.courierLedgerEntry.findFirst({
+      where: { routeId: walkRoute.routeId, kind: 'DELIVERY_FEE' },
+      select: { amountMinor: true },
+    });
+    const carFee = await ctx.db.courierLedgerEntry.findFirst({
+      where: { routeId: carRoute.routeId, kind: 'DELIVERY_FEE' },
+      select: { amountMinor: true },
+    });
+    expect(walkFee?.amountMinor).toBe(-12_000n);
+    expect(carFee?.amountMinor).toBe(-30_000n);
   });
 });
 
@@ -501,7 +581,12 @@ describe('деньги доставки', () => {
 
     const rates = await resolveTariff(ctx.db, day);
     const seeded = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 3_000n });
-    await captureRouteTariff(ctx.db, { routeId: seeded.routeId, deliveryDate: day, rates: rates! });
+    await captureRouteTariff(ctx.db, {
+      routeId: seeded.routeId,
+      deliveryDate: day,
+      vehicleType: 'CAR',
+      rates: rates!,
+    });
 
     const attemptId = await seedAttempt({ ...seeded, courierId: courier.userId });
     const activation = await readLedgerActivation(ctx.db);
@@ -713,6 +798,7 @@ describe('группировка отчёта', () => {
         cashCollectable: true,
         cashMinor: '5000',
         paymentTypeName: null,
+        vehicleType: 'CAR' as const,
         perOrderMinor: '2000',
         perKmMinor: '1000',
         beyondMkadKmTenths: 24,
@@ -738,6 +824,7 @@ describe('группировка отчёта', () => {
         cashCollectable: false,
         cashMinor: '0',
         paymentTypeName: null,
+        vehicleType: 'CAR' as const,
         perOrderMinor: '2000',
         perKmMinor: '1000',
         beyondMkadKmTenths: 6,
@@ -806,6 +893,7 @@ describe('группировка отчёта', () => {
       cashCollectable: true,
       cashMinor: '0',
       paymentTypeName: null,
+      vehicleType: null,
       perOrderMinor: null,
       perKmMinor: null,
       beyondMkadKmTenths: null,
@@ -863,10 +951,16 @@ describe('наличные в строке отчёта', () => {
     await captureRouteTariff(ctx.db, {
       routeId: delivered.routeId,
       deliveryDate: day,
+      vehicleType: 'CAR',
       rates: rates!,
     });
     const failed = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 499_000n });
-    await captureRouteTariff(ctx.db, { routeId: failed.routeId, deliveryDate: day, rates: rates! });
+    await captureRouteTariff(ctx.db, {
+      routeId: failed.routeId,
+      deliveryDate: day,
+      vehicleType: 'CAR',
+      rates: rates!,
+    });
 
     const activation = await readLedgerActivation(ctx.db);
 

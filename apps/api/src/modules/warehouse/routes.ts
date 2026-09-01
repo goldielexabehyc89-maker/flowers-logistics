@@ -38,6 +38,7 @@ import {
 } from './route-flow.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import { readAssemblyBoard, readIssueBoard } from './assembly-board.js';
+import { listAwaitingIntake, AWAITING_INTAKE_ROLES } from './awaiting.js';
 import { readWarehouseManualEntry } from '../settings/service.js';
 import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import {
@@ -71,6 +72,11 @@ const listQuerySchema = z.object({
   isActive: z.enum(['true', 'false']).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(200),
   offset: z.coerce.number().int().min(0).default(0),
+});
+
+const awaitingQuerySchema = z.object({
+  /** Поиск по номеру: частичное совпадение без учёта регистра. */
+  search: z.string().trim().max(120).optional(),
 });
 
 const resolveQuerySchema = z.object({
@@ -468,6 +474,19 @@ export async function registerWarehouseFlowRoutes(
       limit: query.limit,
       offset: query.offset,
     });
+  });
+
+  /**
+   * «Ожидают приёмки»: собранные заказы без ячейки.
+   *
+   * Роли шире складского потока: раздел видит и менеджер выдачи (`MANAGER`).
+   * Право проверяет сервер — скрытая вкладка чужой запрос не остановит. Сама
+   * приёмка идёт прежним путём `POST /api/warehouse/placements`.
+   */
+  app.get('/api/warehouse/awaiting', async (request) => {
+    await authenticateWithRoles(request, deps, AWAITING_INTAKE_ROLES);
+    const query = awaitingQuerySchema.parse(request.query);
+    return listAwaitingIntake(deps.db, { search: query.search });
   });
 
   /**

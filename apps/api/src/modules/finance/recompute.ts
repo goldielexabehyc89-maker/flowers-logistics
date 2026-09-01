@@ -57,7 +57,12 @@ export interface RecomputeSummary {
   date: string;
   dryRun: boolean;
   activation: { activeFrom: string; changed: boolean };
-  tariff: { tariffVersionId: string; perOrderMinor: bigint; perKmMinor: bigint };
+  tariff: {
+    tariffVersionId: string;
+    perOrderWalkMinor: bigint;
+    perOrderCarMinor: bigint;
+    perKmMinor: bigint;
+  };
   snapshotsCreated: number;
   attemptsProcessed: number;
   deliveredCount: number;
@@ -96,7 +101,8 @@ export async function recomputeDeliveriesForDate(
     });
   }
   if (
-    rates.perOrderMinor !== input.expectedPerOrderMinor ||
+    rates.perOrderWalkMinor !== input.expectedPerOrderMinor ||
+    rates.perOrderCarMinor !== input.expectedPerOrderMinor ||
     rates.perKmMinor !== input.expectedPerKmMinor
   ) {
     throw new AppError('CONFLICT', {
@@ -104,7 +110,8 @@ export async function recomputeDeliveriesForDate(
       publicMessage:
         `Тариф на ${date} не совпадает с ожидаемым: ожидалось ` +
         `${input.expectedPerOrderMinor}/${input.expectedPerKmMinor}, в базе ` +
-        `${rates.perOrderMinor}/${rates.perKmMinor}. Пересчёт остановлен.`,
+        `пеший ${rates.perOrderWalkMinor} / авто ${rates.perOrderCarMinor} / ` +
+        `${rates.perKmMinor}. Пересчёт остановлен.`,
     });
   }
 
@@ -131,7 +138,7 @@ export async function recomputeDeliveriesForDate(
           deliveryDate: { gte: day },
           tariffSnapshot: { is: null },
         },
-        select: { id: true, deliveryDate: true },
+        select: { id: true, deliveryDate: true, vehicleType: true },
         orderBy: { deliveryDate: 'asc' },
       });
       let snapshotsCreated = 0;
@@ -147,6 +154,7 @@ export async function recomputeDeliveriesForDate(
         await captureRouteTariff(tx, {
           routeId: route.id,
           deliveryDate: routeDate,
+          vehicleType: route.vehicleType,
           rates: routeRates,
         });
         snapshotsCreated += 1;
@@ -263,7 +271,8 @@ export async function recomputeDeliveriesForDate(
         },
         tariff: {
           tariffVersionId: rates.tariffVersionId,
-          perOrderMinor: rates.perOrderMinor,
+          perOrderWalkMinor: rates.perOrderWalkMinor,
+          perOrderCarMinor: rates.perOrderCarMinor,
           perKmMinor: rates.perKmMinor,
         },
         snapshotsCreated,

@@ -362,6 +362,7 @@ function scopeOf(
     group?: 'ROUTABLE' | 'ATTENTION' | 'ALL' | undefined;
   },
   operationsStartDate: string,
+  excludedSalesChannelId: string | null,
 ): DealsScope {
   return {
     deliveryDate: query.deliveryDate ?? moscowCalendarDate(new Date()),
@@ -371,6 +372,7 @@ function scopeOf(
     includeDrafts: query.includeDrafts === 'true',
     group: query.group ?? 'ALL',
     operationsStartDate,
+    excludedSalesChannelId,
   };
 }
 
@@ -1098,7 +1100,11 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
   app.get('/api/deals', async (request) => {
     await authenticateWithRoles(request, deps, ORDER_ROLES);
     const query = dealsQuerySchema.parse(request.query);
-    const scope = scopeOf(query, deps.config.OPERATIONS_START_DATE);
+    const scope = scopeOf(
+      query,
+      deps.config.OPERATIONS_START_DATE,
+      deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
+    );
 
     const [ids, total, withoutPoint] = await Promise.all([
       dealsIds(deps.db, scope, { limit: query.limit, offset: query.offset }),
@@ -1128,7 +1134,11 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
   app.get('/api/deals/map', async (request) => {
     await authenticateWithRoles(request, deps, ORDER_ROLES);
     const query = dealsQuerySchema.parse(request.query);
-    const scope = scopeOf(query, deps.config.OPERATIONS_START_DATE);
+    const scope = scopeOf(
+      query,
+      deps.config.OPERATIONS_START_DATE,
+      deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
+    );
     const ids = await dealsIds(deps.db, scope);
 
     /*
@@ -1198,7 +1208,11 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
     // Выбрать можно только пригодные: «Требует внимания» и заказы черновиков
     // в выбор не попадают ни при каком переключателе.
     const ids = await dealsIds(deps.db, {
-      ...scopeOf(query, deps.config.OPERATIONS_START_DATE),
+      ...scopeOf(
+        query,
+        deps.config.OPERATIONS_START_DATE,
+        deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
+      ),
       includeDrafts: false,
       group: 'ROUTABLE',
     });

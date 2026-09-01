@@ -61,25 +61,29 @@ describe('видимость разделов', () => {
     }
   });
 
-  it('роли производственного контура видят ровно свой раздел', () => {
+  it('роли производственного контура видят свой раздел', () => {
     // Прежний контракт «у кладовщика нет разделов» заменён осознанно:
-    // разделы появились, но каждая роль видит только собственный.
+    // разделы появились, каждая роль видит собственный.
     expect(keysFor(['WAREHOUSE'])).toEqual(['warehouse']);
     expect(keysFor(['FLORIST'])).toEqual(['florist']);
-    expect(keysFor(['MANAGER'])).toEqual(['pickup']);
+    // Менеджер выдачи — единственное исключение: помимо «Самовывоза» ему
+    // открыта складская вкладка «Ожидают приёмки», поэтому раздел «Склад» тоже
+    // виден. Дом при этом остаётся «Самовывозом» (см. «первый доступный раздел»).
+    expect(keysFor(['MANAGER'])).toEqual(['warehouse', 'pickup']);
   });
 
   it('роли производственного контура не видят чужие разделы и логистику', () => {
     const production = [
-      { roles: ['FLORIST'] as const, own: 'florist' },
-      { roles: ['WAREHOUSE'] as const, own: 'warehouse' },
-      { roles: ['MANAGER'] as const, own: 'pickup' },
+      { roles: ['FLORIST'] as const, own: ['florist'] },
+      { roles: ['WAREHOUSE'] as const, own: ['warehouse'] },
+      // Менеджеру выдачи открыт и «Склад» — ради вкладки «Ожидают приёмки».
+      { roles: ['MANAGER'] as const, own: ['warehouse', 'pickup'] },
     ];
 
     for (const { roles, own } of production) {
       const keys = keysFor([...roles]);
 
-      // Ни соседнего производственного раздела, ни логистики, ни настроек,
+      // Ни чужого производственного раздела, ни логистики, ни настроек,
       // ни управления пользователями.
       for (const forbidden of [
         'florist',
@@ -94,11 +98,12 @@ describe('видимость разделов', () => {
         'reports',
         'couriers',
         'settings',
-      ].filter((key) => key !== own)) {
+      ].filter((key) => !own.includes(key))) {
         expect(keys).not.toContain(forbidden);
       }
 
-      // Прямой переход в чужой раздел закрыт.
+      // Прямой переход в чужой раздел закрыт; собственные — открыты.
+      const ownPaths = own.map((key) => `/${key}`);
       for (const path of [
         '/deals',
         '/settings',
@@ -107,7 +112,7 @@ describe('видимость разделов', () => {
         '/warehouse',
         '/pickup',
       ]) {
-        expect(isSectionVisible([...roles], path)).toBe(path === `/${own}`);
+        expect(isSectionVisible([...roles], path)).toBe(ownPaths.includes(path));
       }
     }
   });
@@ -163,6 +168,15 @@ describe('видимость разделов', () => {
     expect(firstAvailablePath(['FLORIST'])).toBe('/florist');
     expect(firstAvailablePath(['WAREHOUSE'])).toBe('/warehouse');
     expect(firstAvailablePath(['MANAGER'])).toBe('/pickup');
+
+    // Складская вкладка «Ожидают приёмки» открывает «Склад» менеджеру выдачи, но
+    // дом от этого не переезжает: у самого менеджера — «Самовывоз», а у флориста,
+    // которому вдобавок отметили роль менеджера, домом остаётся «Флорист».
+    // «Склад» не перехватывает старт ни у того, ни у другого.
+    expect(firstAvailablePath(['FLORIST', 'MANAGER'])).toBe('/florist');
+    expect(firstAvailablePath(['MANAGER', 'FLORIST'])).toBe('/florist');
+    // Настоящему кладовщику «Склад» — законный дом.
+    expect(firstAvailablePath(['WAREHOUSE', 'MANAGER'])).toBe('/warehouse');
   });
 
   it('у каждой роли есть хотя бы один раздел', () => {
@@ -226,9 +240,18 @@ describe('видимость разделов', () => {
    * кнопка «Склад» вела бы на уже открытую страницу.
    */
   it('чистым производственным ролям доступен ровно один верхнеуровневый раздел', () => {
-    for (const role of ['FLORIST', 'WAREHOUSE', 'MANAGER'] as const) {
+    for (const role of ['FLORIST', 'WAREHOUSE'] as const) {
       expect(visibleSections([role])).toHaveLength(1);
     }
+  });
+
+  it('менеджеру выдачи открыты «Самовывоз» и «Склад», но дом — «Самовывоз»', () => {
+    // Единственное намеренное исключение из «один раздел на роль»: складская
+    // вкладка «Ожидают приёмки» видна менеджеру выдачи, поэтому «Склад» тоже.
+    // Приземляется он всё равно в свой рабочий раздел, а не на чужой экран.
+    const sections = visibleSections(['MANAGER']);
+    expect(sections.map((section) => section.key).sort()).toEqual(['pickup', 'warehouse']);
+    expect(firstAvailablePath(['MANAGER'])).toBe('/pickup');
   });
 
   it('нескольким ролям остаётся обычная навигация', () => {

@@ -157,7 +157,12 @@ describe('аудитория событий по ролям', () => {
     { topic: 'route.updated', roles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'] },
     { topic: 'route.cancelled', roles: ['ADMIN', 'LOGISTICIAN', 'FLORIST', 'WAREHOUSE'] },
     { topic: 'order.updated', roles: ['ADMIN', 'LOGISTICIAN', 'COURIER'] },
-    { topic: 'order.fulfillment_process_changed', roles: ['ADMIN', 'FLORIST', 'WAREHOUSE'] },
+    {
+      // SUPERVISOR и MANAGER добавлены ради живого обновления «Ожидают приёмки»:
+      // им нужно видеть, что заказ только что собрали.
+      topic: 'order.fulfillment_process_changed',
+      roles: ['ADMIN', 'FLORIST', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'],
+    },
     { topic: 'warehouse.placement_changed', roles: ['ADMIN', 'WAREHOUSE', 'LOGISTICIAN'] },
   ];
 

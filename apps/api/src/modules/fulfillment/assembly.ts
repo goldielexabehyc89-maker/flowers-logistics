@@ -861,7 +861,11 @@ async function publishProcessEvent(
       assigned: order.fulfillmentAssigneeId !== null,
       actorUserId,
     },
-    audienceRoles: [...FULFILLMENT_AUDIENCE],
+    // SUPERVISOR и MANAGER добавлены ради живого обновления «Ожидают приёмки»:
+    // как только заказ становится «Собран», карточка появляется у склада без
+    // F5. Payload несёт лишь идентификатор и состояние — ни номера, ни состава,
+    // ни имени флориста, поэтому расширение аудитории ничего не раскрывает.
+    audienceRoles: [...FULFILLMENT_AUDIENCE, 'SUPERVISOR', 'MANAGER'],
   });
 }
 

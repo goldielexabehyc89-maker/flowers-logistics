@@ -581,3 +581,82 @@ describe('статус «Принят, Не оплачен»', () => {
     expect(await dealsIds(ctx.db, { deliveryDate: HOLD_DAY })).toContain(unknown);
   });
 });
+
+describe('исключение канала продаж (Flowwow) из «Сделок»', () => {
+  const CH_DAY = '2027-09-19';
+  const FLOWWOW = randomUUID();
+  const OTHER_CHANNEL = randomUUID();
+
+  /** Заказ Flowwow без георазрешения: попадает в счётчик «без точки». */
+  async function seedFlowwowPointless(): Promise<string> {
+    const snapshot = snapshotOf({
+      deliveryPlannedMoment: `${CH_DAY} 12:00:00.000`,
+      salesChannel: { meta: { href: href('saleschannel', FLOWWOW) } },
+    });
+    await ctx.db.$transaction((tx) => applyOrderSnapshot(tx, snapshot, new Date()));
+    const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { externalId: snapshot.externalId },
+      select: { id: true },
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { needsAttention: false, attentionReasons: [], geoState: 'UNRESOLVED' },
+    });
+    return order.id;
+  }
+
+  it('исключается только заданный канал; заказы без канала и других каналов остаются', async () => {
+    const flowwow = await seedRoutable({
+      deliveryPlannedMoment: `${CH_DAY} 12:00:00.000`,
+      salesChannel: { meta: { href: href('saleschannel', FLOWWOW) } },
+    });
+    const other = await seedRoutable({
+      deliveryPlannedMoment: `${CH_DAY} 12:00:00.000`,
+      salesChannel: { meta: { href: href('saleschannel', OTHER_CHANNEL) } },
+    });
+    const noChannel = await seedRoutable({ deliveryPlannedMoment: `${CH_DAY} 12:00:00.000` });
+    const flowwowPointless = await seedFlowwowPointless();
+
+    const openScope = { deliveryDate: CH_DAY };
+    const filteredScope = { deliveryDate: CH_DAY, excludedSalesChannelId: FLOWWOW };
+
+    // Без настройки виден весь набор, включая оба заказа Flowwow.
+    const all = await dealsIds(ctx.db, openScope);
+    expect(all).toEqual(expect.arrayContaining([flowwow, other, noChannel, flowwowPointless]));
+
+    // С настройкой оба заказа Flowwow уходят, заказы других/пустого канала — нет.
+    const filtered = await dealsIds(ctx.db, filteredScope);
+    expect(filtered).not.toContain(flowwow);
+    expect(filtered).not.toContain(flowwowPointless);
+    expect(filtered).toEqual(expect.arrayContaining([other, noChannel]));
+
+    // Счётчики считаются относительно: разница — ровно вклад двух Flowwow-заказов
+    // (устойчиво к чужим заказам того же дня в общей базе).
+    expect(await dealsCount(ctx.db, filteredScope)).toBe((await dealsCount(ctx.db, openScope)) - 2);
+    // Счётчик «без точки»: исключается и беспозиционный Flowwow-заказ.
+    expect(await dealsWithoutPointCount(ctx.db, filteredScope)).toBe(
+      (await dealsWithoutPointCount(ctx.db, openScope)) - 1,
+    );
+  });
+
+  it('исключение действует и при поиске по номеру', async () => {
+    const marker = `FLWSEARCH-${randomUUID().slice(0, 6)}`;
+    const flowwow = await seedRoutable({
+      name: marker,
+      deliveryPlannedMoment: `${CH_DAY} 12:00:00.000`,
+      salesChannel: { meta: { href: href('saleschannel', FLOWWOW) } },
+    });
+
+    // Точный поиск не возвращает исключённый канал…
+    expect(
+      await dealsIds(ctx.db, {
+        deliveryDate: CH_DAY,
+        search: marker,
+        excludedSalesChannelId: FLOWWOW,
+      }),
+    ).not.toContain(flowwow);
+
+    // …а без исключения тот же поиск заказ находит — значит, дело в канале.
+    expect(await dealsIds(ctx.db, { deliveryDate: CH_DAY, search: marker })).toContain(flowwow);
+  });
+});

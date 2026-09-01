@@ -86,6 +86,7 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
   'apps/api/src/modules/integrations/moysklad/state-sync.critical.test.ts': Object.freeze([
     '2028-07',
   ]),
+  'apps/api/src/modules/warehouse/awaiting.critical.test.ts': Object.freeze(['2029-03']),
 });
 
 /** Месяц даты `ГГГГ-ММ-ДД`. */

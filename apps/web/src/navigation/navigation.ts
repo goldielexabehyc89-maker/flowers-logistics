@@ -59,11 +59,15 @@ export const APP_SECTIONS: readonly AppSection[] = [
     roles: ['ADMIN', 'FLORIST', 'SUPERVISOR'],
   },
   {
+    // MANAGER (менеджер выдачи) добавлен ради одной вкладки — «Ожидают приёмки»:
+    // ему нужно видеть, какие собранные заказы склад ещё не принял. Остальные
+    // вкладки склада ему не показываются (гейт по роли внутри экрана), а сервер
+    // подтверждает право и на раздел, и на каждый складской API отдельно.
     key: 'warehouse',
     path: '/warehouse',
     title: 'Склад',
     shortTitle: 'Склад',
-    roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR'],
+    roles: ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'],
   },
   {
     key: 'pickup',
@@ -191,7 +195,27 @@ export function isSectionVisible(roles: readonly Role[], path: string): boolean 
  * заведённая раньше своего раздела, не должна показывать пустой экран без выхода.
  */
 export function firstAvailablePath(roles: readonly Role[]): string | null {
-  return visibleSections(roles)[0]?.path ?? null;
+  const sections = visibleSections(roles);
+
+  /*
+   * Складская вкладка «Ожидают приёмки» открывает «Склад» менеджеру выдачи, но
+   * домом это не делает: если «Склад» доступен только через роль MANAGER (без
+   * настоящей складской роли WAREHOUSE/ADMIN/SUPERVISOR), он не считается
+   * стартовым разделом. Дом менеджера — следующий его раздел, «Самовывоз».
+   *
+   * Важно НЕ трогать чужой дом: у флориста с флаг-ролью менеджера (бывает в
+   * проверках) первым разделом остаётся «Флорист», а не «Самовывоз», и приземлять
+   * его на пункт выдачи нельзя. Поэтому пропускается ровно «Склад», а не выбор
+   * между другими разделами.
+   */
+  const warehouseIsManagerOnly =
+    roles.includes('MANAGER') &&
+    !roles.includes('WAREHOUSE') &&
+    !roles.includes('ADMIN') &&
+    !roles.includes('SUPERVISOR');
+  const home = sections.find((section) => !(warehouseIsManagerOnly && section.key === 'warehouse'));
+
+  return home?.path ?? sections[0]?.path ?? null;
 }
 
 /**

@@ -18,11 +18,18 @@
 import type { TransactionClient } from '../auth/sessions.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { appendEntry, accrualKey, reversalKey } from './ledger.js';
-import { ledgerCoversDate, type LedgerActivation, type TariffRates } from './tariffs.js';
+import {
+  ledgerCoversDate,
+  perOrderForVehicle,
+  type LedgerActivation,
+  type TariffRates,
+} from './tariffs.js';
 
 export interface CaptureTariffInput {
   routeId: string;
   deliveryDate: string;
+  /** Тип транспорта маршрута: им выбирается пешая или автомобильная ставка. */
+  vehicleType: 'CAR' | 'FOOT';
   rates: TariffRates;
 }
 
@@ -49,7 +56,10 @@ export async function captureRouteTariff(
     data: {
       routeId: input.routeId,
       tariffVersionId: input.rates.tariffVersionId,
-      perOrderMinor: input.rates.perOrderMinor,
+      vehicleType: input.vehicleType,
+      // Ставка выбирается по типу транспорта здесь и замораживается: смена
+      // настроек тарифа задним числом подтверждённый маршрут не пересчитывает.
+      perOrderMinor: perOrderForVehicle(input.rates, input.vehicleType),
       perKmMinor: input.rates.perKmMinor,
       deliveryDate: new Date(`${input.deliveryDate}T00:00:00.000Z`),
     },

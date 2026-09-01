@@ -290,6 +290,15 @@ async function activate(page: Page, phone: string, code: string, pin: string): P
   await page.getByLabel('Новый PIN').fill(pin);
   await page.getByLabel('Повторите PIN').fill(pin);
   await page.getByRole('button', { name: 'Установить PIN и войти' }).click();
+  /*
+   * Как и обычный вход, активация считается завершённой лишь когда экран
+   * активации сменился рабочим разделом. Без ожидания следующее действие
+   * успевало уйти раньше ответа на вход, cookie обновления ещё не стояла, и
+   * проактивный refresh получал «refresh cookie missing»: сценарий откатывался
+   * к форме, а раздел «не отрисовывался». Под нагрузкой последнего теста гонка
+   * проявлялась стабильно.
+   */
+  await page.waitForURL((url) => !url.pathname.startsWith('/first-login'), { timeout: 20_000 });
 }
 
 async function login(page: Page, phone: string, pin: string): Promise<void> {
@@ -2291,11 +2300,18 @@ test('складские ячейки: администратор управля
   await activate(warehousePage, warehousePhone, warehouseCode, WAREHOUSE_PIN);
   await expect(warehousePage.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
 
-  // У кладовщика рабочий экран с тремя вкладками (этап 6.5), а не заглушка.
-  for (const tab of ['storage', 'picking', 'issue']) {
+  // У кладовщика рабочий экран со всеми вкладками, а не заглушка. «Ожидают
+  // приёмки» стоит рядом с остальными: собранные заказы без ячейки.
+  for (const tab of ['storage', 'awaiting', 'picking', 'issue', 'returns']) {
     await expect(warehousePage.getByTestId(`wh-tab-${tab}`)).toBeVisible();
   }
   await expect(warehousePage.getByTestId('wh-scan-order')).toBeVisible();
+
+  // Вкладка «Ожидают приёмки» открывается и показывает свой раздел.
+  await warehousePage.getByTestId('wh-tab-awaiting').click();
+  await expect(warehousePage.getByTestId('wh-awaiting')).toBeVisible();
+  await expect(warehousePage.getByTestId('wh-awaiting-search')).toBeVisible();
+  await warehousePage.getByTestId('wh-tab-storage').click();
 
   // Но управления справочником ячеек у него нет: это раздел настроек.
   await expect(warehousePage.getByTestId('cell-create')).toHaveCount(0);
@@ -4052,15 +4068,22 @@ test('самовывоз: флорист собрал → склад приня�
   const managerPage = await managerContext.newPage();
   await activate(managerPage, managerPhone, managerCode, MANAGER_PIN);
   await expect(managerPage.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
-  for (const foreign of [
-    'Настройки',
-    'Сотрудники и курьеры',
-    'Маршрутизация',
-    'Склад',
-    'Флорист',
-  ]) {
+  for (const foreign of ['Настройки', 'Сотрудники и курьеры', 'Маршрутизация', 'Флорист']) {
     await expect(managerPage.getByRole('link', { name: foreign })).toHaveCount(0);
   }
+
+  // «Склад» менеджеру выдачи открыт — но ровно ради одной вкладки «Ожидают
+  // приёмки»: рабочих вкладок кладовщика (Склад/Сборка/Выдача/Возвраты) у него
+  // нет. Дом при этом остался «Самовывозом» (проверено выше).
+  await openSection(managerPage, 'Склад');
+  await expect(managerPage.getByTestId('wh-tab-awaiting')).toBeVisible();
+  for (const hidden of ['storage', 'picking', 'issue', 'returns']) {
+    await expect(managerPage.getByTestId(`wh-tab-${hidden}`)).toHaveCount(0);
+  }
+  await expect(managerPage.getByTestId('wh-awaiting')).toBeVisible();
+  // Возврат к «Самовывозу» для продолжения сценария выдачи.
+  await openSection(managerPage, 'Самовывоз');
+  await expect(managerPage.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
 
   // Заказ ждёт выдачи и лежит в известной ячейке.
   const waiting = managerPage.locator('[data-testid="pickup-waiting-row"]', {
@@ -5847,7 +5870,11 @@ test('история и отчёты: тариф, доставка, расчёт
   await expect(page.getByTestId('finance-settings')).toBeVisible();
 
   await page.getByTestId('tariff-from').fill(today);
-  await page.getByTestId('tariff-per-order').fill('200');
+  // Ставка «За заказ» разделена на пешую и автомобильную; за километр — как
+  // прежде. Обе задаём равными, чтобы начисление не зависело от типа маршрута,
+  // а раздельность ставок доказывают критические проверки финансов.
+  await page.getByTestId('tariff-per-order-walk').fill('200');
+  await page.getByTestId('tariff-per-order-car').fill('200');
   await page.getByTestId('tariff-per-km').fill('30');
   await page.getByTestId('tariff-note').fill('проверочный тариф');
   await page.getByTestId('tariff-submit').click();
@@ -7532,7 +7559,7 @@ test('два сеанса: самовывоз виден у менеджера �
  * Телефон: четыре вкладки склада читаются целиком и ничего не уезжает
  * за правый край.
  */
-test('телефон: четыре вкладки склада без выезда и без второго заголовка', async ({
+test('телефон: пять вкладок склада без выезда и без второго заголовка', async ({
   browser,
 }: {
   browser: Browser;
@@ -7559,7 +7586,13 @@ test('телефон: четыре вкладки склада без выезд
       page.locator('main').getByRole('heading', { name: 'Склад', exact: true }),
     ).toHaveCount(0);
 
-    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    const tabs = [
+      'wh-tab-storage',
+      'wh-tab-awaiting',
+      'wh-tab-picking',
+      'wh-tab-issue',
+      'wh-tab-returns',
+    ];
     const boxes = [];
     for (const id of tabs) {
       const box = await page.getByTestId(id).boundingBox();
@@ -7567,12 +7600,15 @@ test('телефон: четыре вкладки склада без выезд
       boxes.push(box!);
     }
 
-    // Все четыре вкладки стоят в один ряд и помещаются в экран.
-    const top = boxes[0]!.y;
+    // Все пять вкладок помещаются в экран без горизонтального выезда: длинное
+    // «Ожидают приёмки» на узком телефоне переносит вкладки не более чем в два
+    // ряда, но за край ни одна не выходит.
+    const rows = new Set<number>();
     for (const box of boxes) {
-      expect(Math.abs(box.y - top)).toBeLessThan(2);
       expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
+      rows.add(Math.round(box.y / 8));
     }
+    expect(rows.size, `рядов вкладок на ширине ${width}`).toBeLessThanOrEqual(2);
 
     for (const id of tabs) {
       await page.getByTestId(id).click();
@@ -7680,8 +7716,8 @@ test('сборка: последовательная проверка, пауз�
  * Пять размеров экрана: от узкого телефона до настольного.
  *
  * Проверяется не «красиво», а работоспособно: ничего не уезжает за правый
- * край, четыре вкладки помещаются в один ряд, окно отгрузки целиком внутри
- * экрана, нижняя кнопка доступна, а длинные имя курьера, номер листа
+ * край, пять вкладок помещаются не более чем в два ряда, окно отгрузки целиком
+ * внутри экрана, нижняя кнопка доступна, а длинные имя курьера, номер листа
  * и номер заказа разметку не рвут.
  */
 test('склад на пяти размерах: вкладки, окна, длинные значения и поля', async ({
@@ -7726,20 +7762,27 @@ test('склад на пяти размерах: вкладки, окна, дл�
         'document.documentElement.scrollWidth - document.documentElement.clientWidth',
       );
 
-    // 1. Четыре вкладки: один ряд, целиком в экране, ничего не уезжает.
-    const tabs = ['wh-tab-storage', 'wh-tab-returns', 'wh-tab-picking', 'wh-tab-issue'];
+    // 1. Пять вкладок: не более двух рядов, целиком в экране, ничего не уезжает.
+    const tabs = [
+      'wh-tab-storage',
+      'wh-tab-awaiting',
+      'wh-tab-picking',
+      'wh-tab-issue',
+      'wh-tab-returns',
+    ];
     const boxes = [];
     for (const id of tabs) {
       const box = await page.getByTestId(id).boundingBox();
       expect(box, `${id} ${label}`).not.toBeNull();
       boxes.push(box!);
     }
-    const top = boxes[0]!.y;
+    const tabRows = new Set<number>();
     for (const box of boxes) {
-      expect(Math.abs(box.y - top), `вкладки в один ряд ${label}`).toBeLessThan(2);
       expect(box.x, label).toBeGreaterThanOrEqual(-1);
       expect(box.x + box.width, label).toBeLessThanOrEqual(size.width + 1);
+      tabRows.add(Math.round(box.y / 8));
     }
+    expect(tabRows.size, `рядов вкладок ${label}`).toBeLessThanOrEqual(2);
 
     /*
      * Название вкладки не обрезано.
