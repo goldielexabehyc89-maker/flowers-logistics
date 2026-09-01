@@ -2317,6 +2317,88 @@ test('флорист: авто-раздача — режим скрывает о
   }
 });
 
+/*
+ * Вёрстка статистики флористов: заголовки внутри общего контейнера, а последний
+ * столбец на desktop-ширине помещается целиком. Это проверяет только браузер —
+ * значения и расчёты считает сервер и его критические тесты. Данные детерминиро-
+ * ванно создаёт сам сценарий: флорист открывает и закрывает смену, чего хватает
+ * для одной строки статистики.
+ */
+test('статистика флориста: заголовки внутри контейнера, последний столбец виден', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  await page.setViewportSize({ width: 1280, height: 900 });
+
+  // 1. Администратор заводит флориста.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const floristPhone = uniquePhone();
+  await openSection(page, 'Сотрудники и курьеры');
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Флорист статистики');
+  await page.getByLabel('Телефон').fill(floristPhone);
+  await page.getByRole('checkbox', { name: 'Флорист' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+  const floristCode = (await page.locator('.one-time-code').innerText()).trim();
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // 2. Флорист открывает и закрывает смену — одной смены хватает для строки.
+  const context = await browser.newContext();
+  const floristPage = await context.newPage();
+  await activate(floristPage, floristPhone, floristCode, '5127');
+  await clickAndAwait(
+    floristPage,
+    floristPage.getByTestId('shift-start'),
+    'POST',
+    '/api/florist/shift/start',
+  );
+  await clickAndAwait(
+    floristPage,
+    floristPage.getByTestId('shift-close'),
+    'POST',
+    '/api/florist/shift/close',
+  );
+  await context.close();
+
+  // 3. Администратор открывает статистику флориста (период по умолчанию — неделя).
+  await openSection(page, 'Флорист');
+  await page.getByTestId('florist-tab-stats').click();
+  const table = page.getByTestId('stats-table');
+  await expect(table).toBeVisible();
+
+  // Заголовки колонок — ВНУТРИ общего контейнера таблицы.
+  const head = table.locator('.stats__head');
+  await expect(head).toBeVisible();
+  const lastHeader = head.getByText('Δ собрано', { exact: true });
+  await expect(lastHeader).toBeVisible();
+
+  // Последний столбец на desktop помещается целиком: его правый край не выходит
+  // за правый край контейнера. Значит, ничего не обрезано.
+  const tableBox = await table.boundingBox();
+  const lastBox = await lastHeader.boundingBox();
+  expect(tableBox, 'габариты контейнера').not.toBeNull();
+  expect(lastBox, 'габариты последнего столбца').not.toBeNull();
+  if (tableBox !== null && lastBox !== null) {
+    expect(lastBox.x + lastBox.width).toBeLessThanOrEqual(tableBox.x + tableBox.width + 2);
+    // И это действительно внутри контейнера (левее его правого края с запасом).
+    expect(lastBox.x).toBeGreaterThanOrEqual(tableBox.x - 2);
+  }
+
+  // Страница целиком по горизонтали не расширяется: прокручивается только таблица.
+  const bodyScroll = await page.evaluate<boolean>(
+    'document.documentElement.scrollWidth <= document.documentElement.clientWidth + 2',
+  );
+  expect(bodyScroll, 'страница не расширяется по горизонтали').toBe(true);
+});
+
 test('складские ячейки: администратор управляет справочником, кладовщик только смотрит', async ({
   page,
   request,

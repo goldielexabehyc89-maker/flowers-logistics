@@ -205,6 +205,14 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
         </StatusBadge>
       </header>
 
+      {card.outOfScope === true && (
+        <div className="florist__alert" role="alert" data-testid="card-out-of-scope">
+          Заказ больше не в производственной области МоегоСклада: он исчез из источника или выведен
+          из области уже после того, как попал к вам в работу. Поэтому его нет в свободной очереди и
+          в поиске обычного списка. Карточка доступна, чтобы вы могли завершить или вернуть заказ.
+        </div>
+      )}
+
       {card.changedSinceClaim && (
         <div className="florist__alert" role="alert" data-testid="card-changed">
           Заказ изменён. Состав ниже уже обновлён — сверьтесь с ним перед завершением.

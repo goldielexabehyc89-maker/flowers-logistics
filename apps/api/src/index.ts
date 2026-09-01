@@ -97,7 +97,8 @@ async function main(): Promise<void> {
         enabled: config.MOYSKLAD_ORDER_STATE_SYNC_ENABLED,
       }),
       // Автораспределение заказов флористам: раздаёт свободные заказы готовым.
-      'florist.dispatch': createDispatchHandler(),
+      // Граница операций — из конфигурации, как у свободной очереди в маршрутах.
+      'florist.dispatch': createDispatchHandler(config.OPERATIONS_START_DATE),
     },
   });
   outbox.start();

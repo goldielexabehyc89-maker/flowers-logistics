@@ -44,6 +44,11 @@ export interface FloristStatComparison {
 export interface FloristStatRow extends FloristStatComparison {
   floristId: string;
   floristName: string;
+  /**
+   * Московская дата начала САМОЙ РАННЕЙ смены флориста в периоде (`ГГГГ-ММ-ДД`).
+   * Показывается под именем. `null` — смен в периоде нет (в строку не попадает).
+   */
+  firstShiftDate: string | null;
   /** Простой известен неполно: часть периода — до начала точного накопления. */
   idleIncomplete: boolean;
   /** Деньги известны неполно: часть сборок сделана до начала накопления денег. */
@@ -443,6 +448,19 @@ export async function buildFloristStatistics(
   const current = rowsForPeriod(input.from, input.to);
   const previous = rowsForPeriod(prevFrom, prevTo);
 
+  // Дата начала самой ранней смены периода — по московскому времени, для показа
+  // под именем. Считается по тем же сменам, что и статистика.
+  const firstShiftById = new Map<string, Date>();
+  for (const s of shifts) {
+    if (!inPeriod(s.startedAt, input.from, input.to)) {
+      continue;
+    }
+    const existing = firstShiftById.get(s.userId);
+    if (existing === undefined || s.startedAt < existing) {
+      firstShiftById.set(s.userId, s.startedAt);
+    }
+  }
+
   const rows: FloristStatRow[] = [];
   for (const [floristId, stat] of current) {
     const dur = stat.shiftDurationMinutes;
@@ -461,9 +479,11 @@ export async function buildFloristStatistics(
       medianAssemblyMinutes: null,
     };
 
+    const firstShift = firstShiftById.get(floristId);
     rows.push({
       floristId,
       floristName: nameById.get(floristId) ?? 'Флорист удалён из справочника',
+      firstShiftDate: firstShift === undefined ? null : moscowDate(firstShift),
       shiftDurationMinutes: stat.shiftDurationMinutes,
       workingMinutes: stat.workingMinutes,
       idleWithQueueMinutes: stat.idleWithQueueMinutes,

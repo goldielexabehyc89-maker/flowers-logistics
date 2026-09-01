@@ -43,6 +43,7 @@ export async function floristDispatchStatus(
   db: Database,
   actor: AuthenticatedActor,
   now: Date = new Date(),
+  operationsStartDate?: string | undefined,
 ): Promise<FloristDispatchStatus> {
   const mode = await readFloristDispatchMode(db);
   const shift = await db.floristShift.findFirst({
@@ -70,7 +71,9 @@ export async function floristDispatchStatus(
     readyAt: shift?.dispatchReadyAt?.toISOString() ?? null,
     finishAfterCurrent: shift?.dispatchFinishAfterCurrent ?? false,
     // Число ожидающих показываем и до готовности: флорист видит нагрузку.
-    waitingCount: mode.value.auto ? (await listDispatchableOrderIds(db, now)).length : 0,
+    waitingCount: mode.value.auto
+      ? (await listDispatchableOrderIds(db, now, operationsStartDate)).length
+      : 0,
     activeOrder:
       active === null
         ? null
@@ -446,4 +449,22 @@ export async function decideRefusal(
 
     return { state: newState, alreadyDecided: false };
   });
+}
+
+/**
+ * Идентификаторы уведомлений НЕрешённых запросов отказа.
+ *
+ * Догоняющий список для всплывающих окон руководителя: живое событие
+ * `notification.created` видит только тот, кто был онлайн в момент отказа.
+ * Кто вошёл позже, обязан увидеть отказ, ждущий решения, — поэтому при входе
+ * фронт запрашивает открытые (`PENDING`) отказы и показывает их окнами.
+ * Решённые сюда не попадают: они не всплывают повторно.
+ */
+export async function listPendingRefusalNotificationIds(db: Database): Promise<string[]> {
+  const rows = await db.orderRefusalRequest.findMany({
+    where: { state: 'PENDING', notificationId: { not: null } },
+    orderBy: { createdAt: 'asc' },
+    select: { notificationId: true },
+  });
+  return rows.flatMap((row) => (row.notificationId === null ? [] : [row.notificationId]));
 }

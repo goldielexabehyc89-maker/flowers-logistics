@@ -304,7 +304,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   /** Состояние распределения: режим, готовность, назначение, ожидающие. */
   app.get('/api/florist/dispatch/status', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
-    return floristDispatchStatus(deps.db, actor);
+    return floristDispatchStatus(deps.db, actor, new Date(), deps.config.OPERATIONS_START_DATE);
   });
 
   /** «Готов к заказам» / выход из готовности. */

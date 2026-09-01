@@ -50,6 +50,7 @@ import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import type { Database } from '../../platform/db.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { OrderFulfillmentProcessState } from '../../generated/prisma/enums.js';
+import type { Prisma } from '../../generated/prisma/client.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { OPERATIONS_START_DATE } from '../orders/operations-window.js';
 import {
@@ -306,6 +307,42 @@ function orderSelect() {
  * СОБРАН, а изменившийся состав — отдельный разговор своей вкладки.
  */
 const PAST_UNFINISHED_STATES = ['NEW', 'IN_ASSEMBLY'] as const;
+/** Активная работа: заказ уже у исполнителя, а не в свободной очереди. */
+const ACTIVE_WORK_STATES = ['IN_ASSEMBLY', 'NEEDS_REVIEW'] as const;
+
+/**
+ * Условия «пригодности к выдаче» свободного заказа.
+ *
+ * Отвечают на вопрос «можно ли ПРЕДЛОЖИТЬ этот заказ флористу как свободную
+ * работу»: он в производственной области, не архивный, не исчез из источника,
+ * состав подтверждён, статус источника допустим и он не раньше начала
+ * операционной работы. К уже назначенной работе эти условия не применяются:
+ * заказ, ушедший из источника ПОСЛЕ назначения, остаётся у исполнителя.
+ */
+function offerableConstraints(
+  operationsStartDate?: string | undefined,
+): Prisma.DeliveryOrderWhereInput {
+  return {
+    fulfillmentInScope: true,
+    sourceArchived: false,
+    sourceMissing: false,
+    fulfillmentCompositionState: 'READY' as const,
+    AND: [
+      {
+        OR: [
+          { externalStateId: null },
+          { externalStateId: { not: MOYSKLAD_IDS.states.acceptedUnpaid } },
+        ],
+      },
+      {
+        OR: [
+          { deliveryDate: null },
+          { deliveryDate: { gte: toDateColumn(operationsStartDate ?? OPERATIONS_START_DATE) } },
+        ],
+      },
+    ],
+  };
+}
 
 function buildScopeWhere(input: {
   /** `null` — все дни сразу: так считается счётчик активных заказов. */
@@ -326,37 +363,9 @@ function buildScopeWhere(input: {
   operationsStartDate?: string | undefined;
 }) {
   return {
-    fulfillmentInScope: true,
-    sourceArchived: false,
-    sourceMissing: false,
-    // «Принят, Не оплачен» импортируется и хранится, но в работу не идёт:
-    // флорист его не собирает, пока статус в источнике не станет допустимым.
-    // Сопоставление по UUID состояния, не по строке. Условие лежит в `AND`,
-    // а не отдельным ключом `OR`: у условия дня уже есть свой `OR`, и второй
-    // ключ верхнего уровня затёр бы его. NULL перечислен явно — `<>` в SQL
-    // отбросил бы заказ без известного состояния, а его прятать нельзя.
-    AND: [
-      {
-        OR: [
-          { externalStateId: null },
-          { externalStateId: { not: MOYSKLAD_IDS.states.acceptedUnpaid } },
-        ],
-      },
-      // Начало операционной работы: заказы более ранних дней в очередь не идут.
-      // Лежит в `AND` по той же причине, что и состояние: у дня уже свой `OR`.
-      // Заказ без даты границей не отсекается.
-      {
-        OR: [
-          { deliveryDate: null },
-          {
-            deliveryDate: { gte: toDateColumn(input.operationsStartDate ?? OPERATIONS_START_DATE) },
-          },
-        ],
-      },
-    ],
-    // Пустой состав при `PENDING` неотличим от настоящего пустого состава,
-    // поэтому в очередь попадает только подтверждённый.
-    fulfillmentCompositionState: 'READY' as const,
+    // Пригодность к выдаче («Принят, Не оплачен» не собирается; пустой состав
+    // при PENDING в очередь не идёт; заказы раньше начала операций — тоже).
+    ...offerableConstraints(input.operationsStartDate),
     ...dateCondition(input.date, input.includePast === true),
     ...(input.assigneeId === null ? {} : { fulfillmentAssigneeId: input.assigneeId }),
     // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
@@ -365,6 +374,51 @@ function buildScopeWhere(input: {
     ...(input.search === null
       ? {}
       : { externalName: { contains: input.search, mode: 'insensitive' as const } }),
+  };
+}
+
+/**
+ * Условие «Моих заказов»: всё, что числится за исполнителем.
+ *
+ * Область/источник тут НЕ фильтруются намеренно. Заказ, который после
+ * назначения исчез из МоегоСклада или вышел из области, физически остаётся у
+ * флориста — и обязан быть виден ему в «Моей работе», иначе человек держит
+ * заказ, которого «нет». Состояние сужается отдельно (`MINE_WORK_STATES`
+ * или `ASSEMBLED`).
+ */
+function buildMineWhere(input: {
+  userId: string;
+  search: string | null;
+}): Prisma.DeliveryOrderWhereInput {
+  return {
+    fulfillmentAssigneeId: input.userId,
+    ...(input.search === null
+      ? {}
+      : { externalName: { contains: input.search, mode: 'insensitive' as const } }),
+  };
+}
+
+/**
+ * Условие поиска руководителя во вкладке флориста.
+ *
+ * По номеру ADMIN/SUPERVISOR обязан найти и свободные пригодные заказы, и уже
+ * назначенные в активной работе — в том числе те, что вышли из области после
+ * назначения (иначе застрявший заказ невозможно ни найти, ни разобрать). День
+ * не ограничивается: ищут конкретный номер, а не сегодняшнюю очередь.
+ */
+function buildSupervisorSearchWhere(input: {
+  search: string;
+  operationsStartDate?: string | undefined;
+}): Prisma.DeliveryOrderWhereInput {
+  return {
+    externalName: { contains: input.search, mode: 'insensitive' as const },
+    OR: [
+      {
+        fulfillmentProcessState: 'NEW' as const,
+        ...offerableConstraints(input.operationsStartDate),
+      },
+      { fulfillmentProcessState: { in: [...ACTIVE_WORK_STATES] } },
+    ],
   };
 }
 
@@ -452,7 +506,29 @@ export async function countActiveAssignments(
 export async function listDispatchableOrderIds(
   db: Database | TransactionClient,
   now: Date = new Date(),
+  operationsStartDate?: string | undefined,
 ): Promise<string[]> {
+  const { sorted } = await orderedFreeQueue(db, { operationsStartDate }, now);
+  return sorted.map((entry) => entry.id);
+}
+
+/**
+ * ЕДИНЫЙ источник свободной очереди «на сегодня».
+ *
+ * И свободная очередь флориста/руководителя, и кандидаты автоматической
+ * раздачи строятся ОДНОЙ этой функцией: один и тот же запрос (`buildScopeWhere`
+ * с той же границей операций) и одна и та же сортировка (`sortQueue`). Иначе
+ * флорист получал бы автоназначением заказ, которого руководитель не видит
+ * первым в очереди, — ровно тот дефект, из-за которого списки расходились.
+ *
+ * `operationsStartDate` обязателен для совпадения: маршрут и воркер раздачи
+ * передают одно значение `config.OPERATIONS_START_DATE`.
+ */
+async function orderedFreeQueue(
+  db: Database | TransactionClient,
+  input: { operationsStartDate?: string | undefined },
+  now: Date = new Date(),
+): Promise<{ sorted: ReturnType<typeof sortQueue>; byId: Map<string, QueueRow> }> {
   const date = resolveQueueDate('today', now);
   const context = {
     viewDate: date,
@@ -464,15 +540,35 @@ export async function listDispatchableOrderIds(
     includePast: true,
     assigneeId: null,
     search: null,
-    operationsStartDate: undefined,
+    operationsStartDate: input.operationsStartDate,
   });
 
-  const rows = await db.deliveryOrder.findMany({
-    where: { ...scopeWhere, fulfillmentProcessState: 'NEW' },
-    select: orderSelect(),
-  });
+  const rows = await fetchQueueRows(db, { ...scopeWhere, fulfillmentProcessState: 'NEW' });
   const routes = await readRoutes(db, rows);
+  const queueOrders = buildQueueOrders(rows, routes, { date, trimFutureNonPickup: true }, now);
+  return {
+    sorted: sortQueue(queueOrders, context),
+    byId: new Map(rows.map((row) => [row.id, row])),
+  };
+}
 
+/** Заказы очереди с общим набором полей. Один select на все пути очереди. */
+function fetchQueueRows(db: Database | TransactionClient, where: Prisma.DeliveryOrderWhereInput) {
+  return db.deliveryOrder.findMany({ where, select: orderSelect() });
+}
+type QueueRow = Awaited<ReturnType<typeof fetchQueueRows>>[number];
+
+/**
+ * Строки заказов → элементы сортировки. Признак ближайшего самовывоза считается
+ * здесь, по полному набору, до сортировки и до страницы. `trimFutureNonPickup`
+ * убирает завтрашние заказы, попавшие в выборку только ради порога «меньше часа».
+ */
+function buildQueueOrders(
+  rows: readonly QueueRow[],
+  routes: Map<string, QueueRoute>,
+  opts: { date: string; trimFutureNonPickup: boolean },
+  now: Date,
+): QueueOrder[] {
   const queueOrders: QueueOrder[] = [];
   for (const row of rows) {
     const minutes = effectiveMinutes(row);
@@ -486,8 +582,12 @@ export async function listDispatchableOrderIds(
       },
       now,
     );
-    // Завтрашний самовывоз, до которого ещё больше часа, распределять рано.
-    if (!pickupSoon && deliveryDate !== null && deliveryDate > date) {
+    if (
+      opts.trimFutureNonPickup &&
+      !pickupSoon &&
+      deliveryDate !== null &&
+      deliveryDate > opts.date
+    ) {
       continue;
     }
     const participation = row.routeOrders[0];
@@ -502,8 +602,7 @@ export async function listDispatchableOrderIds(
       pickupSoon,
     });
   }
-
-  return sortQueue(queueOrders, context).map((entry) => entry.id);
+  return queueOrders;
 }
 
 export async function readQueue(
@@ -537,14 +636,32 @@ export async function readQueue(
    *
    * «Очередь» день сохраняет: там выбирают, что брать в работу сегодня.
    */
-  const scopeWhere = buildScopeWhere({
-    date: mine ? null : date,
-    // Прошлое подтягивается только в «Сегодня»: «Завтра» — это ровно завтра.
-    includePast: !mine && query.day === 'today',
-    assigneeId: mine ? viewer.userId : null,
-    search,
-    operationsStartDate: query.operationsStartDate,
-  });
+  const roles = viewer.roles ?? [];
+  const supervises = roles.includes('ADMIN') || roles.includes('SUPERVISOR');
+  /*
+   * Поиск руководителя во вкладке флориста ищет по всему операционному контуру:
+   * и свободные пригодные заказы, и уже назначенные в активной работе — включая
+   * вышедшие из области ПОСЛЕ назначения. Без этого застрявший заказ невозможно
+   * ни найти, ни увидеть его исполнителя. Обычный список (без поиска) остаётся
+   * свободной очередью.
+   */
+  const supervisorSearch = !mine && supervises && search !== null;
+
+  const scopeWhere = mine
+    ? buildMineWhere({ userId: viewer.userId, search })
+    : supervisorSearch
+      ? buildSupervisorSearchWhere({
+          search: search as string,
+          operationsStartDate: query.operationsStartDate,
+        })
+      : buildScopeWhere({
+          date,
+          // Прошлое подтягивается только в «Сегодня»: «Завтра» — это ровно завтра.
+          includePast: query.day === 'today',
+          assigneeId: null,
+          search,
+          operationsStartDate: query.operationsStartDate,
+        });
 
   /**
    * Точное число собранных считает БАЗА.
@@ -599,8 +716,6 @@ export async function readQueue(
    * Скрытие вкладки на клиенте — лишь удобство, защита здесь.
    */
   if (!mine) {
-    const roles = viewer.roles ?? [];
-    const supervises = roles.includes('ADMIN') || roles.includes('SUPERVISOR');
     if (!supervises) {
       const mode = await readFloristDispatchMode(db);
       if (mode.value.auto) {
@@ -629,51 +744,24 @@ export async function readQueue(
       ? [...UNFINISHED_STATES]
       : ['NEW'];
 
-  const rows = await db.deliveryOrder.findMany({
-    where: { ...scopeWhere, fulfillmentProcessState: { in: states } },
-    // Без границы дня участие в листе ищется по дню САМОГО заказа: иначе
-    // вчерашний заказ терял бы свой маршрут и падал вниз списка.
-    select: orderSelect(),
-  });
+  const rows = await fetchQueueRows(
+    db,
+    // Поиск руководителя уже несёт состояния в своём `OR`; остальным путям
+    // состояние добавляется здесь. Без границы дня участие в листе ищется по
+    // дню самого заказа — иначе вчерашний заказ терял бы маршрут.
+    supervisorSearch ? scopeWhere : { ...scopeWhere, fulfillmentProcessState: { in: states } },
+  );
 
   const routes = await readRoutes(db, rows);
 
   /*
-   * Признак ближайшего самовывоза считается здесь, до сортировки и до
-   * страницы: приоритет обязан определяться по ПОЛНОМУ набору очереди, иначе
-   * заказ за границей загруженной страницы никогда не поднялся бы наверх.
+   * Признак ближайшего самовывоза считается по ПОЛНОМУ набору очереди, до
+   * сортировки и страницы. Завтрашние самовывозы подтягиваются только в
+   * «Сегодня» свободной очереди; в «Моих» и в поиске руководителя дня нет,
+   * и обрезать будущее там нельзя — иначе поиск не нашёл бы заказ другого дня.
    */
-  const withNextDayPickups = !mine && query.day === 'today';
-  const queueOrders: QueueOrder[] = [];
-  for (const row of rows) {
-    const minutes = effectiveMinutes(row);
-    const deliveryDate = row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate);
-    const pickupSoon = isPickupSoon(
-      {
-        pickup: isPickupMethod(row),
-        cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
-        deliveryDate,
-        startMinute: minutes.startMinute,
-      },
-      now,
-    );
-    // Завтрашний самовывоз, до которого ещё больше часа, в сегодняшнем дне
-    // не показывается: выборка взяла его только ради проверки порога.
-    if (withNextDayPickups && !pickupSoon && deliveryDate !== null && deliveryDate > date) {
-      continue;
-    }
-    const participation = row.routeOrders[0];
-    queueOrders.push({
-      id: row.id,
-      externalName: row.externalName,
-      deliveryDate,
-      startMinute: minutes.startMinute,
-      endMinute: minutes.endMinute,
-      route: participation === undefined ? null : (routes.get(participation.route.id) ?? null),
-      routePosition: participation?.position ?? null,
-      pickupSoon,
-    });
-  }
+  const trimFutureNonPickup = !mine && !supervisorSearch && query.day === 'today';
+  const queueOrders = buildQueueOrders(rows, routes, { date, trimFutureNonPickup }, now);
 
   const byId = new Map(rows.map((row) => [row.id, row]));
   // Порядок считается по ПОЛНОЙ выборке, и только потом берётся страница:

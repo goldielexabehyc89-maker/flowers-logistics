@@ -70,6 +70,7 @@ async function availableFlorists(tx: TransactionClient): Promise<{ id: string; u
 export async function dispatchFloristsTx(
   tx: TransactionClient,
   now: Date = new Date(),
+  operationsStartDate?: string | undefined,
 ): Promise<number> {
   {
     // Сериализуем весь прогон: два параллельных запуска не спорят за заказы.
@@ -85,7 +86,9 @@ export async function dispatchFloristsTx(
       return 0;
     }
 
-    const orderIds = await listDispatchableOrderIds(tx, now);
+    // Кандидаты раздачи — ТОТ ЖЕ список и порядок, что видит руководитель в
+    // свободной очереди: одна функция, одна граница операций, одна сортировка.
+    const orderIds = await listDispatchableOrderIds(tx, now, operationsStartDate);
     if (orderIds.length === 0) {
       return 0;
     }
@@ -124,16 +127,26 @@ export async function dispatchFloristsTx(
 }
 
 /** Раздаёт заказы в собственной транзакции (прямой вызов и тесты). */
-export async function dispatchFlorists(db: Database, now: Date = new Date()): Promise<number> {
-  return db.$transaction((tx) => dispatchFloristsTx(tx, now));
+export async function dispatchFlorists(
+  db: Database,
+  now: Date = new Date(),
+  operationsStartDate?: string | undefined,
+): Promise<number> {
+  return db.$transaction((tx) => dispatchFloristsTx(tx, now, operationsStartDate));
 }
 
-/** Обработчик outbox: запускает распределение в транзакции воркера. */
-export function createDispatchHandler(): OutboxHandler {
+/**
+ * Обработчик outbox: запускает распределение в транзакции воркера.
+ *
+ * Граница операций передаётся из конфигурации (`config.OPERATIONS_START_DATE`) —
+ * ровно та же, что у свободной очереди в маршрутах. Так кандидаты раздачи и
+ * видимая очередь строятся по одному и тому же набору заказов.
+ */
+export function createDispatchHandler(operationsStartDate: string): OutboxHandler {
   return async (_message, tx) => {
     if (tx === undefined) {
       return;
     }
-    await dispatchFloristsTx(tx);
+    await dispatchFloristsTx(tx, new Date(), operationsStartDate);
   };
 }
