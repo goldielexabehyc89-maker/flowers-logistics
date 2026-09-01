@@ -18,14 +18,17 @@ import { useAuth } from '../../auth/AuthContext';
 import { Button, Modal } from '../../ui/components';
 import { subscribeRealtimeEvents } from '../../realtime/event-bus';
 import { type NotificationView } from './notifications';
-import { NotificationBody, ReassemblyDialog } from './NotificationParts';
+import { NotificationBody, ReassemblyDialog, RefusalDialog } from './NotificationParts';
 
 export function NotificationPopups(): React.JSX.Element | null {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
   const queryClient = useQueryClient();
   const [queue, setQueue] = useState<string[]>([]);
   const shownRef = useRef<Set<string>>(new Set());
   const [reassembly, setReassembly] = useState<NotificationView | null>(null);
+  const [refusal, setRefusal] = useState<NotificationView | null>(null);
+  const canDecideRefusal =
+    user?.roles.includes('ADMIN') === true || user?.roles.includes('SUPERVISOR') === true;
 
   useEffect(() => {
     return subscribeRealtimeEvents((event, data) => {
@@ -91,6 +94,19 @@ export function NotificationPopups(): React.JSX.Element | null {
     );
   }
 
+  // Диалог решения по отказу — так же поверх окна и с переходом к следующему.
+  if (refusal !== null) {
+    return (
+      <RefusalDialog
+        item={refusal}
+        onClose={() => {
+          setRefusal(null);
+          advance();
+        }}
+      />
+    );
+  }
+
   // Уведомление могло исчезнуть (например, удалено в тестах) — просто пропускаем.
   if (detail.isError || (detail.isSuccess && item === null)) {
     advance();
@@ -101,11 +117,16 @@ export function NotificationPopups(): React.JSX.Element | null {
   }
 
   const offersReassembly = item.kind === 'COMPOSITION_AFTER_ASSEMBLY' && item.decision === null;
+  const offersRefusal =
+    canDecideRefusal && item.kind === 'REFUSAL_REQUEST' && item.refusal?.state === 'PENDING';
+  const isRefusal = item.kind === 'REFUSAL_REQUEST';
 
   return (
     <Modal
       open
-      title={`Изменён заказ ${item.orderNumber}`}
+      title={
+        isRefusal ? `Отказ по заказу ${item.orderNumber}` : `Изменён заказ ${item.orderNumber}`
+      }
       onClose={() => {
         void dismiss();
       }}
@@ -122,8 +143,13 @@ export function NotificationPopups(): React.JSX.Element | null {
               На пересборку
             </Button>
           )}
+          {offersRefusal && (
+            <Button variant="primary" data-testid="popup-refusal" onClick={() => setRefusal(item)}>
+              Решить по отказу
+            </Button>
+          )}
           <Button
-            variant={offersReassembly ? 'ghost' : 'primary'}
+            variant={offersReassembly || offersRefusal ? 'ghost' : 'primary'}
             data-testid="popup-ok"
             onClick={() => void dismiss()}
           >

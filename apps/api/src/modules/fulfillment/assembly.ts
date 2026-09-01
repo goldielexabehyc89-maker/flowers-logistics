@@ -41,6 +41,7 @@ import {
   type StoredPosition,
 } from './print-form.js';
 import { recordQueueAvailability } from './stats-capture.js';
+import { enqueueDispatch } from './dispatch-trigger.js';
 import {
   FULFILLMENT_AUDIENCE,
   MIN_REASON_LENGTH,
@@ -350,6 +351,8 @@ export async function releaseOrder(
     await publishProcessEvent(tx, order, actor.userId);
     // Возврат вернул строку в общую очередь — фиксируем переход доступности.
     await recordQueueAvailability(tx);
+    // Освободившийся заказ и освободившийся флорист — повод раздать заново.
+    await enqueueDispatch(tx);
     return toResult(order);
   });
 }
@@ -564,6 +567,63 @@ export async function assignReassemblyTx(
       floristId: input.floristId,
     };
   }
+}
+
+/**
+ * Атомарное автоматическое назначение свободного заказа флористу.
+ *
+ * Система (а не сам флорист) назначает верхний заказ выбранному флористу: то же
+ * условное состояние `NEW → IN_ASSEMBLY`, что и у ручного захвата, поэтому два
+ * распределения не выдадут один заказ дважды — проигравший получит 0 строк и
+ * `false`. «Собран» остаётся отдельным действием (`assembleOrder`). Автор в
+ * аудите — система (`null`). Смена флориста должна быть заблокирована ВЫШЕ по
+ * стеку (порядок блокировок: FloristShift → DeliveryOrder).
+ */
+export async function autoAssignTx(
+  tx: TransactionClient,
+  input: { orderId: string; floristId: string; shiftId: string },
+  context: RequestContext,
+): Promise<boolean> {
+  const updated = await tx.deliveryOrder.updateMany({
+    where: {
+      id: input.orderId,
+      fulfillmentProcessState: 'NEW',
+      fulfillmentAssigneeId: null,
+      ...ASSEMBLABLE,
+    },
+    data: {
+      fulfillmentProcessState: 'IN_ASSEMBLY',
+      fulfillmentAssigneeId: input.floristId,
+      fulfillmentAssignedAt: new Date(),
+      fulfillmentShiftId: input.shiftId,
+      fulfillmentProcessVersion: { increment: 1 },
+    },
+  });
+  if (updated.count === 0) {
+    return false;
+  }
+
+  const order = await readOrder(tx, input.orderId);
+  await writeAudit(tx, {
+    action: 'ORDER_FULFILLMENT_AUTO_ASSIGNED',
+    entityType: 'DeliveryOrder',
+    entityId: order.id,
+    actorUserId: null,
+    actorRoles: [],
+    newValue: {
+      processState: order.fulfillmentProcessState,
+      processVersion: order.fulfillmentProcessVersion,
+      toUserId: input.floristId,
+    },
+    ip: context.ip,
+    userAgent: context.userAgent,
+    source: 'worker',
+  });
+  // Заказ уходит из свободной очереди у руководителей и появляется карточкой
+  // у назначенного флориста — оба без перезагрузки.
+  await publishProcessEvent(tx, order, null);
+  await publishPersonalProcessEvent(tx, order, input.floristId);
+  return true;
 }
 
 export interface AssembleResult extends ProcessResult {
@@ -856,6 +916,8 @@ export async function assembleOrder(
 
     await publishProcessEvent(tx, after, actor.userId);
     await publishPrintEvent(tx, job.id, order.id, 'CREATED');
+    // Флорист освободился после «Собран» — раздаём ему следующий заказ.
+    await enqueueDispatch(tx);
 
     return {
       ...toResult(after),
@@ -994,7 +1056,7 @@ async function writeProcessAudit(
 async function publishProcessEvent(
   tx: TransactionClient,
   order: StoredOrder,
-  actorUserId: string,
+  actorUserId: string | null,
 ): Promise<void> {
   await publishRealtimeEvent(tx, {
     topic: 'order.fulfillment_process_changed',

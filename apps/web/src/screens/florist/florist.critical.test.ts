@@ -15,6 +15,7 @@ import {
   QUEUE_PAGE_SIZE,
   QUEUE_POLL_MS,
   availableActions,
+  dispatchStateLabel,
   groupAssembledByDate,
   groupQueueByRoute,
   queueGroupTitle,
@@ -500,5 +501,41 @@ describe('группировка собранных по датам достав
 
     const groups = groupAssembledByDate(items, counts, NOW);
     expect(groups.map((group) => group.date)).toEqual(['2027-03-10']);
+  });
+});
+
+describe('состояние авто-раздачи (dispatchStateLabel)', () => {
+  const base = {
+    mode: 'AUTO' as const,
+    hasActiveShift: true,
+    ready: false,
+    readyAt: null,
+    finishAfterCurrent: false,
+    waitingCount: 0,
+    activeOrder: null,
+    pendingRefusal: false,
+  };
+
+  it('без смены — просит открыть смену раньше любой другой причины', () => {
+    expect(dispatchStateLabel({ ...base, hasActiveShift: false, ready: true })).toContain('смену');
+  });
+
+  it('назначенный заказ важнее готовности; открытый отказ виден отдельно', () => {
+    const order = { id: 'o', number: 'A-1', reassembly: false };
+    expect(dispatchStateLabel({ ...base, activeOrder: order })).toContain('текущий');
+    expect(dispatchStateLabel({ ...base, activeOrder: order, pendingRefusal: true })).toContain(
+      'решени',
+    );
+  });
+
+  it('готов и есть очередь — ждём; готов и пусто — свободных нет', () => {
+    expect(dispatchStateLabel({ ...base, ready: true, waitingCount: 3 })).toContain('Ожидаем');
+    expect(dispatchStateLabel({ ...base, ready: true, waitingCount: 0 })).toContain('пока нет');
+  });
+
+  it('снята готовность «после текущего» — новых заказов не будет', () => {
+    expect(dispatchStateLabel({ ...base, ready: true, finishAfterCurrent: true })).toContain(
+      'новых',
+    );
   });
 });

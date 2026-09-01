@@ -413,6 +413,26 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
   'notification.created': [['notifications'], ['notifications-count']],
   'notification.decided': [['notifications'], ['notifications-count']],
   'notification.read': [['notifications'], ['notifications-count']],
+
+  /*
+   * Режим распределения (ручной/авто) переключил администратор.
+   *
+   * Флорист обязан сразу увидеть либо очередь (ручной), либо панель «Готов
+   * к заказам» (авто) — не перезагружая. Экран настроек у второго
+   * администратора тоже показывает актуальное значение.
+   */
+  'settings.florist_dispatch_mode_changed': [
+    ['florist-dispatch'],
+    ...FLORIST_SCREEN,
+    ['planning-settings'],
+  ],
+  /*
+   * Готовность флориста, «закончить после текущего», запрос/итог отказа.
+   *
+   * Обновляет собственную панель флориста и сводку смен у руководителя —
+   * без перезагрузки. Списки заказов трогают отдельные события назначения.
+   */
+  'florist.dispatch_changed': [['florist-dispatch'], ['florist-shifts'], ['florist-queue']],
 };
 
 /**

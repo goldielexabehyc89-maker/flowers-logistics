@@ -54,6 +54,44 @@ export interface NotificationView {
     assemblyRound: number;
     decidedAt: string;
   } | null;
+  /**
+   * Запрос отказа флориста (kind `REFUSAL_REQUEST`). Отдельное событие со своим
+   * набором решений: Отклонить / Подтвердить отказ / Передать другому.
+   */
+  refusal: {
+    state: 'PENDING' | 'REJECTED' | 'APPROVED' | 'TRANSFERRED';
+    reason: string;
+    comment: string | null;
+    floristId: string;
+    floristName: string;
+    decidedByName: string | null;
+    decidedAt: string | null;
+  } | null;
+}
+
+/** Причина отказа словами. Совпадает с серверным enum `OrderRefusalReason`. */
+const REFUSAL_REASON_LABEL: Record<string, string> = {
+  INSUFFICIENT_GOODS: 'Не хватает товара',
+  CANNOT_ASSEMBLE: 'Не могу собрать',
+  PHYSICALLY_IMPOSSIBLE: 'Физически невозможно',
+  WRONG_ASSIGNMENT: 'Ошибочное назначение',
+  OTHER: 'Другое',
+};
+
+export function refusalReasonLabel(reason: string): string {
+  return REFUSAL_REASON_LABEL[reason] ?? reason;
+}
+
+/** Итог решения по отказу словами. `PENDING` — ещё ждёт руководителя. */
+const REFUSAL_STATE_LABEL: Record<string, string> = {
+  PENDING: 'Ожидает решения',
+  REJECTED: 'Отклонён',
+  APPROVED: 'Отказ подтверждён',
+  TRANSFERRED: 'Передан другому',
+};
+
+export function refusalStateLabel(state: string): string {
+  return REFUSAL_STATE_LABEL[state] ?? state;
 }
 
 export interface NotificationsResponse {

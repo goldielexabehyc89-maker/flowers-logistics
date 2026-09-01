@@ -74,6 +74,7 @@
   },
   "overrides": {
     "deepmerge-ts": "8.0.1",
-    "uuid": "14.0.1"
+    "uuid": "14.0.1",
+    "mysql2": "3.24.2"
   }
 }

@@ -2229,6 +2229,100 @@ test('флорист на телефоне: без нижней полосы, к
   await context.close();
 });
 
+/*
+ * Автоматическая раздача заказов флористам.
+ *
+ * Доказываем то, что нельзя проверить одним сервером: администратор включает
+ * авто-режим в «Настройках»; у флориста ПРОПАДАЕТ вкладка «Очередь» — свободный
+ * список ему больше не отдаётся — и вместо неё появляется панель «Готов к
+ * заказам»; готовность требует смены и переключается без перезагрузки.
+ *
+ * Режим — глобальная настройка. Тест ОБЯЗАН вернуть ручной режим в `finally`,
+ * иначе он оставил бы авто-раздачу включённой всем следующим проверкам в общем
+ * бэкенде и на стенде.
+ */
+test('флорист: авто-раздача — режим скрывает очередь и включает готовность', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const FLORIST_PIN = '3928';
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  try {
+    // 1. Администратор включает авто-раздачу в «Настройках».
+    await openSection(page, 'Настройки');
+    const modeToggle = page.getByTestId('dispatch-mode-toggle');
+    await expect(modeToggle).toBeVisible();
+    if (!(await modeToggle.isChecked())) {
+      await clickAndAwait(page, modeToggle, 'PUT', '/api/settings/florist/dispatch-mode');
+    }
+    await expect(modeToggle).toBeChecked();
+
+    // 2. Администратор заводит флориста.
+    const floristPhone = uniquePhone();
+    await openSection(page, 'Сотрудники и курьеры');
+    await page.getByRole('button', { name: 'Добавить' }).click();
+    await page.getByLabel('ФИО').fill('Флорист авто-раздачи');
+    await page.getByLabel('Телефон').fill(floristPhone);
+    await page.getByRole('checkbox', { name: 'Флорист' }).check();
+    const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+    if (await courierRole.isChecked()) {
+      await courierRole.uncheck();
+    }
+    await page.getByRole('button', { name: 'Создать' }).click();
+    const floristCode = (await page.locator('.one-time-code').innerText()).trim();
+    expect(floristCode).toMatch(/^\d{4}$/);
+    await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+    // 3. Флорист входит: очереди нет, есть «Моя работа» с панелью готовности.
+    const context = await browser.newContext();
+    const floristPage = await context.newPage();
+    await activate(floristPage, floristPhone, floristCode, FLORIST_PIN);
+    await expect(floristPage.getByRole('heading', { name: 'Флорист', level: 1 })).toBeVisible();
+
+    // Свободная очередь скрыта у флориста (сервер её не отдаёт) — вкладки нет.
+    await expect(floristPage.getByTestId('florist-tab-queue')).toHaveCount(0);
+    await expect(floristPage.getByTestId('florist-tab-auto')).toBeVisible();
+    const panel = floristPage.getByTestId('florist-auto');
+    await expect(panel).toBeVisible();
+
+    // 4. Готовность требует смены: пока её нет, кнопка выключена.
+    const readyButton = floristPage.getByTestId('florist-auto-ready');
+    await expect(readyButton).toBeDisabled();
+
+    // 5. Смена начинается явно, после чего готовность доступна.
+    await clickAndAwait(
+      floristPage,
+      floristPage.getByTestId('shift-start'),
+      'POST',
+      '/api/florist/shift/start',
+    );
+    await expect(readyButton).toBeEnabled();
+
+    // 6. «Готов к заказам» переключается без перезагрузки.
+    await clickAndAwait(floristPage, readyButton, 'POST', '/api/florist/dispatch/ready');
+    await expect(readyButton).toHaveText('Не готов к заказам');
+    // «Закончить после текущего» появляется, когда есть что заканчивать.
+    await expect(floristPage.getByTestId('florist-auto-finish')).toBeVisible();
+    await expect(floristPage.getByTestId('florist-auto-state')).toBeVisible();
+
+    await context.close();
+  } finally {
+    // Возврат ручного режима обязателен: настройка глобальная.
+    await openSection(page, 'Настройки');
+    const modeToggle = page.getByTestId('dispatch-mode-toggle');
+    if (await modeToggle.isChecked()) {
+      await clickAndAwait(page, modeToggle, 'PUT', '/api/settings/florist/dispatch-mode');
+    }
+    await expect(modeToggle).not.toBeChecked();
+  }
+});
+
 test('складские ячейки: администратор управляет справочником, кладовщик только смотрит', async ({
   page,
   request,

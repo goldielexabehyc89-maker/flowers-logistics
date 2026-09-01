@@ -59,6 +59,12 @@ interface PlanningSettingsResponse {
    * заказ и ячейку руками, менеджер самовывоза выдаёт без сканирования.
    */
   warehouseManualEntry: { value: { enabled: boolean }; version: number };
+  /**
+   * Автоматическая раздача заказов флористам. `auto=false` — ручная очередь
+   * (умолчание). В авто-режиме сервер не отдаёт флористу свободную очередь и
+   * назначает заказы сам.
+   */
+  floristDispatchMode: { value: { auto: boolean }; version: number };
   shift: { value: { startMinute: number; endMinute: number } | null; version: number };
   serviceTime: {
     value: { carMinutes: number; footMinutes: number };
@@ -166,6 +172,26 @@ export function PlanningSettings(): React.JSX.Element {
     onSuccess: async (_result, enabled) => {
       await invalidate();
       showToast(enabled ? 'Ручной ввод разрешён' : 'Ручной ввод запрещён', 'success');
+    },
+    onError: (error: unknown) => showToast(errorText(error), 'error'),
+  });
+
+  /**
+   * Переключение режима раздачи заказов флористам.
+   *
+   * Меняет только администратор; управляющий и логист видят значение, но не
+   * правят (сервер тоже проверяет роль). Версия защищает от слепой перезаписи
+   * чужого переключения.
+   */
+  const saveDispatchMode = useMutation({
+    mutationFn: (auto: boolean) =>
+      client.put('/api/settings/florist/dispatch-mode', {
+        value: { auto },
+        expectedVersion: settings.data?.floristDispatchMode.version ?? 0,
+      }),
+    onSuccess: async (_result, auto) => {
+      await invalidate();
+      showToast(auto ? 'Автоматическая раздача включена' : 'Возвращена ручная очередь', 'success');
     },
     onError: (error: unknown) => showToast(errorText(error), 'error'),
   });
@@ -337,6 +363,30 @@ export function PlanningSettings(): React.JSX.Element {
             </p>
             {isAdmin ? null : (
               <p className="muted text-sm" data-testid="manual-entry-readonly">
+                Изменяет только администратор.
+              </p>
+            )}
+          </div>
+
+          <div className="stack" data-testid="dispatch-mode-form">
+            <h3>Раздача заказов флористам</h3>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                data-testid="dispatch-mode-toggle"
+                checked={settings.data.floristDispatchMode.value.auto}
+                disabled={!isAdmin || saveDispatchMode.isPending}
+                onChange={(event) => saveDispatchMode.mutate(event.target.checked)}
+              />
+              Раздавать заказы автоматически (без свободной очереди у флориста)
+            </label>
+            <p className="muted text-sm">
+              В автоматическом режиме флорист не выбирает заказ из очереди — нажимает «Готов» и
+              получает назначение. Свободная очередь при этом скрывается у флориста на сервере. По
+              умолчанию режим ручной.
+            </p>
+            {isAdmin ? null : (
+              <p className="muted text-sm" data-testid="dispatch-mode-readonly">
                 Изменяет только администратор.
               </p>
             )}

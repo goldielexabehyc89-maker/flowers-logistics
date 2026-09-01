@@ -62,6 +62,7 @@ import {
 } from '../../ui/components';
 import { OrderCardPanel } from './OrderCardPanel';
 import { StatisticsTab } from './StatisticsTab';
+import { AutoDispatchPanel } from './AutoDispatchPanel';
 import {
   QUEUE_PAGE_SIZE,
   QUEUE_POLL_MS,
@@ -78,6 +79,8 @@ import {
   processLabel,
   routeLabel,
   safeFileName,
+  type FloristDispatchStatus,
+  type RefusalReason,
   type FloristOption,
   type PrintPointOption,
   type FloristTab,
@@ -123,7 +126,6 @@ export function FloristScreen(): React.JSX.Element {
   // Статистика — строго администратор: управляющему её не видно, сервер тоже
   // отвечает 403. Поэтому отдельный признак, а не общий `isAdmin`.
   const isStrictAdmin = user?.roles.includes('ADMIN') === true;
-  const visibleTabs = isStrictAdmin ? [...TABS, STATS_TAB] : TABS;
   const viewerId = user?.id ?? '';
 
   const [tab, setTab] = useState<FloristTab>('queue');
@@ -172,6 +174,43 @@ export function FloristScreen(): React.JSX.Element {
     queryFn: () => client.get<ShiftResponse>('/api/florist/shift'),
   });
 
+  /**
+   * Режим распределения и рабочее место авто-раздачи.
+   *
+   * Запрос без `enabled`: режим нужен на всех вкладках, чтобы решить, показывать
+   * ли «Очередь» или панель «Готов к заказам». Опрашивается коротко по той же
+   * причине, что и очередь: число ожидающих меняется от хода времени, а не
+   * только от событий.
+   */
+  const dispatchQuery = useQuery({
+    queryKey: ['florist-dispatch'],
+    queryFn: () => client.get<FloristDispatchStatus>('/api/florist/dispatch/status'),
+    refetchInterval: QUEUE_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+  const dispatchStatus = dispatchQuery.data ?? null;
+  /*
+   * Авто-режим прячет свободную очередь ТОЛЬКО у флориста.
+   *
+   * Администратор и управляющий видят очередь и в авто-режиме: сервер отдаёт им
+   * её для разбора, и скрывать вкладку у них было бы неверно. Признак —
+   * `isAdmin`, тот же, что открывает административные действия флориста.
+   */
+  const autoForFlorist = dispatchStatus?.mode === 'AUTO' && !isAdmin;
+
+  /*
+   * Набор вкладок.
+   *
+   * В авто-режиме у флориста «Очередь» заменяется на «Мою работу» — панель
+   * готовности и текущего заказа: свободного списка ему всё равно не отдадут.
+   * У администратора и управляющего очередь остаётся всегда. «Статистика» —
+   * строго администратору и последней.
+   */
+  const baseTabs: { key: FloristTab; title: string }[] = autoForFlorist
+    ? [{ key: 'auto', title: 'Моя работа' }, ...TABS.filter((item) => item.key !== 'queue')]
+    : TABS;
+  const visibleTabs = isStrictAdmin ? [...baseTabs, STATS_TAB] : baseTabs;
+
   /** Адрес страницы списка. Один на обе группы: условия у них общие. */
   function queueUrl(group: 'work' | 'assembled', offset: number): string {
     return (
@@ -196,7 +235,7 @@ export function FloristScreen(): React.JSX.Element {
     queryFn: ({ pageParam }) => client.get<QueueResponse>(queueUrl('work', pageParam)),
     initialPageParam: 0,
     getNextPageParam: (last: QueueResponse) => nextPageOffset(last) ?? undefined,
-    enabled: tab !== 'print' && tab !== 'stats',
+    enabled: tab === 'queue' || tab === 'mine',
     /*
      * Короткий опрос очереди — из-за хода времени, а не из-за событий.
      *
@@ -247,6 +286,21 @@ export function FloristScreen(): React.JSX.Element {
   useEffect(() => {
     setAssembledOpen(false);
   }, [tab, day]);
+
+  /*
+   * Переключение режима не должно оставлять человека на исчезнувшей вкладке.
+   *
+   * Флорист перешёл в авто — «Очередь» пропала, ведём его на «Мою работу».
+   * Вернулись в ручной — панели больше нет, возвращаем на «Очередь». Событие
+   * приходит по realtime, поэтому вкладка меняется без перезагрузки.
+   */
+  useEffect(() => {
+    if (autoForFlorist && tab === 'queue') {
+      setTab('auto');
+    } else if (!autoForFlorist && tab === 'auto') {
+      setTab('queue');
+    }
+  }, [autoForFlorist, tab]);
 
   useEffect(() => {
     queryClient.setQueriesData<unknown>({ queryKey: ['florist-print-jobs'] }, collapseToFirstPage);
@@ -360,6 +414,7 @@ export function FloristScreen(): React.JSX.Element {
       queryClient.invalidateQueries({ queryKey: ['florist-shift'] }),
       queryClient.invalidateQueries({ queryKey: ['florist-shifts'] }),
       queryClient.invalidateQueries({ queryKey: ['florist-florists'] }),
+      queryClient.invalidateQueries({ queryKey: ['florist-dispatch'] }),
     ]);
   }
 
@@ -582,6 +637,19 @@ export function FloristScreen(): React.JSX.Element {
               ? `Смена с ${formatMoscowDateTime(shift.startedAt)} · в сборке: ${shift.openAssignments}`
               : 'Смена не начата. Без неё новый заказ взять нельзя.'}
           </p>
+          {/*
+            Режим раздачи — только руководителю (администратору и управляющему).
+            Управляющий его не меняет (это делает администратор в «Настройках»),
+            но видеть текущий режим обязан: от него зависит вся работа флористов.
+          */}
+          {isAdmin && dispatchStatus !== null && (
+            <p className="muted text-sm" data-testid="florist-dispatch-mode">
+              Раздача заказов:{' '}
+              <strong>
+                {dispatchStatus.mode === 'AUTO' ? 'автоматическая' : 'ручная очередь'}
+              </strong>
+            </p>
+          )}
         </div>
         <div className="row">
           {hasActiveShift ? (
@@ -793,7 +861,41 @@ export function FloristScreen(): React.JSX.Element {
 
       {tab === 'stats' && isStrictAdmin && <StatisticsTab />}
 
-      {tab !== 'print' && tab !== 'stats' && (
+      {tab === 'auto' && dispatchStatus !== null && (
+        <AutoDispatchPanel
+          status={dispatchStatus}
+          pending={action.isPending}
+          refusalPending={action.isPending}
+          onToggleReady={(ready) =>
+            action.mutate({
+              path: '/api/florist/dispatch/ready',
+              body: { ready },
+              success: ready ? 'Готов к заказам' : 'Готовность снята',
+            })
+          }
+          onToggleFinish={(value) =>
+            action.mutate({
+              path: '/api/florist/dispatch/finish-after-current',
+              body: { value },
+              success: value ? 'Закончите после текущего заказа' : 'Автораздача возобновлена',
+            })
+          }
+          onOpenOrder={setOpenOrderId}
+          onRequestRefusal={(input: {
+            orderId: string;
+            reason: RefusalReason;
+            comment: string | null;
+          }) =>
+            action.mutate({
+              path: `/api/florist/orders/${input.orderId}/refusal`,
+              body: { reason: input.reason, comment: input.comment },
+              success: 'Запрос отказа отправлен руководителю',
+            })
+          }
+        />
+      )}
+
+      {(tab === 'queue' || tab === 'mine') && (
         <div className="florist__filters card">
           {/*
             День выбирается только в «Очереди».
@@ -852,16 +954,16 @@ export function FloristScreen(): React.JSX.Element {
         </div>
       )}
 
-      {tab !== 'print' && tab !== 'stats' && queueQuery.isPending && (
+      {(tab === 'queue' || tab === 'mine') && queueQuery.isPending && (
         <LoadingState title="Загружаем очередь…" />
       )}
-      {tab !== 'print' && tab !== 'stats' && queueQuery.isError && (
+      {(tab === 'queue' || tab === 'mine') && queueQuery.isError && (
         <ErrorState
           description="Очередь не загрузилась."
           onRetry={() => void queueQuery.refetch()}
         />
       )}
-      {tab !== 'print' && tab !== 'stats' && queueQuery.isSuccess && queueItems.length === 0 && (
+      {(tab === 'queue' || tab === 'mine') && queueQuery.isSuccess && queueItems.length === 0 && (
         <EmptyState
           title={
             search !== ''
@@ -895,8 +997,7 @@ export function FloristScreen(): React.JSX.Element {
         не видел, сколько ему осталось до отгрузки. Порядок групп задаёт
         сервер: раньше время первой остановки — выше лист.
       */}
-      {tab !== 'print' &&
-        tab !== 'stats' &&
+      {(tab === 'queue' || tab === 'mine') &&
         queueQuery.isSuccess &&
         queueItems.length > 0 &&
         groupQueueByRoute(queueItems).map((group) => (
@@ -925,7 +1026,7 @@ export function FloristScreen(): React.JSX.Element {
        * и заказ, оставшийся за границей страницы, просто не существует для того,
        * кто на него смотрит.
        */}
-      {tab !== 'print' && tab !== 'stats' && queueQuery.isSuccess && queueItems.length > 0 && (
+      {(tab === 'queue' || tab === 'mine') && queueQuery.isSuccess && queueItems.length > 0 && (
         <div className="florist__more">
           <span className="muted text-sm" data-testid="florist-queue-count">
             {pageSummary(queueItems.length, queueTotal)}

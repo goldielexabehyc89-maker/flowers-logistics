@@ -16,6 +16,7 @@ import { createMaintenanceRunner } from './platform/maintenance.js';
 import { createNotifier } from './modules/realtime/notifier.js';
 import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
+import { createDispatchHandler } from './modules/fulfillment/dispatch.js';
 import { MoyskladClient } from './modules/integrations/moysklad/client.js';
 import { createMoyskladOrderStateHandler } from './modules/integrations/moysklad/state-sync.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
         logger,
         enabled: config.MOYSKLAD_ORDER_STATE_SYNC_ENABLED,
       }),
+      // Автораспределение заказов флористам: раздаёт свободные заказы готовым.
+      'florist.dispatch': createDispatchHandler(),
     },
   });
   outbox.start();

@@ -48,6 +48,7 @@
 import { moscowToday, shiftCalendarDate } from '@fl/shared';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import type { Database } from '../../platform/db.js';
+import type { TransactionClient } from '../auth/sessions.js';
 import type { OrderFulfillmentProcessState } from '../../generated/prisma/enums.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { OPERATIONS_START_DATE } from '../orders/operations-window.js';
@@ -59,6 +60,7 @@ import {
   type PageRequest,
 } from './paging.js';
 import { isPickupMethod } from '../pickup/views.js';
+import { readFloristDispatchMode } from '../settings/service.js';
 import {
   effectiveMinutes,
   isOverdue,
@@ -440,9 +442,73 @@ export async function countActiveAssignments(
   });
 }
 
+/**
+ * Заказы, доступные автоматическому распределению, в ТОМ ЖЕ порядке, что и
+ * свободная очередь: сегодня и просроченные, свободные (`NEW`) и пригодные по
+ * действующим правилам. Возвращает идентификаторы сверху вниз — верхний
+ * назначается первым. Отдельной клиентской сортировки нет: используется
+ * `sortQueue`, как и в очереди флориста.
+ */
+export async function listDispatchableOrderIds(
+  db: Database | TransactionClient,
+  now: Date = new Date(),
+): Promise<string[]> {
+  const date = resolveQueueDate('today', now);
+  const context = {
+    viewDate: date,
+    todayMoscow: moscowToday(now),
+    nowMinuteMoscow: moscowMinuteOfDay(now),
+  };
+  const scopeWhere = buildScopeWhere({
+    date,
+    includePast: true,
+    assigneeId: null,
+    search: null,
+    operationsStartDate: undefined,
+  });
+
+  const rows = await db.deliveryOrder.findMany({
+    where: { ...scopeWhere, fulfillmentProcessState: 'NEW' },
+    select: orderSelect(),
+  });
+  const routes = await readRoutes(db, rows);
+
+  const queueOrders: QueueOrder[] = [];
+  for (const row of rows) {
+    const minutes = effectiveMinutes(row);
+    const deliveryDate = row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate);
+    const pickupSoon = isPickupSoon(
+      {
+        pickup: isPickupMethod(row),
+        cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
+        deliveryDate,
+        startMinute: minutes.startMinute,
+      },
+      now,
+    );
+    // Завтрашний самовывоз, до которого ещё больше часа, распределять рано.
+    if (!pickupSoon && deliveryDate !== null && deliveryDate > date) {
+      continue;
+    }
+    const participation = row.routeOrders[0];
+    queueOrders.push({
+      id: row.id,
+      externalName: row.externalName,
+      deliveryDate,
+      startMinute: minutes.startMinute,
+      endMinute: minutes.endMinute,
+      route: participation === undefined ? null : (routes.get(participation.route.id) ?? null),
+      routePosition: participation?.position ?? null,
+      pickupSoon,
+    });
+  }
+
+  return sortQueue(queueOrders, context).map((entry) => entry.id);
+}
+
 export async function readQueue(
   db: Database,
-  viewer: { userId: string },
+  viewer: { userId: string; roles?: readonly string[] },
   query: QueueQuery,
   now: Date = new Date(),
 ): Promise<QueueResult> {
@@ -522,6 +588,39 @@ export async function readQueue(
       total: assembledTotal ?? 0,
       byDate: assembledByDate ?? [],
     });
+  }
+
+  /*
+   * Автоматический режим прячет свободную очередь от флориста НА СЕРВЕРЕ.
+   *
+   * В AUTO система назначает заказы сама, поэтому флорист не должен получать
+   * карточки свободной очереди даже запросом API — только своё назначение
+   * («Мои заказы»). Руководители (ADMIN/SUPERVISOR) видят очередь всегда.
+   * Скрытие вкладки на клиенте — лишь удобство, защита здесь.
+   */
+  if (!mine) {
+    const roles = viewer.roles ?? [];
+    const supervises = roles.includes('ADMIN') || roles.includes('SUPERVISOR');
+    if (!supervises) {
+      const mode = await readFloristDispatchMode(db);
+      if (mode.value.auto) {
+        return {
+          day: query.day,
+          deliveryDate: date,
+          scope: query.scope,
+          group,
+          includeAssigned: query.includeAssigned,
+          search,
+          assembledTotal,
+          assembledByDate,
+          items: [],
+          total: 0,
+          limit: page.limit,
+          offset: page.offset,
+          hasMore: false,
+        };
+      }
+    }
   }
 
   const states: OrderFulfillmentProcessState[] = mine
@@ -748,7 +847,7 @@ function hasChangedSinceClaim(row: {
  * переупорядочивалась бы сама собой в течение дня.
  */
 async function readRoutes(
-  db: Database,
+  db: Database | TransactionClient,
   rows: readonly { routeOrders: readonly { route: { id: string } }[] }[],
 ): Promise<Map<string, QueueRoute>> {
   const routeIds = [

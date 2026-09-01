@@ -21,6 +21,7 @@ import {
   listReassemblyFlorists,
   markRead,
 } from './service.js';
+import { decideRefusal } from '../fulfillment/dispatch-florist.js';
 
 const idParamSchema = z.object({ id: z.string().uuid() });
 const listQuerySchema = z.object({
@@ -28,6 +29,12 @@ const listQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 const reassemblySchema = z.object({ floristId: z.string().uuid() });
+/** Решения по отказу принимают только руководители. */
+const REFUSAL_DECISION_ROLES = ['ADMIN', 'SUPERVISOR'] as const;
+const refusalDecisionSchema = z.object({
+  action: z.enum(['REJECT', 'APPROVE', 'TRANSFER']),
+  floristId: z.string().uuid().nullish(),
+});
 
 export interface NotificationDeps {
   db: Database;
@@ -97,6 +104,24 @@ export function registerNotificationRoutes(app: AppServer, deps: NotificationDep
       deps.db,
       actor,
       { notificationId: id, floristId: body.floristId },
+      contextOf(request),
+    );
+  });
+
+  /**
+   * Решение по запросу отказа: только ADMIN и SUPERVISOR.
+   *
+   * Логист видит уведомление, но решает руководитель — сервер проверяет роль,
+   * а не скрытая кнопка.
+   */
+  app.post('/api/logistics/notifications/:id/refusal-decision', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, REFUSAL_DECISION_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    const body = refusalDecisionSchema.parse(request.body);
+    return decideRefusal(
+      deps.db,
+      actor,
+      { notificationId: id, action: body.action, floristId: body.floristId ?? null },
       contextOf(request),
     );
   });

@@ -21,6 +21,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { diffSnapshots, snapshotHash, type FulfillmentSnapshot } from './composition.js';
+import { enqueueDispatch } from './dispatch-trigger.js';
 
 /**
  * Кто видит производственные события.
@@ -370,6 +371,10 @@ async function confirmed(
     payload: { orderId: order.id, changedFields, first },
     audienceRoles: [...FULFILLMENT_AUDIENCE],
   });
+
+  // Состав подтверждён — заказ мог стать пригодным к работе (NEW + READY).
+  // Ставим распределение в очередь: движок сам решит, есть ли что раздать.
+  await enqueueDispatch(tx);
 
   return { outcome: first ? 'IMPORTED' : 'CHANGED', changedFields };
 }
