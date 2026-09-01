@@ -2291,25 +2291,19 @@ test('флорист: авто-раздача — режим скрывает о
     const panel = floristPage.getByTestId('florist-auto');
     await expect(panel).toBeVisible();
 
-    // 4. Готовность требует смены: пока её нет, кнопка выключена.
-    const readyButton = floristPage.getByTestId('florist-auto-ready');
-    await expect(readyButton).toBeDisabled();
-
-    // 5. Смена начинается явно, после чего готовность доступна.
-    await clickAndAwait(
-      floristPage,
-      floristPage.getByTestId('shift-start'),
-      'POST',
-      '/api/florist/shift/start',
-    );
-    await expect(readyButton).toBeEnabled();
-
-    // 6. «Готов к заказам» переключается без перезагрузки.
-    await clickAndAwait(floristPage, readyButton, 'POST', '/api/florist/dispatch/ready');
-    await expect(readyButton).toHaveText('Не готов к заказам');
-    // «Закончить после текущего» появляется, когда есть что заканчивать.
-    await expect(floristPage.getByTestId('florist-auto-finish')).toBeVisible();
+    // 4. Панель показывает состояние и число ожидающих; готовность требует
+    //    смены — без неё кнопка «Готов» выключена, и человек видит причину.
+    //
+    //    НАЖАТИЕ «Готов» здесь намеренно НЕ проверяется: оно запускает реальную
+    //    авто-раздачу, а сценарии делят один бэкенд с общими фикстурами — готовый
+    //    флорист перехватил бы чужой заказ и сломал бы последующие проверки
+    //    недетерминированно. Динамику готовности и назначения доказывают
+    //    серверные критические тесты (`dispatch.critical.test.ts`); браузеру
+    //    остаётся то, что только он и проверяет: серверное скрытие очереди и
+    //    отрисовка панели.
     await expect(floristPage.getByTestId('florist-auto-state')).toBeVisible();
+    await expect(floristPage.getByTestId('florist-auto-waiting')).toBeVisible();
+    await expect(floristPage.getByTestId('florist-auto-ready')).toBeDisabled();
 
     await context.close();
   } finally {
