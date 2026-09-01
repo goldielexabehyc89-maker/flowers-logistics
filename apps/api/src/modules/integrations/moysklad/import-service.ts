@@ -18,6 +18,7 @@ import type { $Enums, Prisma } from '../../../generated/prisma/client.js';
 import type { TransactionClient } from '../../auth/sessions.js';
 import { writeAudit, type AuditAction } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
+import { recordQueueAvailability } from '../../fulfillment/stats-capture.js';
 import { toDateColumn } from './delivery-date.js';
 import { parseMoscow } from './moscow-time.js';
 import { diffSnapshots, snapshotHash, type OrderSnapshot } from './mapper.js';
@@ -216,10 +217,15 @@ export async function applyOrderSnapshot(
       // ни получателя, ни суммы.
       return { outcome: 'SKIPPED_OUT_OF_SCOPE', changedFields: [] };
     }
-    return createOrder(tx, snapshot, now, options);
+    const created = await createOrder(tx, snapshot, now, options);
+    // Импорт мог изменить доступность общей очереди (строка появилась/исчезла).
+    await recordQueueAvailability(tx);
+    return created;
   }
 
-  return updateOrder(tx, existing, snapshot, now, options);
+  const updated = await updateOrder(tx, existing, snapshot, now, options);
+  await recordQueueAvailability(tx);
+  return updated;
 }
 
 /**
