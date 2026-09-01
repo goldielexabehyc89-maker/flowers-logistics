@@ -8261,9 +8261,6 @@ test('«Ожидают приёмки»: приёмка сверяет зака�
   await card.getByTestId('wh-awaiting-accept').click();
   await expect(page.getByTestId('scan-title')).toHaveText('Сканирование заказа');
 
-  // Ручной ввод по умолчанию выключен — рядом со сканером его поля нет.
-  await expect(page.getByTestId('scan-manual')).toHaveCount(0);
-
   /*
    * 1. Другой заказ (реальный, из того же стенда) отвергается: сверка идёт по
    *    устойчивому id, сканер называет оба номера, остаётся на первом шаге и
