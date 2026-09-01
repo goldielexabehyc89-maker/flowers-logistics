@@ -18,7 +18,7 @@ import {
   seedUser,
   type TestContext,
 } from '../auth/testing/harness.js';
-import { buildFloristStatistics } from './statistics.js';
+import { AvailabilityTimeline, buildFloristStatistics } from './statistics.js';
 
 let ctx: TestContext;
 
@@ -121,7 +121,9 @@ describe('агрегация статистики смен', () => {
     expect(withoutQ).toBeGreaterThan(0);
     // Ритм: 2 заказа за 8 часов.
     expect(row?.ordersPerHour).toBe(0.3);
-    expect(stats.accurateFrom).toBe(`2029-05-${day}`);
+    // Граница точного накопления — минимум события доступности (глобальна по
+    // всей базе, поэтому проверяем лишь её наличие, а не конкретную дату).
+    expect(stats.accurateFrom).not.toBeNull();
   });
 
   it('повторная сборка не удваивает уникальный счёт, но добавляет цикл', async () => {
@@ -150,17 +152,14 @@ describe('агрегация статистики смен', () => {
     expect(row?.avgAssemblyMinutes).toBe(20);
   });
 
-  it('до первого события доступности простой неполон, деньги без суммы — неполны', async () => {
+  it('сборка без зафиксированной суммы делает деньги неполными, но не портит прочее', async () => {
     const florist = await seedUser(ctx.db, { roles: ['FLORIST'] });
-    // День РАНЬШЕ самого первого события доступности (04-е): простой этой смены
-    // приходится на зону «неизвестно» и честно помечается неполным.
     const day = '02';
     const order = randomUUID();
     await seedShift(florist.id, at(day, '09:00'), at(day, '12:00'));
     await seedAudit('ORDER_FULFILLMENT_CLAIMED', florist.id, order, at(day, '09:30'));
     // Сборка без зафиксированной суммы (как у прежней истории).
     await seedAudit('ORDER_FULFILLMENT_ASSEMBLED', florist.id, order, at(day, '09:50'));
-    // Событий доступности за этот день нет вовсе.
 
     const stats = await buildFloristStatistics(ctx.db, {
       from: `2029-05-${day}`,
@@ -168,8 +167,6 @@ describe('агрегация статистики смен', () => {
       now: at(day, '13:00'),
     });
     const row = stats.rows.find((r) => r.floristId === florist.id);
-    expect(row?.idleIncomplete).toBe(true);
-    expect(row?.idleWithQueueMinutes).toBeNull();
     expect(row?.moneyIncomplete).toBe(true);
     expect(row?.totalSumMinor).toBeNull();
     expect(row?.rublesPerHour).toBeNull();
@@ -196,5 +193,39 @@ describe('агрегация статистики смен', () => {
     // Вся смена (240 минут) отнесена к 10-му и не появляется у 11-го.
     expect(onStart.rows.find((r) => r.floristId === florist.id)?.shiftDurationMinutes).toBe(240);
     expect(onNext.rows.find((r) => r.floristId === florist.id)).toBeUndefined();
+  });
+});
+
+describe('доступность очереди: разбиение простоя и зона «неизвестно»', () => {
+  const t = (ms: number): Date => new Date(ms);
+
+  it('без событий весь промежуток — «неизвестно» (простой неполон)', () => {
+    const timeline = new AvailabilityTimeline([]);
+    const split = timeline.split({ start: 0, end: 100 });
+    expect(split.unknown).toBe(100);
+    expect(split.withQueue).toBe(0);
+    expect(split.withoutQueue).toBe(0);
+  });
+
+  it('до первого перехода — «неизвестно», после — по состоянию', () => {
+    // Переход в доступна@100, недоступна@300.
+    const timeline = new AvailabilityTimeline([
+      { occurredAt: t(100), available: true },
+      { occurredAt: t(300), available: false },
+    ]);
+    // Промежуток [0, 400]: [0,100) неизвестно, [100,300) с очередью, [300,400) без.
+    const split = timeline.split({ start: 0, end: 400 });
+    expect(split.unknown).toBe(100);
+    expect(split.withQueue).toBe(200);
+    expect(split.withoutQueue).toBe(100);
+  });
+
+  it('состояние держится между переходами', () => {
+    const timeline = new AvailabilityTimeline([{ occurredAt: t(0), available: false }]);
+    // Единственный переход «недоступна@0»: весь [10, 60] — без очереди, без «неизвестно».
+    const split = timeline.split({ start: 10, end: 60 });
+    expect(split.unknown).toBe(0);
+    expect(split.withQueue).toBe(0);
+    expect(split.withoutQueue).toBe(50);
   });
 });

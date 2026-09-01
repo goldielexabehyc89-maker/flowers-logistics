@@ -142,7 +142,7 @@ function subtractSpans(base: Span, busy: Span[]): Span[] {
 }
 
 /** Ступенчатая доступность очереди из переходов, с зоной «неизвестно» до первого. */
-class AvailabilityTimeline {
+export class AvailabilityTimeline {
   private readonly events: { t: number; available: boolean }[];
   readonly firstAt: number | null;
 
