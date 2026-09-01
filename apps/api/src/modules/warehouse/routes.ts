@@ -77,7 +77,12 @@ const listQuerySchema = z.object({
 const awaitingQuerySchema = z.object({
   /** Поиск по номеру: частичное совпадение без учёта регистра. */
   search: z.string().trim().max(120).optional(),
-  /** Только счётчик вкладки: список не грузится, отдаётся полное число. */
+  /** Тип отбора для чипа. `all` (или отсутствие) — весь набор. */
+  method: z.enum(['all', 'delivery', 'pickup']).optional(),
+  /** Страница списка. Без потери строк: полный набор доступен догрузкой. */
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  /** Только счётчики: список не грузится, отдаются числа. */
   countOnly: z
     .enum(['0', '1'])
     .optional()
@@ -491,7 +496,13 @@ export async function registerWarehouseFlowRoutes(
   app.get('/api/warehouse/awaiting', async (request) => {
     await authenticateWithRoles(request, deps, AWAITING_INTAKE_ROLES);
     const query = awaitingQuerySchema.parse(request.query);
-    return listAwaitingIntake(deps.db, { search: query.search, countOnly: query.countOnly });
+    return listAwaitingIntake(deps.db, {
+      search: query.search,
+      method: query.method === 'all' ? undefined : query.method,
+      limit: query.limit,
+      offset: query.offset,
+      countOnly: query.countOnly,
+    });
   });
 
   /**

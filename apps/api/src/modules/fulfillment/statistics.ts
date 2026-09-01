@@ -45,10 +45,10 @@ export interface FloristStatRow extends FloristStatComparison {
   floristId: string;
   floristName: string;
   /**
-   * Московская дата начала САМОЙ РАННЕЙ смены флориста в периоде (`ГГГГ-ММ-ДД`).
-   * Показывается под именем. `null` — смен в периоде нет (в строку не попадает).
+   * Московский день начала смены (`ГГГГ-ММ-ДД`), к которому относится строка.
+   * Одна строка — один флорист за один день; несколько дней не суммируются.
    */
-  firstShiftDate: string | null;
+  day: string;
   /** Простой известен неполно: часть периода — до начала точного накопления. */
   idleIncomplete: boolean;
   /** Деньги известны неполно: часть сборок сделана до начала накопления денег. */
@@ -414,33 +414,57 @@ export async function buildFloristStatistics(
   });
   const nameById = new Map(users.map((u) => [u.id, u.fullName]));
 
-  const inPeriod = (d: Date, from: string, to: string): boolean => {
-    const day = moscowDate(d);
-    return day >= from && day <= to;
-  };
+  type DayStat = FloristStatComparison & { idleUnknownMs: number; moneyIncomplete: boolean };
+  type DayEntry = { stat: DayStat; floristId: string; day: string };
 
-  const rowsForPeriod = (
-    from: string,
-    to: string,
-  ): Map<string, FloristStatComparison & { idleUnknownMs: number; moneyIncomplete: boolean }> => {
-    const result = new Map<
-      string,
-      FloristStatComparison & { idleUnknownMs: number; moneyIncomplete: boolean }
-    >();
+  /** Событие относится к смене, если попало в её интервал (открытая — до now). */
+  const withinShifts = (t: number, spans: Span[]): boolean =>
+    spans.some((s) => t >= s.start && t < s.end);
+
+  /**
+   * Строки за период, СГРУППИРОВАННЫЕ по (флорист, московский день начала смены).
+   *
+   * Каждая смена относится к дате СВОЕГО начала — даже если перешла через
+   * полночь: её сборки после полуночи считаются в день старта, потому что
+   * события относятся к смене по её интервалу, а не по московскому дню события.
+   * Несколько дней одного флориста НЕ суммируются: у каждого дня своя строка.
+   */
+  const rowsForPeriod = (from: string, to: string): Map<string, DayEntry> => {
+    const result = new Map<string, DayEntry>();
     for (const floristId of floristIds) {
-      const fShifts = shifts.filter(
-        (s) => s.userId === floristId && inPeriod(s.startedAt, from, to),
-      );
-      if (fShifts.length === 0) {
-        continue;
+      const byDay = new Map<string, ShiftRow[]>();
+      for (const s of shifts) {
+        if (s.userId !== floristId) {
+          continue;
+        }
+        const day = moscowDate(s.startedAt);
+        if (day < from || day > to) {
+          continue;
+        }
+        const list = byDay.get(day);
+        if (list === undefined) {
+          byDay.set(day, [s]);
+        } else {
+          list.push(s);
+        }
       }
-      const fClaims = claims.filter(
-        (c) => c.actorUserId === floristId && inPeriod(c.occurredAt, from, to),
-      );
-      const fAssembles = assembles.filter(
-        (a) => a.actorUserId === floristId && inPeriod(a.occurredAt, from, to),
-      );
-      result.set(floristId, computeForFlorist(fShifts, fClaims, fAssembles, timeline, now));
+      for (const [day, dayShifts] of byDay) {
+        const spans: Span[] = dayShifts.map((s) => ({
+          start: s.startedAt.getTime(),
+          end: (s.closedAt ?? new Date(now)).getTime(),
+        }));
+        const fClaims = claims.filter(
+          (c) => c.actorUserId === floristId && withinShifts(c.occurredAt.getTime(), spans),
+        );
+        const fAssembles = assembles.filter(
+          (a) => a.actorUserId === floristId && withinShifts(a.occurredAt.getTime(), spans),
+        );
+        result.set(`${floristId}|${day}`, {
+          stat: computeForFlorist(dayShifts, fClaims, fAssembles, timeline, now),
+          floristId,
+          day,
+        });
+      }
     }
     return result;
   };
@@ -448,42 +472,30 @@ export async function buildFloristStatistics(
   const current = rowsForPeriod(input.from, input.to);
   const previous = rowsForPeriod(prevFrom, prevTo);
 
-  // Дата начала самой ранней смены периода — по московскому времени, для показа
-  // под именем. Считается по тем же сменам, что и статистика.
-  const firstShiftById = new Map<string, Date>();
-  for (const s of shifts) {
-    if (!inPeriod(s.startedAt, input.from, input.to)) {
-      continue;
-    }
-    const existing = firstShiftById.get(s.userId);
-    if (existing === undefined || s.startedAt < existing) {
-      firstShiftById.set(s.userId, s.startedAt);
-    }
-  }
+  const zeroComparison: FloristStatComparison = {
+    shiftDurationMinutes: 0,
+    workingMinutes: 0,
+    idleWithQueueMinutes: null,
+    idleWithoutQueueMinutes: null,
+    uniqueAssembledCount: 0,
+    reassemblyCount: 0,
+    totalSumMinor: null,
+    ordersPerHour: 0,
+    rublesPerHour: null,
+    avgAssemblyMinutes: null,
+    medianAssemblyMinutes: null,
+  };
 
   const rows: FloristStatRow[] = [];
-  for (const [floristId, stat] of current) {
+  for (const { stat, floristId, day } of current.values()) {
     const dur = stat.shiftDurationMinutes;
-    const prev = previous.get(floristId);
-    const zeroComparison: FloristStatComparison = {
-      shiftDurationMinutes: 0,
-      workingMinutes: 0,
-      idleWithQueueMinutes: null,
-      idleWithoutQueueMinutes: null,
-      uniqueAssembledCount: 0,
-      reassemblyCount: 0,
-      totalSumMinor: null,
-      ordersPerHour: 0,
-      rublesPerHour: null,
-      avgAssemblyMinutes: null,
-      medianAssemblyMinutes: null,
-    };
-
-    const firstShift = firstShiftById.get(floristId);
+    // Сравнение с равным предыдущим периодом — тот же флорист в СОответствующий
+    // день, сдвинутый на длину периода назад (день D против дня D − длина).
+    const prevEntry = previous.get(`${floristId}|${addDays(day, -length)}`);
     rows.push({
       floristId,
       floristName: nameById.get(floristId) ?? 'Флорист удалён из справочника',
-      firstShiftDate: firstShift === undefined ? null : moscowDate(firstShift),
+      day,
       shiftDurationMinutes: stat.shiftDurationMinutes,
       workingMinutes: stat.workingMinutes,
       idleWithQueueMinutes: stat.idleWithQueueMinutes,
@@ -505,10 +517,13 @@ export async function buildFloristStatistics(
       rublesPerHour: stat.rublesPerHour,
       avgAssemblyMinutes: stat.avgAssemblyMinutes,
       medianAssemblyMinutes: stat.medianAssemblyMinutes,
-      comparison: prev ?? zeroComparison,
+      comparison: prevEntry?.stat ?? zeroComparison,
     });
   }
-  rows.sort((a, b) => a.floristName.localeCompare(b.floristName, 'ru'));
+  // Дни — от нового к старому; внутри дня — по имени флориста.
+  rows.sort((a, b) =>
+    a.day < b.day ? 1 : a.day > b.day ? -1 : a.floristName.localeCompare(b.floristName, 'ru'),
+  );
 
   return {
     period: { from: input.from, to: input.to },

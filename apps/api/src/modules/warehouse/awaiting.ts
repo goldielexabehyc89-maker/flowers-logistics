@@ -1,29 +1,39 @@
 /**
- * «Ожидают приёмки»: собранные флористом заказы, которых ещё нет на полке.
+ * «Ожидают приёмки»: собранные флористом заказы, ТЕКУЩИЙ круг сборки которых
+ * склад ещё ни разу не принимал в ячейку.
  *
  * Это ЭКРАН склада, а не производственный статус. Он показывает, какие коробки
- * склад должен принять: заказ собран, но действующего размещения в ячейке у
- * него нет. Чтение состояния сборки здесь допустимо (как на доске сборки) —
- * это подсказка «что ждать», а не разрешение на операцию. Сама приёмка идёт
- * прежним физическим путём `receiveOrder` и никакого нового статуса не заводит.
+ * склад должен принять. Сама приёмка идёт прежним путём `receiveOrder` и нового
+ * статуса не заводит.
  *
- * Порядок и полный счётчик считает сервер по всему отбору: сортировка на
- * клиенте упорядочила бы лишь загруженную страницу, а счётчик по странице
- * обманывал бы кладовщика.
+ * ПОЧЕМУ «ТЕКУЩИЙ КРУГ», А НЕ «НЕТ АКТИВНОГО РАЗМЕЩЕНИЯ».
+ *
+ * Прежнее условие проверяло лишь отсутствие ДЕЙСТВУЮЩЕГО размещения. Но после
+ * выдачи курьеру (или любого освобождения) размещение освобождается, а заказ
+ * остаётся `ASSEMBLED` — и уже принятый, уехавший заказ снова попадал в список.
+ * Так набралось 612 строк вместо реальных ожидающих.
+ *
+ * Правильное условие: текущий КРУГ сборки ещё ни разу не был в ячейке. Круг
+ * несут и заказ, и размещение (`assemblyRound` есть у обоих). Заказ показывается,
+ * только если нет НИ ОДНОГО размещения его текущего круга — ни активного, ни
+ * освобождённого. Историческое размещение прошлого круга приёмке новой
+ * пересборки не мешает: у него другой круг. Backfill не нужен — колонка
+ * `OrderPlacement.assemblyRound` уже существует и заполняется при размещении.
  */
 
 import { Prisma } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { normalizePageRequest, pageInfo, type PageInfo } from '../fulfillment/paging.js';
 
 const PICKUP_METHOD_ID = MOYSKLAD_IDS.deliveryMethodPickup;
 
 /** Роли, которым виден раздел и его API. Право проверяет сервер. */
 export const AWAITING_INTAKE_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'] as const;
 
-/** Верхний предел выдачи: набор «ожидают приёмки» невелик по своей природе. */
-const MAX_AWAITING = 500;
+/** Тип получения для фильтра-чипа. `undefined` — весь набор. */
+export type AwaitingMethod = 'delivery' | 'pickup';
 
 export interface AwaitingIntakeCard {
   orderId: string;
@@ -43,104 +53,153 @@ export interface AwaitingIntakeCard {
   positionCount: number;
 }
 
-export interface AwaitingIntakePage {
-  /** Число заказов текущего отбора: с учётом поиска, если он задан. */
-  total: number;
+/** Счётчики чипов «Все / Доставка / Самовывоз» — считает сервер по условию. */
+export interface AwaitingTypeCounts {
+  all: number;
+  delivery: number;
+  pickup: number;
+}
+
+export interface AwaitingIntakeResult {
   /**
-   * Полное число ожидающих приёмки — БЕЗ поиска.
-   *
-   * Это счётчик вкладки: он отвечает на вопрос «сколько всего коробок ждёт
-   * приёмки», а не «сколько нашлось по строке поиска». Считается тем же
-   * бизнес-условием, что и список, поэтому со списком не расходится.
+   * Счётчики чипов: учитывают поиск, но НЕ тип. Считаются сервером по тому же
+   * бизнес-условию, что и список, поэтому чипы, вкладка и список не расходятся
+   * и не упираются в молчаливый предел.
    */
+  counts: AwaitingTypeCounts;
+  /** Полное число ожидающих БЕЗ поиска — счётчик вкладки. */
   fullTotal: number;
+  /** Страница текущего отбора (поиск + тип): total/limit/offset/hasMore. */
+  page: PageInfo;
   items: AwaitingIntakeCard[];
 }
 
-/**
- * Отбор целиком пишется SQL.
- *
- * Условия: заказ собран флористом (`ASSEMBLED`), нет действующего размещения
- * в ячейке, не отменён источником и логистом, не выдан, не отменён локально и
- * не списан. Возврат флористу отсюда уходит сам: у возвращённого состояние
- * сборки уже не `ASSEMBLED`. Повторно собранный (REASSEMBLY) снова становится
- * `ASSEMBLED` без действующего размещения — и снова появляется здесь.
- */
-function filterSql(search: string | undefined): Prisma.Sql {
-  const term = (search ?? '').trim();
-  const searchClause =
-    term === ''
-      ? Prisma.empty
-      : Prisma.sql`AND o."externalName" ILIKE ${`%${term.replace(/[\\%_]/g, (m) => `\\${m}`)}%`}`;
+export interface ListAwaitingInput {
+  search?: string | undefined;
+  method?: AwaitingMethod | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+  /** Только счётчики: список не грузится. Для бейджа вкладки и чипов. */
+  countOnly?: boolean | undefined;
+}
 
+/**
+ * Базовое условие отбора (без поиска и без типа).
+ *
+ * Собран; в производственной области; источник не архивирован и не пропал; не
+ * отменён источником и логистом; не выдан на самовывозе; не отменён локально;
+ * не списан; и ТЕКУЩИЙ круг сборки ещё не размещался (нет размещения этого
+ * круга — ни активного, ни освобождённого).
+ */
+function baseFilter(): Prisma.Sql {
   return Prisma.sql`
     FROM "DeliveryOrder" AS o
     WHERE o."fulfillmentProcessState" = 'ASSEMBLED'
+      AND o."fulfillmentInScope"
+      AND NOT o."sourceArchived"
+      AND NOT o."sourceMissing"
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM "OrderPlacement" p
-        WHERE p."orderId" = o."id" AND p."releasedAt" IS NULL
-      )
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupCancellation" c WHERE c."orderId" = o."id")
-      -- Списанные не показываем: у заказа есть изъятие «в списание» и нет
-      -- действующего размещения — принимать нечего. Снова принятый на полку
-      -- получит активное размещение и уйдёт отсюда как размещённый.
+      -- Текущий круг сборки УЖЕ был в ячейке: есть его размещение — активное
+      -- (стоит на полке) или освобождённое (выдан курьеру, перенос, списание).
+      -- Круг несёт и заказ, и размещение (assemblyRound), поэтому историческое
+      -- размещение прошлого круга приёмке новой пересборки не мешает: у него
+      -- другой круг. Списание тоже сюда попадает: у списанного круг размещался.
       AND NOT EXISTS (
         SELECT 1 FROM "OrderPlacement" p
-        WHERE p."orderId" = o."id" AND p."withdrawReason" = 'WRITE_OFF'
+        WHERE p."orderId" = o."id" AND p."assemblyRound" = o."assemblyRound"
       )
-      ${searchClause}
   `;
+}
+
+function searchClause(search: string): Prisma.Sql {
+  if (search === '') {
+    return Prisma.empty;
+  }
+  const escaped = search.replace(/[\\%_]/g, (m) => `\\${m}`);
+  return Prisma.sql`AND o."externalName" ILIKE ${`%${escaped}%`}`;
+}
+
+function methodClause(method: AwaitingMethod | undefined): Prisma.Sql {
+  if (method === 'pickup') {
+    return Prisma.sql`AND o."deliveryMethodId" = ${PICKUP_METHOD_ID}::uuid`;
+  }
+  if (method === 'delivery') {
+    return Prisma.sql`AND o."deliveryMethodId" IS DISTINCT FROM ${PICKUP_METHOD_ID}::uuid`;
+  }
+  return Prisma.empty;
 }
 
 export async function listAwaitingIntake(
   db: Database,
-  input: { search?: string | undefined; countOnly?: boolean } = {},
-): Promise<AwaitingIntakePage> {
-  const term = (input.search ?? '').trim();
-  const filter = filterSql(input.search);
+  input: ListAwaitingInput = {},
+): Promise<AwaitingIntakeResult> {
+  const search = (input.search ?? '').trim();
+  const base = baseFilter();
+  const sClause = searchClause(search);
 
-  // Полный счётчик считается без поиска тем же условием, что и список: с пустым
-  // поиском это тот же запрос, поэтому берём его один раз.
-  const fullFilter = term === '' ? filter : filterSql(undefined);
+  // Счётчики по типу, с учётом поиска: одним группированным запросом.
+  const grouped = await db.$queryRaw<{ is_pickup: boolean; n: bigint }[]>`
+    SELECT (o."deliveryMethodId" = ${PICKUP_METHOD_ID}::uuid) AS is_pickup, count(*)::bigint AS n
+    ${base} ${sClause}
+    GROUP BY 1
+  `;
+  let pickup = 0;
+  let delivery = 0;
+  for (const row of grouped) {
+    if (row.is_pickup) {
+      pickup = Number(row.n);
+    } else {
+      delivery = Number(row.n);
+    }
+  }
+  const counts: AwaitingTypeCounts = { all: pickup + delivery, delivery, pickup };
 
-  const counted = await db.$queryRaw<
-    {
-      total: bigint;
-    }[]
-  >`SELECT count(*)::bigint AS "total" ${filter}`;
-  const total = Number(counted[0]?.total ?? 0n);
+  // Бейдж вкладки — без поиска. При пустом поиске это уже посчитано.
   const fullTotal =
-    term === ''
-      ? total
+    search === ''
+      ? counts.all
       : Number(
-          (
-            await db.$queryRaw<
-              { total: bigint }[]
-            >`SELECT count(*)::bigint AS "total" ${fullFilter}`
-          )[0]?.total ?? 0n,
+          (await db.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS "n" ${base}`)[0]?.n ?? 0n,
         );
 
-  // Счётчик вкладки не грузит список: он обновляется на каждое складское
-  // событие, и тащить ради числа до пятисот строк — впустую.
+  const request = normalizePageRequest({
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+    ...(input.offset === undefined ? {} : { offset: input.offset }),
+  });
+
   if (input.countOnly === true) {
-    return { total, fullTotal, items: [] };
+    return { counts, fullTotal, page: pageInfo(request, counts.all, 0), items: [] };
   }
 
-  // Порядок: по дате доставки (без даты — в конец), затем по номеру. Тем же
-  // ключом группируется экран, поэтому сортировку держит запрос.
+  // Итог текущего отбора (поиск + тип) выводится из уже посчитанных счётчиков.
+  const total =
+    input.method === 'pickup'
+      ? counts.pickup
+      : input.method === 'delivery'
+        ? counts.delivery
+        : counts.all;
+
+  const mClause = methodClause(input.method);
+  // Порядок целиком выражается SQL, поэтому LIMIT/OFFSET над ним даёт ту же
+  // страницу, что и срез в памяти. Новые даты выше старых; без даты — в конец;
+  // внутри даты позднее собранное выше; далее устойчиво по номеру и id.
   const ordered = await db.$queryRaw<{ id: string }[]>`
-      SELECT o."id"
-      ${filter}
-      ORDER BY COALESCE(o."deliveryDate", DATE '9999-12-31') ASC, o."externalName" ASC, o."id" ASC
-      LIMIT ${MAX_AWAITING}
-    `;
+    SELECT o."id"
+    ${base} ${sClause} ${mClause}
+    ORDER BY (o."deliveryDate" IS NULL) ASC,
+             o."deliveryDate" DESC,
+             o."fulfillmentAssembledAt" DESC NULLS LAST,
+             o."externalName" ASC,
+             o."id" ASC
+    LIMIT ${request.limit} OFFSET ${request.offset}
+  `;
 
   const ids = ordered.map((row) => row.id);
   if (ids.length === 0) {
-    return { total, fullTotal, items: [] };
+    return { counts, fullTotal, page: pageInfo(request, total, 0), items: [] };
   }
 
   const orders = await db.deliveryOrder.findMany({
@@ -179,5 +238,5 @@ export async function listAwaitingIntake(
       positionCount: order._count.fulfillmentPositions,
     }));
 
-  return { total, fullTotal, items };
+  return { counts, fullTotal, page: pageInfo(request, total, items.length), items };
 }

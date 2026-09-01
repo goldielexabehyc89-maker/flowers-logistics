@@ -294,9 +294,11 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   });
 
   app.get('/api/florist/orders/:id', async (request) => {
-    await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
-    return { card: await readOrderCard(deps.db, id) };
+    return {
+      card: await readOrderCard(deps.db, id, { userId: actor.userId, roles: actor.roles }),
+    };
   });
 
   // --- Автоматическое распределение (рабочее место флориста) ----------------

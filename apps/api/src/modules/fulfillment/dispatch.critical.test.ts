@@ -491,8 +491,11 @@ describe('застрявший назначенный заказ', () => {
     // Заказ исчез из МоегоСклада уже ПОСЛЕ того, как попал в работу.
     await makeOutOfScope(order.id);
 
-    // 1. Карточка открывается (не 404) и помечена как вне области.
-    const card = await readOrderCard(ctx.db, order.id);
+    // 1. Карточка открывается у назначенного флориста (не 404) и помечена.
+    const card = await readOrderCard(ctx.db, order.id, {
+      userId: florist.userId,
+      roles: ['FLORIST'],
+    });
     expect(card.process.state).toBe('IN_ASSEMBLY');
     expect(card.process.assignee?.id).toBe(florist.userId);
     expect(card.outOfScope).toBe(true);
@@ -522,7 +525,9 @@ describe('застрявший назначенный заказ', () => {
     const order = await seedOrder();
     await isolate([]); // остаётся NEW, но выводим из области ниже
     await makeOutOfScope(order.id);
-    await expect(readOrderCard(ctx.db, order.id)).rejects.toThrow();
+    await expect(
+      readOrderCard(ctx.db, order.id, { userId: admin.userId, roles: ['ADMIN'] }),
+    ).rejects.toThrow();
   });
 });
 
@@ -613,7 +618,10 @@ describe('регрессия: два флориста, отказ, возвра�
         found.items.some((item) => item.id === order.id),
         `найден ${order.number}`,
       ).toBe(true);
-      const card = await readOrderCard(ctx.db, order.id);
+      const card = await readOrderCard(ctx.db, order.id, {
+        userId: admin.userId,
+        roles: ['ADMIN'],
+      });
       expect(card.number).toBe(order.number);
     }
   });
@@ -647,5 +655,61 @@ describe('догоняющие окна отказов', () => {
     );
     const afterDecision = await listPendingRefusalNotificationIds(ctx.db);
     expect(afterDecision).not.toContain(notificationId);
+  });
+});
+
+describe('доступ к застрявшему заказу вне области (доменное чтение карточки)', () => {
+  it('владелец, ADMIN и SUPERVISOR видят; посторонний флорист получает 404', async () => {
+    const owner = await floristReady('Владелец застрявшего', NOW);
+    const order = await seedOrder();
+    await claimOrder(ctx.db, owner, order.id, CONTEXT);
+    await makeOutOfScope(order.id);
+
+    // Владелец (назначенный флорист) — видит.
+    const ownCard = await readOrderCard(ctx.db, order.id, {
+      userId: owner.userId,
+      roles: ['FLORIST'],
+    });
+    expect(ownCard.outOfScope).toBe(true);
+    expect(ownCard.process.assignee?.id).toBe(owner.userId);
+
+    // ADMIN и SUPERVISOR — видят.
+    await expect(
+      readOrderCard(ctx.db, order.id, { userId: admin.userId, roles: ['ADMIN'] }),
+    ).resolves.toMatchObject({ number: order.number });
+    const supervisor = await seedUser(ctx.db, { roles: ['SUPERVISOR'], fullName: 'Управляющий' });
+    await expect(
+      readOrderCard(ctx.db, order.id, { userId: supervisor.id, roles: ['SUPERVISOR'] }),
+    ).resolves.toMatchObject({ number: order.number });
+
+    // Посторонний флорист — 404, даже зная UUID.
+    const stranger = await seedUser(ctx.db, { roles: ['FLORIST'], fullName: 'Посторонний' });
+    await expect(
+      readOrderCard(ctx.db, order.id, { userId: stranger.id, roles: ['FLORIST'] }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('единая финальная проверка кандидата', () => {
+  it('отменённый кандидат не назначается, берётся следующий подходящий', async () => {
+    const cancelled = await seedOrder(600);
+    const valid = await seedOrder(660);
+    // Отмена в источнике: заказ ещё числится свободным и в области, но собирать
+    // его нельзя — финальная проверка назначения обязана его отклонить.
+    await ctx.db.deliveryOrder.update({
+      where: { id: cancelled.id },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    const florist = await floristOnShift('Финальная проверка');
+    await isolate([cancelled.id, valid.id]);
+    await makeReady(florist.shiftId, NOW);
+    await setAuto(true);
+
+    await dispatchFlorists(ctx.db, NOW);
+
+    // Верхний по очереди — отменённый; он НЕ назначен (конкретная причина —
+    // отмена), а флорист получил следующий подходящий заказ.
+    expect((await processState(cancelled.id)).fulfillmentProcessState).toBe('NEW');
+    expect((await processState(valid.id)).fulfillmentAssigneeId).toBe(florist.userId);
   });
 });

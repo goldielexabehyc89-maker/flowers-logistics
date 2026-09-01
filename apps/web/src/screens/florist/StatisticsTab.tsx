@@ -30,8 +30,8 @@ interface Comparison {
 interface StatRow extends Comparison {
   floristId: string;
   floristName: string;
-  /** Московская дата начала самой ранней смены периода — под именем. */
-  firstShiftDate: string | null;
+  /** Московский день начала смены — под именем. Одна строка = флорист за день. */
+  day: string;
   idleIncomplete: boolean;
   moneyIncomplete: boolean;
   idleWithQueuePercent: number | null;
@@ -218,7 +218,7 @@ export function StatisticsTab(): React.JSX.Element {
               const incomplete = row.idleIncomplete || row.moneyIncomplete;
               return (
                 <article
-                  key={row.floristId}
+                  key={`${row.floristId}|${row.day}`}
                   className={incomplete ? 'stats__row stats__row--incomplete' : 'stats__row'}
                   data-testid="stats-row"
                   data-florist={row.floristId}
@@ -226,7 +226,7 @@ export function StatisticsTab(): React.JSX.Element {
                   <div className="stats__cell stats__cell--start stats__name">
                     <strong>{row.floristName}</strong>
                     <span className="stats__submeta">
-                      {row.firstShiftDate === null ? '—' : formatCalendarDate(row.firstShiftDate)}
+                      {formatCalendarDate(row.day)}
                       {incomplete && (
                         <span className="stats__tag" data-testid="stats-incomplete">
                           {' · неполные'}

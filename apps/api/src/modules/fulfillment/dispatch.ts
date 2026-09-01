@@ -110,7 +110,7 @@ export async function dispatchFloristsTx(
         }
         const ok = await autoAssignTx(
           tx,
-          { orderId, floristId: florist.userId, shiftId: florist.id },
+          { orderId, floristId: florist.userId, shiftId: florist.id, operationsStartDate },
           DISPATCH_CONTEXT,
         );
         // Успех — занят этим флористом; неуспех — заказ уже перехвачен,

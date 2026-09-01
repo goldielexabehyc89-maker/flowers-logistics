@@ -117,6 +117,30 @@ describe('доступные действия', () => {
     ).toBe(true);
   });
 
+  it('заказ вне области: «Собран» недоступен, а возврат остаётся', () => {
+    const stuck = card({
+      outOfScope: true,
+      process: {
+        state: 'IN_ASSEMBLY',
+        version: 1,
+        assignee: { id: VIEWER, fullName: 'Я' },
+        assignedAt: null,
+        assembledAt: null,
+        assembledById: null,
+      },
+    });
+    const actions = availableActions({
+      card: stuck,
+      viewerId: VIEWER,
+      isAdmin: false,
+      hasActiveShift: true,
+    });
+    // Собирать в производство нечего — заказа нет в источнике.
+    expect(actions.canAssemble).toBe(false);
+    // Но увести заказ из работы можно: возврат/освобождение доступно владельцу.
+    expect(actions.canRelease).toBe(true);
+  });
+
   it('после закрытия смены «Собран» и отказ исчезают, а у администратора остаются', () => {
     const mine = card({
       process: {
