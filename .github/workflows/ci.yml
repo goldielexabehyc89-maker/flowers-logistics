@@ -393,7 +393,7 @@ jobs:
           NODE_ENV: production
         run: |
           set -euo pipefail
-          MAP_ARTIFACTS_PATH="${RUNNER_TEMP}/basemap" node apps/api/dist/index.js &
+          MAP_ARTIFACTS_PATH="${RUNNER_TEMP}/basemap" node apps/api/dist/index.js > /tmp/app.log 2>&1 &
           for _ in $(seq 1 60); do
             if curl -fsS --max-time 2 http://127.0.0.1:3000/ready > /dev/null; then exit 0; fi
             sleep 1
@@ -650,6 +650,9 @@ jobs:
           if [ "$found" = "0" ]; then
             echo "снимков страницы нет: отказ произошёл вне браузерной проверки"
           fi
+          echo "::group::app.log (диагностика)"
+          grep -iE "refresh|revoke|reuse|session|401|unauthorized|token|error|warn" /tmp/app.log | tail -80 || true
+          echo "::endgroup::"
 
   secrets-scan:
     name: Запрещённые файлы и поиск секретов
