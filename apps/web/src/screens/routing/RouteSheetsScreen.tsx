@@ -92,6 +92,12 @@ function SheetOrders({
   const { showToast } = useToast();
   /** Заказ, для которого открыто подтверждение удаления из активного листа. */
   const [removeTarget, setRemoveTarget] = useState<{ id: string; number: string } | null>(null);
+  /** Явное подтверждение администратора, что заказ не у курьера. */
+  const [removeAck, setRemoveAck] = useState(false);
+  const closeRemove = (): void => {
+    setRemoveTarget(null);
+    setRemoveAck(false);
+  };
   const card = useQuery({
     queryKey: ['route', routeId],
     queryFn: () => client.get<RouteCardView>(`/api/routes/${routeId}`),
@@ -112,7 +118,7 @@ function SheetOrders({
       }),
     onSuccess: () => {
       showToast('Заказ убран из маршрута и вернулся в «Сделки»', 'success');
-      setRemoveTarget(null);
+      closeRemove();
       void queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
       void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
       void queryClient.invalidateQueries({ queryKey: ['routes'] });
@@ -122,7 +128,7 @@ function SheetOrders({
         (error as { message?: string }).message ?? 'Не удалось убрать заказ из маршрута',
         'error',
       );
-      setRemoveTarget(null);
+      closeRemove();
       void queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
       void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
     },
@@ -202,7 +208,7 @@ function SheetOrders({
       <Modal
         open={removeTarget !== null}
         title="Убрать заказ из маршрута?"
-        onClose={() => setRemoveTarget(null)}
+        onClose={closeRemove}
         dismissible={!removeFromActive.isPending}
         testId="sheet-order-remove-confirm"
       >
@@ -210,13 +216,25 @@ function SheetOrders({
           <div className="stack">
             <p className="text-sm">
               Заказ {removeTarget.number} будет убран из листа {route.number} и вернётся в «Сделки»
-              нераспределённым. Уже выданный курьеру вернётся в «Ожидают приёмки» до повторной
-              приёмки складом — без пересборки и новой печати, если состав не менялся. Ничего не
-              удаляется. Действие доступно только администратору.
+              нераспределённым, а также в «Склад → Ожидают приёмки» для назначения ячейки — без
+              пересборки и новой печати, если состав не менялся. Заказ полностью снимается с
+              курьера; задача возврата ему не создаётся, а возврат на склад кладовщик оформляет
+              обычной приёмкой. Ничего не удаляется. Действие доступно только администратору.
             </p>
+            <label className="row" style={{ gap: '8px', alignItems: 'flex-start' }}>
+              <input
+                type="checkbox"
+                data-testid="sheet-order-remove-ack"
+                checked={removeAck}
+                onChange={(event) => setRemoveAck(event.target.checked)}
+              />
+              <span className="text-sm">
+                Подтверждаю, что заказ фактически не находится у курьера
+              </span>
+            </label>
             <div className="modal__footer">
               <Button
-                onClick={() => setRemoveTarget(null)}
+                onClick={closeRemove}
                 disabled={removeFromActive.isPending}
                 data-testid="sheet-order-remove-dismiss"
               >
@@ -224,7 +242,7 @@ function SheetOrders({
               </Button>
               <Button
                 variant="danger"
-                disabled={removeFromActive.isPending}
+                disabled={removeFromActive.isPending || !removeAck}
                 data-testid="sheet-order-remove-submit"
                 onClick={() =>
                   removeFromActive.mutate({

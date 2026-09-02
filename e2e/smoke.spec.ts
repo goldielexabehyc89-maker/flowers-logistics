@@ -727,6 +727,81 @@ test('Сделки: адрес не обновляет экран на кажд�
   await expect(field).toHaveValue('');
 });
 
+test('Сделки: календарь листает месяц отдельно от выбора дня', async ({ page }: { page: Page }) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await expect(page.getByTestId('deals-workspace')).toBeVisible();
+  await expect(page.getByTestId('deals-list')).toBeVisible();
+
+  // Считаем ТОЛЬКО запросы списка `/api/deals?` (не /map и не /selectable).
+  let listRequests = 0;
+  page.on('request', (request) => {
+    if (request.url().includes('/api/deals?')) {
+      listRequests += 1;
+    }
+  });
+  await page.waitForTimeout(400);
+
+  const trigger = page.getByTestId('deals-day-trigger');
+  const dateBefore = (await trigger.textContent())?.trim() ?? '';
+
+  await trigger.click();
+  await expect(page.getByTestId('deals-calendar')).toBeVisible();
+  const monthLabel = page.getByTestId('deals-cal-month');
+  const titleStart = (await monthLabel.textContent())?.trim() ?? '';
+  const yearOf = (title: string): number => Number(title.split(' ').pop());
+
+  const baseline = listRequests;
+
+  // 1. Границу года берём честно: 13 шагов вперёд гарантированно её пересекают.
+  for (let i = 0; i < 13; i += 1) {
+    await page.getByTestId('deals-cal-next').click();
+  }
+  expect(yearOf((await monthLabel.textContent())?.trim() ?? '')).toBe(yearOf(titleStart) + 1);
+
+  // 2. Пока листаем — дата не менялась, список не перезагружался (он всё ещё на
+  //    экране, а не сменился общим индикатором загрузки), запросов не было.
+  expect((await trigger.textContent())?.trim()).toBe(dateBefore);
+  await expect(page.getByTestId('deals-list')).toBeVisible();
+  expect(listRequests).toBe(baseline);
+
+  // 3. Возврат на один месяц вперёд от старта — выбираем там день.
+  for (let i = 0; i < 12; i += 1) {
+    await page.getByTestId('deals-cal-prev').click();
+  }
+  const titleNext = (await monthLabel.textContent())?.trim() ?? '';
+  expect(titleNext).not.toBe(titleStart); // это следующий месяц, не текущий
+  expect(listRequests).toBe(baseline); // листание по-прежнему без запросов
+
+  // 4. Клик по конкретному дню — РОВНО одно обновление списка, попап закрылся.
+  const before = listRequests;
+  await page.locator('[data-testid="deals-cal-day"][aria-pressed="false"]').first().click();
+  await expect(page.getByTestId('deals-calendar')).toHaveCount(0);
+  await expect.poll(() => listRequests).toBe(before + 1);
+
+  // 5. Календарь не вернулся к текущему месяцу: он открывается на месяце
+  //    ВЫБРАННОГО дня, а не на «сегодня».
+  await trigger.click();
+  expect((await monthLabel.textContent())?.trim()).toBe(titleNext);
+
+  // 6. Мобильная ширина: попап целиком помещается в экран, без горизонтали.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const popup = page.getByTestId('deals-calendar');
+  await expect(popup).toBeVisible();
+  const box = await popup.boundingBox();
+  expect(box).not.toBeNull();
+  if (box !== null) {
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(391);
+  }
+  // Листание и выбор так же доступны на узком экране.
+  await page.getByTestId('deals-cal-next').click();
+  await expect(page.getByTestId('deals-cal-month')).toBeVisible();
+});
+
 test('Сделки: день, поиск, выбор из списка и ручной черновик', async ({ page }: { page: Page }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
   const orderNumber = process.env['E2E_ORDER_NUMBER'] ?? '';
@@ -5834,9 +5909,18 @@ test('маршрутные листы: разделы, курьер, ручна�
    */
   await shippedRow.getByTestId('sheet-expand').click();
   await expect(shippedRow.getByTestId('sheet-orders')).toBeVisible();
-  await expect(
-    shippedRow.locator(`[data-order-number="${own}"]`).getByTestId('sheet-order-remove-active'),
-  ).toBeVisible();
+  await shippedRow
+    .locator(`[data-order-number="${own}"]`)
+    .getByTestId('sheet-order-remove-active')
+    .click();
+  // Подтверждение требует ЯВНОГО согласия «заказ не у курьера»: без галочки
+  // кнопка удаления недоступна. Простого нажатия крестика недостаточно.
+  await expect(page.getByTestId('sheet-order-remove-confirm')).toBeVisible();
+  await expect(page.getByTestId('sheet-order-remove-submit')).toBeDisabled();
+  await page.getByTestId('sheet-order-remove-ack').check();
+  await expect(page.getByTestId('sheet-order-remove-submit')).toBeEnabled();
+  // Дальше сценарий проверяет отмену отгрузки, поэтому заказ не удаляем.
+  await page.getByTestId('sheet-order-remove-dismiss').click();
   await shippedRow.getByTestId('sheet-expand').click();
 
   // 6. Отмена отгрузки без доставленных заказов: обычное подтверждение.

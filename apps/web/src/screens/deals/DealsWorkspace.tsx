@@ -34,6 +34,7 @@ import {
   type AttentionReason,
 } from './deals-view';
 import { DealsMap } from './DealsMap';
+import { DealsCalendar } from './DealsCalendar';
 import { AddressDialog } from './AddressDialog';
 import { CreateRouteDialog } from './CreateRouteDialog';
 import {
@@ -449,14 +450,15 @@ export function DealsWorkspace(): React.JSX.Element {
           */}
           <div className="deals__panel-head">
             <div className="deals__head-row">
-              <TextInput
-                type="date"
-                aria-label="День"
-                className="deals__date"
+              {/*
+                Листание месяца отделено от выбора дня: стрелки календаря меняют
+                только вид, а список/карта перезапрашиваются РОВНО по клику на
+                день (см. DealsCalendar). Так экран не мигает на перелистывании.
+              */}
+              <DealsCalendar
                 value={date}
-                data-testid="deals-day"
-                onChange={(event) => {
-                  setDate(event.target.value);
+                onSelect={(picked) => {
+                  setDate(picked);
                   setPages(1);
                 }}
               />
