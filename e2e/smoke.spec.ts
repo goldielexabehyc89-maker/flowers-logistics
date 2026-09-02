@@ -3602,20 +3602,20 @@ test('отмена из МоегоСклада видна на стадиях, �
   await expect(page.getByTestId('order-window-cancelled')).toContainText('Отменён в МоемСкладе');
   await page.getByRole('button', { name: 'Закрыть' }).first().click();
 
-  // 3. Флорист видит отмену на своём заказе и собирать его не должен.
+  // 3. У флориста отменённого заказа нет вовсе: он убран из работы целиком —
+  //    и из общей очереди, и из «Моих заказов», — а не просто помечен. Собирать
+  //    отменённое незачем, и держать его перед глазами флориста тоже.
   const floristContext = await browser.newContext();
   const floristPage = await floristContext.newPage();
 
   try {
     await login(floristPage, floristPhone, floristPin);
-    // Заказ закреплён за этим флористом, поэтому он живёт во вкладке «Мои
-    // заказы», а не в общей очереди.
     await floristPage.getByRole('button', { name: 'Мои заказы' }).click();
     const floristRow = floristPage.locator(
       `[data-testid="florist-row"][data-order-number="${draftOrder}"]`,
     );
-    await expect(floristRow).toBeVisible();
-    await expect(floristRow).toContainText('Отменён — не собирать');
+    // Заказ отменён в источнике — во вкладке флориста его быть не должно.
+    await expect(floristRow).toHaveCount(0);
 
     // 4. В маршруте заказ тоже помечен, а не исчез молча.
     await page.getByRole('link', { name: 'Маршрутизация' }).first().click();
@@ -3644,7 +3644,8 @@ test('отмена из МоегоСклада видна на стадиях, �
     // 6. Заказ вышел из маршрута сам: прежний черновик не восстанавливается.
     await expect(stop).toHaveCount(0);
 
-    // 7. И у флориста его больше нет: сборка отпущена, заказ снова общий.
+    // 7. У флориста его по-прежнему нет: снятие отмены вернуло заказ общим
+    //    нераспределённым, а не в чью-то личную вкладку.
     await expect(floristRow).toHaveCount(0);
 
     // 8. В «Сделках» заказ вернулся обычным: пометки отмены больше нет.
