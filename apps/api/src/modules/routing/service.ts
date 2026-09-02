@@ -664,6 +664,9 @@ export async function removeFromActiveRoute(
         select: { id: true },
       });
       if (issued !== null) {
+        // Новый круг сборки: заказ вернётся в «Склад → Ожидают приёмки» для
+        // назначения ячейки. Приёмку выполняет кладовщик штатно; заказ остаётся
+        // ASSEMBLED, пересборки и повторной печати нет.
         await tx.deliveryOrder.update({
           where: { id: input.orderId },
           data: { assemblyRound: { increment: 1 } },
@@ -691,6 +694,24 @@ export async function removeFromActiveRoute(
       await bumpVersion(tx, routeId, input.expectedVersion);
     }
     await publishRoute(tx, 'route.updated', routeId, [input.orderId]);
+
+    /*
+     * Прежнего курьера уведомляем ОТДЕЛЬНО и адресно.
+     *
+     * Событие маршрута видят логист, флорист и склад, но не курьер: его экран
+     * «Доставки» перечитывается только по личному событию. Без этого снятый
+     * заказ висел бы у курьера в списке до обновления страницы. Личное событие
+     * инвалидирует и активные доставки, и возвраты — заказ уходит от курьера
+     * сразу, а обязательства «вернуть на склад» у него не появляется (снятие из
+     * листа не создаёт возврата; приёмку выполняет кладовщик штатно).
+     */
+    if (route.courierUserId !== null) {
+      await publishRealtimeEvent(tx, {
+        topic: 'route.updated',
+        payload: { routeId, orderIds: [input.orderId] },
+        audienceUserId: route.courierUserId,
+      });
+    }
 
     return { version: input.expectedVersion + 1, routeCompleted: completed };
   });

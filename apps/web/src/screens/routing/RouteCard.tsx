@@ -178,13 +178,19 @@ export function RouteCard({
 
   /** Заказ, который ADMIN убирает из активного листа (открыто подтверждение). */
   const [removeTarget, setRemoveTarget] = useState<{ id: string; number: string } | null>(null);
+  /** Явное подтверждение администратора, что заказ не у курьера. */
+  const [removeAck, setRemoveAck] = useState(false);
+  const closeRemove = (): void => {
+    setRemoveTarget(null);
+    setRemoveAck(false);
+  };
   const removeFromActive = useMutation({
     mutationFn: (orderId: string) =>
       client.post<RouteCardView>(`/api/routes/${routeId}/orders/${orderId}/remove-from-active`, {
         expectedVersion: route?.version ?? 0,
       }),
     onSuccess: (card) => {
-      setRemoveTarget(null);
+      closeRemove();
       afterSuccess('Заказ убран из маршрута и возвращён в «Сделки»', card);
     },
     onError: handleFailure,
@@ -977,22 +983,35 @@ export function RouteCard({
         open={removeTarget !== null}
         title="Убрать заказ из маршрута"
         testId="route-remove-confirm"
-        onClose={() => setRemoveTarget(null)}
+        onClose={closeRemove}
       >
         <div className="stack">
           <p className="text-sm">
             Убрать заказ <strong>{removeTarget?.number}</strong> из маршрута{' '}
             <strong>{route.number}</strong>? Заказ вернётся в «Логистика → Сделки» как
-            нераспределённый; история, складские движения и прежняя выдача сохранятся.
+            нераспределённый и в «Склад → Ожидают приёмки» для назначения ячейки. Курьеру задача
+            возврата не создаётся: заказ снимается с него полностью, а возврат на склад кладовщик
+            оформляет обычной приёмкой. История и прежняя выдача сохраняются.
           </p>
+          <label className="row" style={{ gap: '8px', alignItems: 'flex-start' }}>
+            <input
+              type="checkbox"
+              data-testid="route-remove-confirm-ack"
+              checked={removeAck}
+              onChange={(event) => setRemoveAck(event.target.checked)}
+            />
+            <span className="text-sm">
+              Подтверждаю, что заказ фактически не находится у курьера
+            </span>
+          </label>
           <div className="modal__footer">
-            <Button onClick={() => setRemoveTarget(null)}>Отмена</Button>
+            <Button onClick={closeRemove}>Отмена</Button>
             <Button
               variant="danger"
               data-testid="route-remove-confirm-submit"
-              disabled={removeFromActive.isPending}
+              disabled={removeFromActive.isPending || !removeAck}
               onClick={() => {
-                if (removeTarget !== null) {
+                if (removeTarget !== null && removeAck) {
                   removeFromActive.mutate(removeTarget.id);
                 }
               }}

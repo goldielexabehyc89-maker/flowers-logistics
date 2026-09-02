@@ -183,6 +183,141 @@
   width: 168px;
 }
 
+/* --- Календарь дня --------------------------------------------------------- */
+
+/* Корень держит попап под кнопкой: позиционирование — от него. */
+.deals__calendar {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+/* Кнопка-триггер выглядит как поле ввода даты, но открывает наш календарь. */
+.deals__calendar-trigger {
+  width: 168px;
+  height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.deals__calendar-trigger:hover {
+  background: var(--color-surface-hover);
+}
+
+.deals__calendar-trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Попап поверх содержимого, привязан к левому краю кнопки. */
+.deals__calendar-pop {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 260px;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-out-lg);
+}
+
+.deals__calendar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.deals__calendar-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.deals__calendar-nav:hover {
+  background: var(--color-surface-hover);
+}
+
+.deals__calendar-nav:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.deals__calendar-month {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.deals__calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.deals__calendar-weekday {
+  padding: 2px 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  text-align: center;
+}
+
+.deals__calendar-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.deals__calendar-cell--empty {
+  cursor: default;
+}
+
+.deals__calendar-cell:not(.deals__calendar-cell--empty):hover {
+  background: var(--color-surface-hover);
+}
+
+.deals__calendar-cell:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Сегодня подчёркнуто рамкой; выбранный день — заливкой акцентом. */
+.deals__calendar-cell.is-today {
+  border-color: var(--color-border);
+}
+
+.deals__calendar-cell.is-selected {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+  font-weight: 600;
+}
+
 /*
  * Поиск забирает всю оставшуюся ширину.
  *

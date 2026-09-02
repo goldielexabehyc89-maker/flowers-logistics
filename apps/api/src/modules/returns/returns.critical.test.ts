@@ -24,9 +24,11 @@ import type { Role } from '@fl/shared';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import {
   cancelDeliveryResult,
+  listActiveDeliveries,
   recordDeliveryResult,
   type DeliveryDeps,
 } from '../delivery/service.js';
+import { dealsIds } from '../orders/deals-scope.js';
 import { isAssembled } from '../orders/routes.js';
 import {
   acceptReturn,
@@ -989,7 +991,7 @@ describe('удаление заказа из активного маршрута
     expect(after.state).toBe('COMPLETED');
   });
 
-  it('уже выданный курьеру заказ: новый круг сборки для повторной приёмки', async () => {
+  it('уже выданный курьеру заказ: новый круг приёмки, но у курьера ничего не остаётся', async () => {
     const admin = await actorFor(['ADMIN']);
     const courier = await actorFor(['COURIER']);
     const delivery = await seedActiveDelivery(courier.userId);
@@ -1036,7 +1038,64 @@ describe('удаление заказа из активного маршрута
       where: { id: delivery.orderId },
       select: { assemblyRound: true },
     });
-    // Новый круг: заказ вернётся в «Ожидают приёмки» до физического возврата.
+    // Штатная механика склада сохранена: новый круг приёмки — заказ вернётся
+    // в «Склад → Ожидают приёмки» для назначения ячейки (предикат приёмки по
+    // новому кругу проверяется в тестах склада). Приёмку выполняет кладовщик.
     expect(after.assemblyRound).toBe(before.assemblyRound + 1);
+
+    // Курьерский контур чист: ни задачи возврата, ни заказа в активных доставках.
+    const issuedReturns = await ctx.db.orderReturn.count({
+      where: { orderId: delivery.orderId, activeKey: { not: null } },
+    });
+    expect(issuedReturns).toBe(0);
+    const issuedStillWithCourier = (await listActiveDeliveries(deps, courier)).routes.some(
+      (route) => route.orders.some((order) => order.orderId === delivery.orderId),
+    );
+    expect(issuedStillWithCourier).toBe(false);
+
+    // И заказ снова в «Сделках» — собранный и нераспределённый.
+    expect(await dealsIds(ctx.db, { deliveryDate: DAY })).toContain(delivery.orderId);
+  });
+
+  it('снятый заказ уходит от курьера: нет в доставках, нет возврата на склад, снова в «Сделках»', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    // Второй заказ в ТОМ ЖЕ листе, чтобы снятие первого не завершило маршрут.
+    await addOrderToRoute(delivery.routeId, admin.userId, 2);
+
+    await removeFromActiveRoute(
+      { db: ctx.db },
+      admin,
+      delivery.routeId,
+      { orderId: delivery.orderId, expectedVersion: await routeVersion(delivery.routeId) },
+      CONTEXT,
+    );
+
+    // 1. Заказа больше нет в активных доставках курьера — снят полностью, а не
+    //    просто спрятан: сервер отдаёт его список без этого заказа.
+    const activeForCourier = await listActiveDeliveries(deps, courier);
+    const stillWithCourier = activeForCourier.routes.some((route) =>
+      route.orders.some((order) => order.orderId === delivery.orderId),
+    );
+    expect(stillWithCourier).toBe(false);
+
+    // 2. Обязательства «вернуть на склад» у курьера не возникло: это не
+    //    недоставка. Активных карточек возврата по заказу нет.
+    const activeReturns = await ctx.db.orderReturn.count({
+      where: { orderId: delivery.orderId, activeKey: { not: null } },
+    });
+    expect(activeReturns).toBe(0);
+
+    // 3. Заказ снова нераспределённый и виден в «Логистика → Сделки».
+    const dealIds = await dealsIds(ctx.db, { deliveryDate: DAY });
+    expect(dealIds).toContain(delivery.orderId);
+
+    // 4. Прежний курьер получил АДРЕСНОЕ событие: его «Доставки» перечитаются и
+    //    заказ уйдёт с экрана сразу, а не после ручного обновления.
+    const courierEvents = await ctx.db.realtimeEvent.count({
+      where: { topic: 'route.updated', audienceUserId: courier.userId },
+    });
+    expect(courierEvents).toBeGreaterThan(0);
   });
 });
