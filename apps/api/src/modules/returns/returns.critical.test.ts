@@ -38,6 +38,11 @@ import {
   listResolutions,
   markReturning,
 } from './service.js';
+import { removeFromActiveRoute } from '../routing/service.js';
+import {
+  escalateOverdueResolutions,
+  listPendingEscalationNotificationIds,
+} from '../notifications/escalation.js';
 
 let ctx: TestContext;
 let deps: DeliveryDeps;
@@ -827,5 +832,211 @@ describe('персональные данные не расходятся по �
     expect(serialized).not.toContain('синтетический получатель');
     // Номера заказа в событиях тоже нет: клиент перечитывает свой список сам.
     expect(JSON.stringify(events)).not.toContain(delivery.orderNumber);
+  });
+});
+
+// --- Change 2: эскалация просроченной задачи логиста -------------------------
+
+describe('эскалация задачи логиста >30 минут (change 2)', () => {
+  it('открытая задача старше 30 мин эскалируется РОВНО один раз', async () => {
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    const now = new Date();
+    await failDelivery(courier, delivery.routeOrderId, new Date(now.getTime() - 35 * 60 * 1000));
+
+    await escalateOverdueResolutions(ctx.db, { now });
+    let count = await ctx.db.orderChangeNotification.count({
+      where: { orderId: delivery.orderId, kind: 'LOGIST_TASK_ESCALATION' },
+    });
+    expect(count).toBe(1);
+
+    // Повторный проход дубликата не создаёт (escalatedAt-дедуп).
+    await escalateOverdueResolutions(ctx.db, { now });
+    count = await ctx.db.orderChangeNotification.count({
+      where: { orderId: delivery.orderId, kind: 'LOGIST_TASK_ESCALATION' },
+    });
+    expect(count).toBe(1);
+  });
+
+  it('свежая задача (<30 мин) не эскалируется', async () => {
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    const now = new Date();
+    await failDelivery(courier, delivery.routeOrderId, new Date(now.getTime() - 5 * 60 * 1000));
+
+    await escalateOverdueResolutions(ctx.db, { now });
+    const count = await ctx.db.orderChangeNotification.count({
+      where: { orderId: delivery.orderId, kind: 'LOGIST_TASK_ESCALATION' },
+    });
+    expect(count).toBe(0);
+  });
+
+  it('догоняющий список: есть пока не прочитано и задача открыта; после прочтения — нет', async () => {
+    const courier = await actorFor(['COURIER']);
+    const supervisor = await actorFor(['SUPERVISOR']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    const now = new Date();
+    await failDelivery(courier, delivery.routeOrderId, new Date(now.getTime() - 40 * 60 * 1000));
+    await escalateOverdueResolutions(ctx.db, { now });
+
+    const notif = await ctx.db.orderChangeNotification.findFirstOrThrow({
+      where: { orderId: delivery.orderId, kind: 'LOGIST_TASK_ESCALATION' },
+      select: { id: true },
+    });
+    const before = await listPendingEscalationNotificationIds(ctx.db, supervisor.userId);
+    expect(before).toContain(notif.id);
+
+    // Показ помечает прочитанным ЭТИМ руководителем → повтора нет.
+    await ctx.db.orderChangeNotificationRead.create({
+      data: { notificationId: notif.id, userId: supervisor.userId },
+    });
+    const after = await listPendingEscalationNotificationIds(ctx.db, supervisor.userId);
+    expect(after).not.toContain(notif.id);
+  });
+});
+
+// --- Change 3: ADMIN убирает заказ из активного маршрута ----------------------
+
+async function routeVersion(routeId: string): Promise<number> {
+  const row = await ctx.db.deliveryRoute.findUniqueOrThrow({
+    where: { id: routeId },
+    select: { version: true },
+  });
+  return row.version;
+}
+
+/** Добавляет свежий (нигде не состоящий) заказ в существующий лист. */
+async function addOrderToRoute(routeId: string, byUserId: string, position: number): Promise<void> {
+  const order = await ctx.db.deliveryOrder.create({
+    data: {
+      externalId: randomUUID(),
+      externalName: unique('KEEP'),
+      externalUpdated: new Date(),
+      deliveryDate: toDateColumn(DAY),
+      inScope: true,
+      address: 'синтетический адрес',
+      recipient: 'синтетический получатель',
+    },
+    select: { id: true },
+  });
+  await ctx.db.routeOrder.create({
+    data: { routeId, orderId: order.id, position, addedById: byUserId },
+  });
+}
+
+describe('удаление заказа из активного маршрута (change 3)', () => {
+  it('ADMIN убирает заказ: снят из листа и возвращён в нераспределённые', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    // Второй заказ в ТОМ ЖЕ листе, чтобы снятие первого не завершило маршрут.
+    await addOrderToRoute(delivery.routeId, admin.userId, 2);
+
+    await removeFromActiveRoute(
+      { db: ctx.db },
+      admin,
+      delivery.routeId,
+      { orderId: delivery.orderId, expectedVersion: await routeVersion(delivery.routeId) },
+      CONTEXT,
+    );
+
+    const participation = await ctx.db.routeOrder.findFirstOrThrow({
+      where: { orderId: delivery.orderId },
+      select: { removedAt: true, removalReason: true },
+    });
+    expect(participation.removedAt).not.toBeNull();
+    expect(participation.removalReason).toBe('RETURNED_TO_UNASSIGNED');
+    const active = await ctx.db.routeOrder.count({
+      where: { orderId: delivery.orderId, removedAt: null },
+    });
+    expect(active).toBe(0);
+  });
+
+  it('заказ с окончательным результатом убрать нельзя', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    await failDelivery(courier, delivery.routeOrderId); // NOT_DELIVERED — финал
+
+    await expect(
+      removeFromActiveRoute(
+        { db: ctx.db },
+        admin,
+        delivery.routeId,
+        { orderId: delivery.orderId, expectedVersion: await routeVersion(delivery.routeId) },
+        CONTEXT,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('снятие последнего нерешённого заказа завершает отгруженный лист', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+
+    const result = await removeFromActiveRoute(
+      { db: ctx.db },
+      admin,
+      delivery.routeId,
+      { orderId: delivery.orderId, expectedVersion: await routeVersion(delivery.routeId) },
+      CONTEXT,
+    );
+    expect(result.routeCompleted).toBe(true);
+    const after = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: delivery.routeId },
+      select: { state: true },
+    });
+    expect(after.state).toBe('COMPLETED');
+  });
+
+  it('уже выданный курьеру заказ: новый круг сборки для повторной приёмки', async () => {
+    const admin = await actorFor(['ADMIN']);
+    const courier = await actorFor(['COURIER']);
+    const delivery = await seedActiveDelivery(courier.userId);
+    await addOrderToRoute(delivery.routeId, admin.userId, 2); // чтобы лист не завершился
+    const cell = await seedCell('ROUTE');
+    const session = await ctx.db.routeIssueSession.create({
+      data: {
+        routeId: delivery.routeId,
+        courierUserId: courier.userId,
+        confirmedById: admin.userId,
+        state: 'COMPLETED',
+        openKey: null,
+        completedAt: new Date(),
+      },
+      select: { id: true },
+    });
+    const before = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: delivery.orderId },
+      select: { assemblyRound: true },
+    });
+    await ctx.db.orderPlacement.create({
+      data: {
+        orderId: delivery.orderId,
+        cellId: cell.id,
+        source: 'RECEIVED',
+        placedById: admin.userId,
+        releasedAt: new Date(),
+        releasedById: admin.userId,
+        releaseReason: 'ISSUED_TO_COURIER',
+        issueSessionId: session.id,
+        assemblyRound: before.assemblyRound,
+      },
+    });
+
+    await removeFromActiveRoute(
+      { db: ctx.db },
+      admin,
+      delivery.routeId,
+      { orderId: delivery.orderId, expectedVersion: await routeVersion(delivery.routeId) },
+      CONTEXT,
+    );
+
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: delivery.orderId },
+      select: { assemblyRound: true },
+    });
+    // Новый круг: заказ вернётся в «Ожидают приёмки» до физического возврата.
+    expect(after.assemblyRound).toBe(before.assemblyRound + 1);
   });
 });

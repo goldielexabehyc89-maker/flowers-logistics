@@ -25,6 +25,7 @@ import {
   decideRefusal,
   listPendingRefusalNotificationIds,
 } from '../fulfillment/dispatch-florist.js';
+import { listPendingEscalationNotificationIds } from './escalation.js';
 
 const idParamSchema = z.object({ id: z.string().uuid() });
 const listQuerySchema = z.object({
@@ -122,6 +123,19 @@ export function registerNotificationRoutes(app: AppServer, deps: NotificationDep
   app.get('/api/logistics/notifications/pending-refusals', async (request) => {
     await authenticateWithRoles(request, deps, REFUSAL_DECISION_ROLES);
     return { notificationIds: await listPendingRefusalNotificationIds(deps.db) };
+  });
+
+  /**
+   * Догоняющие эскалации задач логиста для всплывающих окон руководителя.
+   *
+   * Живое событие видит только тот, кто был онлайн. Кто вошёл позже — получает
+   * здесь ещё не прочитанные ИМ эскалации открытых задач и показывает их окном.
+   * После прочтения (показа) повтора нет — «не более одного раза». Только
+   * ADMIN/SUPERVISOR: логист и есть тот, кто не отреагировал.
+   */
+  app.get('/api/logistics/notifications/pending-escalations', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, REFUSAL_DECISION_ROLES);
+    return { notificationIds: await listPendingEscalationNotificationIds(deps.db, actor.userId) };
   });
 
   /**

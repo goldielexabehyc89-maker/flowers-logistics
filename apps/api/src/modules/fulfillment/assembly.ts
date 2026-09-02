@@ -34,6 +34,10 @@ import { offerableConstraints } from './queue-service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
+import {
+  enqueueOrderStateSync,
+  type OrderStateTarget,
+} from '../integrations/moysklad/state-sync.js';
 import { effectiveMinutes } from './queue.js';
 import {
   buildPrintFormSnapshot,
@@ -770,6 +774,9 @@ export async function assembleOrder(
         sourceArchived: true,
         sourceMissing: true,
         assemblyRound: true,
+        // Способ получения решает исходящий статус сборки: доставка → «Ожидает
+        // отправку», самовывоз → «Готов к самовывозу».
+        deliveryMethodId: true,
         // Деньги в МОМЕНТ сборки: синхронизация переписывает sumMinor позже,
         // поэтому статистика берёт зафиксированное здесь значение, а не живое.
         sumMinor: true,
@@ -933,6 +940,29 @@ export async function assembleOrder(
 
     await publishProcessEvent(tx, after, actor.userId);
     await publishPrintEvent(tx, job.id, order.id, 'CREATED');
+
+    /*
+     * Исходящий статус сборки в МойСклад — через ту же очередь синхронизации
+     * (`moysklad.order_state`), в ЭТОЙ ЖЕ транзакции, а не прямым запросом.
+     * Доставка → «Ожидает отправку»; самовывоз → «Готов к самовывозу». Иной или
+     * неизвестный способ — без записи (не гадаем статус). Ключ идемпотентности
+     * несёт круг сборки: повтор «Собран» того же круга дубликата не создаёт, а
+     * новый круг — своё событие. Порядок и запрет регресса держит seq+ранг.
+     */
+    const assembledTarget: OrderStateTarget | null =
+      order.deliveryMethodId === MOYSKLAD_IDS.deliveryMethodPickup
+        ? 'ready_for_pickup'
+        : order.deliveryMethodId === MOYSKLAD_IDS.deliveryMethodDelivery
+          ? 'awaiting_shipment'
+          : null;
+    if (assembledTarget !== null) {
+      await enqueueOrderStateSync(tx, {
+        orderId: order.id,
+        target: assembledTarget,
+        dedupeKey: `moysklad.order_state:${order.id}:assembled:round:${order.assemblyRound}`,
+      });
+    }
+
     // Флорист освободился после «Собран» — раздаём ему следующий заказ.
     await enqueueDispatch(tx);
 

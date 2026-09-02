@@ -38,7 +38,7 @@ import { calendarDate, ineligibleReason, INELIGIBLE_MESSAGES } from './eligibili
 import { nextRouteNumber } from './numbering.js';
 import { grantLease, requireLease } from './lease.js';
 import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
-import { confirmWithinTransaction } from './lifecycle.js';
+import { confirmWithinTransaction, completeActiveRouteIfAllResolved } from './lifecycle.js';
 
 /**
  * Кому адресованы события маршрутов.
@@ -574,6 +574,125 @@ export async function returnOrders(
     await publishRoute(tx, 'route.updated', routeId, orderIds);
 
     return { version: input.expectedVersion + 1 };
+  });
+}
+
+/**
+ * Удаление ОДНОГО заказа из активного (или отгруженного) листа. Только ADMIN
+ * (право проверяет маршрут). В отличие от `returnOrders`, работает не с
+ * черновиком, а с `CONFIRMED`/`ACTIVE`.
+ *
+ * Заказ возвращается в «Сделки» как нераспределённый (штатная причина
+ * `RETURNED_TO_UNASSIGNED`), но история, складские движения, прежняя выдача и
+ * аудит не удаляются. Физика коробки:
+ *  * ещё на полке (активное размещение) → пометка к возврату в хранение;
+ *  * уже выдан курьеру → новый круг сборки, чтобы заказ вернулся в «Ожидают
+ *    приёмки» до физического возврата и повторного сканирования (остаётся
+ *    ASSEMBLED: без флориста, без учёта как пересборки, без новой печати).
+ * Запрещено при уже зафиксированном результате DELIVERED/NOT_DELIVERED.
+ * Идемпотентно и защищено от гонки с курьером блокировкой листа и версией.
+ */
+export async function removeFromActiveRoute(
+  deps: RoutingDeps,
+  actor: AuthenticatedActor,
+  routeId: string,
+  input: { orderId: string; expectedVersion: number },
+  context: RequestContext,
+): Promise<{ version: number; routeCompleted: boolean }> {
+  return deps.db.$transaction(async (tx) => {
+    const route = requireRoute(await lockRoutes(tx, [routeId]), routeId);
+    if (route.state !== 'ACTIVE' && route.state !== 'CONFIRMED') {
+      throw new AppError('CONFLICT', {
+        message: 'route is not active or confirmed',
+        publicMessage: 'Убрать заказ можно только из подтверждённого или отгруженного маршрута.',
+        conflict: { kind: 'ROUTE_NOT_ACTIVE' },
+      });
+    }
+    requireVersion(route, input.expectedVersion);
+
+    await lockOrders(tx, [input.orderId]);
+    const participations = await activeParticipations(tx, routeId);
+    const participation = participations.find((item) => item.orderId === input.orderId);
+    if (participation === undefined) {
+      throw new AppError('CONFLICT', {
+        message: 'order is not in this route',
+        publicMessage: 'Заказ уже не состоит в этом маршруте. Обновите страницу.',
+        conflict: { kind: 'ROUTE_ORDER_SET_MISMATCH', orderIds: [input.orderId] },
+      });
+    }
+
+    // Окончательный результат уже зафиксирован — из маршрута не убрать.
+    const finalResult = await tx.deliveryAttempt.findFirst({
+      where: { routeOrderId: participation.id, activeKey: { not: null } },
+      select: { id: true },
+    });
+    if (finalResult !== null) {
+      throw new AppError('CONFLICT', {
+        message: 'order already has a final delivery result',
+        publicMessage: 'У заказа уже есть результат доставки — из маршрута его убрать нельзя.',
+        conflict: { kind: 'ORDER_HAS_FINAL_RESULT', orderIds: [input.orderId] },
+      });
+    }
+
+    const now = clockOf(deps)();
+    await tx.routeOrder.update({
+      where: { id: participation.id },
+      data: { removedAt: now, removedById: actor.userId, removalReason: 'RETURNED_TO_UNASSIGNED' },
+    });
+
+    // Физическое состояние коробки: не двигаем её молча (FUL-003).
+    const order = await tx.deliveryOrder.findUniqueOrThrow({
+      where: { id: input.orderId },
+      select: { assemblyRound: true },
+    });
+    const activePlacement = await tx.orderPlacement.findFirst({
+      where: { orderId: input.orderId, releasedAt: null },
+      select: { id: true },
+    });
+    if (activePlacement !== null) {
+      await tx.orderPlacement.update({
+        where: { id: activePlacement.id },
+        data: { requiresRelocation: true },
+      });
+    } else {
+      const issued = await tx.orderPlacement.findFirst({
+        where: {
+          orderId: input.orderId,
+          releaseReason: 'ISSUED_TO_COURIER',
+          assemblyRound: order.assemblyRound,
+        },
+        select: { id: true },
+      });
+      if (issued !== null) {
+        await tx.deliveryOrder.update({
+          where: { id: input.orderId },
+          data: { assemblyRound: { increment: 1 } },
+        });
+      }
+    }
+
+    const remaining = participations.filter((item) => item.orderId !== input.orderId);
+    await renumber(
+      tx,
+      routeId,
+      remaining.map((item) => item.id),
+    );
+
+    await auditRoute(tx, 'ROUTE_ORDER_REMOVED_FROM_ACTIVE', routeId, actor, context, {
+      orderIds: [input.orderId],
+      previousState: route.state,
+      totalOrders: remaining.length,
+    });
+
+    // Пересчёт состояния штатным доменным путём: снятие последнего нерешённого
+    // заказа завершает отгруженный лист. Иначе просто повышаем версию.
+    const completed = await completeActiveRouteIfAllResolved(tx, actor, routeId, now);
+    if (!completed) {
+      await bumpVersion(tx, routeId, input.expectedVersion);
+    }
+    await publishRoute(tx, 'route.updated', routeId, [input.orderId]);
+
+    return { version: input.expectedVersion + 1, routeCompleted: completed };
   });
 }
 

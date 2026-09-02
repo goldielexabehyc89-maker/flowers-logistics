@@ -88,6 +88,26 @@ export function NotificationPopups(): React.JSX.Element | null {
     // Зависимость — только данные догоняющего запроса; enqueueOnce дедупит.
   }, [pendingRefusals.data]);
 
+  /**
+   * Догоняющие эскалации задач логиста (>30 мин без реакции) при входе.
+   *
+   * Кто был офлайн в момент эскалации, получает её здесь — но ТОЛЬКО не
+   * прочитанную им и по открытой задаче. Показ помечает прочитанным (ниже),
+   * поэтому руководитель видит эскалацию не более одного раза.
+   */
+  const pendingEscalations = useQuery({
+    queryKey: ['notifications', 'pending-escalations'],
+    queryFn: () =>
+      client.get<{ notificationIds: string[] }>('/api/logistics/notifications/pending-escalations'),
+    enabled: canDecideRefusal,
+  });
+
+  useEffect(() => {
+    for (const id of pendingEscalations.data?.notificationIds ?? []) {
+      enqueueOnce(id);
+    }
+  }, [pendingEscalations.data]);
+
   const currentId = queue[0] ?? null;
 
   const detail = useQuery({
@@ -98,6 +118,24 @@ export function NotificationPopups(): React.JSX.Element | null {
       ),
     enabled: currentId !== null,
   });
+
+  /**
+   * Показ эскалации помечает её прочитанной СРАЗУ (не по «Ок»): так «догоняющий»
+   * запрос её больше не вернёт, и руководитель видит эскалацию не более одного
+   * раза, даже если закрыл вкладку не нажав «Ок».
+   */
+  const escalationReadRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const shown = detail.data?.notification ?? null;
+    if (
+      shown !== null &&
+      shown.kind === 'LOGIST_TASK_ESCALATION' &&
+      !escalationReadRef.current.has(shown.id)
+    ) {
+      escalationReadRef.current.add(shown.id);
+      void client.post(`/api/logistics/notifications/${shown.id}/read`, {}).catch(() => {});
+    }
+  }, [detail.data]);
 
   const advance = (): void => {
     setQueue((current) => current.slice(1));
@@ -158,12 +196,17 @@ export function NotificationPopups(): React.JSX.Element | null {
   const offersRefusal =
     canDecideRefusal && item.kind === 'REFUSAL_REQUEST' && item.refusal?.state === 'PENDING';
   const isRefusal = item.kind === 'REFUSAL_REQUEST';
+  const isEscalation = item.kind === 'LOGIST_TASK_ESCALATION';
 
   return (
     <Modal
       open
       title={
-        isRefusal ? `Отказ по заказу ${item.orderNumber}` : `Изменён заказ ${item.orderNumber}`
+        isEscalation
+          ? 'Логист не реагирует на задачу'
+          : isRefusal
+            ? `Отказ по заказу ${item.orderNumber}`
+            : `Изменён заказ ${item.orderNumber}`
       }
       onClose={() => {
         void dismiss();

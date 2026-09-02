@@ -326,6 +326,11 @@ export function offerableConstraints(
     fulfillmentInScope: true,
     sourceArchived: false,
     sourceMissing: false,
+    // Отменённый заказ («Отменён — не собирать» из МоегоСклада ИЛИ отмена
+    // логистом) собирать нельзя — его нет ни в очереди, ни в поиске, ни в
+    // счётчиках, ни в автораздаче.
+    cancelledInSource: false,
+    cancelledByLogistAt: null,
     fulfillmentCompositionState: 'READY' as const,
     AND: [
       {
@@ -392,6 +397,10 @@ function buildMineWhere(input: {
 }): Prisma.DeliveryOrderWhereInput {
   return {
     fulfillmentAssigneeId: input.userId,
+    // Отменённый заказ не показывается флористу как задание на сборку: снятие
+    // назначения при отмене выводит его из работы, и обратно он не всплывает.
+    cancelledInSource: false,
+    cancelledByLogistAt: null,
     ...(input.search === null
       ? {}
       : { externalName: { contains: input.search, mode: 'insensitive' as const } }),

@@ -33,6 +33,7 @@ import {
   moveOrders,
   reorder,
   returnOrders,
+  removeFromActiveRoute,
   setCourier,
   type RequestContext,
 } from './service.js';
@@ -48,6 +49,8 @@ import {
 import { cancelRoute, confirmBlockers, confirmRoute, returnToDraft } from './lifecycle.js';
 
 const ROUTE_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
+/** Удаление заказа из активного листа — только ADMIN (не управляющий, не логист). */
+const ROUTE_REMOVE_ROLES = ['ADMIN'] as const;
 const MAX_LIMIT = 100;
 /** Разумный потолок массовой операции: он же защищает от случайной отправки всего дня. */
 const MAX_ORDERS_PER_OPERATION = 200;
@@ -345,6 +348,28 @@ export async function registerRoutingRoutes(app: AppServer, deps: RoutingDeps): 
     const body = ordersSchema.parse(request.body);
 
     await returnOrders(deps, actor, id, body, contextOf(request));
+    return routeCard(deps.db, id, actor);
+  });
+
+  /**
+   * Удаление ОДНОГО заказа из активного/отгруженного листа. Только ADMIN —
+   * право проверяет сервер, а не скрытая кнопка. Заказ возвращается в «Сделки»
+   * нераспределённым; при уже зафиксированном результате — понятный отказ.
+   */
+  app.post('/api/routes/:id/orders/:orderId/remove-from-active', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ROUTE_REMOVE_ROLES);
+    const { id, orderId } = z
+      .object({ id: z.string().uuid(), orderId: z.string().uuid() })
+      .parse(request.params);
+    const body = z.object({ expectedVersion: z.number().int().min(0) }).parse(request.body);
+
+    await removeFromActiveRoute(
+      deps,
+      actor,
+      id,
+      { orderId, expectedVersion: body.expectedVersion },
+      contextOf(request),
+    );
     return routeCard(deps.db, id, actor);
   });
 

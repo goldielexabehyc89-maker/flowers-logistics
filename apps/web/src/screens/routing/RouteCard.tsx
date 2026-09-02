@@ -73,7 +73,10 @@ export function RouteCard({
   embedded = false,
   onConfirmed,
 }: RouteCardProps): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
+  // Удаление заказа из активного/отгруженного листа — только ADMIN. Сервер тоже
+  // проверяет роль: кнопка лишь не предлагает того, что заведомо отклонят.
+  const isAdmin = user?.roles.includes('ADMIN') === true;
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { showToast } = useToast();
@@ -172,6 +175,24 @@ export function RouteCard({
     onSuccess: (card) => afterSuccess('Заказы возвращены в нераспределённые', card),
     onError: handleFailure,
   });
+
+  /** Заказ, который ADMIN убирает из активного листа (открыто подтверждение). */
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; number: string } | null>(null);
+  const removeFromActive = useMutation({
+    mutationFn: (orderId: string) =>
+      client.post<RouteCardView>(`/api/routes/${routeId}/orders/${orderId}/remove-from-active`, {
+        expectedVersion: route?.version ?? 0,
+      }),
+    onSuccess: (card) => {
+      setRemoveTarget(null);
+      afterSuccess('Заказ убран из маршрута и возвращён в «Сделки»', card);
+    },
+    onError: handleFailure,
+  });
+  // Удаление доступно только в подтверждённом/отгруженном листе (черновик правит
+  // существующая кнопка возврата). Отдельная кнопка — не путать с ней.
+  const canRemoveFromActive =
+    isAdmin && (route?.state === 'CONFIRMED' || route?.state === 'ACTIVE');
 
   const reorder = useMutation({
     mutationFn: (orderIds: string[]) =>
@@ -709,6 +730,21 @@ export function RouteCard({
                 >
                   <CornerUpLeft size={13} aria-hidden="true" />
                 </button>
+                {canRemoveFromActive && (
+                  <button
+                    type="button"
+                    className="routes__stop-remove"
+                    data-testid="route-stop-remove-active"
+                    aria-label={`Убрать заказ ${item.order.number} из активного маршрута`}
+                    title="Убрать из активного маршрута (только администратор)"
+                    disabled={removeFromActive.isPending}
+                    onClick={() =>
+                      setRemoveTarget({ id: item.order.id, number: item.order.number })
+                    }
+                  >
+                    <X size={13} aria-hidden="true" />
+                  </button>
+                )}
               </div>
             </li>
           ))}
@@ -931,6 +967,37 @@ export function RouteCard({
               onClick={submitReason}
             >
               Продолжить
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Подтверждение удаления заказа из активного маршрута (только ADMIN). */}
+      <Modal
+        open={removeTarget !== null}
+        title="Убрать заказ из маршрута"
+        testId="route-remove-confirm"
+        onClose={() => setRemoveTarget(null)}
+      >
+        <div className="stack">
+          <p className="text-sm">
+            Убрать заказ <strong>{removeTarget?.number}</strong> из маршрута{' '}
+            <strong>{route.number}</strong>? Заказ вернётся в «Логистика → Сделки» как
+            нераспределённый; история, складские движения и прежняя выдача сохранятся.
+          </p>
+          <div className="modal__footer">
+            <Button onClick={() => setRemoveTarget(null)}>Отмена</Button>
+            <Button
+              variant="danger"
+              data-testid="route-remove-confirm-submit"
+              disabled={removeFromActive.isPending}
+              onClick={() => {
+                if (removeTarget !== null) {
+                  removeFromActive.mutate(removeTarget.id);
+                }
+              }}
+            >
+              Убрать из маршрута
             </Button>
           </div>
         </div>
