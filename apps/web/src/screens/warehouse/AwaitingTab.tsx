@@ -24,7 +24,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import {
   formatMinutesOfDay,
   formatMoscowDateTime,
@@ -36,8 +36,11 @@ import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../..
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanContext } from './warehouse-flow';
 import { createReceiveIntent } from './receive-intent';
-import { awaitingTypeCounts, filterAwaitingByType, type AwaitingTypeFilter } from './awaiting-view';
+import { type AwaitingTypeFilter } from './awaiting-view';
 import { assembledDateLabel } from '../florist/florist';
+
+/** Размер страницы: полный набор доступен догрузкой, без потери строк. */
+const AWAITING_PAGE_SIZE = 50;
 
 interface AwaitingCard {
   orderId: string;
@@ -53,8 +56,12 @@ interface AwaitingCard {
 }
 
 interface AwaitingResponse {
-  total: number;
+  /** Счётчики чипов: учитывают поиск, но НЕ тип. Считает сервер. */
+  counts: { all: number; delivery: number; pickup: number };
+  /** Полное число без поиска — счётчик вкладки. */
   fullTotal: number;
+  /** Страница текущего отбора (поиск + тип). */
+  page: { total: number; limit: number; offset: number; hasMore: boolean };
   items: AwaitingCard[];
 }
 
@@ -172,20 +179,46 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
   const [acceptingCard, setAcceptingCard] = useState<AwaitingCard | null>(null);
 
   const term = search.trim();
-  const awaiting = useQuery({
-    queryKey: ['warehouse-awaiting', term],
-    queryFn: () =>
-      client.get<AwaitingResponse>(
-        `/api/warehouse/awaiting${term === '' ? '' : `?search=${encodeURIComponent(term)}`}`,
-      ),
+  const awaiting = useInfiniteQuery({
+    queryKey: ['warehouse-awaiting', term, typeFilter],
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams();
+      if (term !== '') {
+        params.set('search', term);
+      }
+      if (typeFilter !== 'all') {
+        params.set('method', typeFilter);
+      }
+      params.set('limit', String(AWAITING_PAGE_SIZE));
+      params.set('offset', String(pageParam));
+      return client.get<AwaitingResponse>(`/api/warehouse/awaiting?${params.toString()}`);
+    },
+    initialPageParam: 0,
+    getNextPageParam: (last: AwaitingResponse) =>
+      last.page.hasMore ? last.page.offset + last.page.limit : undefined,
   });
 
-  const items = useMemo(() => awaiting.data?.items ?? [], [awaiting.data]);
-  const counts = useMemo(() => awaitingTypeCounts(items), [items]);
-  const groups = useMemo(
-    () => groupByDate(filterAwaitingByType(items, typeFilter), new Date()),
-    [items, typeFilter],
-  );
+  const pages = useMemo(() => awaiting.data?.pages ?? [], [awaiting.data]);
+  // Строки склеиваются с дедупом по orderId: набор живёт, и между страницами
+  // смещение может сдвинуться — один заказ пришёл бы дважды.
+  const items = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: AwaitingCard[] = [];
+    for (const page of pages) {
+      for (const card of page.items) {
+        if (!seen.has(card.orderId)) {
+          seen.add(card.orderId);
+          merged.push(card);
+        }
+      }
+    }
+    return merged;
+  }, [pages]);
+  // Счётчики чипов и итог — с СЕРВЕРА (первая страница): один и тот же набор
+  // правил, поэтому чипы, вкладка и список не расходятся и не упираются в 500.
+  const counts = pages[0]?.counts ?? { all: 0, delivery: 0, pickup: 0 };
+  const selectionTotal = pages[0]?.page.total ?? 0;
+  const groups = useMemo(() => groupByDate(items, new Date()), [items]);
 
   const toggleDay = (key: string): void => {
     setCollapsed((prev) => {
@@ -279,28 +312,23 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
         <LoadingState title="Загружаем список…" />
       ) : awaiting.isError ? (
         <ErrorState title="Не удалось загрузить список" onRetry={() => void awaiting.refetch()} />
-      ) : (awaiting.data?.total ?? 0) === 0 ? (
+      ) : selectionTotal === 0 ? (
         <EmptyState
           title="Пусто"
           description={
-            term === ''
-              ? 'Нет собранных заказов, ожидающих приёмки.'
-              : 'По этому номеру ничего не найдено.'
-          }
-        />
-      ) : groups.length === 0 ? (
-        <EmptyState
-          title="Пусто"
-          description={
-            typeFilter === 'pickup'
-              ? 'Среди ожидающих нет самовывоза.'
-              : 'Среди ожидающих нет доставки.'
+            term !== ''
+              ? 'По этому номеру ничего не найдено.'
+              : typeFilter === 'pickup'
+                ? 'Среди ожидающих нет самовывоза.'
+                : typeFilter === 'delivery'
+                  ? 'Среди ожидающих нет доставки.'
+                  : 'Нет собранных заказов, ожидающих приёмки.'
           }
         />
       ) : (
         <div className="stack" data-testid="wh-awaiting-list">
           <p className="muted text-sm" data-testid="wh-awaiting-total">
-            Всего: {awaiting.data.total}
+            Показано {items.length} из {selectionTotal}
           </p>
           {groups.map((group) => {
             const isCollapsed = collapsed.has(group.key);
@@ -356,6 +384,19 @@ export function AwaitingTab({ manualEntry }: ManualEntryProps): React.JSX.Elemen
               </section>
             );
           })}
+
+          {awaiting.hasNextPage && (
+            <div className="wh-awaiting__more">
+              <Button
+                variant="secondary"
+                data-testid="wh-awaiting-more"
+                disabled={awaiting.isFetchingNextPage}
+                onClick={() => void awaiting.fetchNextPage()}
+              >
+                {awaiting.isFetchingNextPage ? 'Загрузка…' : 'Загрузить ещё'}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

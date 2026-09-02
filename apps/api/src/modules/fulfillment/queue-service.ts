@@ -319,7 +319,7 @@ const ACTIVE_WORK_STATES = ['IN_ASSEMBLY', 'NEEDS_REVIEW'] as const;
  * операционной работы. К уже назначенной работе эти условия не применяются:
  * заказ, ушедший из источника ПОСЛЕ назначения, остаётся у исполнителя.
  */
-function offerableConstraints(
+export function offerableConstraints(
   operationsStartDate?: string | undefined,
 ): Prisma.DeliveryOrderWhereInput {
   return {

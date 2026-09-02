@@ -221,7 +221,7 @@ describe('состав списка «Ожидают приёмки»', () => {
 
     const after = await listAwaitingIntake(ctx.db);
     expect(after.items.map((item) => item.orderNumber)).not.toContain(order.number);
-    expect(after.total).toBe(before.total - 1);
+    expect(after.page.total).toBe(before.page.total - 1);
   });
 
   it('несобранный заказ в списке не показывается', async () => {
@@ -289,10 +289,10 @@ describe('счётчик вкладки «Ожидают приёмки»', () =
     // Поиск сужает список и его total, но полный счётчик остаётся прежним:
     // это число всех ожидающих, а не найденных по строке.
     const searched = await listAwaitingIntake(ctx.db, { search: order.number });
-    expect(searched.total).toBe(1);
+    expect(searched.page.total).toBe(1);
     expect(searched.items.map((item) => item.orderNumber)).toEqual([order.number]);
     expect(searched.fullTotal).toBe(full.fullTotal);
-    expect(full.fullTotal).toBe(full.total);
+    expect(full.fullTotal).toBe(full.page.total);
   });
 
   it('countOnly отдаёт полное число без списка, тем же условием', async () => {
@@ -303,7 +303,7 @@ describe('счётчик вкладки «Ожидают приёмки»', () =
     expect(count.items).toEqual([]);
     // Счётчик и список считает одно бизнес-условие — числа совпадают.
     expect(count.fullTotal).toBe(list.fullTotal);
-    expect(count.total).toBe(list.total);
+    expect(count.page.total).toBe(list.page.total);
 
     // Даже с поиском countOnly отдаёт ПОЛНОЕ число ожидающих, а не найденных.
     const countWithSearch = await listAwaitingIntake(ctx.db, {
@@ -311,6 +311,29 @@ describe('счётчик вкладки «Ожидают приёмки»', () =
       search: order.number,
     });
     expect(countWithSearch.fullTotal).toBe(count.fullTotal);
+  });
+
+  it('заказ без способа получения — доставка: счётчики сходятся с полным числом', async () => {
+    const tag = unique('NOMETHOD');
+    // Заказ БЕЗ deliveryMethodId (NULL) — должен считаться доставкой, а не выпасть
+    // из счётчиков третьей группой.
+    const noMethod = await seedProductionOrder({
+      externalName: `${tag}-d`,
+      deliveryMethodId: null,
+    });
+    await assembleBy(noMethod.id);
+    const pickup = await seedProductionOrder({
+      externalName: `${tag}-p`,
+      deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup,
+    });
+    await assembleBy(pickup.id);
+
+    const page = await listAwaitingIntake(ctx.db, { search: tag });
+    // Сумма самовывоза и доставки == полному набору отбора (без «потерянной» группы).
+    expect(page.counts.all).toBe(page.counts.delivery + page.counts.pickup);
+    expect(page.counts.all).toBe(2);
+    expect(page.counts.pickup).toBe(1);
+    expect(page.counts.delivery).toBe(1); // NULL-способ учтён в доставке
   });
 
   it('приёмка уменьшает полный счётчик', async () => {
@@ -322,5 +345,171 @@ describe('счётчик вкладки «Ожидают приёмки»', () =
     await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
     const after = await listAwaitingIntake(ctx.db, { countOnly: true });
     expect(after.fullTotal).toBe(before.fullTotal - 1);
+  });
+});
+
+/** Освобождает действующее размещение заказа (без активного взамен). */
+async function releaseCurrentPlacement(orderId: string, byUserId: string): Promise<void> {
+  await ctx.db.orderPlacement.updateMany({
+    where: { orderId, releasedAt: null },
+    data: {
+      releasedAt: new Date(),
+      releasedById: byUserId,
+      releaseReason: 'WITHDRAWN',
+    },
+  });
+}
+
+describe('текущий круг сборки, а не «нет активного размещения»', () => {
+  it('размещённый и затем освобождённый заказ текущего круга не возвращается', async () => {
+    const keeper = await actorFor(['WAREHOUSE']);
+    const order = await seedProductionOrder();
+    await assembleBy(order.id);
+    const cell = await seedCell();
+    await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
+    // Размещение освобождается (например, выдан курьеру), но заказ остаётся
+    // ASSEMBLED — раньше он тут же возвращался в список. Теперь круг уже был в
+    // ячейке, и повторно принимать его нечего.
+    await releaseCurrentPlacement(order.id, keeper.userId);
+    expect(await awaitingNumbers()).not.toContain(order.number);
+  });
+
+  it('новый круг сборки появляется, а после его размещения исчезает', async () => {
+    const keeper = await actorFor(['WAREHOUSE']);
+    const order = await seedProductionOrder();
+    await assembleBy(order.id);
+    const cell = await seedCell();
+
+    // Круг 1: размещён и освобождён → в списке нет.
+    await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell.code }, CONTEXT);
+    await releaseCurrentPlacement(order.id, keeper.userId);
+    expect(await awaitingNumbers()).not.toContain(order.number);
+
+    // Новый круг сборки (повторная доставка/пересборка увеличивает `assemblyRound`
+    // заказа). Историческое размещение прошлого круга приёмке не мешает: у него
+    // другой круг — заказ снова ожидает приёмки.
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { assemblyRound: { increment: 1 } },
+    });
+    expect(await awaitingNumbers()).toContain(order.number);
+
+    // Разместили новый круг — снова уходит из списка (у размещения тот же круг).
+    const cell2 = await seedCell();
+    await receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell2.code }, CONTEXT);
+    expect(await awaitingNumbers()).not.toContain(order.number);
+  });
+});
+
+describe('сортировка списка', () => {
+  it('новые даты выше старых, без даты — в конце', async () => {
+    const tag = unique('SORT');
+    const oldDay = await seedProductionOrder({
+      externalName: `${tag}-old`,
+      deliveryDate: toDateColumn('2029-03-05'),
+    });
+    await assembleBy(oldDay.id);
+    const newDay = await seedProductionOrder({
+      externalName: `${tag}-new`,
+      deliveryDate: toDateColumn('2029-03-20'),
+    });
+    await assembleBy(newDay.id);
+    const noDay = await seedProductionOrder({ externalName: `${tag}-none`, deliveryDate: null });
+    await assembleBy(noDay.id);
+
+    const numbers = (await listAwaitingIntake(ctx.db, { search: tag })).items.map(
+      (item) => item.orderNumber,
+    );
+    expect(numbers).toEqual([`${tag}-new`, `${tag}-old`, `${tag}-none`]);
+  });
+
+  it('внутри одной даты позднее собранное выше', async () => {
+    const tag = unique('SAMEDAY');
+    const first = await seedProductionOrder({
+      externalName: `${tag}-first`,
+      deliveryDate: toDateColumn('2029-03-14'),
+    });
+    await assembleBy(first.id); // собран раньше
+    const second = await seedProductionOrder({
+      externalName: `${tag}-second`,
+      deliveryDate: toDateColumn('2029-03-14'),
+    });
+    await assembleBy(second.id); // собран позже
+
+    const numbers = (await listAwaitingIntake(ctx.db, { search: tag })).items.map(
+      (item) => item.orderNumber,
+    );
+    expect(numbers).toEqual([`${tag}-second`, `${tag}-first`]);
+  });
+});
+
+describe('свыше 500 без молчаливого предела и расхождения счётчиков', () => {
+  it('501 ожидающий доступен догрузкой, счётчики совпадают', async () => {
+    const tag = unique('BULK');
+    const florist = await seedUser(ctx.db, { roles: ['FLORIST'], fullName: 'Массовый сборщик' });
+    const COUNT = 501;
+    for (let i = 0; i < COUNT; i += 1) {
+      const externalId = randomUUID();
+      const snapshot = compositionOf(externalId);
+      const created = await ctx.db.deliveryOrder.create({
+        data: {
+          externalId,
+          externalName: `${tag}-${i}`,
+          externalUpdated: new Date('2029-03-01T00:00:00.000Z'),
+          deliveryDate: toDateColumn(DAY),
+          intervalKind: 'RANGE',
+          intervalStartMinute: 600,
+          intervalEndMinute: 840,
+          inScope: true,
+          fulfillmentInScope: true,
+          fulfillmentDescription: snapshot.description,
+          fulfillmentCardText: snapshot.cardText,
+          fulfillmentSnapshotHash: snapshotHash(snapshot),
+          fulfillmentCompositionState: 'READY',
+          fulfillmentCompositionSyncedAt: new Date(),
+          fulfillmentRevisions: {
+            create: {
+              externalUpdated: new Date('2029-03-01T00:00:00.000Z'),
+              snapshot: snapshot as never,
+              snapshotHash: snapshotHash(snapshot),
+              changedFields: ['externalId'],
+              reason: 'INITIAL_IMPORT',
+            },
+          },
+        },
+        select: { id: true, fulfillmentRevisions: { select: { id: true } } },
+      });
+      await ctx.db.deliveryOrder.update({
+        where: { id: created.id },
+        data: {
+          fulfillmentProcessState: 'ASSEMBLED',
+          fulfillmentAssigneeId: florist.id,
+          fulfillmentAssignedAt: new Date(),
+          fulfillmentAssembledAt: new Date(),
+          fulfillmentAssembledById: florist.id,
+          fulfillmentAssembledRevisionId: created.fulfillmentRevisions[0]?.id,
+        },
+      });
+    }
+
+    // Счётчик по этому набору — ровно 501, а не молчаливые 500.
+    const counted = await listAwaitingIntake(ctx.db, { search: tag, countOnly: true });
+    expect(counted.counts.all).toBe(COUNT);
+
+    // Догрузка страницами по 100 отдаёт ВСЕ 501 без потерь и дублей.
+    const seen = new Set<string>();
+    let offset = 0;
+    for (;;) {
+      const page = await listAwaitingIntake(ctx.db, { search: tag, limit: 100, offset });
+      for (const item of page.items) {
+        seen.add(item.orderNumber);
+      }
+      expect(page.page.total).toBe(COUNT);
+      if (!page.page.hasMore) {
+        break;
+      }
+      offset += page.page.limit;
+    }
+    expect(seen.size).toBe(COUNT);
   });
 });

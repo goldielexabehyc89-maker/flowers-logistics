@@ -103,7 +103,11 @@ function quantityText(value: unknown): string {
   return text.includes('.') ? text.replace(/\.?0+$/, '') : text;
 }
 
-export async function readOrderCard(db: Database, orderId: string): Promise<OrderCard> {
+export async function readOrderCard(
+  db: Database,
+  orderId: string,
+  viewer: { userId: string; roles: readonly string[] },
+): Promise<OrderCard> {
   const order = await db.deliveryOrder.findUnique({
     where: { id: orderId },
     select: {
@@ -185,11 +189,29 @@ export async function readOrderCard(db: Database, orderId: string): Promise<Orde
     order.fulfillmentProcessState === 'NEEDS_REVIEW' ||
     order.fulfillmentProcessState === 'ASSEMBLED' ||
     order.fulfillmentAssignee !== null;
-  if (!order.fulfillmentInScope && !activeWork) {
-    throw new AppError('NOT_FOUND', {
-      message: 'order is out of fulfillment scope',
-      publicMessage: 'Заказ вне производственной области — карточка недоступна.',
-    });
+  if (!order.fulfillmentInScope) {
+    // Свободный заказ вне области карточкой не является.
+    if (!activeWork) {
+      throw new AppError('NOT_FOUND', {
+        message: 'order is out of fulfillment scope',
+        publicMessage: 'Заказ вне производственной области — карточка недоступна.',
+      });
+    }
+    /*
+     * Застрявший заказ вне области видят только те, кому он и так принадлежит:
+     * назначенный флорист и руководитель (ADMIN/SUPERVISOR). Посторонний
+     * флорист, даже зная UUID, получает 404 — существование чужого застрявшего
+     * заказа ему не раскрывается. Проверка здесь, в доменном чтении, а не в
+     * интерфейсе: скрытая кнопка прямой запрос не остановит.
+     */
+    const isManager = viewer.roles.includes('ADMIN') || viewer.roles.includes('SUPERVISOR');
+    const isAssignee = order.fulfillmentAssignee?.id === viewer.userId;
+    if (!isManager && !isAssignee) {
+      throw new AppError('NOT_FOUND', {
+        message: 'out-of-scope order not visible to this viewer',
+        publicMessage: 'Заказ не найден.',
+      });
+    }
   }
 
   const minutes = effectiveMinutes(order);

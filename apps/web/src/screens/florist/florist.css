@@ -593,21 +593,21 @@
  * Собственный фон занавешивает уезжающие под него ячейки; фон совпадает с
  * карточкой строки и с контейнером у заголовка.
  */
-.stats__cell--name {
+.stats__cell--start {
   position: sticky;
   left: 0;
   z-index: 2;
 }
 
-.stats__row .stats__cell--name {
+.stats__row .stats__cell--start {
   background: var(--surface-raised);
 }
 
-.stats__row--incomplete .stats__cell--name {
+.stats__row--incomplete .stats__cell--start {
   background: var(--row-danger, var(--color-warning-soft));
 }
 
-.stats__head .stats__cell--name {
+.stats__head .stats__cell--start {
   z-index: 4;
   background: var(--surface-sunken);
 }

@@ -30,6 +30,7 @@ import type { Database } from '../../platform/db.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
+import { offerableConstraints } from './queue-service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
@@ -581,15 +582,31 @@ export async function assignReassemblyTx(
  */
 export async function autoAssignTx(
   tx: TransactionClient,
-  input: { orderId: string; floristId: string; shiftId: string },
+  input: {
+    orderId: string;
+    floristId: string;
+    shiftId: string;
+    operationsStartDate?: string | undefined;
+  },
   context: RequestContext,
 ): Promise<boolean> {
+  /*
+   * Финальная проверка кандидата — В ТОЙ ЖЕ транзакции и по ТОМУ ЖЕ правилу,
+   * что и свободная очередь: `offerableConstraints` (граница операций, статус не
+   * «Принят, Не оплачен», производственная область, источник не пропал и не
+   * архивирован, состав готов) плюс «не отменён» и «по-прежнему свободен».
+   * Предикат один — свободная очередь, список кандидатов и это назначение не
+   * могут разойтись. Условная запись атомарна: если заказ уже перехвачен или
+   * перестал подходить, обновится 0 строк и назначение не состоится.
+   */
   const updated = await tx.deliveryOrder.updateMany({
     where: {
       id: input.orderId,
       fulfillmentProcessState: 'NEW',
       fulfillmentAssigneeId: null,
-      ...ASSEMBLABLE,
+      cancelledInSource: false,
+      cancelledByLogistAt: null,
+      ...offerableConstraints(input.operationsStartDate),
     },
     data: {
       fulfillmentProcessState: 'IN_ASSEMBLY',

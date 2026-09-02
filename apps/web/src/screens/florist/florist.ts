@@ -496,7 +496,10 @@ export function availableActions(context: ActionContext): {
     // назначения и в смене не нуждается.
     canClaim: state === 'NEW' && hasActiveShift,
     canRelease: state === 'IN_ASSEMBLY' && (isAdmin || (mine && hasActiveShift)),
-    canAssemble: state === 'IN_ASSEMBLY' && mine && hasActiveShift,
+    // «Собран» недоступен для заказа вне производственной области: его нет в
+    // источнике, собирать в производство нечего. Возврат/освобождение при этом
+    // остаётся — заказ нужно увести из работы, а не завершить.
+    canAssemble: state === 'IN_ASSEMBLY' && mine && hasActiveShift && card.outOfScope !== true,
     // Возврат собранного на шаг назад: администратору/управляющему — любой,
     // флористу — только СВОЙ и только на активной смене (как сборка и снятие).
     canReopen:

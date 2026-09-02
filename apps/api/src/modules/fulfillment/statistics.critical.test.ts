@@ -104,7 +104,7 @@ describe('агрегация статистики смен', () => {
     const row = stats.rows.find((r) => r.floristId === florist.id);
     expect(row).toBeDefined();
     // Дата начала смены — под именем, по московскому дню (смена началась 09:00).
-    expect(row?.firstShiftDate).toBe(`2029-05-${day}`);
+    expect(row?.day).toBe(`2029-05-${day}`);
     expect(row?.shiftDurationMinutes).toBe(480);
     // Рабочее время — объединение [09:10–09:30] и [10:00–10:15] = 35 минут.
     expect(row?.workingMinutes).toBe(35);
@@ -229,5 +229,64 @@ describe('доступность очереди: разбиение просто
     expect(split.unknown).toBe(0);
     expect(split.withQueue).toBe(0);
     expect(split.withoutQueue).toBe(50);
+  });
+});
+
+describe('группировка по московскому дню начала смены', () => {
+  it('несколько дней одного флориста — отдельные строки, дни от нового к старому', async () => {
+    const florist = await seedUser(ctx.db, { roles: ['FLORIST'], fullName: 'Двухдневный' });
+    // День 10: смена 09:00–12:00, одна сборка.
+    await seedShift(florist.id, at('10', '09:00'), at('10', '12:00'));
+    await seedAudit('ORDER_FULFILLMENT_ASSEMBLED', florist.id, randomUUID(), at('10', '10:00'), {
+      assembledSumMinor: '100000',
+    });
+    // День 11: смена 09:00–13:00, две сборки.
+    await seedShift(florist.id, at('11', '09:00'), at('11', '13:00'));
+    await seedAudit('ORDER_FULFILLMENT_ASSEMBLED', florist.id, randomUUID(), at('11', '10:00'), {
+      assembledSumMinor: '200000',
+    });
+    await seedAudit('ORDER_FULFILLMENT_ASSEMBLED', florist.id, randomUUID(), at('11', '11:00'), {
+      assembledSumMinor: '300000',
+    });
+
+    const stats = await buildFloristStatistics(ctx.db, {
+      from: '2029-05-10',
+      to: '2029-05-11',
+      now: at('11', '18:00'),
+    });
+    const rows = stats.rows.filter((r) => r.floristId === florist.id);
+    expect(rows).toHaveLength(2);
+    // Дни от нового к старому.
+    expect(rows.map((r) => r.day)).toEqual(['2029-05-11', '2029-05-10']);
+    // НЕ суммированы: у каждого дня свои числа.
+    const day11 = rows.find((r) => r.day === '2029-05-11');
+    const day10 = rows.find((r) => r.day === '2029-05-10');
+    expect(day11?.uniqueAssembledCount).toBe(2);
+    expect(day10?.uniqueAssembledCount).toBe(1);
+    expect(day11?.shiftDurationMinutes).toBe(240);
+    expect(day10?.shiftDurationMinutes).toBe(180);
+  });
+
+  it('смена через полночь и её послеполуночные сборки относятся к дню начала', async () => {
+    const florist = await seedUser(ctx.db, { roles: ['FLORIST'], fullName: 'Ночной' });
+    // Смена 22:00 (12-го) — 02:00 (13-го).
+    await seedShift(florist.id, at('12', '22:00'), at('13', '02:00'));
+    // Сборка в 01:00 13-го — после полуночи, но в смене 12-го.
+    await seedAudit('ORDER_FULFILLMENT_ASSEMBLED', florist.id, randomUUID(), at('13', '01:00'), {
+      assembledSumMinor: '100000',
+    });
+
+    const stats = await buildFloristStatistics(ctx.db, {
+      from: '2029-05-12',
+      to: '2029-05-13',
+      now: at('13', '05:00'),
+    });
+    const rows = stats.rows.filter((r) => r.floristId === florist.id);
+    // Одна строка — день 12 (дата начала смены), а не 13.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.day).toBe('2029-05-12');
+    // Смена целиком (4 часа) и послеполуночная сборка — в дне старта.
+    expect(rows[0]?.shiftDurationMinutes).toBe(240);
+    expect(rows[0]?.uniqueAssembledCount).toBe(1);
   });
 });
