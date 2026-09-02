@@ -12,9 +12,12 @@
 
 import type { Database } from './db.js';
 import type { AppLogger } from './logging/logger.js';
+import { escalateOverdueResolutions } from '../modules/notifications/escalation.js';
 
 export const SUCCESSOR_CLEANUP_INTERVAL_MS = 60_000;
 export const REALTIME_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
+/** Как часто проверять задачи логиста на просрочку >30 мин без реакции. */
+export const ESCALATION_SWEEP_INTERVAL_MS = 60_000;
 /**
  * Очистка просроченных матриц.
  *
@@ -85,6 +88,7 @@ export interface MaintenanceRunner {
     successorTokens: number;
     realtimeEvents: number;
     matrixEntries: number;
+    escalations: number;
   }>;
 }
 
@@ -92,6 +96,7 @@ interface Intervals {
   successorCleanup: number;
   realtimeCleanup: number;
   matrixCleanup: number;
+  escalationSweep: number;
 }
 
 export function createMaintenanceRunner(
@@ -100,6 +105,7 @@ export function createMaintenanceRunner(
     successorCleanup: SUCCESSOR_CLEANUP_INTERVAL_MS,
     realtimeCleanup: REALTIME_CLEANUP_INTERVAL_MS,
     matrixCleanup: MATRIX_CLEANUP_INTERVAL_MS,
+    escalationSweep: ESCALATION_SWEEP_INTERVAL_MS,
   },
 ): MaintenanceRunner {
   const timers: NodeJS.Timeout[] = [];
@@ -107,6 +113,7 @@ export function createMaintenanceRunner(
   let successorInFlight: Promise<number> | null = null;
   let realtimeInFlight: Promise<number> | null = null;
   let matrixInFlight: Promise<number> | null = null;
+  let escalationInFlight: Promise<number> | null = null;
 
   const runSuccessorCleanup = async (): Promise<number> => {
     if (successorInFlight !== null || stopped) {
@@ -182,6 +189,31 @@ export function createMaintenanceRunner(
     }
   };
 
+  const runEscalationSweep = async (): Promise<number> => {
+    if (escalationInFlight !== null || stopped) {
+      return 0;
+    }
+    const pass = (async (): Promise<number> => {
+      try {
+        const now = (deps.now ?? (() => new Date()))();
+        const count = await escalateOverdueResolutions(deps.db, { now });
+        if (count > 0) {
+          deps.logger.info({ escalated: count }, 'эскалированы задачи логиста без реакции >30 мин');
+        }
+        return count;
+      } catch (error) {
+        deps.logger.error({ err: error }, 'эскалация задач логиста завершилась ошибкой');
+        return 0;
+      }
+    })();
+    escalationInFlight = pass;
+    try {
+      return await pass;
+    } finally {
+      escalationInFlight = null;
+    }
+  };
+
   return {
     start() {
       if (timers.length > 0) {
@@ -194,10 +226,15 @@ export function createMaintenanceRunner(
       );
       const realtimeTimer = setInterval(() => void runRealtimeCleanup(), intervals.realtimeCleanup);
       const matrixTimer = setInterval(() => void runMatrixCleanup(), intervals.matrixCleanup);
+      const escalationTimer = setInterval(
+        () => void runEscalationSweep(),
+        intervals.escalationSweep,
+      );
       successorTimer.unref();
       realtimeTimer.unref();
       matrixTimer.unref();
-      timers.push(successorTimer, realtimeTimer, matrixTimer);
+      escalationTimer.unref();
+      timers.push(successorTimer, realtimeTimer, matrixTimer, escalationTimer);
     },
     /**
      * Снимает таймеры и дожидается уже начатых проходов.
@@ -211,13 +248,19 @@ export function createMaintenanceRunner(
         clearInterval(timer);
       }
       timers.length = 0;
-      await Promise.allSettled([successorInFlight, realtimeInFlight, matrixInFlight]);
+      await Promise.allSettled([
+        successorInFlight,
+        realtimeInFlight,
+        matrixInFlight,
+        escalationInFlight,
+      ]);
     },
     async runOnce() {
       return {
         successorTokens: await runSuccessorCleanup(),
         realtimeEvents: await runRealtimeCleanup(),
         matrixEntries: await runMatrixCleanup(),
+        escalations: await runEscalationSweep(),
       };
     },
   };

@@ -156,6 +156,35 @@ async function applyTransition(
   });
 }
 
+/**
+ * Штатное завершение активного листа, если все его заказы получили результат.
+ *
+ * Используется после удаления заказа из активного листа: если снятый заказ был
+ * последним нерешённым, лист доставлен и переходит в `COMPLETED` тем же
+ * доменным переходом, что и обычная фиксация результата. Возвращает `true`,
+ * если переход выполнен. Лист блокируется в этой же транзакции.
+ */
+export async function completeActiveRouteIfAllResolved(
+  tx: TransactionClient,
+  actor: AuthenticatedActor,
+  routeId: string,
+  now: Date,
+): Promise<boolean> {
+  const route = await lockRoute(tx, routeId);
+  if (route.state !== 'ACTIVE') {
+    return false;
+  }
+  const remaining = await tx.routeOrder.count({
+    where: { routeId, removedAt: null, attempts: { none: { activeKey: { not: null } } } },
+  });
+  if (remaining > 0) {
+    return false;
+  }
+  await applyTransition(tx, route, 'COMPLETED', actor, now, null);
+  await publishRouteEvent(tx, 'route.updated', routeId);
+  return true;
+}
+
 /** Запись аудита маршрута с произвольным содержимым. */
 async function auditRouteValue(
   tx: TransactionClient,

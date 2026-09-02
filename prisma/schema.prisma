@@ -431,6 +431,9 @@ model OrderMoyskladState {
   order       DeliveryOrder @relation(fields: [orderId], references: [id])
   enqueuedSeq Int           @default(0)
   appliedSeq  Int           @default(0)
+  /// Ранг последней применённой стадии (сборка=1, доставка=2, финал=3). Более
+  /// поздняя стадия не откатывается более ранней даже при большем `seq`.
+  appliedRank Int           @default(0)
   /// UUID последнего отправленного состояния — для наблюдаемости, не секрет.
   lastStateId String?       @db.Uuid
   updatedAt   DateTime      @updatedAt
@@ -3132,6 +3135,11 @@ model OrderResolution {
 
   /// Активная задача одна на заказ. Значение равно `orderId`, у закрытой — NULL.
   activeKey String? @unique @db.Uuid
+
+  /// Момент эскалации «логист не реагирует >30 мин». Ставится РОВНО один раз
+  /// (условной записью) — перезапуск, повторный проход и обновление страницы
+  /// повтора не создают. NULL — эскалации ещё не было.
+  escalatedAt DateTime?
 
   @@index([orderId])
   @@index([createdAt])

@@ -386,3 +386,56 @@ describe('активация маршрута ставит «Доставляе�
     expect(orderIds).not.toContain(cancelled.id);
   });
 });
+
+describe('статус сборки: доставка/самовывоз и запрет регресса', () => {
+  it('доставка → «Ожидает отправку», самовывоз → «Готов к самовывозу»', async () => {
+    const order = await seedOrder();
+    const { fetch, requests } = recordingFetch(() => okResponse());
+    const handler = makeHandler(makeClient(fetch, true), true);
+
+    await enqueue(order.id, 'awaiting_shipment', unique('dk'));
+    await processOutboxOnce({ db: ctx.db, logger, handlers: { [ORDER_STATE_TOPIC]: handler } });
+    let mine = requests.filter((r) => r.url.endsWith(order.externalId));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.body).toContain(MOYSKLAD_IDS.states.awaitingShipment);
+
+    const pickup = await seedOrder();
+    await enqueue(pickup.id, 'ready_for_pickup', unique('dk'));
+    await processOutboxOnce({ db: ctx.db, logger, handlers: { [ORDER_STATE_TOPIC]: handler } });
+    mine = requests.filter((r) => r.url.endsWith(pickup.externalId));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.body).toContain(MOYSKLAD_IDS.states.readyForPickup);
+  });
+
+  it('стадия сборки НЕ откатывает более позднюю «Доставляется» (пересборка после отгрузки)', async () => {
+    const order = await seedOrder();
+    const { fetch, requests } = recordingFetch(() => okResponse());
+    const handler = makeHandler(makeClient(fetch, true), true);
+
+    // Доставка применена (ранг 2, seq 1).
+    await callHandler(handler, order.id, 'delivering', 1);
+    // Пересборка шлёт «Ожидает отправку» ПОЗЖЕ (больший seq), но ранг ниже —
+    // регресс запрещён: записи нет.
+    await callHandler(handler, order.id, 'awaiting_shipment', 2);
+
+    const mine = requests.filter((r) => r.url.endsWith(order.externalId));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.body).toContain(MOYSKLAD_IDS.states.delivering);
+    // Финал/отмена (ранг 3) применяется поверх доставки — регрессом не считается.
+    await callHandler(handler, order.id, 'completed', 3);
+    const after = requests.filter((r) => r.url.endsWith(order.externalId));
+    expect(after).toHaveLength(2);
+    expect(after[1]!.body).toContain(MOYSKLAD_IDS.states.completed);
+  });
+
+  it('повтор того же события сборки идемпотентен (одна запись)', async () => {
+    const order = await seedOrder();
+    const { fetch, requests } = recordingFetch(() => okResponse());
+    const handler = makeHandler(makeClient(fetch, true), true);
+
+    await callHandler(handler, order.id, 'awaiting_shipment', 1);
+    await callHandler(handler, order.id, 'awaiting_shipment', 1); // повтор того же seq
+    const mine = requests.filter((r) => r.url.endsWith(order.externalId));
+    expect(mine).toHaveLength(1);
+  });
+});

@@ -511,5 +511,39 @@ describe('свыше 500 без молчаливого предела и рас�
       offset += page.page.limit;
     }
     expect(seen.size).toBe(COUNT);
+    // Посев 501 заказа — это 1002 последовательных запроса к БД: под нагрузкой
+    // CI дефолтные 5 с не хватает на подготовку, поэтому даём запас. Проверка
+    // про счётчики и постраничную догрузку, а не про скорость посева.
+  }, 30_000);
+});
+
+describe('исходящий статус сборки в МойСклад (change 4)', () => {
+  it('доставка → awaiting_shipment, самовывоз → ready_for_pickup в очереди статусов', async () => {
+    const delivery = await seedProductionOrder({
+      deliveryMethodId: MOYSKLAD_IDS.deliveryMethodDelivery,
+    });
+    await assembleBy(delivery.id);
+    const pickup = await seedProductionOrder({
+      deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup,
+    });
+    await assembleBy(pickup.id);
+
+    const dMsg = await ctx.db.outboxMessage.findFirstOrThrow({
+      where: {
+        topic: 'moysklad.order_state',
+        idempotencyKey: { contains: `${delivery.id}:assembled` },
+      },
+      select: { payload: true },
+    });
+    expect((dMsg.payload as { target?: string }).target).toBe('awaiting_shipment');
+
+    const pMsg = await ctx.db.outboxMessage.findFirstOrThrow({
+      where: {
+        topic: 'moysklad.order_state',
+        idempotencyKey: { contains: `${pickup.id}:assembled` },
+      },
+      select: { payload: true },
+    });
+    expect((pMsg.payload as { target?: string }).target).toBe('ready_for_pickup');
   });
 });

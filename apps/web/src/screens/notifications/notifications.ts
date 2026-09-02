@@ -94,6 +94,19 @@ export function refusalStateLabel(state: string): string {
   return REFUSAL_STATE_LABEL[state] ?? state;
 }
 
+/** `kind` уведомления-эскалации задачи логиста. */
+export const LOGIST_TASK_ESCALATION_KIND = 'LOGIST_TASK_ESCALATION';
+
+/** Вид задачи логиста словами (совпадает с серверным `OrderResolutionKind`). */
+const RESOLUTION_KIND_LABEL: Record<string, string> = {
+  FAILED_DELIVERY: 'недоставка',
+  CANCELLED_AFTER_DELIVERY: 'отмена после доставки',
+};
+
+export function resolutionKindLabel(kind: string): string {
+  return RESOLUTION_KIND_LABEL[kind] ?? kind;
+}
+
 export interface NotificationsResponse {
   items: NotificationView[];
   total: number;

@@ -17,13 +17,35 @@ import {
   orderStateLabel,
   refusalReasonLabel,
   refusalStateLabel,
+  resolutionKindLabel,
   sourceLabel,
+  LOGIST_TASK_ESCALATION_KIND,
   type NotificationView,
 } from './notifications';
 import './notifications.css';
 
 /** Тело уведомления: что изменилось (старое → новое) и где заказ сейчас. */
 export function NotificationBody({ item }: { item: NotificationView }): React.JSX.Element {
+  /*
+   * Эскалация задачи логиста: логист не отреагировал более 30 минут. Своя форма
+   * (нет полей/состава); показывается раньше остального.
+   */
+  if (item.kind === LOGIST_TASK_ESCALATION_KIND) {
+    const payload = item.payload as unknown as { taskKind?: string };
+    const taskKind = typeof payload.taskKind === 'string' ? payload.taskKind : '';
+    return (
+      <div className="stack stack--tight" data-testid="notif-escalation">
+        <div className="notif__field-label">Реакция логиста просрочена</div>
+        <p>
+          Логист не реагирует на задачу «{resolutionKindLabel(taskKind)}» по заказу{' '}
+          <strong>{item.orderNumber}</strong> более 30 минут.
+        </p>
+        <div className="notif__state" data-testid="notif-state">
+          <span className="notif__field-label">Сейчас</span> {orderStateLabel(item.currentState)}
+        </div>
+      </div>
+    );
+  }
   /*
    * Запрос отказа — не изменение полей заказа, а обращение флориста. У него
    * своя форма: кто отказывается, по какой причине, с каким комментарием и чем

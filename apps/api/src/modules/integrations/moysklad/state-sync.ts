@@ -36,19 +36,57 @@ export const ORDER_STATE_TOPIC = 'moysklad.order_state';
 /**
  * Куда переводим заказ в источнике.
  *
- *  * `delivering` — заказ вошёл в активную доставку (маршрут отгружен);
- *  * `completed`  — курьер отметил заказ доставленным;
- *  * `cancelled`  — логист подтвердил отмену.
+ *  * `awaiting_shipment` — заказ ДОСТАВКИ собран, ждёт отправку;
+ *  * `ready_for_pickup`  — заказ САМОВЫВОЗА собран, готов к выдаче;
+ *  * `delivering`        — заказ вошёл в активную доставку (маршрут отгружен);
+ *  * `completed`         — курьер отметил заказ доставленным;
+ *  * `cancelled`         — логист подтвердил отмену.
  */
-export type OrderStateTarget = 'delivering' | 'completed' | 'cancelled';
+export type OrderStateTarget =
+  'awaiting_shipment' | 'ready_for_pickup' | 'delivering' | 'completed' | 'cancelled';
 
-const TARGETS: readonly OrderStateTarget[] = ['delivering', 'completed', 'cancelled'];
+const TARGETS: readonly OrderStateTarget[] = [
+  'awaiting_shipment',
+  'ready_for_pickup',
+  'delivering',
+  'completed',
+  'cancelled',
+];
 
 /** UUID состояний из справочника МоегоСклада (не секрет, подтверждён аудитом). */
 const STATE_ID: Record<OrderStateTarget, string> = {
+  awaiting_shipment: MOYSKLAD_IDS.states.awaitingShipment,
+  ready_for_pickup: MOYSKLAD_IDS.states.readyForPickup,
   delivering: MOYSKLAD_IDS.states.delivering,
   completed: MOYSKLAD_IDS.states.completed,
   cancelled: MOYSKLAD_IDS.states.cancelled,
+};
+
+/**
+ * Ранг стадии заказа. Более поздняя стадия НЕ откатывается более ранней, даже
+ * если ранняя пришла позже (пересборка после отгрузки). `seq` упорядочивает
+ * события внутри одного ранга; ранг — между стадиями.
+ *
+ *  * сборка (ожидает отправку / готов к самовывозу) = 1;
+ *  * доставка = 2;
+ *  * завершение/отмена = 3.
+ */
+const RANK: Record<OrderStateTarget, number> = {
+  awaiting_shipment: 1,
+  ready_for_pickup: 1,
+  delivering: 2,
+  completed: 3,
+  cancelled: 3,
+};
+
+/** Ранг по UUID уже применённого состояния — чтобы старые строки без ранга
+ * (до миграции `appliedRank`) не откатывались собранной стадией без backfill. */
+const RANK_BY_STATE_ID: Record<string, number> = {
+  [MOYSKLAD_IDS.states.awaitingShipment]: 1,
+  [MOYSKLAD_IDS.states.readyForPickup]: 1,
+  [MOYSKLAD_IDS.states.delivering]: 2,
+  [MOYSKLAD_IDS.states.completed]: 3,
+  [MOYSKLAD_IDS.states.cancelled]: 3,
 };
 
 /**
@@ -172,18 +210,40 @@ function parsePayload(payload: unknown): ParsedMessage {
  */
 export function createMoyskladOrderStateHandler(deps: OrderStateHandlerDeps): OutboxHandler {
   /** Применяет одно событие в границах переданной транзакции. */
-  const apply = async (tx: TransactionClient, orderId: string, stateId: string, seq: number) => {
+  const apply = async (
+    tx: TransactionClient,
+    orderId: string,
+    target: OrderStateTarget,
+    stateId: string,
+    seq: number,
+  ) => {
     // Блокировка заказа: события одного заказа не обрабатываются одновременно
     // и не обгоняют друг друга даже при нескольких воркерах.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`moysklad-order-state:${orderId}`}))`;
 
     const state = await tx.orderMoyskladState.findUnique({
       where: { orderId },
-      select: { appliedSeq: true },
+      select: { appliedSeq: true, appliedRank: true, lastStateId: true },
     });
 
-    if (state !== null && seq <= state.appliedSeq) {
-      // Устаревшее или уже применённое событие: без регресса и без второй записи.
+    const rank = RANK[target];
+    // Эффективный применённый ранг: у строк, синхронизированных ДО миграции
+    // `appliedRank`, он выводится из последнего записанного UUID — так старую
+    // «Доставляется» не откатит запоздавшая или пересобранная стадия сборки.
+    const appliedRank =
+      state === null
+        ? 0
+        : state.appliedRank > 0
+          ? state.appliedRank
+          : (RANK_BY_STATE_ID[state.lastStateId ?? ''] ?? 0);
+    const appliedSeq = state?.appliedSeq ?? 0;
+
+    // Регресс запрещён: более ранняя стадия не перезаписывает более позднюю.
+    // Внутри одного ранга порядок держит seq.
+    if (rank < appliedRank) {
+      return;
+    }
+    if (rank === appliedRank && seq <= appliedSeq) {
       return;
     }
 
@@ -199,8 +259,14 @@ export function createMoyskladOrderStateHandler(deps: OrderStateHandlerDeps): Ou
 
     await tx.orderMoyskladState.upsert({
       where: { orderId },
-      create: { orderId, enqueuedSeq: seq, appliedSeq: seq, lastStateId: stateId },
-      update: { appliedSeq: seq, lastStateId: stateId },
+      create: {
+        orderId,
+        enqueuedSeq: seq,
+        appliedSeq: seq,
+        appliedRank: rank,
+        lastStateId: stateId,
+      },
+      update: { appliedSeq: seq, appliedRank: rank, lastStateId: stateId },
     });
   };
 
@@ -225,9 +291,9 @@ export function createMoyskladOrderStateHandler(deps: OrderStateHandlerDeps): Ou
       // отправка наружу, отметка обработки и новый `appliedSeq` фиксируются
       // атомарно. Прямой вызов без воркера (в тестах) открывает свою транзакцию.
       if (tx !== undefined) {
-        await apply(tx, orderId, stateId, seq);
+        await apply(tx, orderId, target, stateId, seq);
       } else {
-        await deps.db.$transaction((own) => apply(own, orderId, stateId, seq), {
+        await deps.db.$transaction((own) => apply(own, orderId, target, stateId, seq), {
           timeout: HANDLER_TX_TIMEOUT_MS,
         });
       }

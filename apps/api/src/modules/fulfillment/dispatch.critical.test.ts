@@ -42,6 +42,7 @@ import {
   listPendingRefusalNotificationIds,
 } from './dispatch-florist.js';
 import { readFloristDispatchMode, saveFloristDispatchMode } from '../settings/service.js';
+import { applyCancellation } from '../integrations/moysklad/cancellation.js';
 
 let ctx: TestContext;
 const CONTEXT = { ip: null, userAgent: null };
@@ -711,5 +712,69 @@ describe('единая финальная проверка кандидата', 
     // отмена), а флорист получил следующий подходящий заказ.
     expect((await processState(cancelled.id)).fulfillmentProcessState).toBe('NEW');
     expect((await processState(valid.id)).fulfillmentAssigneeId).toBe(florist.userId);
+  });
+});
+
+describe('отменённый заказ скрыт из работы флориста (change 1)', () => {
+  it('не в свободной очереди, не в поиске, не в кандидатах автораздачи', async () => {
+    const cancelled = await seedOrder(600);
+    const valid = await seedOrder(660);
+    await ctx.db.deliveryOrder.update({
+      where: { id: cancelled.id },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await isolate([cancelled.id, valid.id]);
+
+    // Свободная очередь руководителя: отменённого нет, обычный есть.
+    const queue = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false },
+      NOW,
+    );
+    const ids = queue.items.map((i) => i.id);
+    expect(ids).toContain(valid.id);
+    expect(ids).not.toContain(cancelled.id);
+
+    // Поиск по номеру отменённого — пусто (свободный отменённый не находится).
+    const found = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false, search: cancelled.number },
+      NOW,
+    );
+    expect(found.items.some((i) => i.id === cancelled.id)).toBe(false);
+
+    // Кандидаты автораздачи: отменённого нет.
+    const candidates = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(candidates).not.toContain(cancelled.id);
+    expect(candidates).toContain(valid.id);
+  });
+
+  it('отмена, пришедшая на назначенный (не собранный) заказ, снимает назначение', async () => {
+    const order = await seedOrder();
+    const florist = await floristReady('Держал отменённый', NOW);
+    await claimOrder(ctx.db, florist, order.id, CONTEXT);
+    expect((await processState(order.id)).fulfillmentProcessState).toBe('IN_ASSEMBLY');
+
+    await applyCancellation(ctx.db, {
+      orderId: order.id,
+      cancelled: true,
+      previous: false,
+      now: new Date(),
+    });
+
+    const state = await processState(order.id);
+    // Флорист освобождён: назначения нет; в свободную очередь заказ не вернулся
+    // (он отменён и из неё исключён).
+    expect(state.fulfillmentAssigneeId).toBeNull();
+    expect(state.fulfillmentProcessState).toBe('NEW');
+    const mine = await readQueue(
+      ctx.db,
+      { userId: florist.userId, roles: ['FLORIST'] },
+      { day: 'today', scope: 'mine', includeAssigned: false },
+      NOW,
+    );
+    expect(mine.items.some((i) => i.id === order.id)).toBe(false);
   });
 });

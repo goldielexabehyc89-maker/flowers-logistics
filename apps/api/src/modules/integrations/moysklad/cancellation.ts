@@ -83,6 +83,10 @@ export async function applyCancellation(
   if (input.cancelled) {
     await markRouteCellPlacement(tx, input.orderId);
     await openCorrectionTaskIfDelivered(tx, input.orderId);
+    // Отмена пришла на назначенный, но ещё не собранный заказ — снимаем
+    // назначение, освобождая флориста. В свободную очередь он не вернётся:
+    // отменённый заказ из неё исключён (см. offerableConstraints/buildMineWhere).
+    await releaseInAssemblyOnCancel(tx, input.orderId);
   } else {
     await returnToUnassigned(tx, input.orderId);
   }
@@ -217,18 +221,19 @@ async function returnToUnassigned(tx: TransactionClient, orderId: string): Promi
     });
   }
 
-  /*
-   * Незавершённая сборка тоже отпускается.
-   *
-   * Флорист, за которым заказ числился до отмены, за это время занялся
-   * другим: вернуть ему заказ молча значило бы записать работу на человека,
-   * который о ней не знает. Заказ возвращается в общую очередь, и его берут
-   * заново.
-   *
-   * Уже СОБРАННЫЙ заказ не трогается: букет физически существует, и делать
-   * вид, что сборки не было, нельзя.
-   */
-  await tx.deliveryOrder.updateMany({
+  await releaseInAssemblyOnCancel(tx, orderId);
+}
+
+/**
+ * Снимает назначение с НЕзавершённой сборки (IN_ASSEMBLY), освобождая флориста.
+ *
+ * Флорист, за которым заказ числился, за это время занялся другим: держать за
+ * ним отменённый заказ нельзя. Заказ переходит в `NEW`, но в свободную очередь
+ * не возвращается — отменённый из неё исключён фильтром. Уже СОБРАННЫЙ заказ не
+ * трогается: букет физически существует, документы и печать остаются.
+ */
+async function releaseInAssemblyOnCancel(tx: TransactionClient, orderId: string): Promise<void> {
+  const updated = await tx.deliveryOrder.updateMany({
     where: { id: orderId, fulfillmentProcessState: 'IN_ASSEMBLY' },
     data: {
       fulfillmentProcessState: 'NEW',
@@ -239,9 +244,11 @@ async function returnToUnassigned(tx: TransactionClient, orderId: string): Promi
     },
   });
 
-  await publishRealtimeEvent(tx, {
-    topic: 'order.fulfillment_process_changed',
-    payload: { orderId },
-    audienceRoles: ['ADMIN', 'FLORIST', 'LOGISTICIAN', 'WAREHOUSE'],
-  });
+  if (updated.count > 0) {
+    await publishRealtimeEvent(tx, {
+      topic: 'order.fulfillment_process_changed',
+      payload: { orderId },
+      audienceRoles: ['ADMIN', 'FLORIST', 'LOGISTICIAN', 'WAREHOUSE'],
+    });
+  }
 }

@@ -373,8 +373,9 @@ describe('группа в ответе сервера', () => {
     expect(inGroup.has(cancelled.id)).toBe(false);
     expect(inGroup.has(noTime.id)).toBe(false);
 
-    // Отменённый из очереди не исчезает — он просто не приоритетный.
-    expect(queue.items.map((item) => item.id)).toContain(cancelled.id);
+    // Отменённый («Отменён — не собирать») из очереди флориста ИСКЛЮЧЁН вовсе:
+    // его не показывают ни как задание, ни как приоритет (CORE-…-MOYSKLAD-02 §1).
+    expect(queue.items.map((item) => item.id)).not.toContain(cancelled.id);
     // Собранный в рабочую очередь не входит вовсе.
     expect(queue.items.map((item) => item.id)).not.toContain(done.id);
 
