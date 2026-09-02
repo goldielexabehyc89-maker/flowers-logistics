@@ -16,6 +16,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { X } from 'lucide-react';
 import { useAuth } from '../../auth/AuthContext';
 import { useToast } from '../../ui/ToastProvider';
 import {
@@ -86,10 +87,45 @@ function SheetOrders({
   deliveredNumbers: readonly string[];
   onOpenOrder: (orderId: string) => void;
 }): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  /** Заказ, для которого открыто подтверждение удаления из активного листа. */
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; number: string } | null>(null);
   const card = useQuery({
     queryKey: ['route', routeId],
     queryFn: () => client.get<RouteCardView>(`/api/routes/${routeId}`),
+  });
+
+  /**
+   * Убирает заказ из УЖЕ отгруженного (или подтверждённого) листа.
+   *
+   * Ту же серверную ручку сторожит роль ADMIN и проверка финального
+   * результата, поэтому клиент лишь показывает кнопку и подтверждение, а
+   * последнее слово — за сервером. `expectedVersion` защищает от гонки с
+   * чужой правкой листа: устаревшая версия вернёт понятную ошибку.
+   */
+  const removeFromActive = useMutation({
+    mutationFn: (input: { orderId: string; expectedVersion: number }) =>
+      client.post(`/api/routes/${routeId}/orders/${input.orderId}/remove-from-active`, {
+        expectedVersion: input.expectedVersion,
+      }),
+    onSuccess: () => {
+      showToast('Заказ убран из маршрута и вернулся в «Сделки»', 'success');
+      setRemoveTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
+      void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
+      void queryClient.invalidateQueries({ queryKey: ['routes'] });
+    },
+    onError: (error: unknown) => {
+      showToast(
+        (error as { message?: string }).message ?? 'Не удалось убрать заказ из маршрута',
+        'error',
+      );
+      setRemoveTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ['route-sheets'] });
+      void queryClient.invalidateQueries({ queryKey: ['route', routeId] });
+    },
   });
 
   if (card.isPending) {
@@ -99,42 +135,111 @@ function SheetOrders({
     return <ErrorState title="Не удалось загрузить состав" onRetry={() => void card.refetch()} />;
   }
 
+  const route = card.data;
+  const isAdmin = user?.roles.includes('ADMIN') === true;
+  /*
+   * Убрать заказ из ЖИВОГО листа может только администратор и только пока лист
+   * подтверждён или отгружен: у доставленной остановки уже есть исход, и её
+   * трогает не эта кнопка. По доставленным ✕ не показываем — сервер их всё
+   * равно отклонит (ORDER_HAS_FINAL_RESULT), а гашёная кнопка обещала бы
+   * действие, которого нет.
+   */
+  const canRemoveFromActive = isAdmin && (route.state === 'ACTIVE' || route.state === 'CONFIRMED');
   const delivered = new Set(deliveredNumbers);
+
   return (
-    <ul className="sheets__orders" data-testid="sheet-orders">
-      {card.data.orders.map((item) => (
-        <li
-          key={item.routeOrderId}
-          className="sheets__order"
-          data-testid="sheet-order"
-          data-order-number={item.order.number}
-        >
-          <span className="sheets__order-position">{item.position}</span>
-          {/* Номер — вход в окно заказа: там вся информация и правки. */}
-          <button
-            type="button"
-            className="sheets__order-number order-number-button"
-            data-testid="order-number"
-            onClick={() => onOpenOrder(item.order.id)}
+    <>
+      <ul className="sheets__orders" data-testid="sheet-orders">
+        {route.orders.map((item) => (
+          <li
+            key={item.routeOrderId}
+            className="sheets__order"
+            data-testid="sheet-order"
+            data-order-number={item.order.number}
           >
-            {item.order.number}
-          </button>
-          {/*
-            Время стоит между номером и адресом: остановка читается как
-            «этот заказ, к этому часу, сюда». Адрес идёт последним — он
-            длиннее всех и забирает остаток строки.
-          */}
-          <span className="sheets__order-interval muted">{stopInterval(item.order.interval)}</span>
-          <span className="sheets__order-address">
-            {item.order.address ?? '—'}
-            {item.order.addressDetails === null ? '' : ` · ${item.order.addressDetails}`}
-          </span>
-          {delivered.has(item.order.number) && (
-            <span className="sheets__order-state">Доставлен</span>
-          )}
-        </li>
-      ))}
-    </ul>
+            <span className="sheets__order-position">{item.position}</span>
+            {/* Номер — вход в окно заказа: там вся информация и правки. */}
+            <button
+              type="button"
+              className="sheets__order-number order-number-button"
+              data-testid="order-number"
+              onClick={() => onOpenOrder(item.order.id)}
+            >
+              {item.order.number}
+            </button>
+            {/*
+              Время стоит между номером и адресом: остановка читается как
+              «этот заказ, к этому часу, сюда». Адрес идёт последним — он
+              длиннее всех и забирает остаток строки.
+            */}
+            <span className="sheets__order-interval muted">
+              {stopInterval(item.order.interval)}
+            </span>
+            <span className="sheets__order-address">
+              {item.order.address ?? '—'}
+              {item.order.addressDetails === null ? '' : ` · ${item.order.addressDetails}`}
+            </span>
+            {delivered.has(item.order.number) && (
+              <span className="sheets__order-state">Доставлен</span>
+            )}
+            {canRemoveFromActive && !delivered.has(item.order.number) && (
+              <button
+                type="button"
+                className="routes__stop-remove sheets__order-remove"
+                data-testid="sheet-order-remove-active"
+                aria-label={`Убрать заказ ${item.order.number} из маршрута`}
+                title="Убрать из маршрута (только администратор): заказ вернётся в «Сделки»"
+                disabled={removeFromActive.isPending}
+                onClick={() => setRemoveTarget({ id: item.order.id, number: item.order.number })}
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      <Modal
+        open={removeTarget !== null}
+        title="Убрать заказ из маршрута?"
+        onClose={() => setRemoveTarget(null)}
+        dismissible={!removeFromActive.isPending}
+        testId="sheet-order-remove-confirm"
+      >
+        {removeTarget !== null && (
+          <div className="stack">
+            <p className="text-sm">
+              Заказ {removeTarget.number} будет убран из листа {route.number} и вернётся в «Сделки»
+              нераспределённым. Уже выданный курьеру вернётся в «Ожидают приёмки» до повторной
+              приёмки складом — без пересборки и новой печати, если состав не менялся. Ничего не
+              удаляется. Действие доступно только администратору.
+            </p>
+            <div className="modal__footer">
+              <Button
+                onClick={() => setRemoveTarget(null)}
+                disabled={removeFromActive.isPending}
+                data-testid="sheet-order-remove-dismiss"
+              >
+                Отмена
+              </Button>
+              <Button
+                variant="danger"
+                disabled={removeFromActive.isPending}
+                data-testid="sheet-order-remove-submit"
+                onClick={() =>
+                  removeFromActive.mutate({
+                    orderId: removeTarget.id,
+                    expectedVersion: route.version,
+                  })
+                }
+              >
+                Убрать из маршрута
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </>
   );
 }
 
