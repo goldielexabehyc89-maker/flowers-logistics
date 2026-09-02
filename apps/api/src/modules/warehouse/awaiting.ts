@@ -141,8 +141,14 @@ export async function listAwaitingIntake(
   const sClause = searchClause(search);
 
   // Счётчики по типу, с учётом поиска: одним группированным запросом.
+  //
+  // `IS TRUE` схлопывает NULL к «не самовывоз»: заказ без способа получения —
+  // доставка. Без этого NULL образовал бы ТРЕТЬЮ группу, и сумма самовывоза и
+  // доставки не сошлась бы с полным числом. Тот же смысл, что у чипа «Доставка»
+  // (`IS DISTINCT FROM pickup` тоже включает NULL) и у признака карточки.
   const grouped = await db.$queryRaw<{ is_pickup: boolean; n: bigint }[]>`
-    SELECT (o."deliveryMethodId" = ${PICKUP_METHOD_ID}::uuid) AS is_pickup, count(*)::bigint AS n
+    SELECT ((o."deliveryMethodId" = ${PICKUP_METHOD_ID}::uuid) IS TRUE) AS is_pickup,
+           count(*)::bigint AS n
     ${base} ${sClause}
     GROUP BY 1
   `;

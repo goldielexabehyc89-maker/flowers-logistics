@@ -313,6 +313,29 @@ describe('счётчик вкладки «Ожидают приёмки»', () =
     expect(countWithSearch.fullTotal).toBe(count.fullTotal);
   });
 
+  it('заказ без способа получения — доставка: счётчики сходятся с полным числом', async () => {
+    const tag = unique('NOMETHOD');
+    // Заказ БЕЗ deliveryMethodId (NULL) — должен считаться доставкой, а не выпасть
+    // из счётчиков третьей группой.
+    const noMethod = await seedProductionOrder({
+      externalName: `${tag}-d`,
+      deliveryMethodId: null,
+    });
+    await assembleBy(noMethod.id);
+    const pickup = await seedProductionOrder({
+      externalName: `${tag}-p`,
+      deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup,
+    });
+    await assembleBy(pickup.id);
+
+    const page = await listAwaitingIntake(ctx.db, { search: tag });
+    // Сумма самовывоза и доставки == полному набору отбора (без «потерянной» группы).
+    expect(page.counts.all).toBe(page.counts.delivery + page.counts.pickup);
+    expect(page.counts.all).toBe(2);
+    expect(page.counts.pickup).toBe(1);
+    expect(page.counts.delivery).toBe(1); // NULL-способ учтён в доставке
+  });
+
   it('приёмка уменьшает полный счётчик', async () => {
     const keeper = await actorFor(['WAREHOUSE']);
     const order = await seedAssembled();
