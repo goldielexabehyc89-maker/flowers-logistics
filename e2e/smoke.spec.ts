@@ -5825,6 +5825,20 @@ test('маршрутные листы: разделы, курьер, ручна�
   const shippedRow = shipped.locator(`[data-sheet-number="${sheetNumber}"]`);
   await expect(shippedRow).toBeVisible({ timeout: 20_000 });
 
+  /*
+   * 5а. На ОТГРУЖЕННОМ листе администратор видит ✕ «убрать заказ из маршрута».
+   *
+   * Заказ уехал к курьеру, но не доставлен: только администратор может вернуть
+   * его в «Сделки». Кнопка живёт на строке состава именно отгруженного листа —
+   * там, где логист и смотрит заказы у курьера, а не на экране черновиков.
+   */
+  await shippedRow.getByTestId('sheet-expand').click();
+  await expect(shippedRow.getByTestId('sheet-orders')).toBeVisible();
+  await expect(
+    shippedRow.locator(`[data-order-number="${own}"]`).getByTestId('sheet-order-remove-active'),
+  ).toBeVisible();
+  await shippedRow.getByTestId('sheet-expand').click();
+
   // 6. Отмена отгрузки без доставленных заказов: обычное подтверждение.
   await shippedRow.getByTestId('sheet-cancel-shipment').click();
   await expect(page.getByTestId('cancel-shipment-dialog')).toBeVisible();
