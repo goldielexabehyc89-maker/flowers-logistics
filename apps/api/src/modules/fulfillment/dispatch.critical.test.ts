@@ -44,6 +44,13 @@ import {
 } from './dispatch-florist.js';
 import { readFloristDispatchMode, saveFloristDispatchMode } from '../settings/service.js';
 import { applyCancellation } from '../integrations/moysklad/cancellation.js';
+import {
+  countOpenNoFlowersQuarantines,
+  listNoFlowersQuarantines,
+  listPendingNoFlowersNotificationIds,
+  returnFromQuarantine,
+} from './no-flowers.js';
+import { markRead } from '../notifications/service.js';
 
 let ctx: TestContext;
 const CONTEXT = { ip: null, userAgent: null };
@@ -569,10 +576,12 @@ describe('регрессия: два флориста, отказ, возвра�
     expect((await processState(a.id)).fulfillmentAssigneeId).toBe(flor1.userId);
 
     // Первый отказывается от A; руководитель подтверждает — A возвращается в NEW.
+    // Причина — НЕ «Нет цветов»: у неё в AUTO отдельный путь (карантин), а этот
+    // сценарий проверяет обычный запрос отказа и решение руководителя.
     const req = await requestRefusal(
       ctx.db,
       flor1,
-      { orderId: a.id, reason: 'INSUFFICIENT_GOODS', comment: null },
+      { orderId: a.id, reason: 'CANNOT_ASSEMBLE', comment: null },
       CONTEXT,
     );
     const notificationId = await ctx.db.orderRefusalRequest
@@ -923,5 +932,279 @@ describe('«Принят, Не оплачен»: самовывоз собира
       NOW,
     );
     expect(queue.items.some((i) => i.id === cancelled.id || i.id === archived.id)).toBe(false);
+  });
+});
+
+/**
+ * Карантин «Нет цветов» (CORE-NO-FLOWERS-QUARANTINE-01).
+ *
+ * В AUTO флорист, отказавшийся с причиной «Нет цветов», сразу освобождается, а
+ * заказ уходит в серверный карантин и не назначается никому, пока менеджер не
+ * вернёт его в очередь — в КОНЕЦ.
+ */
+describe('карантин «Нет цветов»', () => {
+  async function managerActor(): Promise<AuthenticatedActor> {
+    const user = await seedUser(ctx.db, { roles: ['MANAGER'], fullName: 'Менеджер выдачи' });
+    return { userId: user.id, roles: ['MANAGER'], familyId: randomUUID() } as AuthenticatedActor;
+  }
+
+  /** Ставит заказ в карантин через отказ флориста «Нет цветов» в AUTO. */
+  async function quarantine(
+    orderId: string,
+    florist: AuthenticatedActor & { shiftId: string },
+  ): Promise<void> {
+    await ctx.db.deliveryOrder.update({
+      where: { id: orderId },
+      data: {
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        fulfillmentAssigneeId: florist.userId,
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentShiftId: florist.shiftId,
+      },
+    });
+    await setAuto(true);
+    await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId, reason: 'INSUFFICIENT_GOODS', comment: 'нет роз' },
+      CONTEXT,
+    );
+  }
+
+  const generalQuery = {
+    day: 'today' as const,
+    scope: 'general' as const,
+    includeAssigned: false,
+  };
+
+  it('«Нет цветов» в AUTO сразу снимает заказ с флориста и убирает из очереди/поиска/счётчика/автораздачи', async () => {
+    const florist = await floristOnShift('Отказ Нет цветов');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+
+    const st = await processState(order.id);
+    expect(st.fulfillmentProcessState).toBe('NEW');
+    expect(st.fulfillmentAssigneeId).toBeNull();
+
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirst({
+      where: { orderId: order.id, activeKey: { not: null } },
+      select: { id: true },
+    });
+    expect(q).not.toBeNull();
+
+    expect(await listDispatchableOrderIds(ctx.db, NOW)).not.toContain(order.id);
+    const viewer = { userId: florist.userId, roles: ['FLORIST'] };
+    const queue = await readQueue(ctx.db, viewer, generalQuery, NOW);
+    expect(queue.items.some((i) => i.id === order.id)).toBe(false);
+    expect(queue.total).toBe(0);
+    const search = await readQueue(ctx.db, viewer, { ...generalQuery, search: order.number }, NOW);
+    expect(search.items.some((i) => i.id === order.id)).toBe(false);
+  });
+
+  it('после отказа флорист свободен и получает следующий заказ', async () => {
+    const florist = await floristOnShift('Свободен после отказа');
+    const first = await seedOrder(600);
+    const second = await seedOrder(660);
+    await isolate([first.id, second.id]);
+    await quarantine(first.id, florist);
+    await makeReady(florist.shiftId, new Date('2029-05-15T05:00:00.000Z'));
+    await setAuto(true);
+
+    expect(await dispatchFlorists(ctx.db, NOW)).toBe(1);
+    expect((await processState(second.id)).fulfillmentAssigneeId).toBe(florist.userId);
+    expect((await processState(first.id)).fulfillmentAssigneeId).toBeNull();
+  });
+
+  it('перезапуск/обновление карантинный заказ не возвращают (состояние в БД)', async () => {
+    const florist = await floristOnShift('Персист');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+    await makeReady(florist.shiftId, new Date('2029-05-15T05:00:00.000Z'));
+    await setAuto(true);
+
+    // «Перезапуск воркера» = свежий проход раздачи: карантинный заказ ему невидим.
+    expect(await dispatchFlorists(ctx.db, NOW)).toBe(0);
+    expect((await processState(order.id)).fulfillmentAssigneeId).toBeNull();
+  });
+
+  it('два «параллельных» распределителя не назначают карантинный заказ', async () => {
+    const florist = await floristOnShift('Гонка');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+    await makeReady(florist.shiftId, new Date('2029-05-15T05:00:00.000Z'));
+    await setAuto(true);
+
+    await dispatchFlorists(ctx.db, NOW);
+    await dispatchFlorists(ctx.db, NOW);
+    const st = await processState(order.id);
+    expect(st.fulfillmentProcessState).toBe('NEW');
+    expect(st.fulfillmentAssigneeId).toBeNull();
+  });
+
+  it('вкладка «Решения»: список и счётчик показывают открытый карантин', async () => {
+    const florist = await floristOnShift('Список');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+
+    const { items, total } = await listNoFlowersQuarantines(ctx.db);
+    expect(total).toBeGreaterThanOrEqual(1);
+    const mine = items.find((i) => i.orderId === order.id);
+    expect(mine?.orderNumber).toBe(order.number);
+    expect(mine?.reason).toBe('INSUFFICIENT_GOODS');
+    expect(mine?.comment).toBe('нет роз');
+    expect(await countOpenNoFlowersQuarantines(ctx.db)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('окно один раз: догоняющий список пустеет после «Ок» (прочтения), задача не закрывается', async () => {
+    const manager = await managerActor();
+    const florist = await floristOnShift('Окно');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: order.id },
+      select: { notificationId: true },
+    });
+    const notificationId = q.notificationId;
+    if (notificationId === null) {
+      throw new Error('notification missing');
+    }
+
+    expect(await listPendingNoFlowersNotificationIds(ctx.db, manager.userId)).toContain(
+      notificationId,
+    );
+    // «Ок» = только отметка прочтения. Задачу не закрывает.
+    await markRead(ctx.db, manager, notificationId);
+    expect(await listPendingNoFlowersNotificationIds(ctx.db, manager.userId)).not.toContain(
+      notificationId,
+    );
+    expect(await countOpenNoFlowersQuarantines(ctx.db)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('«Вернуть в очередь» ставит заказ в КОНЕЦ и снова делает назначаемым', async () => {
+    const manager = await managerActor();
+    const florist = await floristOnShift('Возврат');
+    const returned = await seedOrder(540); // раннее время — иначе стоял бы выше
+    const normal = await seedOrder(600);
+    await isolate([returned.id, normal.id]);
+    await quarantine(returned.id, florist);
+
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: returned.id },
+      select: { id: true },
+    });
+    const res = await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
+    expect(res.returned).toBe(true);
+
+    const ids = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(ids).toContain(returned.id);
+    expect(ids).toContain(normal.id);
+    // В КОНЦЕ: обычный заказ раньше возвращённого, хотя у возвращённого время раньше.
+    expect(ids.indexOf(normal.id)).toBeLessThan(ids.indexOf(returned.id));
+  });
+
+  it('«Вернуть в очередь» идемпотентно: повтор ничего не создаёт и не двигает', async () => {
+    const manager = await managerActor();
+    const florist = await floristOnShift('Идемпотентность');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: order.id },
+      select: { id: true },
+    });
+    const first = await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
+    expect(first.returned).toBe(true);
+    const at1 = (
+      await ctx.db.deliveryOrder.findUniqueOrThrow({
+        where: { id: order.id },
+        select: { dispatchRequeuedAt: true },
+      })
+    ).dispatchRequeuedAt;
+
+    const second = await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
+    expect(second.returned).toBe(false);
+    expect(second.alreadyClosed).toBe(true);
+    const at2 = (
+      await ctx.db.deliveryOrder.findUniqueOrThrow({
+        where: { id: order.id },
+        select: { dispatchRequeuedAt: true },
+      })
+    ).dispatchRequeuedAt;
+    expect(at2?.getTime()).toBe(at1?.getTime());
+    expect(
+      await ctx.db.orderNoFlowersQuarantine.count({
+        where: { orderId: order.id, activeKey: { not: null } },
+      }),
+    ).toBe(0);
+  });
+
+  it('отменённый в карантине заказ не возвращается: задача закрывается штатно', async () => {
+    const manager = await managerActor();
+    const florist = await floristOnShift('Отменён в карантине');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: order.id },
+      select: { id: true },
+    });
+    const res = await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
+    expect(res.returned).toBe(false);
+    expect(res.closedUnfit).toBe(true);
+    expect(
+      (
+        await ctx.db.deliveryOrder.findUniqueOrThrow({
+          where: { id: order.id },
+          select: { dispatchRequeuedAt: true },
+        })
+      ).dispatchRequeuedAt,
+    ).toBeNull();
+    expect(
+      await ctx.db.orderNoFlowersQuarantine.count({
+        where: { orderId: order.id, activeKey: { not: null } },
+      }),
+    ).toBe(0);
+    expect(await listDispatchableOrderIds(ctx.db, NOW)).not.toContain(order.id);
+  });
+
+  it('MANUAL: «Нет цветов» идёт обычным запросом отказа, не в карантин', async () => {
+    const florist = await floristOnShift('Ручной отказ');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: {
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        fulfillmentAssigneeId: florist.userId,
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentShiftId: florist.shiftId,
+      },
+    });
+    await setAuto(false);
+    await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'INSUFFICIENT_GOODS', comment: null },
+      CONTEXT,
+    );
+
+    expect(await ctx.db.orderNoFlowersQuarantine.count({ where: { orderId: order.id } })).toBe(0);
+    const refusal = await ctx.db.orderRefusalRequest.findFirst({
+      where: { orderId: order.id, state: 'PENDING' },
+    });
+    expect(refusal).not.toBeNull();
+    expect((await processState(order.id)).fulfillmentAssigneeId).toBe(florist.userId);
   });
 });

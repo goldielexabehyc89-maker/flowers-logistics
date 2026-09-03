@@ -17,6 +17,7 @@
  * сервер не принял.
  */
 
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, ConfirmDialog, Modal, StatusBadge } from '../../ui/components';
@@ -57,40 +58,50 @@ interface PhotoProps {
  */
 function PositionPhoto({ assortmentId, positionName }: PhotoProps): React.JSX.Element | null {
   const { client } = useAuth();
-  const [url, setUrl] = useState<string | null>(null);
   const [zoomed, setZoomed] = useState(false);
 
+  /*
+   * Фото грузится через react-query, а не голым эффектом. Это даёт ровно то, что
+   * нужно карточке:
+   *  - закрытие карточки ОТМЕНЯЕТ незавершённый запрос (signal уходит в fetch);
+   *  - повторный render и realtime-обновление НЕ перезапрашивают то же фото:
+   *    результат (в т. ч. «нет фото» = null) закэширован (staleTime: Infinity),
+   *    а ключ фото не входит ни в один список инвалидации;
+   *  - недоступное фото — это `null`, а не ошибка: карточка не показывает сбой
+   *    связи всего ERP, состав и кнопки работают независимо от картинки.
+   */
+  const photo = useQuery({
+    queryKey: ['assortment-photo', assortmentId],
+    enabled: assortmentId !== null,
+    retry: false,
+    staleTime: Infinity,
+    queryFn: async ({ signal }): Promise<Blob | null> => {
+      try {
+        return await client.getBlob(
+          `/api/florist/assortment/${assortmentId ?? ''}/photo`,
+          'image/*',
+          signal,
+        );
+      } catch {
+        // Отсутствующее или недоступное фото — штатное состояние карточки.
+        return null;
+      }
+    },
+  });
+
+  const blob = photo.data ?? null;
+  const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
-    if (assortmentId === null) {
+    if (blob === null) {
+      setUrl(null);
       return;
     }
-
-    let revoked = false;
-    let objectUrl: string | null = null;
-
-    void client
-      .getBlob(`/api/florist/assortment/${assortmentId}/photo`, 'image/*')
-      .then((blob) => {
-        if (revoked) {
-          // Карточка успела закрыться: ссылку создавать незачем, а созданную
-          // никто бы уже не освободил.
-          return;
-        }
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
-      })
-      .catch(() => {
-        // Отсутствующее или недоступное фото — штатное состояние карточки.
-        // Отдельного видимого состояния у него нет по решению владельца.
-      });
-
+    const objectUrl = URL.createObjectURL(blob);
+    setUrl(objectUrl);
     return () => {
-      revoked = true;
-      if (objectUrl !== null) {
-        URL.revokeObjectURL(objectUrl);
-      }
+      URL.revokeObjectURL(objectUrl);
     };
-  }, [assortmentId, client]);
+  }, [blob]);
 
   if (url === null) {
     return null;

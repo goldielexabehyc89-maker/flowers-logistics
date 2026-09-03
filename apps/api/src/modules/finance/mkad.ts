@@ -13,6 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Database } from '../../platform/db.js';
+import type { TransactionClient } from '../auth/sessions.js';
 import { AppError } from '../../platform/errors.js';
 import type { LatLon } from '../integrations/valhalla/client.js';
 
@@ -266,38 +267,56 @@ export async function computeBeyondMkad(
  * Прежняя действующая строка не удаляется: у неё снимается признак действующей,
  * и она остаётся в истории. Так ручная правка логиста не стирает расчёт.
  */
+export interface SaveDistanceSnapshotInput {
+  routeOrderId: string;
+  ringVersionId: string;
+  graphSha256: string | null;
+  meters: number;
+  insideMkad: boolean;
+  source: 'COMPUTED' | 'MANUAL';
+  actorUserId?: string | null;
+  reason?: string | null;
+  /** Координаты, для которых считалось расстояние (микроградусы). */
+  targetLatMicro?: number | null;
+  targetLonMicro?: number | null;
+}
+
+/**
+ * Сохранение снимка в уже открытой транзакции.
+ *
+ * Прежняя действующая строка не удаляется: у неё снимается признак действующей.
+ * Автоматический расчёт вызывает этот вариант внутри транзакции outbox-обработчика.
+ */
+export async function saveDistanceSnapshotTx(
+  tx: TransactionClient,
+  input: SaveDistanceSnapshotInput,
+): Promise<void> {
+  await tx.routeOrderDistance.updateMany({
+    where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
+    data: { activeKey: null },
+  });
+
+  await tx.routeOrderDistance.create({
+    data: {
+      routeOrderId: input.routeOrderId,
+      ringVersionId: input.ringVersionId,
+      graphSha256: input.graphSha256,
+      meters: input.meters,
+      roundedKmTenths: toKmTenths(input.meters),
+      insideMkad: input.insideMkad,
+      source: input.source,
+      actorUserId: input.actorUserId ?? null,
+      reason: input.reason ?? null,
+      targetLatMicro: input.targetLatMicro ?? null,
+      targetLonMicro: input.targetLonMicro ?? null,
+      activeKey: input.routeOrderId,
+    },
+  });
+}
+
 export async function saveDistanceSnapshot(
   db: Database,
-  input: {
-    routeOrderId: string;
-    ringVersionId: string;
-    graphSha256: string | null;
-    meters: number;
-    insideMkad: boolean;
-    source: 'COMPUTED' | 'MANUAL';
-    actorUserId?: string | null;
-    reason?: string | null;
-  },
+  input: SaveDistanceSnapshotInput,
 ): Promise<void> {
-  await db.$transaction(async (tx) => {
-    await tx.routeOrderDistance.updateMany({
-      where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
-      data: { activeKey: null },
-    });
-
-    await tx.routeOrderDistance.create({
-      data: {
-        routeOrderId: input.routeOrderId,
-        ringVersionId: input.ringVersionId,
-        graphSha256: input.graphSha256,
-        meters: input.meters,
-        roundedKmTenths: toKmTenths(input.meters),
-        insideMkad: input.insideMkad,
-        source: input.source,
-        actorUserId: input.actorUserId ?? null,
-        reason: input.reason ?? null,
-        activeKey: input.routeOrderId,
-      },
-    });
-  });
+  await db.$transaction((tx) => saveDistanceSnapshotTx(tx, input));
 }

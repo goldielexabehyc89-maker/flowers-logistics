@@ -33,6 +33,7 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import { enqueueOrderStateSync, ORDER_STATE_TOPIC } from '../integrations/moysklad/state-sync.js';
 import { moscowCalendarDate } from '@fl/shared';
 import { accrueDeliveryResult, reverseDeliveryAccruals } from '../finance/accrual.js';
+import { enqueueMkadDistanceOnDelivered } from '../finance/mkad-auto.js';
 import { closeAfterCancelledResult, openAfterFailedDelivery } from '../returns/service.js';
 // Рабочий адрес считается в одном месте на весь продукт, а не переписывается здесь.
 import { addressDetailsOf, effectiveAddress, ORDER_ADDRESS_SELECT } from '../orders/address.js';
@@ -641,6 +642,19 @@ export async function recordDeliveryResult(
       actorUserId: actor.userId,
       outcome: created.outcome,
     });
+
+    /*
+     * Контроль пропущенного расчёта расстояния за МКАД.
+     *
+     * Если расстояние ещё не посчитано (Valhalla была недоступна к моменту
+     * доставки), задание встанет в очередь и посчитает позже; сохранив
+     * расстояние, обработчик добавит отсутствующий DISTANCE_FEE отдельным
+     * идемпотентным начислением. Курьер отмечает «Доставлен» независимо от
+     * доступности Valhalla.
+     */
+    if (created.outcome === 'DELIVERED') {
+      await enqueueMkadDistanceOnDelivered(tx, routeOrderId);
+    }
 
     /*
      * Недоставленный заказ не растворяется вместе с маршрутом.

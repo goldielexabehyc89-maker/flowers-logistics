@@ -47,6 +47,7 @@ import { Button, ICON_SIZE, Modal } from '../ui/components';
 import { useRealtime } from '../realtime/useRealtime';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import { NotificationPopups } from '../screens/notifications/NotificationPopups';
+import { NoFlowersPopups } from '../screens/notifications/NoFlowersPopups';
 import './shell.css';
 
 /**
@@ -108,6 +109,9 @@ export function AppShell(): React.JSX.Element {
    */
   const logisticsVisible =
     roles.includes('ADMIN') || roles.includes('LOGISTICIAN') || roles.includes('SUPERVISOR');
+  // Карантин «Нет цветов» видят менеджер выдачи и руководители.
+  const noFlowersVisible =
+    roles.includes('MANAGER') || roles.includes('ADMIN') || roles.includes('SUPERVISOR');
   const unresolved = useQuery({
     queryKey: ['logistics-resolutions', 'count'],
     queryFn: () => client.get<{ unresolved: number }>('/api/logistics/resolutions/count'),
@@ -462,6 +466,7 @@ export function AppShell(): React.JSX.Element {
         остальных ролей события им не адресованы.
       */}
       {logisticsVisible && <NotificationPopups />}
+      {noFlowersVisible && <NoFlowersPopups />}
 
       {!singleSection && (
         <nav className="shell__bottombar" aria-label="Навигация">

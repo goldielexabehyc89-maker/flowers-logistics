@@ -37,7 +37,6 @@ import {
 import { TEST_SECRETS } from '../../platform/testing/secrets.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { MoyskladClient } from '../integrations/moysklad/client.js';
 import { applyFulfillmentSnapshot } from './service.js';
 import { snapshotHash as compositionHash, type FulfillmentSnapshot } from './composition.js';
 import {
@@ -60,6 +59,7 @@ import {
 } from './print-form.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { requirePhoto, MAX_PHOTO_BYTES } from './photo.js';
+import { PhotoFetcher } from './photo-fetcher.js';
 import { assembleOrder, claimOrder, reassignOrder, releaseOrder, reopenOrder } from './assembly.js';
 import {
   claimNextDelivery,
@@ -2630,7 +2630,7 @@ describe('карточка сборки', () => {
 describe('проксирование фотографии', () => {
   it('неизвестная номенклатура отвечает нейтральным «Фото отсутствует»', async () => {
     await expect(
-      requirePhoto({ db: ctx.db, client: null }, crypto.randomUUID()),
+      requirePhoto({ db: ctx.db, photos: null }, crypto.randomUUID()),
     ).rejects.toMatchObject({ statusCode: 404, publicMessage: 'Фото отсутствует.' });
   });
 
@@ -2642,7 +2642,7 @@ describe('проксирование фотографии', () => {
       ],
     });
 
-    await expect(requirePhoto({ db: ctx.db, client: null }, hidden)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos: null }, hidden)).rejects.toMatchObject({
       statusCode: 404,
     });
   });
@@ -2654,12 +2654,12 @@ describe('проксирование фотографии', () => {
     });
 
     const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
-    const client = stubbedClient({
+    const photos = stubbedPhotos({
       images: [{ meta: { downloadHref: `${BASE}/download/${assortmentId}` }, size: png.length }],
       file: { body: png, type: 'image/png' },
     });
 
-    const photo = await requirePhoto({ db: ctx.db, client }, assortmentId);
+    const photo = await requirePhoto({ db: ctx.db, photos }, assortmentId);
     expect(photo.contentType).toBe('image/png');
     expect(Buffer.from(photo.bytes).equals(png)).toBe(true);
 
@@ -2676,19 +2676,19 @@ describe('проксирование фотографии', () => {
       positions: [{ name: 'Букет', quantity: '1', kind: 'BUNDLE', assortmentId }],
     });
 
-    const huge = stubbedClient({
+    const huge = stubbedPhotos({
       images: [{ meta: { downloadHref: `${BASE}/download/${assortmentId}` } }],
       file: { body: Buffer.alloc(MAX_PHOTO_BYTES + 1), type: 'image/png' },
     });
-    await expect(requirePhoto({ db: ctx.db, client: huge }, assortmentId)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos: huge }, assortmentId)).rejects.toMatchObject({
       statusCode: 404,
     });
 
-    const svg = stubbedClient({
+    const svg = stubbedPhotos({
       images: [{ meta: { downloadHref: `${BASE}/download/${assortmentId}` } }],
       file: { body: Buffer.from('<svg onload="alert(1)"/>'), type: 'image/svg+xml' },
     });
-    await expect(requirePhoto({ db: ctx.db, client: svg }, assortmentId)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos: svg }, assortmentId)).rejects.toMatchObject({
       statusCode: 404,
     });
   });
@@ -2700,7 +2700,7 @@ describe('проксирование фотографии', () => {
     });
 
     const outside: string[] = [];
-    const client = stubbedClient({
+    const photos = stubbedPhotos({
       images: [{ meta: { downloadHref: 'https://evil.example.test/steal' } }],
       file: { body: Buffer.from('x'), type: 'image/png' },
       onRequest: (url) => {
@@ -2710,7 +2710,7 @@ describe('проксирование фотографии', () => {
       },
     });
 
-    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos }, assortmentId)).rejects.toMatchObject({
       statusCode: 404,
     });
     // Ни одного обращения за пределы API МоегоСклада.
@@ -2720,25 +2720,24 @@ describe('проксирование фотографии', () => {
 
 const BASE = 'https://api.moysklad.ru/api/remap/1.2';
 
-/** Клиент с подменённой сетью: ни одного настоящего обращения наружу. */
-function stubbedClient(options: {
+/** Контур фотографий с подменённой сетью: ни одного настоящего обращения наружу. */
+function stubbedPhotos(options: {
   images: unknown[];
   file: { body: Buffer; type: string };
   onRequest?: (url: string) => void;
-}): MoyskladClient {
-  return new MoyskladClient({
-    config: { baseUrl: BASE, token: 'test-token', ids: MOYSKLAD_IDS },
-    minIntervalMs: 0,
-    sleep: async () => undefined,
+}): PhotoFetcher {
+  return new PhotoFetcher({
+    baseUrl: BASE,
+    token: 'test-token',
     fetch: (async (input: string | URL) => {
       const url = String(input);
       options.onRequest?.(url);
 
       if (url.includes('/images')) {
-        return new Response(
-          JSON.stringify({ rows: options.images, meta: { size: options.images.length } }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(JSON.stringify({ rows: options.images }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
 
       return new Response(options.file.body, {
@@ -3060,13 +3059,12 @@ function streamingClient(options: {
   /** Ответ переадресации вместо файла. */
   redirectTo?: string;
   calls: { fetches: string[]; sent: number; cancelled: boolean; redirect: string | undefined };
-}): MoyskladClient {
+}): PhotoFetcher {
   const { calls } = options;
 
-  return new MoyskladClient({
-    config: { baseUrl: BASE, token: 'test-token', ids: MOYSKLAD_IDS },
-    minIntervalMs: 0,
-    sleep: async () => undefined,
+  return new PhotoFetcher({
+    baseUrl: BASE,
+    token: 'test-token',
     fetch: (async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       calls.fetches.push(url);
@@ -3134,14 +3132,14 @@ describe('загрузка фотографии ограничена по-нас
       redirect: undefined as string | undefined,
     };
 
-    const client = streamingClient({
+    const photos = streamingClient({
       chunks: [Buffer.alloc(1024, 1), Buffer.alloc(1024, 2)],
       type: 'image/png',
       declaredLength: null,
       calls,
     });
 
-    const photo = await requirePhoto({ db: ctx.db, client }, assortmentId);
+    const photo = await requirePhoto({ db: ctx.db, photos }, assortmentId);
     expect(photo.bytes.byteLength).toBe(2048);
     expect(calls.cancelled).toBe(false);
     // Переадресации не следуем ни при каких обстоятельствах.
@@ -3159,7 +3157,7 @@ describe('загрузка фотографии ограничена по-нас
 
     // Кусок в мегабайт: превышение наступает на шестом, а не на последнем.
     const chunk = () => Buffer.alloc(1024 * 1024, 7);
-    const client = streamingClient({
+    const photos = streamingClient({
       chunks: Array.from({ length: 20 }, chunk),
       type: 'image/png',
       // Ложное обещание «файл крошечный».
@@ -3167,7 +3165,7 @@ describe('загрузка фотографии ограничена по-нас
       calls,
     });
 
-    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos }, assortmentId)).rejects.toMatchObject({
       statusCode: 404,
     });
 
@@ -3191,14 +3189,14 @@ describe('загрузка фотографии ограничена по-нас
       redirect: undefined as string | undefined,
     };
 
-    const client = streamingClient({
+    const photos = streamingClient({
       chunks: Array.from({ length: 20 }, () => Buffer.alloc(1024 * 1024, 3)),
       type: 'image/png',
       declaredLength: MAX_PHOTO_BYTES + 1,
       calls,
     });
 
-    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos }, assortmentId)).rejects.toMatchObject({
       statusCode: 404,
     });
 
@@ -3216,7 +3214,7 @@ describe('загрузка фотографии ограничена по-нас
       redirect: undefined as string | undefined,
     };
 
-    const client = streamingClient({
+    const photos = streamingClient({
       chunks: [],
       type: 'image/png',
       declaredLength: null,
@@ -3224,7 +3222,7 @@ describe('загрузка фотографии ограничена по-нас
       calls,
     });
 
-    await expect(requirePhoto({ db: ctx.db, client }, assortmentId)).rejects.toMatchObject({
+    await expect(requirePhoto({ db: ctx.db, photos }, assortmentId)).rejects.toMatchObject({
       statusCode: 404,
     });
 

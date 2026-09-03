@@ -119,6 +119,10 @@ export const REALTIME_TOPICS = [
   // руководителей перечитывают статус. Адресуется персонально флористу и ролям
   // управления; в payload только идентификаторы.
   'florist.dispatch_changed',
+  // Карантин «Нет цветов» (авто-раздача). Появление и закрытие/возврат меняют
+  // вкладку «Решения» и её счётчик у MANAGER/ADMIN/SUPERVISOR. В payload только
+  // идентификатор заказа; номер, состав и ФИО туда не уходят.
+  'order.no_flowers_changed',
 ] as const;
 
 export type RealtimeTopic = (typeof REALTIME_TOPICS)[number];

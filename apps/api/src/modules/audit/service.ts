@@ -161,6 +161,11 @@ export const AUDIT_ACTIONS = [
   // Запрос отказа от автоназначенного заказа и решение по нему.
   'ORDER_REFUSAL_REQUESTED',
   'ORDER_REFUSAL_DECIDED',
+  // Карантин «Нет цветов» (авто-раздача): снятие с флориста, возврат в очередь
+  // менеджером и штатное закрытие без возврата (заказ перестал подлежать сборке).
+  'ORDER_NO_FLOWERS_QUARANTINED',
+  'ORDER_NO_FLOWERS_RETURNED',
+  'ORDER_NO_FLOWERS_CLOSED',
   // Производственные данные изменились ПОСЛЕ сборки. Автор — синхронизация.
   'ORDER_FULFILLMENT_REVIEW_REQUIRED',
   // Печать бланка. Байты PDF и содержимое снимка в аудит не попадают:

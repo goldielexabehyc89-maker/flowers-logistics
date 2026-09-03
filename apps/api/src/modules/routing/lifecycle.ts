@@ -39,6 +39,7 @@ import { calendarDate, ineligibleReason } from './eligibility.js';
 import { nextRouteNumber } from './numbering.js';
 import { assertReason, grantLease, releaseLeaseRow, requireLease } from './lease.js';
 import { captureRouteTariff } from '../finance/accrual.js';
+import { enqueueMkadDistanceForRoute } from '../finance/mkad-auto.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { ledgerCoversDate, readLedgerActivation, resolveTariff } from '../finance/tariffs.js';
 import {
@@ -410,6 +411,10 @@ export async function confirmWithinTransaction(
   await applyTransition(tx, route, 'CONFIRMED', actor, now, null);
   // Подтверждённый маршрут не редактируется, поэтому держать его в работе незачем.
   await releaseLeaseRow(tx, routeId, now);
+
+  // Автоматический расчёт расстояния за МКАД: durable-задание. Постановка не
+  // ждёт Valhalla — подтверждение проходит независимо от доступности расчёта.
+  await enqueueMkadDistanceForRoute(tx, routeId);
 
   await auditAndPublish(
     tx,

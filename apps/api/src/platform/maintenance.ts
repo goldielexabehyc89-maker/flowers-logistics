@@ -13,11 +13,20 @@
 import type { Database } from './db.js';
 import type { AppLogger } from './logging/logger.js';
 import { escalateOverdueResolutions } from '../modules/notifications/escalation.js';
+import { runMkadDistanceRecoverySweep } from '../modules/finance/mkad-auto.js';
 
 export const SUCCESSOR_CLEANUP_INTERVAL_MS = 60_000;
 export const REALTIME_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 /** Как часто проверять задачи логиста на просрочку >30 мин без реакции. */
 export const ESCALATION_SWEEP_INTERVAL_MS = 60_000;
+/**
+ * Как часто искать заказы без расстояния за МКАД и оживлять мёртвые задания.
+ *
+ * Реже минутных проходов: это восстановительная страховка после долгой
+ * недоступности Valhalla, а не основной путь — основной путь ставит задание
+ * событием (подтверждение/активация/доставка/смена координат).
+ */
+export const MKAD_DISTANCE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 /**
  * Очистка просроченных матриц.
  *
@@ -30,6 +39,8 @@ export interface MaintenanceDeps {
   db: Database;
   logger: AppLogger;
   now?: () => Date;
+  /** Граница включения автоматического расчёта за МКАД или `undefined`. */
+  mkadDistanceCalcFrom?: string | undefined;
 }
 
 /**
@@ -89,6 +100,7 @@ export interface MaintenanceRunner {
     realtimeEvents: number;
     matrixEntries: number;
     escalations: number;
+    mkadDistances: number;
   }>;
 }
 
@@ -97,6 +109,7 @@ interface Intervals {
   realtimeCleanup: number;
   matrixCleanup: number;
   escalationSweep: number;
+  mkadDistanceSweep: number;
 }
 
 export function createMaintenanceRunner(
@@ -106,6 +119,7 @@ export function createMaintenanceRunner(
     realtimeCleanup: REALTIME_CLEANUP_INTERVAL_MS,
     matrixCleanup: MATRIX_CLEANUP_INTERVAL_MS,
     escalationSweep: ESCALATION_SWEEP_INTERVAL_MS,
+    mkadDistanceSweep: MKAD_DISTANCE_SWEEP_INTERVAL_MS,
   },
 ): MaintenanceRunner {
   const timers: NodeJS.Timeout[] = [];
@@ -114,6 +128,7 @@ export function createMaintenanceRunner(
   let realtimeInFlight: Promise<number> | null = null;
   let matrixInFlight: Promise<number> | null = null;
   let escalationInFlight: Promise<number> | null = null;
+  let mkadDistanceInFlight: Promise<number> | null = null;
 
   const runSuccessorCleanup = async (): Promise<number> => {
     if (successorInFlight !== null || stopped) {
@@ -214,6 +229,37 @@ export function createMaintenanceRunner(
     }
   };
 
+  const runMkadDistanceSweep = async (): Promise<number> => {
+    if (mkadDistanceInFlight !== null || stopped) {
+      return 0;
+    }
+    const pass = (async (): Promise<number> => {
+      try {
+        const now = (deps.now ?? (() => new Date()))();
+        const result = await runMkadDistanceRecoverySweep(deps.db, {
+          calcFrom: deps.mkadDistanceCalcFrom,
+          now,
+        });
+        if (result.revived > 0 || result.enqueued > 0) {
+          deps.logger.info(
+            { revived: result.revived, enqueued: result.enqueued },
+            'восстановительный проход расстояния за МКАД',
+          );
+        }
+        return result.revived + result.enqueued;
+      } catch (error) {
+        deps.logger.error({ err: error }, 'восстановительный проход за МКАД завершился ошибкой');
+        return 0;
+      }
+    })();
+    mkadDistanceInFlight = pass;
+    try {
+      return await pass;
+    } finally {
+      mkadDistanceInFlight = null;
+    }
+  };
+
   return {
     start() {
       if (timers.length > 0) {
@@ -230,11 +276,16 @@ export function createMaintenanceRunner(
         () => void runEscalationSweep(),
         intervals.escalationSweep,
       );
+      const mkadDistanceTimer = setInterval(
+        () => void runMkadDistanceSweep(),
+        intervals.mkadDistanceSweep,
+      );
       successorTimer.unref();
       realtimeTimer.unref();
       matrixTimer.unref();
       escalationTimer.unref();
-      timers.push(successorTimer, realtimeTimer, matrixTimer, escalationTimer);
+      mkadDistanceTimer.unref();
+      timers.push(successorTimer, realtimeTimer, matrixTimer, escalationTimer, mkadDistanceTimer);
     },
     /**
      * Снимает таймеры и дожидается уже начатых проходов.
@@ -253,6 +304,7 @@ export function createMaintenanceRunner(
         realtimeInFlight,
         matrixInFlight,
         escalationInFlight,
+        mkadDistanceInFlight,
       ]);
     },
     async runOnce() {
@@ -261,6 +313,7 @@ export function createMaintenanceRunner(
         realtimeEvents: await runRealtimeCleanup(),
         matrixEntries: await runMatrixCleanup(),
         escalations: await runEscalationSweep(),
+        mkadDistances: await runMkadDistanceSweep(),
       };
     },
   };

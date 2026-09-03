@@ -433,6 +433,12 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
    * без перезагрузки. Списки заказов трогают отдельные события назначения.
    */
   'florist.dispatch_changed': [['florist-dispatch'], ['florist-shifts'], ['florist-queue']],
+  /*
+   * Карантин «Нет цветов»: появление и возврат меняют вкладку «Решения» и её
+   * счётчик, а возврат в очередь — общую очередь флориста. Всплывающее окно
+   * рисуется отдельно по живому `notification.created`, а не по инвалидации.
+   */
+  'order.no_flowers_changed': [['no-flowers'], ['no-flowers-count'], ...FLORIST_SCREEN],
 };
 
 /**

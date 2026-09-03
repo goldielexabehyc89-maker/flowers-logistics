@@ -16,6 +16,7 @@ import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { enqueueRouteActivatedStateSync } from '../integrations/moysklad/state-sync.js';
+import { enqueueMkadDistanceForRoute } from '../finance/mkad-auto.js';
 import { normalizeCellCode } from './cell-code.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import {
@@ -807,6 +808,10 @@ export async function activateRouteWithinTransaction(
    * не зависит.
    */
   await enqueueRouteActivatedStateSync(tx, route.id);
+
+  // Контроль пропущенного расчёта перед активацией: durable-задание на расстояние
+  // за МКАД по всем заказам листа. Активация не ждёт Valhalla.
+  await enqueueMkadDistanceForRoute(tx, route.id);
 }
 
 /**

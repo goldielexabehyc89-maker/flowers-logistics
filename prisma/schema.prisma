@@ -134,6 +134,10 @@ model User {
   orderRefusalRequests OrderRefusalRequest[] @relation("OrderRefusalFlorist")
   decidedRefusals      OrderRefusalRequest[] @relation("OrderRefusalDecidedBy")
 
+  /// Карантин «Нет цветов»: отказы флориста и возвраты в очередь менеджером.
+  noFlowersRefused  OrderNoFlowersQuarantine[] @relation("NoFlowersFlorist")
+  noFlowersReturned OrderNoFlowersQuarantine[] @relation("NoFlowersReturnedBy")
+
   floristShifts       FloristShift[]  @relation("FloristShiftUser")
   closedFloristShifts FloristShift[]  @relation("FloristShiftClosedBy")
   assignedFulfillment DeliveryOrder[] @relation("OrderFulfillmentAssignee")
@@ -845,6 +849,14 @@ model DeliveryOrder {
   fulfillmentProcessState   OrderFulfillmentProcessState @default(NEW)
   fulfillmentProcessVersion Int                          @default(0)
 
+  /// Момент возврата заказа в очередь из карантина «Нет цветов».
+  ///
+  /// Обычный порядок очереди — по срочности (интервал + номер). Возвращённый
+  /// из карантина заказ обязан встать В КОНЕЦ, чтобы не выхватить сразу
+  /// следующего флориста. Один и тот же ключ читают и отображение очереди, и
+  /// авто-раздача. NULL — заказ в очередь из карантина не возвращался.
+  dispatchRequeuedAt DateTime?
+
   /// Единственный флорист, за которым закреплён заказ.
   fulfillmentAssigneeId String?       @db.Uuid
   fulfillmentAssignee   User?         @relation("OrderFulfillmentAssignee", fields: [fulfillmentAssigneeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
@@ -883,6 +895,7 @@ model DeliveryOrder {
   resolutions          OrderResolution[]
   returns              OrderReturn[]
   moyskladState        OrderMoyskladState?
+  noFlowersQuarantines OrderNoFlowersQuarantine[] @relation("OrderNoFlowersQuarantineOrder")
 
   @@index([inScope, deliveryDate])
   @@index([fulfillmentInScope, deliveryDate])
@@ -1231,6 +1244,53 @@ model OrderRefusalRequest {
   @@index([orderId])
   @@index([floristId])
   @@index([state])
+}
+
+/// Карантин «Нет цветов» для авто-раздачи.
+///
+/// Когда в режиме AUTO флорист отказывается с причиной «Нет цветов»
+/// (`INSUFFICIENT_GOODS`), заказ СРАЗУ снимается с флориста (решения
+/// руководителя не ждём) и помещается сюда. Пока запись открыта
+/// (`activeKey != null`), заказ исключён из очереди, поиска, счётчиков,
+/// приоритета самовывоза, ручного взятия и авто-раздачи (см.
+/// `offerableConstraints`). Менеджер выдачи в отдельной вкладке «Решения»
+/// возвращает заказ в очередь. Дата, способ, состав и статус заказа при этом
+/// не меняются. Максимум одна открытая запись на заказ (activeKey = orderId).
+model OrderNoFlowersQuarantine {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  orderId String        @db.Uuid
+  order   DeliveryOrder @relation("OrderNoFlowersQuarantineOrder", fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Флорист, отказавшийся от заказа.
+  floristId String @db.Uuid
+  florist   User   @relation("NoFlowersFlorist", fields: [floristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Круг сборки на момент карантина: снимок, а не живое поле заказа.
+  assemblyRound Int
+  reason        OrderRefusalReason
+  comment       String?
+
+  createdAt DateTime @default(now())
+
+  /// Возврат в очередь менеджером (или ADMIN/SUPERVISOR).
+  returnedAt   DateTime?
+  returnedById String?   @db.Uuid
+  returnedBy   User?     @relation("NoFlowersReturnedBy", fields: [returnedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Штатное закрытие без возврата: заказ отменён/архивирован/собран иначе.
+  closedAt     DateTime?
+  closedReason String?
+
+  /// Открытый карантин — один на заказ: значение равно `orderId`, у закрытого NULL.
+  activeKey String? @unique @db.Uuid
+
+  /// Уведомление ответственным (общая система уведомлений) для всплывающего окна.
+  notificationId String?                  @unique @db.Uuid
+  notification   OrderChangeNotification? @relation("NoFlowersNotification", fields: [notificationId], references: [id], onDelete: SetNull, onUpdate: Restrict)
+
+  @@index([orderId])
+  @@index([activeKey])
 }
 
 /// Неизменяемая история доступности ОБЩЕЙ очереди флориста.
@@ -2892,6 +2952,12 @@ model RouteOrderDistance {
   actor       User?            @relation("DistanceActor", fields: [actorUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   reason      String?
 
+  /// Координаты заказа на момент расчёта (микроградусы). Нужны автоматическому
+  /// расчёту, чтобы отличить «снимок для текущих координат уже есть» (no-op) от
+  /// «координаты изменились» (новая версия). Прежние и ручные строки — null.
+  targetLatMicro Int?
+  targetLonMicro Int?
+
   activeKey String? @unique @db.Uuid
 
   capturedAt DateTime @default(now())
@@ -3317,6 +3383,7 @@ model OrderChangeNotification {
   reads        OrderChangeNotificationRead[]
   decision     OrderReassemblyDecision?
   refusalRequest OrderRefusalRequest?
+  noFlowersQuarantine OrderNoFlowersQuarantine? @relation("NoFlowersNotification")
 
   @@index([orderId])
   @@index([occurredAt])

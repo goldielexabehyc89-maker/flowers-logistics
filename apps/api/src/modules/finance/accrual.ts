@@ -180,29 +180,75 @@ export async function accrueDeliveryResult(
     });
   }
 
+  await accrueDistanceFee(tx, {
+    attemptId: input.attemptId,
+    routeOrderId: input.routeOrderId,
+    routeId: input.routeId,
+    orderId: input.orderId,
+    courierUserId: input.courierUserId,
+    actorUserId: input.actorUserId,
+    operationDate: deliveryDate,
+    perKmMinor: snapshot.perKmMinor,
+  });
+}
+
+export interface DistanceFeeInput {
+  attemptId: string;
+  routeOrderId: string;
+  routeId: string;
+  orderId: string;
+  courierUserId: string;
+  actorUserId: string;
+  /** Дата операции в форме ГГГГ-ММ-ДД. */
+  operationDate: string;
+  perKmMinor: bigint;
+}
+
+/**
+ * Начисление оплаты километров за МКАД по действующему снимку расстояния.
+ *
+ * Вынесено отдельно, потому что вызывается из двух мест: сразу при результате
+ * «Доставлен», если расстояние уже посчитано, и позднее — когда Valhalla
+ * ответила уже после доставки и расстояние сохранилось. Уникальный ключ
+ * `attempt:<id>:DISTANCE_FEE` не даёт начислить километры дважды: повторный
+ * вызов после позднего снимка добавляет запись ровно один раз, а основная
+ * оплата `DELIVERY_FEE` остаётся нетронутой.
+ */
+export async function accrueDistanceFee(
+  tx: TransactionClient,
+  input: DistanceFeeInput,
+): Promise<void> {
+  if (input.perKmMinor <= 0n) {
+    return;
+  }
+
   const distance = await tx.routeOrderDistance.findFirst({
     where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
     select: { roundedKmTenths: true },
   });
 
-  if (distance !== null && distance.roundedKmTenths > 0 && snapshot.perKmMinor > 0n) {
-    // Десятые доли километра: ставка задана за целый километр, поэтому
-    // умножение и деление выполняются в целых минорных единицах.
-    const amount = (snapshot.perKmMinor * BigInt(distance.roundedKmTenths)) / 10n;
-    if (amount > 0n) {
-      await appendEntry(tx, {
-        courierUserId: input.courierUserId,
-        kind: 'DISTANCE_FEE',
-        amountMinor: amount,
-        operationDate: deliveryDate,
-        actorUserId: input.actorUserId,
-        routeId: input.routeId,
-        orderId: input.orderId,
-        attemptId: input.attemptId,
-        idempotencyKey: accrualKey(input.attemptId, 'DISTANCE_FEE'),
-      });
-    }
+  if (distance === null || distance.roundedKmTenths <= 0) {
+    return;
   }
+
+  // Десятые доли километра: ставка задана за целый километр, поэтому
+  // умножение и деление выполняются в целых минорных единицах.
+  const amount = (input.perKmMinor * BigInt(distance.roundedKmTenths)) / 10n;
+  if (amount <= 0n) {
+    return;
+  }
+
+  await appendEntry(tx, {
+    courierUserId: input.courierUserId,
+    kind: 'DISTANCE_FEE',
+    amountMinor: amount,
+    operationDate: input.operationDate,
+    actorUserId: input.actorUserId,
+    routeId: input.routeId,
+    orderId: input.orderId,
+    attemptId: input.attemptId,
+    idempotencyKey: accrualKey(input.attemptId, 'DISTANCE_FEE'),
+  });
 }
 
 /**

@@ -17,6 +17,7 @@ import { createNotifier } from './modules/realtime/notifier.js';
 import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
 import { createDispatchHandler } from './modules/fulfillment/dispatch.js';
+import { createMkadDistanceHandler } from './modules/finance/mkad-auto.js';
 import { MoyskladClient } from './modules/integrations/moysklad/client.js';
 import { createMoyskladOrderStateHandler } from './modules/integrations/moysklad/state-sync.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
@@ -55,7 +56,11 @@ async function main(): Promise<void> {
 
   const app = await buildServer({ config, logger, db, notifier });
 
-  const maintenance = createMaintenanceRunner({ db, logger });
+  const maintenance = createMaintenanceRunner({
+    db,
+    logger,
+    mkadDistanceCalcFrom: config.MKAD_DISTANCE_AUTO_CALC_FROM,
+  });
   // Первый проход сразу при старте: процесс мог быть остановлен надолго.
   await maintenance.runOnce();
   maintenance.start();
@@ -99,6 +104,14 @@ async function main(): Promise<void> {
       // Автораспределение заказов флористам: раздаёт свободные заказы готовым.
       // Граница операций — из конфигурации, как у свободной очереди в маршрутах.
       'florist.dispatch': createDispatchHandler(config.OPERATIONS_START_DATE),
+      // Автоматический расчёт расстояния за МКАД. Отсечку по дате доставки
+      // держит обработчик: без `MKAD_DISTANCE_AUTO_CALC_FROM` он ничего не делает.
+      'mkad.distance': createMkadDistanceHandler({
+        db,
+        logger,
+        calcFrom: config.MKAD_DISTANCE_AUTO_CALC_FROM,
+        valhallaUrl: config.VALHALLA_URL ?? null,
+      }),
     },
   });
   outbox.start();

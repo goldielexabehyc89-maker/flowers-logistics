@@ -9,7 +9,14 @@
 import type { TransactionClient } from '../auth/sessions.js';
 
 /** Разрешённые темы. Обработчик выбирается только из этого списка. */
-export const OUTBOX_TOPICS = ['test.ping', 'moysklad.order_state', 'florist.dispatch'] as const;
+export const OUTBOX_TOPICS = [
+  'test.ping',
+  'moysklad.order_state',
+  'florist.dispatch',
+  // Автоматический расчёт расстояния за МКАД: durable-задание, чтобы
+  // подтверждение/активация маршрута и результат «Доставлен» не ждали Valhalla.
+  'mkad.distance',
+] as const;
 export type OutboxTopic = (typeof OUTBOX_TOPICS)[number];
 
 const FORBIDDEN_PAYLOAD_FIELDS =

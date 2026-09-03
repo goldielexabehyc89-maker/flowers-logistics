@@ -238,6 +238,8 @@ function orderSelect() {
     deliveryMethodId: true,
     cancelledInSource: true,
     cancelledByLogistAt: true,
+    // Возврат из карантина «Нет цветов»: ставит заказ в конец очереди.
+    dispatchRequeuedAt: true,
     fulfillmentAssignee: { select: { id: true, fullName: true } },
     assemblyRound: true,
     /*
@@ -332,6 +334,10 @@ export function offerableConstraints(
     cancelledInSource: false,
     cancelledByLogistAt: null,
     fulfillmentCompositionState: 'READY' as const,
+    // Карантин «Нет цветов»: пока открыт, заказ не идёт ни в очередь, ни в поиск,
+    // ни в счётчики, ни в приоритет самовывоза, ни в ручное взятие, ни в
+    // авто-раздачу. Возврат в очередь — только решением менеджера.
+    noFlowersQuarantines: { none: { activeKey: { not: null } } },
     AND: [
       {
         // «Принят, Не оплачен» из работы флориста исключается — КРОМЕ самовывоза.
@@ -616,6 +622,7 @@ function buildQueueOrders(
       route: participation === undefined ? null : (routes.get(participation.route.id) ?? null),
       routePosition: participation?.position ?? null,
       pickupSoon,
+      requeuedAt: row.dispatchRequeuedAt === null ? null : row.dispatchRequeuedAt.toISOString(),
     });
   }
   return queueOrders;
