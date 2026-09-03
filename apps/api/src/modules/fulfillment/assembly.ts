@@ -47,6 +47,7 @@ import {
 } from './print-form.js';
 import { recordQueueAvailability } from './stats-capture.js';
 import { enqueueDispatch } from './dispatch-trigger.js';
+import { readFloristDispatchMode } from '../settings/service.js';
 import {
   FULFILLMENT_AUDIENCE,
   MIN_REASON_LENGTH,
@@ -308,6 +309,25 @@ export async function releaseOrder(
   context: RequestContext,
 ): Promise<ProcessResult> {
   return db.$transaction(async (tx) => {
+    /*
+     * В режиме авто-раздачи прямое освобождение флористом запрещено.
+     *
+     * Единственный путь отказа здесь — «Отказаться» с причиной (/refusal): для
+     * «Нет цветов» это карантин, для остальных — согласование руководителем.
+     * Прямой возврат «в очередь» без причины тут же вернул бы заказ автораздачей
+     * тому же человеку — ровно тот дефект, из-за которого точки входа сводятся
+     * к одному endpoint. Разбор застрявших назначений остаётся у администратора,
+     * а в ручном режиме поведение освобождения не меняется.
+     */
+    const mode = await readFloristDispatchMode(tx);
+    if (mode.value.auto && !isAdmin(actor)) {
+      throw new AppError('CONFLICT', {
+        message: 'release is not allowed in auto dispatch mode',
+        publicMessage: 'В режиме авто-раздачи откажитесь от заказа с указанием причины.',
+        conflict: { kind: 'RELEASE_REQUIRES_REFUSAL' },
+      });
+    }
+
     // Порядок блокировок: сначала смена, потом заказ.
     const shift = await lockOwnShift(tx, actor);
     const shiftId = shift?.id ?? null;

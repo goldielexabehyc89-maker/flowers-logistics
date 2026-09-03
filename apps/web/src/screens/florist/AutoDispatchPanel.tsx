@@ -13,14 +13,9 @@
  */
 
 import { useState } from 'react';
-import { Button, Field, Modal, Select, StatusBadge, TextArea } from '../../ui/components';
-import {
-  REFUSAL_REASONS,
-  REFUSAL_REASON_LABELS,
-  dispatchStateLabel,
-  type FloristDispatchStatus,
-  type RefusalReason,
-} from './florist';
+import { Button, StatusBadge } from '../../ui/components';
+import { RefusalReasonModal } from './RefusalReasonModal';
+import { dispatchStateLabel, type FloristDispatchStatus, type RefusalReason } from './florist';
 
 export interface AutoDispatchPanelProps {
   status: FloristDispatchStatus;
@@ -47,27 +42,8 @@ export function AutoDispatchPanel({
   onRequestRefusal,
 }: AutoDispatchPanelProps): React.JSX.Element {
   const [refusalOpen, setRefusalOpen] = useState(false);
-  const [reason, setReason] = useState<RefusalReason>('INSUFFICIENT_GOODS');
-  const [comment, setComment] = useState('');
 
   const { activeOrder } = status;
-  // «Другое» без пояснения сервер отклонит — не даём отправить и здесь.
-  const commentRequired = reason === 'OTHER';
-  const commentMissing = commentRequired && comment.trim() === '';
-
-  function submitRefusal(): void {
-    if (activeOrder === null || commentMissing) {
-      return;
-    }
-    onRequestRefusal({
-      orderId: activeOrder.id,
-      reason,
-      comment: comment.trim() === '' ? null : comment.trim(),
-    });
-    setRefusalOpen(false);
-    setComment('');
-    setReason('INSUFFICIENT_GOODS');
-  }
 
   return (
     <section className="card stack florist-auto" data-testid="florist-auto">
@@ -148,64 +124,18 @@ export function AutoDispatchPanel({
         </div>
       )}
 
-      <Modal
+      <RefusalReasonModal
         open={refusalOpen}
-        title="Отказ от заказа"
-        testId="florist-refusal-modal"
+        pending={refusalPending}
         onClose={() => setRefusalOpen(false)}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setRefusalOpen(false)}>
-              Отмена
-            </Button>
-            <Button
-              variant="primary"
-              data-testid="florist-refusal-submit"
-              disabled={refusalPending || commentMissing}
-              onClick={submitRefusal}
-            >
-              Отправить руководителю
-            </Button>
-          </>
-        }
-      >
-        <div className="stack">
-          <p className="muted text-sm">
-            Заказ останется за вами, пока руководитель не примет решение. Причина обязательна.
-          </p>
-          <Field label="Причина">
-            {(fieldProps) => (
-              <Select
-                {...fieldProps}
-                value={reason}
-                data-testid="florist-refusal-reason"
-                onChange={(event) => setReason(event.target.value as RefusalReason)}
-              >
-                {REFUSAL_REASONS.map((value) => (
-                  <option key={value} value={value}>
-                    {REFUSAL_REASON_LABELS[value]}
-                  </option>
-                ))}
-              </Select>
-            )}
-          </Field>
-          <Field
-            label="Комментарий"
-            hint={commentRequired ? 'Для причины «Другое» обязателен' : 'Необязательно'}
-            error={commentMissing ? 'Опишите причину отказа' : undefined}
-          >
-            {(fieldProps) => (
-              <TextArea
-                {...fieldProps}
-                rows={3}
-                value={comment}
-                data-testid="florist-refusal-comment"
-                onChange={(event) => setComment(event.target.value)}
-              />
-            )}
-          </Field>
-        </div>
-      </Modal>
+        onSubmit={(input) => {
+          if (activeOrder === null) {
+            return;
+          }
+          onRequestRefusal({ orderId: activeOrder.id, ...input });
+          setRefusalOpen(false);
+        }}
+      />
     </section>
   );
 }
