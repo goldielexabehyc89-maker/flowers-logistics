@@ -745,7 +745,43 @@ describe('след выдачи', () => {
     const payload = JSON.stringify(event.payload);
     expect(payload).not.toContain(order.number);
     expect(payload).not.toContain(cell.code);
-    expect([...event.audienceRoles].sort()).toEqual(['ADMIN', 'MANAGER']);
+    expect([...event.audienceRoles].sort()).toEqual(['ADMIN', 'MANAGER', 'SUPERVISOR']);
+  });
+
+  it('выдача уведомляет управляющего в самовывозе и на складе, но не курьера/флориста', async () => {
+    const { order } = await placed();
+    const manager = await actorFor(['MANAGER']);
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
+
+    const issued = await ctx.db.realtimeEvent.findFirstOrThrow({
+      where: { topic: 'pickup.issued', payload: { path: ['orderId'], equals: order.id } },
+      select: { audienceRoles: true },
+    });
+    const placement = await ctx.db.realtimeEvent.findFirstOrThrow({
+      where: {
+        topic: 'warehouse.placement_changed',
+        payload: { path: ['orderId'], equals: order.id },
+      },
+      select: { audienceRoles: true },
+    });
+
+    // Управляющий получает оба события — иначе выданный заказ висел бы у него до F5
+    // в «Самовывоз → Ожидают выдачи» и «Склад → Ожидают приёмки».
+    expect(issued.audienceRoles).toContain('SUPERVISOR');
+    expect(placement.audienceRoles).toContain('SUPERVISOR');
+
+    // Прежние роли сохранены: самовывоз — ADMIN/MANAGER; склад — ADMIN/WAREHOUSE/
+    // LOGISTICIAN/MANAGER.
+    expect([...issued.audienceRoles].sort()).toEqual(['ADMIN', 'MANAGER', 'SUPERVISOR']);
+    expect([...placement.audienceRoles].sort()).toEqual(
+      ['ADMIN', 'LOGISTICIAN', 'MANAGER', 'SUPERVISOR', 'WAREHOUSE'].sort(),
+    );
+
+    // Лишних адресатов нет: ни курьера, ни флориста.
+    for (const roles of [issued.audienceRoles, placement.audienceRoles]) {
+      expect(roles).not.toContain('COURIER');
+      expect(roles).not.toContain('FLORIST');
+    }
   });
 });
 

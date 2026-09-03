@@ -36,8 +36,13 @@ import { readWarehouseManualEntry } from '../settings/service.js';
 /** Выдачу самовывоза выполняет менеджер; администратор — тоже. */
 export const PICKUP_ROLES = ['ADMIN', 'MANAGER', 'SUPERVISOR'] as const;
 
-/** Кому адресованы события раздела. Кладовщика здесь нет: выдача не его работа. */
-export const PICKUP_AUDIENCE = ['ADMIN', 'MANAGER'] as const;
+/**
+ * Кому адресованы события раздела. Кладовщика здесь нет: выдача не его работа.
+ *
+ * Управляющий (SUPERVISOR) есть: он открывает «Самовывоз» (он в PICKUP_ROLES),
+ * и без `pickup.issued` выданный заказ висел бы у него в очереди до F5.
+ */
+export const PICKUP_AUDIENCE = ['ADMIN', 'MANAGER', 'SUPERVISOR'] as const;
 
 export interface RequestContext {
   ip: string | null;
