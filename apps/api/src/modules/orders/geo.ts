@@ -20,6 +20,7 @@ import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
+import { enqueueMkadDistanceForOrder } from '../finance/mkad-auto.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import type { Role } from '@fl/shared';
 
@@ -248,6 +249,11 @@ export async function setManualPoint(
       payload: { orderId, geoState: 'RESOLVED' },
       audienceRoles: [...ORDER_AUDIENCE],
     });
+
+    // Подтверждённые координаты изменились: durable-задание на пересчёт
+    // расстояния за МКАД по участиям заказа в подтверждённых/активных маршрутах.
+    // Новые координаты дают новый ключ — значит новую версию снимка.
+    await enqueueMkadDistanceForOrder(tx, orderId);
 
     return {
       orderId,

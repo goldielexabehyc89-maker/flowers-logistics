@@ -29,7 +29,7 @@
 import { AppError } from '../../platform/errors.js';
 import type { Database } from '../../platform/db.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
-import type { MoyskladClient } from '../integrations/moysklad/client.js';
+import type { PhotoFetcher } from './photo-fetcher.js';
 import { isVisibleToFlorist } from './visibility.js';
 import type { FulfillmentAssortmentKind } from './composition.js';
 
@@ -46,8 +46,12 @@ export interface PhotoResult {
 
 export interface PhotoDeps {
   db: Database;
-  /** `null` означает «интеграция не настроена»: сетевого обращения не будет. */
-  client: MoyskladClient | null;
+  /**
+   * Отдельный ограниченный контур фотографий. `null` — интеграция не настроена:
+   * сетевого обращения не будет. НЕ основной клиент МоегоСклада: фотографии его
+   * очередь (2/1/30), импорт и статусы не занимают.
+   */
+  photos: PhotoFetcher | null;
 }
 
 /** Нейтральный отказ. Один и тот же для всех причин — он же и есть политика. */
@@ -118,47 +122,23 @@ export async function readAssortmentPhoto(
   deps: PhotoDeps,
   assortmentId: string,
 ): Promise<PhotoResult | null> {
-  if (deps.client === null) {
+  if (deps.photos === null) {
     return null;
   }
 
   const kinds = await assortmentKindsOf(deps.db, assortmentId);
-  if (kinds.length === 0) {
+  const entities = kinds
+    .map((kind) => entityKindOf(kind))
+    .filter((entity): entity is 'product' | 'bundle' | 'variant' => entity !== null);
+  if (entities.length === 0) {
     return null;
   }
 
-  for (const kind of kinds) {
-    const entity = entityKindOf(kind);
-    if (entity === null) {
-      continue;
-    }
-
-    try {
-      const images = await deps.client.listAssortmentImages(entity, assortmentId);
-      const first = images[0];
-      if (first === undefined) {
-        continue;
-      }
-
-      // Ранний отказ по обещанному размеру: тратить трафик на заведомо
-      // большой файл незачем. Фактический размер всё равно перепроверяется.
-      if (first.size !== undefined && first.size > MAX_PHOTO_BYTES) {
-        return null;
-      }
-
-      const file = await deps.client.downloadFile(first.meta.downloadHref, {
-        maxBytes: MAX_PHOTO_BYTES,
-        allowedTypes: ALLOWED_PHOTO_TYPES,
-      });
-
-      return { bytes: file.bytes, contentType: file.contentType };
-    } catch {
-      // Ни кода внешней ошибки, ни адреса: карточка обязана продолжать работать.
-      continue;
-    }
-  }
-
-  return null;
+  // Обращение в upstream идёт через ограниченный контур с предохранителем: при
+  // недоступности МоегоСклада запрос быстро завершается «нет фото», карточку не
+  // блокирует и очередь импорта не занимает.
+  const photo = await deps.photos.getPhoto(entities, assortmentId);
+  return photo === null ? null : { bytes: photo.bytes, contentType: photo.contentType };
 }
 
 /** Какими типами номенклатуры эта позиция встречается в составе. */

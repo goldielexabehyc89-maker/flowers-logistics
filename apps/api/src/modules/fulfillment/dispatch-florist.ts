@@ -17,6 +17,7 @@ import { NOTIFICATION_AUDIENCE } from '../notifications/change-notify.js';
 import { lockActiveShift, shiftRequired } from './shifts.js';
 import { listDispatchableOrderIds } from './queue-service.js';
 import { enqueueDispatch } from './dispatch-trigger.js';
+import { quarantineNoFlowers } from './no-flowers.js';
 
 export type RefusalReason =
   'INSUFFICIENT_GOODS' | 'CANNOT_ASSEMBLE' | 'PHYSICALLY_IMPOSSIBLE' | 'WRONG_ASSIGNMENT' | 'OTHER';
@@ -191,13 +192,21 @@ export async function requestRefusal(
         fulfillmentAssigneeId: actor.userId,
         fulfillmentProcessState: { in: ['IN_ASSEMBLY', 'NEEDS_REVIEW'] },
       },
-      select: { id: true, externalName: true },
+      select: { id: true, externalName: true, assemblyRound: true },
     });
     if (order === null) {
       throw new AppError('NOT_FOUND', {
         message: 'order not assigned to florist',
         publicMessage: 'Этот заказ вам не назначен.',
       });
+    }
+
+    // «Нет цветов» в АВТО-режиме — особый путь: заказ СРАЗУ снимается с флориста
+    // и уходит в карантин, а не ждёт решения руководителя занятым за флористом.
+    // В ручном режиме и по другим причинам сохраняется обычный запрос отказа.
+    const mode = await readFloristDispatchMode(tx);
+    if (input.reason === 'INSUFFICIENT_GOODS' && mode.value.auto) {
+      return quarantineNoFlowers(tx, actor, order, input.comment, context);
     }
 
     // Повтор не создаёт дубль: открытый запрос уже есть — возвращаем его.

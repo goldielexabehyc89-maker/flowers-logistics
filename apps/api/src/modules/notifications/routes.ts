@@ -26,6 +26,14 @@ import {
   listPendingRefusalNotificationIds,
 } from '../fulfillment/dispatch-florist.js';
 import { listPendingEscalationNotificationIds } from './escalation.js';
+import {
+  NO_FLOWERS_ROLES,
+  countOpenNoFlowersQuarantines,
+  getNoFlowersByNotificationId,
+  listNoFlowersQuarantines,
+  listPendingNoFlowersNotificationIds,
+  returnFromQuarantine,
+} from '../fulfillment/no-flowers.js';
 
 const idParamSchema = z.object({ id: z.string().uuid() });
 const listQuerySchema = z.object({
@@ -154,5 +162,63 @@ export function registerNotificationRoutes(app: AppServer, deps: NotificationDep
       { notificationId: id, action: body.action, floristId: body.floristId ?? null },
       contextOf(request),
     );
+  });
+
+  /**
+   * Вкладка «Решения»: постоянный список карантина «Нет цветов» и счётчик.
+   *
+   * Доступ — менеджер выдачи (основной), а также ADMIN и SUPERVISOR. Право
+   * проверяет сервер, а не скрытая вкладка.
+   */
+  app.get('/api/logistics/no-flowers/quarantines', async (request) => {
+    await authenticateWithRoles(request, deps, NO_FLOWERS_ROLES);
+    const { items, total } = await listNoFlowersQuarantines(deps.db);
+    return { items, total };
+  });
+
+  /** Только счётчик открытых карантинов — для бейджа вкладки «Решения». */
+  app.get('/api/logistics/no-flowers/count', async (request) => {
+    await authenticateWithRoles(request, deps, NO_FLOWERS_ROLES);
+    return { open: await countOpenNoFlowersQuarantines(deps.db) };
+  });
+
+  /** Карантин по идентификатору уведомления — для всплывающего окна. */
+  app.get('/api/logistics/no-flowers/notification/:id', async (request) => {
+    await authenticateWithRoles(request, deps, NO_FLOWERS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return { quarantine: await getNoFlowersByNotificationId(deps.db, id) };
+  });
+
+  /**
+   * Персональная отметка «прочитано» карантина для ответственного.
+   *
+   * Показ окна помечает его прочитанным, поэтому догоняющий запрос его больше
+   * не вернёт — «не более одного раза». Задачу это НЕ закрывает: карантин
+   * остаётся во вкладке «Решения» до возврата в очередь.
+   */
+  app.post('/api/logistics/no-flowers/notification/:id/read', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, NO_FLOWERS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    await markRead(deps.db, actor, id);
+    return { ok: true };
+  });
+
+  /** Возврат заказа из карантина в очередь (в конец). Идемпотентно. */
+  app.post('/api/logistics/no-flowers/quarantines/:id/return', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, NO_FLOWERS_ROLES);
+    const { id } = idParamSchema.parse(request.params);
+    return returnFromQuarantine(deps.db, actor, id, contextOf(request));
+  });
+
+  /**
+   * Догоняющие окна карантина «Нет цветов» для ответственных при входе.
+   *
+   * Кто был офлайн в момент отказа, получает здесь ещё не прочитанные ИМ
+   * карантины открытых задач и показывает окном один раз. Только
+   * MANAGER/ADMIN/SUPERVISOR.
+   */
+  app.get('/api/logistics/notifications/pending-no-flowers', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, NO_FLOWERS_ROLES);
+    return { notificationIds: await listPendingNoFlowersNotificationIds(deps.db, actor.userId) };
   });
 }

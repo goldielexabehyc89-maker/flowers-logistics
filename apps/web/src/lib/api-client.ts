@@ -186,10 +186,10 @@ export class ApiClient {
    * без него и получили 401. Ответ отдаётся `Blob`: содержимое не попадает
    * ни в состояние приложения, ни в хранилище.
    */
-  async getBlob(path: string, accept: string): Promise<Blob> {
+  async getBlob(path: string, accept: string, signal?: AbortSignal): Promise<Blob> {
     const response = await this.#requestWithRetry(
       path,
-      { method: 'GET', headers: { accept } },
+      { method: 'GET', headers: { accept }, ...(signal === undefined ? {} : { signal }) },
       true,
     );
 

@@ -171,7 +171,7 @@ export async function buildServer(deps: ServerDeps): Promise<AppServer> {
   // Раздел флориста. Клиент МоегоСклада собирается внутри и только при наличии
   // токена: без него проксирование фотографий отвечает «Фото отсутствует»
   // и ни одного сетевого обращения не выполняет.
-  await registerFloristRoutes(app, { db, config });
+  await registerFloristRoutes(app, { db, config, logger });
   // Раздел самовывоза: выдача покупателю. Прав склада и логистики не требует
   // и не выдаёт — у него собственная пара ролей.
   await registerPickupRoutes(app, { db, config });

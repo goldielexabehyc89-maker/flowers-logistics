@@ -18,14 +18,14 @@ import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
 import { authenticateWithRoles } from '../auth/guards.js';
-import { MoyskladClient } from '../integrations/moysklad/client.js';
-import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
+import { MOYSKLAD_BASE_URL } from '../integrations/moysklad/config.js';
+import { PhotoFetcher, type PhotoFetcherLogger } from './photo-fetcher.js';
 import { AppError } from '../../platform/errors.js';
 import { isCalendarDate } from '../integrations/moysklad/delivery-date.js';
 import { readOrderCard } from './card.js';
 import { MAX_SEARCH_LENGTH, countActiveAssignments, readQueue } from './queue-service.js';
 import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from './paging.js';
-import { requirePhoto } from './photo.js';
+import { ALLOWED_PHOTO_TYPES, MAX_PHOTO_BYTES, requirePhoto } from './photo.js';
 import {
   listPrintJobs,
   markPrinted,
@@ -135,12 +135,15 @@ export interface FloristRouteDeps {
   db: Database;
   config: AppConfig;
   /**
-   * Клиент МоегоСклада для проксирования фотографий.
+   * Отдельный ограниченный контур фотографий (НЕ основной клиент МоегоСклада).
    *
-   * `undefined` означает «собрать из конфигурации», `null` — «интеграции нет».
-   * Явный `null` нужен тестам: ни одного сетевого обращения оттуда быть не должно.
+   * `undefined` — «собрать из конфигурации», `null` — «интеграции нет». Явный
+   * `null`/заглушку инъектируют тесты: ни одного обращения к настоящему
+   * МоемуСкладу оттуда быть не должно.
    */
-  moysklad?: MoyskladClient | null;
+  photos?: PhotoFetcher | null;
+  /** Логгер для агрегатных метрик контура фотографий (без токена и PII). */
+  logger?: PhotoFetcherLogger;
 }
 
 interface IncomingRequest {
@@ -157,31 +160,31 @@ function contextOf(request: IncomingRequest): RequestContext {
 }
 
 /**
- * Клиент интеграции.
+ * Контур фотографий.
  *
- * Без токена клиент не создаётся вовсе: так ни одно обращение к МоемуСкладу
- * физически невозможно в окружении, где интеграция не настроена.
+ * Без токена контур не создаётся вовсе: так ни одно обращение к МоемуСкладу
+ * физически невозможно в окружении, где интеграция не настроена. Это отдельный
+ * ограниченный контур с предохранителем — очередь основного клиента (2/1/30),
+ * импорт и статусы он не занимает.
  */
-function resolveClient(deps: FloristRouteDeps): MoyskladClient | null {
-  if (deps.moysklad !== undefined) {
-    return deps.moysklad;
+function resolvePhotoFetcher(deps: FloristRouteDeps): PhotoFetcher | null {
+  if (deps.photos !== undefined) {
+    return deps.photos;
   }
   if (deps.config.MOYSKLAD_TOKEN === undefined) {
     return null;
   }
-  return new MoyskladClient({
-    config: {
-      baseUrl: MOYSKLAD_BASE_URL,
-      token: deps.config.MOYSKLAD_TOKEN,
-      ids: MOYSKLAD_IDS,
-      // Флорист читает состав из МоегоСклада — записи состояния здесь нет.
-      orderStateSyncEnabled: false,
-    },
+  return new PhotoFetcher({
+    baseUrl: MOYSKLAD_BASE_URL,
+    token: deps.config.MOYSKLAD_TOKEN,
+    maxBytes: MAX_PHOTO_BYTES,
+    allowedTypes: ALLOWED_PHOTO_TYPES,
+    ...(deps.logger === undefined ? {} : { logger: deps.logger }),
   });
 }
 
 export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDeps): Promise<void> {
-  const client = resolveClient(deps);
+  const photos = resolvePhotoFetcher(deps);
 
   // --- Смена ----------------------------------------------------------------
 
@@ -409,7 +412,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
 
-    const photo = await requirePhoto({ db: deps.db, client }, id);
+    const photo = await requirePhoto({ db: deps.db, photos }, id);
 
     return (
       reply
