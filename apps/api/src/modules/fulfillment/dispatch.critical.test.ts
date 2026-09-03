@@ -27,6 +27,7 @@ import {
 } from '../auth/testing/harness.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { snapshotHash, type FulfillmentSnapshot } from './composition.js';
 import { startShift } from './shifts.js';
 import { claimOrder } from './assembly.js';
@@ -776,5 +777,151 @@ describe('отменённый заказ скрыт из работы флор�
       NOW,
     );
     expect(mine.items.some((i) => i.id === order.id)).toBe(false);
+  });
+});
+
+/**
+ * Хотфикс CORE-ACCEPTED-UNPAID-PICKUP-HOTFIX-01.
+ *
+ * «Принят, Не оплачен» исключается из работы флориста — КРОМЕ самовывоза:
+ * оплату по самовывозу берут на выдаче, а коробку всё равно нужно собрать.
+ * Способ получения определяется ТОЛЬКО по точному UUID, не по названию.
+ */
+describe('«Принят, Не оплачен»: самовывоз собирается, доставка — нет', () => {
+  /** Заказ с заданными статусом источника и способом получения. */
+  async function seedStatusMethod(
+    startMinute: number,
+    externalStateId: string | null,
+    deliveryMethodId: string | null,
+  ): Promise<{ id: string; number: string }> {
+    const order = await seedOrder(startMinute);
+    await ctx.db.deliveryOrder.update({
+      where: { id: order.id },
+      data: { externalStateId, deliveryMethodId },
+    });
+    return order;
+  }
+
+  const generalQuery = {
+    day: 'today' as const,
+    scope: 'general' as const,
+    includeAssigned: false,
+  };
+
+  it('доставка + «Принят, Не оплачен» отсутствует в очереди, поиске, счётчике и автораздаче', async () => {
+    await setAuto(false);
+    const delivery = await seedStatusMethod(
+      600,
+      MOYSKLAD_IDS.states.acceptedUnpaid,
+      MOYSKLAD_IDS.deliveryMethodDelivery,
+    );
+    const florist = await floristOnShift('Смотрит очередь (доставка)');
+    await isolate([delivery.id]);
+
+    const viewer = { userId: florist.userId, roles: ['FLORIST'] };
+    const queue = await readQueue(ctx.db, viewer, generalQuery, NOW);
+    expect(queue.items.some((i) => i.id === delivery.id)).toBe(false);
+    expect(queue.total).toBe(0);
+
+    const search = await readQueue(
+      ctx.db,
+      viewer,
+      { ...generalQuery, search: delivery.number },
+      NOW,
+    );
+    expect(search.items.some((i) => i.id === delivery.id)).toBe(false);
+
+    const candidates = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(candidates).not.toContain(delivery.id);
+  });
+
+  it('самовывоз + «Принят, Не оплачен» присутствует в очереди, поиске, счётчике и автораздаче', async () => {
+    await setAuto(false);
+    const pickup = await seedStatusMethod(
+      600,
+      MOYSKLAD_IDS.states.acceptedUnpaid,
+      MOYSKLAD_IDS.deliveryMethodPickup,
+    );
+    const florist = await floristOnShift('Смотрит очередь (самовывоз)');
+    await isolate([pickup.id]);
+
+    const viewer = { userId: florist.userId, roles: ['FLORIST'] };
+    const queue = await readQueue(ctx.db, viewer, generalQuery, NOW);
+    expect(queue.items.some((i) => i.id === pickup.id)).toBe(true);
+    expect(queue.total).toBe(1);
+
+    const search = await readQueue(ctx.db, viewer, { ...generalQuery, search: pickup.number }, NOW);
+    expect(search.items.some((i) => i.id === pickup.id)).toBe(true);
+
+    const candidates = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(candidates).toContain(pickup.id);
+  });
+
+  it('самовывоз «Принят, Не оплачен» можно взять вручную', async () => {
+    await setAuto(false);
+    const pickup = await seedStatusMethod(
+      600,
+      MOYSKLAD_IDS.states.acceptedUnpaid,
+      MOYSKLAD_IDS.deliveryMethodPickup,
+    );
+    const florist = await floristOnShift('Берёт вручную');
+    await isolate([pickup.id]);
+
+    await claimOrder(ctx.db, florist, pickup.id, CONTEXT);
+    const state = await processState(pickup.id);
+    expect(state.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+    expect(state.fulfillmentAssigneeId).toBe(florist.userId);
+  });
+
+  it('в AUTO самовывоз «Принят, Не оплачен» назначается свободному флористу', async () => {
+    const pickup = await seedStatusMethod(
+      600,
+      MOYSKLAD_IDS.states.acceptedUnpaid,
+      MOYSKLAD_IDS.deliveryMethodPickup,
+    );
+    const florist = await floristOnShift('Авто самовывоз');
+    await isolate([pickup.id]);
+    await makeReady(florist.shiftId, new Date('2029-05-15T05:00:00.000Z'));
+    await setAuto(true);
+
+    const assigned = await dispatchFlorists(ctx.db, NOW);
+    expect(assigned).toBe(1);
+    expect((await processState(pickup.id)).fulfillmentAssigneeId).toBe(florist.userId);
+  });
+
+  it('отменённый и архивный самовывоз «Принят, Не оплачен» не возвращаются новым исключением', async () => {
+    await setAuto(false);
+    const cancelled = await seedStatusMethod(
+      600,
+      MOYSKLAD_IDS.states.acceptedUnpaid,
+      MOYSKLAD_IDS.deliveryMethodPickup,
+    );
+    await ctx.db.deliveryOrder.update({
+      where: { id: cancelled.id },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    const archived = await seedStatusMethod(
+      660,
+      MOYSKLAD_IDS.states.acceptedUnpaid,
+      MOYSKLAD_IDS.deliveryMethodPickup,
+    );
+    await ctx.db.deliveryOrder.update({
+      where: { id: archived.id },
+      data: { sourceArchived: true },
+    });
+    const florist = await floristOnShift('Проверка исключений');
+    await isolate([cancelled.id, archived.id]);
+
+    const candidates = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(candidates).not.toContain(cancelled.id);
+    expect(candidates).not.toContain(archived.id);
+
+    const queue = await readQueue(
+      ctx.db,
+      { userId: florist.userId, roles: ['FLORIST'] },
+      generalQuery,
+      NOW,
+    );
+    expect(queue.items.some((i) => i.id === cancelled.id || i.id === archived.id)).toBe(false);
   });
 });

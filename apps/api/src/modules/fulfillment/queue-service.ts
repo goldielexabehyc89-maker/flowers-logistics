@@ -334,9 +334,15 @@ export function offerableConstraints(
     fulfillmentCompositionState: 'READY' as const,
     AND: [
       {
+        // «Принят, Не оплачен» из работы флориста исключается — КРОМЕ самовывоза.
+        // У самовывоза оплату берут на выдаче, поэтому собирать заказ нужно как
+        // обычно; у доставки неоплаченный заказ в очередь по-прежнему не идёт.
+        // Способ получения — ТОЛЬКО по точному UUID, без сравнения по названию.
+        // Эквивалент: externalStateId != acceptedUnpaid ИЛИ метод == самовывоз.
         OR: [
           { externalStateId: null },
           { externalStateId: { not: MOYSKLAD_IDS.states.acceptedUnpaid } },
+          { deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup },
         ],
       },
       {
@@ -368,8 +374,9 @@ function buildScopeWhere(input: {
   operationsStartDate?: string | undefined;
 }) {
   return {
-    // Пригодность к выдаче («Принят, Не оплачен» не собирается; пустой состав
-    // при PENDING в очередь не идёт; заказы раньше начала операций — тоже).
+    // Пригодность к выдаче («Принят, Не оплачен» не собирается — кроме
+    // самовывоза; пустой состав при PENDING в очередь не идёт; заказы раньше
+    // начала операций — тоже).
     ...offerableConstraints(input.operationsStartDate),
     ...dateCondition(input.date, input.includePast === true),
     ...(input.assigneeId === null ? {} : { fulfillmentAssigneeId: input.assigneeId }),
