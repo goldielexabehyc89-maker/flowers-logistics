@@ -502,6 +502,7 @@ export async function registerWarehouseFlowRoutes(
       limit: query.limit,
       offset: query.offset,
       countOnly: query.countOnly,
+      queueDateFrom: deps.config.PICKUP_WAREHOUSE_QUEUE_DATE_FROM,
     });
   });
 

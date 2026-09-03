@@ -85,6 +85,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
       listPickupQueue(deps.db, {
         ...query,
         operationsStartDate: deps.config.OPERATIONS_START_DATE,
+        queueDateFrom: deps.config.PICKUP_WAREHOUSE_QUEUE_DATE_FROM,
       }),
       readWarehouseManualEntry(deps.db),
     ]);

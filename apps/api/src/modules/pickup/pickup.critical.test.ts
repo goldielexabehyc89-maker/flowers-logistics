@@ -1123,27 +1123,58 @@ describe('выдача самовывоза без ячейки', () => {
     ).rejects.toMatchObject({ conflict: { kind: 'ORDER_BLOCKED' } });
   });
 
-  it('скан заказа без ячейки отказывает: послабление только для ручной выдачи', async () => {
-    // Скан — выдача С ПОЛКИ: коробку берут из ячейки. Заказ без размещения там
-    // отсутствует, и сканер называет это прямо. Ручная же выдача (CARD) того же
-    // заказа проходит: покупатель уже пришёл, и менеджер отдаёт его кнопкой.
-    const order = await seedOrder();
+  it('скан заказа без ячейки теперь выдаёт: одна операция для всех источников', async () => {
+    // Расхождение убрано: скан больше не требует активного размещения и не
+    // отклоняет выдачу без ячейки (ORDER_NOT_PLACED). Скан, кнопка и ручной ввод
+    // — одна доменная операция; различие только в источнике аудита.
+    const order = await seedOrder(); // ни разу не принят на полку — ячейки нет
     const manager = await actorFor(['MANAGER']);
-    await expect(
-      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
-    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_NOT_PLACED' } });
-    // Скан ничего не выдал — заказ остаётся в очереди.
     expect(await isInQueue(order.number)).toBe(true);
 
-    // Ручная выдача того же заказа без ячейки — проходит.
     const result = await issueToCustomer(
       pickup,
       manager,
-      { orderNumber: order.number, source: 'CARD' },
+      { orderNumber: order.number, source: 'SCAN' },
       CONTEXT,
     );
     expect(result.cellCode).toBeNull();
+    expect(result.cellId).toBeNull();
+
+    // Факт выдачи зафиксирован БЕЗ размещения и ячейки; фиктивных не создано.
+    const issue = await ctx.db.orderPickupIssue.findUniqueOrThrow({
+      where: { orderId: order.id },
+      select: { placementId: true, cellId: true },
+    });
+    expect(issue.placementId).toBeNull();
+    expect(issue.cellId).toBeNull();
+
+    // Заказ ушёл из очереди; повтор отклоняется как уже выданный.
     expect(await isInQueue(order.number)).toBe(false);
+    await expect(
+      issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'PICKUP_ALREADY_ISSUED' } });
+
+    // Статус в МойСклад при выдаче не передаётся.
+    expect(await moyskladStateOf(order.id)).toBeNull();
+  });
+
+  it('уже выданный заказ нельзя принять на полку (гонка выдача/приёмка)', async () => {
+    // Выдача без ячейки, затем попытка приёмки склада: приёмка отклоняется, и
+    // активного размещения не появляется. Если бы первой прошла приёмка, выдача
+    // штатно закрыла бы созданное размещение — оба порядка непротиворечивы.
+    const order = await seedOrder();
+    const manager = await actorFor(['MANAGER']);
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
+
+    const cell = await seedCell();
+    const keeper = await actorFor(['WAREHOUSE']);
+    await expect(
+      receiveOrder(flow, keeper, { orderNumber: order.number, cellCode: cell.code }, CONTEXT),
+    ).rejects.toMatchObject({ conflict: { kind: 'PICKUP_ALREADY_ISSUED' } });
+
+    // Размещение не создано — ни активного, ни какого-либо.
+    expect(await activeCellOf(order.id)).toBeNull();
+    expect(await ctx.db.orderPlacement.count({ where: { orderId: order.id } })).toBe(0);
   });
 });
 
