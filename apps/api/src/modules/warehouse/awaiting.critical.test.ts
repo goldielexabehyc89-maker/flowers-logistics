@@ -31,6 +31,7 @@ import { startShift } from '../fulfillment/shifts.js';
 import { createStorageCell, unknownOccupancy, type CellDeps } from './service.js';
 import { receiveOrder, withdrawOrder, type FlowDeps } from './placement.js';
 import { listAwaitingIntake, AWAITING_INTAKE_ROLES } from './awaiting.js';
+import { issueToCustomer, type PickupDeps } from '../pickup/service.js';
 
 let ctx: TestContext;
 let flow: FlowDeps;
@@ -545,5 +546,65 @@ describe('исходящий статус сборки в МойСклад (chan
       select: { payload: true },
     });
     expect((pMsg.payload as { target?: string }).target).toBe('ready_for_pickup');
+  });
+});
+
+describe('выданный самовывоз уходит из «Ожидают приёмки»', () => {
+  it('выдача без ячейки исключает заказ из очереди приёмки (терминальный факт)', async () => {
+    const pickup: PickupDeps = { db: ctx.db };
+    const manager = await actorFor(['MANAGER']);
+    const order = await seedAssembled({ deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup });
+
+    // До выдачи — собранный самовывоз без ячейки ждёт приёмки.
+    expect(await awaitingNumbers()).toContain(order.number);
+
+    // Выдача без ячейки (скан) — размещения не появляется.
+    await issueToCustomer(pickup, manager, { orderNumber: order.number, source: 'SCAN' }, CONTEXT);
+
+    // Существование OrderPickupIssue — терминальный факт: заказ покинул очередь
+    // приёмки независимо от assemblyRound и отсутствия размещения.
+    expect(await awaitingNumbers()).not.toContain(order.number);
+    expect(await ctx.db.orderPlacement.count({ where: { orderId: order.id } })).toBe(0);
+  });
+});
+
+describe('узкая граница «Ожидают приёмки» (PICKUP_WAREHOUSE_QUEUE_DATE_FROM)', () => {
+  it('дата раньше границы скрыта, граница/позже видны, без даты остаётся — на всём отборе', async () => {
+    const CUTOFF = '2029-03-13';
+    // Уникальный префикс номеров изолирует строки в общей базе: и поиск, и
+    // счётчик считаются по ВСЕМУ отбору с этим поиском — так проверяется сервер,
+    // а не срез страницы (список сортирован по дате и обрезан лимитом).
+    const tag = unique('AWCUT');
+    const before = await seedAssembled({
+      externalName: `${tag}-BEFORE`,
+      deliveryDate: toDateColumn('2029-03-11'),
+    });
+    const onDate = await seedAssembled({
+      externalName: `${tag}-ON`,
+      deliveryDate: toDateColumn(CUTOFF),
+    });
+    const after = await seedAssembled({
+      externalName: `${tag}-AFTER`,
+      deliveryDate: toDateColumn('2029-03-14'),
+    });
+    const noDate = await seedAssembled({ externalName: `${tag}-NULL`, deliveryDate: null });
+
+    const withCutoff = await listAwaitingIntake(ctx.db, {
+      limit: 500,
+      queueDateFrom: CUTOFF,
+      search: tag,
+    });
+    const names = withCutoff.items.map((item) => item.orderNumber);
+    expect(names).not.toContain(before.number); // 2029-03-11 < граница
+    expect(names).toContain(onDate.number); // = граница
+    expect(names).toContain(after.number); // позже
+    expect(names).toContain(noDate.number); // без даты — не скрывается
+    // Счётчик по всему отбору (поиск), а не по странице: скрытая строка не в нём.
+    expect(withCutoff.counts.all).toBe(3);
+
+    // Без переменной — прежнее поведение: до-граничная строка возвращается.
+    const noCutoff = await listAwaitingIntake(ctx.db, { limit: 500, search: tag });
+    expect(noCutoff.items.map((item) => item.orderNumber)).toContain(before.number);
+    expect(noCutoff.counts.all).toBe(4);
   });
 });

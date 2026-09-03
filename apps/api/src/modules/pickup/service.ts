@@ -30,6 +30,7 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
+import { PLACEMENT_AUDIENCE } from '../warehouse/placement.js';
 import { readWarehouseManualEntry } from '../settings/service.js';
 
 /** Выдачу самовывоза выполняет менеджер; администратор — тоже. */
@@ -252,10 +253,15 @@ export async function issueToCustomer(
         select: { id: true, cell: { select: { id: true, code: true } } },
       });
 
-      // Отсутствие ячейки РУЧНОЙ выдаче больше НЕ мешает: покупатель пришёл, и
-      // менеджер отдаёт заказ кнопкой. Но списанный заказ выдавать нельзя —
-      // коробки нет физически: признак списания это снятие с полки причиной
-      // WRITE_OFF без последующей приёмки (активного размещения).
+      // Отсутствие ячейки выдаче больше НЕ мешает — НИ ОДНИМ источником.
+      //
+      // Раньше сканер требовал активное размещение и отклонял выдачу без ячейки
+      // (`ORDER_NOT_PLACED`), тогда как кнопка «Выдан» и ручной ввод отдавали
+      // заказ и без ячейки. Это расхождение убрано: скан, кнопка и ручной ввод —
+      // одна операция, различие только в источнике аудита (SCAN/CARD/MANUAL).
+      // Но списанный заказ выдавать нельзя: коробки нет физически — признак
+      // списания это снятие с полки причиной WRITE_OFF без последующей приёмки
+      // (активного размещения).
       if (placement === null) {
         const writtenOff = await tx.orderPlacement.findFirst({
           where: { orderId: order.id, withdrawReason: 'WRITE_OFF' },
@@ -266,18 +272,6 @@ export async function issueToCustomer(
             message: 'pickup order written off',
             publicMessage: 'Заказ списан — выдавать нечего.',
             conflict: { kind: 'ORDER_BLOCKED' },
-          });
-        }
-
-        // Скан — это выдача С ПОЛКИ: коробку берут из ячейки и сканируют. Заказа
-        // без активного размещения на полке нет, и сканер называет это прямо.
-        // Послабление «без ячейки» касается только ручной выдачи (`CARD`,
-        // `MANUAL`), где менеджер осознанно отдаёт заказ покупателю у прилавка.
-        if (input.source === 'SCAN') {
-          throw new AppError('CONFLICT', {
-            message: 'pickup order not placed in a cell',
-            publicMessage: 'Заказ не находится в ячейке.',
-            conflict: { kind: 'ORDER_NOT_PLACED' },
           });
         }
       }
@@ -331,6 +325,20 @@ export async function issueToCustomer(
       await publishRealtimeEvent(tx, {
         topic: 'pickup.issued',
         audienceRoles: [...PICKUP_AUDIENCE],
+        payload: { orderId: order.id },
+      });
+
+      // Склад тоже должен убрать выданный заказ из «Ожидают приёмки» без F5.
+      //
+      // Выдача — терминальный факт: заказ покидает и «Ожидают выдачи», и
+      // «Ожидают приёмки». Менеджер (аудитория pickup.issued) склад не смотрит,
+      // а кладовщик — смотрит, поэтому шлём складскую аудиторию тем же событием,
+      // что и движение коробок: его веб-подписка уже обновляет «Ожидают приёмки»
+      // и счётчик. Ячейки при выдаче без размещения не менялись — это сигнал
+      // «пересчитай очередь приёмки», а не запись о полке.
+      await publishRealtimeEvent(tx, {
+        topic: 'warehouse.placement_changed',
+        audienceRoles: [...PLACEMENT_AUDIENCE],
         payload: { orderId: order.id },
       });
 

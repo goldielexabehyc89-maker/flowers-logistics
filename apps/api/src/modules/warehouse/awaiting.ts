@@ -81,6 +81,12 @@ export interface ListAwaitingInput {
   offset?: number | undefined;
   /** Только счётчики: список не грузится. Для бейджа вкладки и чипов. */
   countOnly?: boolean | undefined;
+  /**
+   * Узкая граница очереди (`PICKUP_WAREHOUSE_QUEUE_DATE_FROM`): заказы с датой
+   * доставки строго раньше неё в «Ожидают приёмки» не показываются. Заказы без
+   * даты этой границей НЕ скрываются. Без значения — прежнее поведение.
+   */
+  queueDateFrom?: string | undefined;
 }
 
 /**
@@ -91,7 +97,13 @@ export interface ListAwaitingInput {
  * не списан; и ТЕКУЩИЙ круг сборки ещё не размещался (нет размещения этого
  * круга — ни активного, ни освобождённого).
  */
-function baseFilter(): Prisma.Sql {
+function baseFilter(queueDateFrom?: string | undefined): Prisma.Sql {
+  // Узкая граница очереди: старые хвосты не показываем. Заказ без даты остаётся
+  // видимым — его нужно разобрать вручную. Без переменной — Prisma.empty.
+  const cutoffClause =
+    queueDateFrom === undefined
+      ? Prisma.empty
+      : Prisma.sql`AND (o."deliveryDate" IS NULL OR o."deliveryDate" >= ${queueDateFrom}::date)`;
   return Prisma.sql`
     FROM "DeliveryOrder" AS o
     WHERE o."fulfillmentProcessState" = 'ASSEMBLED'
@@ -100,6 +112,7 @@ function baseFilter(): Prisma.Sql {
       AND NOT o."sourceMissing"
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
+      ${cutoffClause}
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupCancellation" c WHERE c."orderId" = o."id")
       -- Текущий круг сборки УЖЕ был в ячейке: есть его размещение — активное
@@ -137,7 +150,7 @@ export async function listAwaitingIntake(
   input: ListAwaitingInput = {},
 ): Promise<AwaitingIntakeResult> {
   const search = (input.search ?? '').trim();
-  const base = baseFilter();
+  const base = baseFilter(input.queueDateFrom);
   const sClause = searchClause(search);
 
   // Счётчики по типу, с учётом поиска: одним группированным запросом.

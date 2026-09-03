@@ -38,6 +38,7 @@ import {
   blockerLabel,
   canIssue,
   cellLabel,
+  issuedCellLabel,
   dayLabel,
   pickupTimeLabel,
   primaryBlocker,
@@ -509,7 +510,7 @@ export function PickupScreen(): React.JSX.Element {
                   <li key={item.orderId} className="pickup-row" data-testid="pickup-issued-row">
                     <span className="pickup-row__main">
                       <strong>{item.orderNumber}</strong>
-                      <span className="muted text-sm">Забран из ячейки {cellLabel(item)}</span>
+                      <span className="muted text-sm">{issuedCellLabel(item)}</span>
                     </span>
                     <StatusBadge tone="success">Выдан</StatusBadge>
                   </li>

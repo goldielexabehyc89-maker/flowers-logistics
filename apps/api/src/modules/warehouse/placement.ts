@@ -240,6 +240,28 @@ export async function receiveOrder(
       const round = await assemblyRoundOf(tx, order.id);
       await lockOrder(tx, order.id);
 
+      /*
+       * Уже выданный покупателю заказ принять в ячейку нельзя.
+       *
+       * Выдача — терминальный факт (OrderPickupIssue, один на заказ). Проверка
+       * ПОД блокировкой заказа закрывает гонку «выдача без ячейки одновременно с
+       * приёмкой»: если выдача успела первой, здесь виден её след и приёмка
+       * отклоняется — размещение не создаётся; если первой успела приёмка, она
+       * создаёт размещение, а выдача штатно закроет его как ISSUED_TO_CUSTOMER.
+       * Так одновременно активного размещения и записи о выдаче не возникает.
+       */
+      const issued = await tx.orderPickupIssue.findUnique({
+        where: { orderId: order.id },
+        select: { id: true },
+      });
+      if (issued !== null) {
+        throw new AppError('CONFLICT', {
+          message: 'order already issued to customer',
+          publicMessage: 'Заказ уже выдан покупателю: принять его в ячейку нельзя.',
+          conflict: { kind: 'PICKUP_ALREADY_ISSUED' },
+        });
+      }
+
       const cell = await resolveCell(tx, input.cellCode, { requireActive: true });
 
       if (cell.kind === 'ROUTE' && input.allowRouteCell !== true) {

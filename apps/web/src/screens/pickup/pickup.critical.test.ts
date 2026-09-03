@@ -15,6 +15,7 @@ import {
   blockerLabel,
   canIssue,
   cellLabel,
+  issuedCellLabel,
   dayLabel,
   pickupTimeLabel,
   primaryBlocker,
@@ -110,6 +111,13 @@ describe('состояние заказа на экране', () => {
     // со полки, и менеджер обязан это видеть, а не гадать.
     expect(cellLabel(card({ cellCode: null }))).toBe('Нет ячейки');
     expect(cellLabel(card({ cellCode: 'S-07' }))).toBe('S-07');
+  });
+
+  it('в «Выданы сегодня» выдача без ячейки называется «Выдан без ячейки»', () => {
+    // Заказ выдан без полки (скан/кнопка/ручной ввод не требуют ячейки): подпись
+    // «Выдан без ячейки», а не бессмысленное «Забран из ячейки Нет ячейки».
+    expect(issuedCellLabel(card({ cellCode: null }))).toBe('Выдан без ячейки');
+    expect(issuedCellLabel(card({ cellCode: 'S-07' }))).toBe('Забран из ячейки S-07');
   });
 
   it('день заказа — подпись, а не отбор', () => {

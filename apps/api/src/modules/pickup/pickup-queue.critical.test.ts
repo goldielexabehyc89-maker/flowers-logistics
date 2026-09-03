@@ -494,3 +494,32 @@ describe('продолжение очереди', () => {
     });
   });
 });
+
+describe('узкая граница очереди самовывоза (PICKUP_WAREHOUSE_QUEUE_DATE_FROM)', () => {
+  it('дата раньше границы скрыта, граница/позже видны, без даты остаётся — на всём отборе', async () => {
+    const before = await seedOrder({ day: YESTERDAY, number: unique('QCUT-BEFORE') });
+    const onDate = await seedOrder({ day: TODAY, number: unique('QCUT-ON') });
+    const after = await seedOrder({ day: TOMORROW, number: unique('QCUT-AFTER') });
+    const noDate = await seedOrder({ day: null, number: unique('QCUT-NULL') });
+
+    // Граница = TODAY: YESTERDAY скрыт, TODAY/TOMORROW видны, без даты не скрыт.
+    // Поиск по нашему префиксу изолирует строки в общей базе; total — по всему
+    // отбору (сервер), а не по загруженной странице.
+    const page = await listPickupQueue(ctx.db, {
+      limit: 200,
+      queueDateFrom: TODAY,
+      search: 'QCUT-',
+    });
+    const names = page.items.map((item) => item.orderNumber);
+    expect(names).not.toContain(before.number); // 2028-08-09 < граница
+    expect(names).toContain(onDate.number); // 2028-08-10 = граница
+    expect(names).toContain(after.number); // позже границы
+    expect(names).toContain(noDate.number); // без даты — не скрывается
+    expect(page.total).toBe(3); // граница + позже + без даты
+
+    // Без переменной — прежнее поведение: скрытая строка снова видна.
+    const noCutoff = await listPickupQueue(ctx.db, { limit: 200, search: 'QCUT-' });
+    expect(noCutoff.items.map((item) => item.orderNumber)).toContain(before.number);
+    expect(noCutoff.total).toBe(4);
+  });
+});

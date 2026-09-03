@@ -8821,12 +8821,12 @@ test('самовывоз с камеры: скан выдаёт заказ, а �
   expect(box).not.toBeNull();
   expect(box!.height).toBeLessThan((viewport?.height ?? 0) - 8);
 
-  // 2. Каждая причина отказа названа своими словами.
+  // 2. Каждая причина отказа названа своими словами. Отсутствие ячейки сюда
+  //    больше НЕ входит: скан выдаёт заказ и без ячейки (см. шаг 3).
   const cases: [string, string][] = [
     ['ЧУЖОЙ-QR-НЕ-ЗАКАЗ', 'Ожидался QR-код заказа'],
     [stand['заказ доставки'] ?? '', 'Это не самовывозный заказ'],
     [stand['заказ отменён'] ?? '', 'Заказ отменён'],
-    [stand['заказ без ячейки'] ?? '', 'Заказ не находится в ячейке'],
     [stand['заказ выдан'] ?? '', 'Заказ уже выдан покупателю'],
   ];
   for (const [code, text] of cases) {
@@ -8838,7 +8838,22 @@ test('самовывоз с камеры: скан выдаёт заказ, а �
     await expect(page.getByTestId('scan-hint')).toHaveText('Наведите камеру на QR-код заказа');
   }
 
-  // 3. Правильный код выдаёт заказ сам: отдельной кнопки подтверждения нет.
+  // 3. Скан ВЫДАЁТ заказ и без ячейки: прежнего отказа «не находится в ячейке»
+  //    больше нет. В «Выданы сегодня» такой заказ подписан «Выдан без ячейки».
+  const withoutCell = stand['заказ без ячейки'] ?? '';
+  await scan(withoutCell, async () => {
+    await expect(success).toContainText(`Заказ ${withoutCell} выдан покупателю`);
+  });
+  await expect(page.getByTestId('scan-title')).toHaveCount(0);
+  await expect(
+    page.locator(`[data-testid="pickup-waiting-row"][data-order-number="${withoutCell}"]`),
+  ).toHaveCount(0);
+  await expect(
+    page.locator('[data-testid="pickup-issued-row"]', { hasText: withoutCell }),
+  ).toContainText('Выдан без ячейки');
+
+  // 4. Заказ с ячейкой выдаётся так же: отдельной кнопки подтверждения нет.
+  await page.getByTestId('pickup-scan').click();
   const target = stand['заказ сегодня'] ?? '';
   await scan(target, async () => {
     await expect(success).toContainText(`Заказ ${target} выдан покупателю`);
@@ -8858,7 +8873,7 @@ test('самовывоз с камеры: скан выдаёт заказ, а �
     page.locator('[data-testid="pickup-issued-row"]', { hasText: target }),
   ).toBeVisible();
 
-  // 4. Повторный кадр того же кода второй выдачи не делает.
+  // 5. Повторный кадр того же кода второй выдачи не делает.
   await page.getByTestId('pickup-scan').click();
   await scan(target, async () => {
     await expect(error).toContainText('Заказ уже выдан покупателю');

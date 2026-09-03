@@ -307,6 +307,13 @@ export async function listPickupQueue(
      * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
      */
     operationsStartDate?: string | undefined;
+    /**
+     * Узкая граница ДВУХ очередей (`PICKUP_WAREHOUSE_QUEUE_DATE_FROM`): заказы с
+     * датой доставки строго раньше неё в «Ожидают выдачи» не показываются.
+     * Отдельная от {@link operationsStartDate} и её не заменяет; без значения —
+     * прежнее поведение. Заказы без даты этой границей НЕ скрываются.
+     */
+    queueDateFrom?: string | undefined;
   } = {},
 ): Promise<PickupQueuePage> {
   const limit = Math.min(Math.max(input.limit ?? QUEUE_PAGE_SIZE, 1), MAX_QUEUE_PAGE_SIZE);
@@ -324,6 +331,13 @@ export async function listPickupQueue(
 
   // Начало операционной работы: заказы более ранних дней в очередь не попадают.
   const windowClause = Prisma.sql`AND (o."deliveryDate" IS NULL OR o."deliveryDate" >= ${input.operationsStartDate ?? OPERATIONS_START_DATE}::date)`;
+
+  // Узкая граница очереди: старые хвосты не показываем. Заказ без даты
+  // остаётся видимым — его нужно разобрать вручную. Без переменной — Prisma.empty.
+  const cutoffClause =
+    input.queueDateFrom === undefined
+      ? Prisma.empty
+      : Prisma.sql`AND (o."deliveryDate" IS NULL OR o."deliveryDate" >= ${input.queueDateFrom}::date)`;
 
   /*
    * Отбор и порядок пишутся SQL целиком.
@@ -363,6 +377,7 @@ export async function listPickupQueue(
         )
       )
       ${windowClause}
+      ${cutoffClause}
       ${searchClause}
   `;
 
