@@ -7827,6 +7827,97 @@ test('два сеанса: самовывоз виден у менеджера �
   await keeperContext.close();
 });
 
+test('два сеанса: управляющий видит уход выданного самовывоза из обеих очередей без F5', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const SUP_PIN = '5170';
+  const stand = seedWarehouseStand();
+  const order = stand['заказ самовывоза'] ?? '';
+
+  // 1. Управляющего (SUPERVISOR) в стенде нет — заводит администратор.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const supPhone = uniquePhone();
+  await openSection(page, 'Сотрудники и курьеры');
+  await page.getByRole('button', { name: 'Добавить' }).click();
+  await page.getByLabel('ФИО').fill('Управляющий второго окна');
+  await page.getByLabel('Телефон').fill(supPhone);
+  await page.getByRole('checkbox', { name: 'Управляющий' }).check();
+  const courierRole = page.getByRole('checkbox', { name: 'Курьер', exact: true });
+  if (await courierRole.isChecked()) {
+    await courierRole.uncheck();
+  }
+  await page.getByRole('button', { name: 'Создать' }).click();
+  const supCode = (await page.locator('.one-time-code').innerText()).trim();
+  expect(supCode).toMatch(/^\d{4}$/);
+  await page.getByRole('button', { name: 'Я сохранил код' }).click();
+
+  // 2. Управляющий открывает ДВА окна: «Самовывоз» и «Склад → Ожидают приёмки».
+  //    Разные контексты — это два независимых сеанса одного человека, у каждого
+  //    свой живой поток событий (одноразовый код тратится активацией первого).
+  const pickupContext = await browser.newContext();
+  const warehouseContext = await browser.newContext();
+  const pickupPage = await pickupContext.newPage();
+  const warehousePage = await warehouseContext.newPage();
+
+  await activate(pickupPage, supPhone, supCode, SUP_PIN);
+  await openSection(pickupPage, 'Самовывоз');
+  await expect(pickupPage.getByRole('heading', { name: 'Самовывоз', level: 1 })).toBeVisible();
+
+  await login(warehousePage, supPhone, SUP_PIN);
+  await openSection(warehousePage, 'Склад');
+  await warehousePage.getByTestId('wh-tab-awaiting').click();
+  await expect(warehousePage.getByTestId('wh-awaiting')).toBeVisible();
+
+  // 3. Заказ виден в обеих очередях; фиксируем счётчики (данные заведомо есть —
+  //    самовывоз стенда собран и ещё не принят на полку).
+  const pickupRow = pickupPage.locator(
+    `[data-testid="pickup-waiting-row"][data-order-number="${order}"]`,
+  );
+  const awaitingCard = warehousePage.locator(
+    `[data-testid="wh-awaiting-card"][data-order-number="${order}"]`,
+  );
+  await expect(pickupRow).toHaveCount(1);
+  await expect(awaitingCard).toHaveCount(1);
+  // Бейдж «Ожидают приёмки» скрывается при нуле — читаем его терпимо к нулю.
+  const awaitingCountNow = async (): Promise<number> => {
+    const badge = warehousePage.getByTestId('wh-tab-awaiting-count');
+    return (await badge.count()) === 0 ? 0 : Number(await badge.innerText());
+  };
+  const pickupBefore = Number(await pickupPage.getByTestId('pickup-waiting-count').innerText());
+  const awaitingBefore = await awaitingCountNow();
+  expect(pickupBefore).toBeGreaterThan(0);
+  expect(awaitingBefore).toBeGreaterThan(0);
+
+  // 4. МЕНЕДЖЕР выдаёт самовывоз БЕЗ ячейки (у заказа нет активного размещения).
+  const managerAuth = await request.post('/api/auth/login', {
+    data: { phone: stand['менеджер'] ?? '', pin: stand['пин'] ?? '' },
+  });
+  const managerToken = ((await managerAuth.json()) as { accessToken: string }).accessToken;
+  const issued = await request.post('/api/pickup/issues', {
+    headers: { authorization: `Bearer ${managerToken}` },
+    data: { orderNumber: order, source: 'CARD' },
+  });
+  expect(issued.status()).toBe(200);
+
+  // 5. Оба окна управляющего убирают заказ БЕЗ F5, и счётчики уменьшаются.
+  await expect(pickupRow).toHaveCount(0);
+  await expect(awaitingCard).toHaveCount(0);
+  await expect
+    .poll(async () => Number(await pickupPage.getByTestId('pickup-waiting-count').innerText()))
+    .toBeLessThan(pickupBefore);
+  await expect.poll(awaitingCountNow).toBeLessThan(awaitingBefore);
+
+  await pickupContext.close();
+  await warehouseContext.close();
+});
+
 /*
  * Телефон: четыре вкладки склада читаются целиком и ничего не уезжает
  * за правый край.
