@@ -21,6 +21,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, ConfirmDialog, Modal, StatusBadge } from '../../ui/components';
+import { RefusalReasonModal } from './RefusalReasonModal';
 import {
   EMPTY_VALUE,
   availableActions,
@@ -33,6 +34,7 @@ import {
   type CardPositionView,
   type FloristOption,
   type OrderCardView,
+  type RefusalReason,
 } from './florist';
 
 interface PhotoProps {
@@ -180,8 +182,15 @@ export interface OrderCardPanelProps {
   hasActiveShift: boolean;
   florists: FloristOption[];
   busy: boolean;
+  /**
+   * Режим авто-раздачи. В нём «Отказаться» открывает окно причины и уходит в
+   * `/refusal` (как в панели «Моя работа»), а не в прямое освобождение — иначе
+   * заказ тут же вернулся бы автораздачей.
+   */
+  auto: boolean;
   onClaim: () => void;
   onRelease: () => void;
+  onRequestRefusal: (input: { reason: RefusalReason; comment: string | null }) => void;
   onAssemble: () => void;
   onReopen: (reason: string) => void;
   onReassign: (floristId: string) => void;
@@ -204,6 +213,7 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
   const [reason, setReason] = useState('');
   const [target, setTarget] = useState('');
   const [confirmReopen, setConfirmReopen] = useState(false);
+  const [refusalOpen, setRefusalOpen] = useState(false);
 
   return (
     <div className="stack" data-testid="florist-card">
@@ -287,7 +297,12 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
           </Button>
         )}
         {actions.canRelease && (
-          <Button variant="secondary" disabled={props.busy} onClick={props.onRelease}>
+          <Button
+            variant="secondary"
+            disabled={props.busy}
+            data-testid="card-release"
+            onClick={props.auto ? () => setRefusalOpen(true) : props.onRelease}
+          >
             Отказаться
           </Button>
         )}
@@ -398,6 +413,16 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
           props.onReopen(reason.trim());
         }}
         onCancel={() => setConfirmReopen(false)}
+      />
+
+      <RefusalReasonModal
+        open={refusalOpen}
+        pending={props.busy}
+        onClose={() => setRefusalOpen(false)}
+        onSubmit={(input) => {
+          props.onRequestRefusal(input);
+          setRefusalOpen(false);
+        }}
       />
     </div>
   );

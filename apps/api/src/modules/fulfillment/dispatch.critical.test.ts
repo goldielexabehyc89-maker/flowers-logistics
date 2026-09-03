@@ -30,7 +30,7 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { snapshotHash, type FulfillmentSnapshot } from './composition.js';
 import { startShift } from './shifts.js';
-import { claimOrder } from './assembly.js';
+import { claimOrder, releaseOrder } from './assembly.js';
 import { listDispatchableOrderIds, readQueue } from './queue-service.js';
 import { readOrderCard } from './card.js';
 import { dispatchFlorists } from './dispatch.js';
@@ -1206,5 +1206,66 @@ describe('карантин «Нет цветов»', () => {
     });
     expect(refusal).not.toBeNull();
     expect((await processState(order.id)).fulfillmentAssigneeId).toBe(florist.userId);
+  });
+});
+
+describe('единая точка отказа в AUTO: прямое освобождение запрещено', () => {
+  async function assignInAssembly(
+    orderId: string,
+    florist: AuthenticatedActor & { shiftId: string },
+  ): Promise<void> {
+    await ctx.db.deliveryOrder.update({
+      where: { id: orderId },
+      data: {
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        fulfillmentAssigneeId: florist.userId,
+        fulfillmentAssignedAt: new Date(),
+        fulfillmentShiftId: florist.shiftId,
+      },
+    });
+  }
+
+  it('в AUTO прямое освобождение флористом отклоняется и требует отказа с причиной', async () => {
+    const florist = await floristOnShift('Освобождение в авто');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
+    await setAuto(true);
+
+    await expect(releaseOrder(ctx.db, florist, order.id, CONTEXT)).rejects.toMatchObject({
+      conflict: { kind: 'RELEASE_REQUIRES_REFUSAL' },
+    });
+
+    // Заказ не тронут: остаётся в сборке за тем же флористом (иначе автораздача
+    // тут же вернула бы его — ровно дефект, который исправляется).
+    const st = await processState(order.id);
+    expect(st.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+    expect(st.fulfillmentAssigneeId).toBe(florist.userId);
+  });
+
+  it('в AUTO администратор всё же может освободить застрявший заказ', async () => {
+    const florist = await floristOnShift('Разбор администратором');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
+    await setAuto(true);
+
+    await releaseOrder(ctx.db, admin, order.id, CONTEXT);
+    const st = await processState(order.id);
+    expect(st.fulfillmentProcessState).toBe('NEW');
+    expect(st.fulfillmentAssigneeId).toBeNull();
+  });
+
+  it('в MANUAL освобождение флористом работает как прежде', async () => {
+    const florist = await floristOnShift('Ручное освобождение');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
+    // Режим по умолчанию — ручной: гейт не срабатывает.
+
+    await releaseOrder(ctx.db, florist, order.id, CONTEXT);
+    const st = await processState(order.id);
+    expect(st.fulfillmentProcessState).toBe('NEW');
+    expect(st.fulfillmentAssigneeId).toBeNull();
   });
 });

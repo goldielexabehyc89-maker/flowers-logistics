@@ -457,6 +457,25 @@ export function FloristScreen(): React.JSX.Element {
   });
 
   /**
+   * Единый отказ с причиной для обеих точек входа.
+   *
+   * И панель «Моя работа», и открытая карточка зовут ЭТО — один endpoint
+   * `/refusal`. «Нет цветов» сервер уводит в карантин (заказ снимается с
+   * флориста сразу), остальные причины — на согласование руководителю. Прямого
+   * `/release` в режиме авто у флориста больше нет.
+   */
+  const requestRefusal = (
+    orderId: string,
+    input: { reason: RefusalReason; comment: string | null },
+  ): void => {
+    action.mutate({
+      path: `/api/florist/orders/${orderId}/refusal`,
+      body: { reason: input.reason, comment: input.comment },
+      success: 'Отказ отправлен',
+    });
+  };
+
+  /**
    * Выбор точки печати на текущую смену.
    *
    * После выбора работа ПРОДОЛЖАЕТСЯ сама: если выбор открылся из-за нажатия
@@ -885,13 +904,7 @@ export function FloristScreen(): React.JSX.Element {
             orderId: string;
             reason: RefusalReason;
             comment: string | null;
-          }) =>
-            action.mutate({
-              path: `/api/florist/orders/${input.orderId}/refusal`,
-              body: { reason: input.reason, comment: input.comment },
-              success: 'Запрос отказа отправлен руководителю',
-            })
-          }
+          }) => requestRefusal(input.orderId, { reason: input.reason, comment: input.comment })}
         />
       )}
 
@@ -1333,6 +1346,7 @@ export function FloristScreen(): React.JSX.Element {
             hasActiveShift={hasActiveShift}
             florists={floristsQuery.data?.items ?? []}
             busy={action.isPending}
+            auto={autoForFlorist}
             onClaim={() =>
               action.mutate({
                 path: `/api/florist/orders/${card.id}/claim`,
@@ -1345,6 +1359,7 @@ export function FloristScreen(): React.JSX.Element {
                 success: 'Заказ возвращён в очередь',
               })
             }
+            onRequestRefusal={(input) => requestRefusal(card.id, input)}
             onAssemble={() => assembleWithPoint(card.id)}
             onReopen={(reason) =>
               action.mutate({

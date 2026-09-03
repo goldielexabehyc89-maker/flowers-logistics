@@ -54,9 +54,21 @@ const ISSUED_KEY = ['pickup-issued'];
 const SEARCH_DEBOUNCE_MS = 300;
 
 export function PickupScreen(): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
+
+  /*
+   * Кто видит вкладку «Решения» (карантин «Нет цветов»).
+   *
+   * Экран «Самовывоз» открыт ADMIN/MANAGER/SUPERVISOR (навигация), но вкладку
+   * «Решения» и её счётчик держим и здесь на тех же ролях: сервер отвечает на
+   * `/no-flowers/*` только им, и явный гейт не даёт вкладке всплыть, если состав
+   * ролей экрана однажды расширят. Роли те же, что у карантина на сервере.
+   */
+  const roles = user?.roles ?? [];
+  const canDecisions =
+    roles.includes('MANAGER') || roles.includes('ADMIN') || roles.includes('SUPERVISOR');
 
   const [scanning, setScanning] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
@@ -78,6 +90,7 @@ export function PickupScreen(): React.JSX.Element {
   const decisionsCount = useQuery({
     queryKey: ['no-flowers-count'],
     queryFn: () => client.get<{ open: number }>('/api/logistics/no-flowers/count'),
+    enabled: canDecisions,
   });
   const decisionsBadge = decisionsCount.data?.open ?? 0;
 
@@ -196,25 +209,27 @@ export function PickupScreen(): React.JSX.Element {
         >
           Выдача
         </button>
-        <button
-          type="button"
-          className={
-            activeTab === 'decisions' ? 'wh-tabs__item wh-tabs__item--active' : 'wh-tabs__item'
-          }
-          aria-current={activeTab === 'decisions' ? 'page' : undefined}
-          data-testid="pickup-tab-decisions"
-          onClick={() => setActiveTab('decisions')}
-        >
-          Решения
-          {decisionsBadge > 0 && (
-            <span className="wh-tabs__badge" data-testid="pickup-tab-decisions-count">
-              {decisionsBadge}
-            </span>
-          )}
-        </button>
+        {canDecisions && (
+          <button
+            type="button"
+            className={
+              activeTab === 'decisions' ? 'wh-tabs__item wh-tabs__item--active' : 'wh-tabs__item'
+            }
+            aria-current={activeTab === 'decisions' ? 'page' : undefined}
+            data-testid="pickup-tab-decisions"
+            onClick={() => setActiveTab('decisions')}
+          >
+            Решения
+            {decisionsBadge > 0 && (
+              <span className="wh-tabs__badge" data-testid="pickup-tab-decisions-count">
+                {decisionsBadge}
+              </span>
+            )}
+          </button>
+        )}
       </nav>
 
-      {activeTab === 'decisions' && <DecisionsTab />}
+      {canDecisions && activeTab === 'decisions' && <DecisionsTab />}
 
       {activeTab === 'issue' && (
         <>
