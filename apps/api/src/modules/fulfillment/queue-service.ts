@@ -61,6 +61,7 @@ import {
   type PageRequest,
 } from './paging.js';
 import { isPickupMethod } from '../pickup/views.js';
+import { operationalPickupOr } from '../orders/operational-pickup.js';
 import { readFloristDispatchMode } from '../settings/service.js';
 import {
   effectiveMinutes,
@@ -192,6 +193,8 @@ export interface QueueQuery extends Partial<PageRequest> {
    * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
    */
   operationsStartDate?: string;
+  /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
+  flowwowChannelId?: string | undefined;
 }
 
 /**
@@ -236,6 +239,7 @@ function orderSelect() {
     // Способ получения нужен приоритету самовывоза: он определяется точным
     // справочником МоегоСклада, а не текстом названия.
     deliveryMethodId: true,
+    salesChannelId: true,
     cancelledInSource: true,
     cancelledByLogistAt: true,
     // Возврат из карантина «Нет цветов»: ставит заказ в конец очереди.
@@ -323,6 +327,7 @@ const ACTIVE_WORK_STATES = ['IN_ASSEMBLY', 'NEEDS_REVIEW'] as const;
  */
 export function offerableConstraints(
   operationsStartDate?: string | undefined,
+  flowwowChannelId?: string | undefined,
 ): Prisma.DeliveryOrderWhereInput {
   return {
     fulfillmentInScope: true,
@@ -340,15 +345,16 @@ export function offerableConstraints(
     noFlowersQuarantines: { none: { activeKey: { not: null } } },
     AND: [
       {
-        // «Принят, Не оплачен» из работы флориста исключается — КРОМЕ самовывоза.
-        // У самовывоза оплату берут на выдаче, поэтому собирать заказ нужно как
-        // обычно; у доставки неоплаченный заказ в очередь по-прежнему не идёт.
-        // Способ получения — ТОЛЬКО по точному UUID, без сравнения по названию.
-        // Эквивалент: externalStateId != acceptedUnpaid ИЛИ метод == самовывоз.
+        // «Принят, Не оплачен» из работы флориста исключается — КРОМЕ самовывоза
+        // (в т.ч. Flowwow). У самовывоза оплату берут на выдаче, поэтому собирать
+        // заказ нужно как обычно; у доставки неоплаченный заказ в очередь
+        // по-прежнему не идёт. Операционный самовывоз — по точному UUID способа
+        // ИЛИ каналу Flowwow. Эквивалент: externalStateId != acceptedUnpaid ИЛИ
+        // операционный самовывоз.
         OR: [
           { externalStateId: null },
           { externalStateId: { not: MOYSKLAD_IDS.states.acceptedUnpaid } },
-          { deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup },
+          ...operationalPickupOr(flowwowChannelId),
         ],
       },
       {
@@ -378,13 +384,15 @@ function buildScopeWhere(input: {
    * из конфигурации; без него берётся продакшн-день {@link OPERATIONS_START_DATE}.
    */
   operationsStartDate?: string | undefined;
+  /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
+  flowwowChannelId?: string | undefined;
 }) {
   return {
     // Пригодность к выдаче («Принят, Не оплачен» не собирается — кроме
     // самовывоза; пустой состав при PENDING в очередь не идёт; заказы раньше
     // начала операций — тоже).
-    ...offerableConstraints(input.operationsStartDate),
-    ...dateCondition(input.date, input.includePast === true),
+    ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId),
+    ...dateCondition(input.date, input.includePast === true, input.flowwowChannelId),
     ...(input.assigneeId === null ? {} : { fulfillmentAssigneeId: input.assigneeId }),
     // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
     // условия: день, область видимости и состояния остаются в силе.
@@ -431,13 +439,14 @@ function buildMineWhere(input: {
 function buildSupervisorSearchWhere(input: {
   search: string;
   operationsStartDate?: string | undefined;
+  flowwowChannelId?: string | undefined;
 }): Prisma.DeliveryOrderWhereInput {
   return {
     externalName: { contains: input.search, mode: 'insensitive' as const },
     OR: [
       {
         fulfillmentProcessState: 'NEW' as const,
-        ...offerableConstraints(input.operationsStartDate),
+        ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId),
       },
       { fulfillmentProcessState: { in: [...ACTIVE_WORK_STATES] } },
     ],
@@ -451,7 +460,11 @@ function buildSupervisorSearchWhere(input: {
  * вчерашний букет, который никто не доделал, обязан остаться на глазах,
  * а не пропасть вместе с датой.
  */
-function dateCondition(date: string | null, includePast: boolean) {
+function dateCondition(
+  date: string | null,
+  includePast: boolean,
+  flowwowChannelId: string | undefined,
+) {
   if (date === null) {
     return {};
   }
@@ -477,7 +490,7 @@ function dateCondition(date: string | null, includePast: boolean) {
        */
       {
         deliveryDate: toDateColumn(shiftCalendarDate(date, 1)),
-        deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup,
+        OR: operationalPickupOr(flowwowChannelId),
       },
     ],
   };
@@ -509,10 +522,17 @@ export async function countActiveAssignments(
   db: Database,
   userId: string,
   operationsStartDate: string = OPERATIONS_START_DATE,
+  flowwowChannelId?: string | undefined,
 ): Promise<number> {
   return db.deliveryOrder.count({
     where: {
-      ...buildScopeWhere({ date: null, assigneeId: userId, search: null, operationsStartDate }),
+      ...buildScopeWhere({
+        date: null,
+        assigneeId: userId,
+        search: null,
+        operationsStartDate,
+        flowwowChannelId,
+      }),
       fulfillmentProcessState: { in: [...MINE_WORK_STATES] },
     },
   });
@@ -529,8 +549,9 @@ export async function listDispatchableOrderIds(
   db: Database | TransactionClient,
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
+  flowwowChannelId?: string | undefined,
 ): Promise<string[]> {
-  const { sorted } = await orderedFreeQueue(db, { operationsStartDate }, now);
+  const { sorted } = await orderedFreeQueue(db, { operationsStartDate, flowwowChannelId }, now);
   return sorted.map((entry) => entry.id);
 }
 
@@ -548,7 +569,7 @@ export async function listDispatchableOrderIds(
  */
 async function orderedFreeQueue(
   db: Database | TransactionClient,
-  input: { operationsStartDate?: string | undefined },
+  input: { operationsStartDate?: string | undefined; flowwowChannelId?: string | undefined },
   now: Date = new Date(),
 ): Promise<{ sorted: ReturnType<typeof sortQueue>; byId: Map<string, QueueRow> }> {
   const date = resolveQueueDate('today', now);
@@ -563,11 +584,17 @@ async function orderedFreeQueue(
     assigneeId: null,
     search: null,
     operationsStartDate: input.operationsStartDate,
+    flowwowChannelId: input.flowwowChannelId,
   });
 
   const rows = await fetchQueueRows(db, { ...scopeWhere, fulfillmentProcessState: 'NEW' });
   const routes = await readRoutes(db, rows);
-  const queueOrders = buildQueueOrders(rows, routes, { date, trimFutureNonPickup: true }, now);
+  const queueOrders = buildQueueOrders(
+    rows,
+    routes,
+    { date, trimFutureNonPickup: true, flowwowChannelId: input.flowwowChannelId },
+    now,
+  );
   return {
     sorted: sortQueue(queueOrders, context),
     byId: new Map(rows.map((row) => [row.id, row])),
@@ -588,7 +615,7 @@ type QueueRow = Awaited<ReturnType<typeof fetchQueueRows>>[number];
 function buildQueueOrders(
   rows: readonly QueueRow[],
   routes: Map<string, QueueRoute>,
-  opts: { date: string; trimFutureNonPickup: boolean },
+  opts: { date: string; trimFutureNonPickup: boolean; flowwowChannelId?: string | undefined },
   now: Date,
 ): QueueOrder[] {
   const queueOrders: QueueOrder[] = [];
@@ -597,7 +624,7 @@ function buildQueueOrders(
     const deliveryDate = row.deliveryDate === null ? null : fromDateColumn(row.deliveryDate);
     const pickupSoon = isPickupSoon(
       {
-        pickup: isPickupMethod(row),
+        pickup: isPickupMethod(row, opts.flowwowChannelId),
         cancelled: row.cancelledInSource || row.cancelledByLogistAt !== null,
         deliveryDate,
         startMinute: minutes.startMinute,
@@ -676,6 +703,7 @@ export async function readQueue(
       ? buildSupervisorSearchWhere({
           search: search as string,
           operationsStartDate: query.operationsStartDate,
+          flowwowChannelId: query.flowwowChannelId,
         })
       : buildScopeWhere({
           date,
@@ -684,6 +712,7 @@ export async function readQueue(
           assigneeId: null,
           search,
           operationsStartDate: query.operationsStartDate,
+          flowwowChannelId: query.flowwowChannelId,
         });
 
   /**
@@ -784,7 +813,12 @@ export async function readQueue(
    * и обрезать будущее там нельзя — иначе поиск не нашёл бы заказ другого дня.
    */
   const trimFutureNonPickup = !mine && !supervisorSearch && query.day === 'today';
-  const queueOrders = buildQueueOrders(rows, routes, { date, trimFutureNonPickup }, now);
+  const queueOrders = buildQueueOrders(
+    rows,
+    routes,
+    { date, trimFutureNonPickup, flowwowChannelId: query.flowwowChannelId },
+    now,
+  );
 
   const byId = new Map(rows.map((row) => [row.id, row]));
   // Порядок считается по ПОЛНОЙ выборке, и только потом берётся страница:

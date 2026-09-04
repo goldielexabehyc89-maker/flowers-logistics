@@ -363,6 +363,7 @@ function scopeOf(
   },
   operationsStartDate: string,
   excludedSalesChannelId: string | null,
+  flowwowChannelId: string | null,
 ): DealsScope {
   return {
     deliveryDate: query.deliveryDate ?? moscowCalendarDate(new Date()),
@@ -373,6 +374,7 @@ function scopeOf(
     group: query.group ?? 'ALL',
     operationsStartDate,
     excludedSalesChannelId,
+    flowwowChannelId,
   };
 }
 
@@ -1104,6 +1106,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       query,
       deps.config.OPERATIONS_START_DATE,
       deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
+      deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID ?? null,
     );
 
     const [ids, total, withoutPoint] = await Promise.all([
@@ -1138,6 +1141,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       query,
       deps.config.OPERATIONS_START_DATE,
       deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
+      deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID ?? null,
     );
     const ids = await dealsIds(deps.db, scope);
 
@@ -1212,6 +1216,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         query,
         deps.config.OPERATIONS_START_DATE,
         deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
+        deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID ?? null,
       ),
       includeDrafts: false,
       group: 'ROUTABLE',

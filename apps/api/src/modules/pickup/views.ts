@@ -22,12 +22,13 @@ import type { Database } from '../../platform/db.js';
 import { Prisma, type $Enums } from '../../generated/prisma/client.js';
 import { AppError } from '../../platform/errors.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
 import { OPERATIONS_START_DATE } from '../orders/operations-window.js';
-
-/** Точный UUID способа получения «Самовывоз»: название ключом не является. */
-const PICKUP_METHOD_ID = MOYSKLAD_IDS.deliveryMethodPickup;
+import {
+  isOperationalPickup,
+  operationalPickupSql,
+  operationalPickupOr,
+} from '../orders/operational-pickup.js';
 
 /**
  * Размер страницы очереди.
@@ -87,6 +88,7 @@ const ORDER_SELECT = {
   externalName: true,
   deliveryDate: true,
   deliveryMethodId: true,
+  salesChannelId: true,
   fulfillmentInScope: true,
   sourceArchived: true,
   sourceMissing: true,
@@ -115,6 +117,7 @@ type OrderRow = {
   externalName: string;
   deliveryDate: Date | null;
   deliveryMethodId: string | null;
+  salesChannelId: string | null;
   fulfillmentInScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
@@ -138,15 +141,16 @@ type OrderRow = {
 };
 
 /**
- * Самовывоз ли это ПО СПОСОБУ ПОЛУЧЕНИЯ.
+ * Операционный самовывоз: точный способ-самовывоз ИЛИ канал Flowwow.
  *
- * Только точный UUID справочника. Производственная область сюда не входит
- * намеренно: архивный заказ перестаёт быть «в производстве», но самовывозом
- * быть не перестаёт — и обязан остаться на глазах у менеджера, а не исчезнуть
- * с полки вместе с коробкой.
+ * Единый предикат {@link isOperationalPickup}; производственная область сюда не
+ * входит намеренно (архивный самовывоз обязан остаться на глазах у менеджера).
  */
-export function isPickupMethod(order: { deliveryMethodId: string | null }): boolean {
-  return order.deliveryMethodId === PICKUP_METHOD_ID;
+export function isPickupMethod(
+  order: { deliveryMethodId: string | null; salesChannelId: string | null },
+  flowwowChannelId: string | undefined,
+): boolean {
+  return isOperationalPickup(order, flowwowChannelId);
 }
 
 /** Отменён ли заказ. Признак нормализованный: импорт и логист пишут в него оба. */
@@ -157,11 +161,12 @@ export function isCancelled(order: {
   return order.cancelledInSource || order.cancelledByLogistAt !== null;
 }
 
-function toCard(order: OrderRow): PickupCard {
+function toCard(order: OrderRow, flowwowChannelId: string | undefined): PickupCard {
   const placement = order.placements[0] ?? null;
+  const pickup = isPickupMethod(order, flowwowChannelId);
 
   const blockers: PickupBlocker[] = [];
-  if (!isPickupMethod(order)) {
+  if (!pickup) {
     blockers.push('NOT_PICKUP');
   }
   if (isCancelled(order)) {
@@ -180,7 +185,7 @@ function toCard(order: OrderRow): PickupCard {
     orderId: order.id,
     orderNumber: order.externalName,
     deliveryDate: order.deliveryDate === null ? null : fromDateColumn(order.deliveryDate),
-    isPickup: isPickupMethod(order),
+    isPickup: pickup,
     // Состояние сборки показывается как контекст: склад и выдача от него
     // не зависят (`FUL-001`), но менеджеру полезно видеть, собран ли букет.
     assemblyState: order.fulfillmentInScope ? order.fulfillmentProcessState : null,
@@ -228,7 +233,11 @@ function effectivePickupInterval(order: OrderRow): PickupCard['deliveryInterval'
 }
 
 /** Карточка по отсканированному или введённому номеру. */
-export async function findPickupByNumber(db: Database, scanned: string): Promise<PickupCard> {
+export async function findPickupByNumber(
+  db: Database,
+  scanned: string,
+  flowwowChannelId: string | undefined,
+): Promise<PickupCard> {
   const resolved = await resolveOrderByNumber(db, scanned);
 
   const order = await db.deliveryOrder.findUnique({
@@ -239,7 +248,7 @@ export async function findPickupByNumber(db: Database, scanned: string): Promise
     throw new AppError('NOT_FOUND', { message: 'order not found' });
   }
 
-  return toCard(order);
+  return toCard(order, flowwowChannelId);
 }
 
 export interface PickupQueuePage {
@@ -314,6 +323,8 @@ export async function listPickupQueue(
      * прежнее поведение. Заказы без даты этой границей НЕ скрываются.
      */
     queueDateFrom?: string | undefined;
+    /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
+    flowwowChannelId?: string | undefined;
   } = {},
 ): Promise<PickupQueuePage> {
   const limit = Math.min(Math.max(input.limit ?? QUEUE_PAGE_SIZE, 1), MAX_QUEUE_PAGE_SIZE);
@@ -351,7 +362,7 @@ export async function listPickupQueue(
    */
   const waiting = Prisma.sql`
     FROM "DeliveryOrder" AS o
-    WHERE o."deliveryMethodId" = ${PICKUP_METHOD_ID}
+    WHERE ${operationalPickupSql(input.flowwowChannelId)}
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
@@ -426,7 +437,7 @@ export async function listPickupQueue(
     items: visible
       .map((row) => byId.get(row.id))
       .filter((order): order is OrderRow => order !== undefined)
-      .map(toCard),
+      .map((order) => toCard(order, input.flowwowChannelId)),
     nextCursor:
       hasMore && last !== null
         ? encodeCursor({
@@ -458,11 +469,12 @@ export async function listPickupQueue(
 export async function listIssuedOfDay(
   db: Database,
   day: string,
+  flowwowChannelId: string | undefined,
 ): Promise<{ deliveryDate: string; issued: PickupCard[] }> {
   const { from, to } = moscowDayRange(day);
   const orders = await db.deliveryOrder.findMany({
     where: {
-      deliveryMethodId: PICKUP_METHOD_ID,
+      OR: operationalPickupOr(flowwowChannelId),
       pickupIssue: { is: { issuedAt: { gte: from, lt: to } } },
     },
     orderBy: [{ externalName: 'asc' }],
@@ -470,5 +482,5 @@ export async function listIssuedOfDay(
     take: MAX_QUEUE_PAGE_SIZE,
   });
 
-  return { deliveryDate: day, issued: orders.map(toCard) };
+  return { deliveryDate: day, issued: orders.map((order) => toCard(order, flowwowChannelId)) };
 }

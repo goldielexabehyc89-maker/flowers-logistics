@@ -24,10 +24,8 @@
 import { Prisma } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { normalizePageRequest, pageInfo, type PageInfo } from '../fulfillment/paging.js';
-
-const PICKUP_METHOD_ID = MOYSKLAD_IDS.deliveryMethodPickup;
+import { isOperationalPickup, operationalPickupSql } from '../orders/operational-pickup.js';
 
 /** Роли, которым виден раздел и его API. Право проверяет сервер. */
 export const AWAITING_INTAKE_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'] as const;
@@ -87,6 +85,8 @@ export interface ListAwaitingInput {
    * даты этой границей НЕ скрываются. Без значения — прежнее поведение.
    */
   queueDateFrom?: string | undefined;
+  /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
+  flowwowChannelId?: string | undefined;
 }
 
 /**
@@ -135,12 +135,15 @@ function searchClause(search: string): Prisma.Sql {
   return Prisma.sql`AND o."externalName" ILIKE ${`%${escaped}%`}`;
 }
 
-function methodClause(method: AwaitingMethod | undefined): Prisma.Sql {
+function methodClause(
+  method: AwaitingMethod | undefined,
+  flowwowChannelId: string | undefined,
+): Prisma.Sql {
   if (method === 'pickup') {
-    return Prisma.sql`AND o."deliveryMethodId" = ${PICKUP_METHOD_ID}::uuid`;
+    return Prisma.sql`AND ${operationalPickupSql(flowwowChannelId)}`;
   }
   if (method === 'delivery') {
-    return Prisma.sql`AND o."deliveryMethodId" IS DISTINCT FROM ${PICKUP_METHOD_ID}::uuid`;
+    return Prisma.sql`AND NOT ${operationalPickupSql(flowwowChannelId)}`;
   }
   return Prisma.empty;
 }
@@ -160,7 +163,7 @@ export async function listAwaitingIntake(
   // доставки не сошлась бы с полным числом. Тот же смысл, что у чипа «Доставка»
   // (`IS DISTINCT FROM pickup` тоже включает NULL) и у признака карточки.
   const grouped = await db.$queryRaw<{ is_pickup: boolean; n: bigint }[]>`
-    SELECT ((o."deliveryMethodId" = ${PICKUP_METHOD_ID}::uuid) IS TRUE) AS is_pickup,
+    SELECT ((${operationalPickupSql(input.flowwowChannelId)}) IS TRUE) AS is_pickup,
            count(*)::bigint AS n
     ${base} ${sClause}
     GROUP BY 1
@@ -201,7 +204,7 @@ export async function listAwaitingIntake(
         ? counts.delivery
         : counts.all;
 
-  const mClause = methodClause(input.method);
+  const mClause = methodClause(input.method, input.flowwowChannelId);
   // Порядок целиком выражается SQL, поэтому LIMIT/OFFSET над ним даёт ту же
   // страницу, что и срез в памяти. Новые даты выше старых; без даты — в конец;
   // внутри даты позднее собранное выше; далее устойчиво по номеру и id.
@@ -228,6 +231,7 @@ export async function listAwaitingIntake(
       externalName: true,
       deliveryDate: true,
       deliveryMethodId: true,
+      salesChannelId: true,
       intervalKind: true,
       intervalStartMinute: true,
       intervalEndMinute: true,
@@ -248,7 +252,7 @@ export async function listAwaitingIntake(
       orderId: order.id,
       orderNumber: order.externalName,
       deliveryDate: order.deliveryDate === null ? null : fromDateColumn(order.deliveryDate),
-      isPickup: order.deliveryMethodId === PICKUP_METHOD_ID,
+      isPickup: isOperationalPickup(order, input.flowwowChannelId),
       startMinute: order.manualIntervalStartMinute ?? order.intervalStartMinute,
       endMinute: order.manualIntervalEndMinute ?? order.intervalEndMinute,
       intervalKind: order.intervalKind,

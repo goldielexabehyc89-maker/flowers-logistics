@@ -38,10 +38,18 @@ export interface DealsScope {
    */
   operationsStartDate?: string;
   /**
-   * UUID канала продаж, заказы которого исключаются из «Сделок» (например,
-   * Flowwow). Значение приходит из конфигурации. Не задано — исключения нет.
+   * UUID канала продаж, заказы которого исключаются из «Сделок» (общая
+   * настройка `DEALS_EXCLUDED_SALES_CHANNEL_ID`). Не задано — исключения нет.
    */
   excludedSalesChannelId?: string | null;
+  /**
+   * UUID канала Flowwow (`MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID`). Flowwow —
+   * операционный самовывоз: он не идёт в «Сделки»/маршрутизацию/курьеров/МКАД.
+   * Отдельно от {@link excludedSalesChannelId}: из «Сделок» могут исключаться
+   * и другие каналы, а семантику самовывоза несёт именно Flowwow. Обычный
+   * самовывоз этим НЕ трогается (его прежнее поведение в «Сделках» сохраняется).
+   */
+  flowwowChannelId?: string | null;
 }
 
 /**
@@ -144,6 +152,15 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
       ? Prisma.sql`TRUE`
       : Prisma.sql`o."salesChannelId" IS DISTINCT FROM ${channel}::uuid`;
 
+  // Flowwow — операционный самовывоз, из «Сделок»/маршрутизации он исключается
+  // ВСЕГДА при заданной переменной, независимо от общего исключения каналов.
+  // IS DISTINCT FROM оставляет заказы с неизвестным (NULL) каналом.
+  const flowwow = scope.flowwowChannelId;
+  const flowwowClause =
+    flowwow === undefined || flowwow === null || flowwow === ''
+      ? Prisma.sql`TRUE`
+      : Prisma.sql`o."salesChannelId" IS DISTINCT FROM ${flowwow}::uuid`;
+
   return Prisma.sql`
     o."inScope" = true
     AND o."sourceArchived" = false
@@ -168,6 +185,7 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
     )
     AND ${draftsClause}
     AND ${channelClause}
+    AND ${flowwowClause}
     AND ${searchCondition(scope.search)}
     AND ${intervalCondition(scope.fromMinute, scope.toMinute)}
     AND ${groupCondition(group)}

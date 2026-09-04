@@ -28,10 +28,10 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
-import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { resolveOrderByNumber } from '../warehouse/order-lookup.js';
 import { PLACEMENT_AUDIENCE } from '../warehouse/placement.js';
 import { readWarehouseManualEntry } from '../settings/service.js';
+import { isOperationalPickup } from '../orders/operational-pickup.js';
 
 /** Выдачу самовывоза выполняет менеджер; администратор — тоже. */
 export const PICKUP_ROLES = ['ADMIN', 'MANAGER', 'SUPERVISOR'] as const;
@@ -51,6 +51,8 @@ export interface RequestContext {
 
 export interface PickupDeps {
   db: Database;
+  /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
+  flowwowChannelId?: string | undefined;
 }
 
 /**
@@ -61,11 +63,15 @@ export interface PickupDeps {
  * не указан вовсе либо указан третьим значением, и все они попали бы в раздел
  * выдачи покупателю (`FUL-005`).
  */
-export function isPickupOrder(order: {
-  deliveryMethodId: string | null;
-  fulfillmentInScope: boolean;
-}): boolean {
-  return order.deliveryMethodId === MOYSKLAD_IDS.deliveryMethodPickup && order.fulfillmentInScope;
+export function isPickupOrder(
+  order: {
+    deliveryMethodId: string | null;
+    salesChannelId: string | null;
+    fulfillmentInScope: boolean;
+  },
+  flowwowChannelId: string | undefined,
+): boolean {
+  return isOperationalPickup(order, flowwowChannelId) && order.fulfillmentInScope;
 }
 
 /**
@@ -98,6 +104,7 @@ interface LockedOrder {
   id: string;
   number: string;
   deliveryMethodId: string | null;
+  salesChannelId: string | null;
   fulfillmentInScope: boolean;
   sourceArchived: boolean;
   sourceMissing: boolean;
@@ -118,6 +125,7 @@ async function lockOrder(tx: TransactionClient, orderId: string): Promise<Locked
       id: string;
       externalName: string;
       deliveryMethodId: string | null;
+      salesChannelId: string | null;
       fulfillmentInScope: boolean;
       sourceArchived: boolean;
       sourceMissing: boolean;
@@ -125,7 +133,7 @@ async function lockOrder(tx: TransactionClient, orderId: string): Promise<Locked
       cancelledByLogistAt: Date | null;
     }[]
   >`
-    SELECT "id", "externalName", "deliveryMethodId", "fulfillmentInScope",
+    SELECT "id", "externalName", "deliveryMethodId", "salesChannelId", "fulfillmentInScope",
            "sourceArchived", "sourceMissing", "cancelledInSource", "cancelledByLogistAt"
     FROM "DeliveryOrder"
     WHERE "id" = ${orderId}::uuid
@@ -140,6 +148,7 @@ async function lockOrder(tx: TransactionClient, orderId: string): Promise<Locked
     id: row.id,
     number: row.externalName,
     deliveryMethodId: row.deliveryMethodId,
+    salesChannelId: row.salesChannelId,
     fulfillmentInScope: row.fulfillmentInScope,
     sourceArchived: row.sourceArchived,
     sourceMissing: row.sourceMissing,
@@ -148,15 +157,16 @@ async function lockOrder(tx: TransactionClient, orderId: string): Promise<Locked
   };
 }
 
-function assertIssuable(order: LockedOrder): void {
+function assertIssuable(order: LockedOrder, flowwowChannelId: string | undefined): void {
   /*
    * Способ получения проверяется ПЕРВЫМ и отдельно от области.
    *
-   * Архивный самовывоз выходит из производственной области, но самовывозом
-   * быть не перестаёт: сказать про него «это не самовывоз» значило бы
-   * отправить менеджера искать курьера, которого нет.
+   * Операционный самовывоз: точный способ-самовывоз ИЛИ канал Flowwow. Архивный
+   * самовывоз выходит из производственной области, но самовывозом быть не
+   * перестаёт: сказать про него «это не самовывоз» значило бы отправить менеджера
+   * искать курьера, которого нет.
    */
-  if (order.deliveryMethodId !== MOYSKLAD_IDS.deliveryMethodPickup) {
+  if (!isOperationalPickup(order, flowwowChannelId)) {
     throw new AppError('CONFLICT', {
       message: 'order is not a pickup order',
       publicMessage: 'Это не самовывозный заказ: его везёт курьер.',
@@ -225,7 +235,7 @@ export async function issueToCustomer(
 
       const resolved = await resolveOrderByNumber(tx, input.orderNumber);
       const order = await lockOrder(tx, resolved.id);
-      assertIssuable(order);
+      assertIssuable(order, deps.flowwowChannelId);
 
       const already = await tx.orderPickupIssue.findUnique({
         where: { orderId: order.id },
@@ -414,8 +424,8 @@ export async function cancelPickupLocally(
       const resolved = await resolveOrderByNumber(tx, input.orderNumber);
       const order = await lockOrder(tx, resolved.id);
 
-      // Раздел только про самовывоз: доставочный заказ сюда не относится.
-      if (order.deliveryMethodId !== MOYSKLAD_IDS.deliveryMethodPickup) {
+      // Раздел только про самовывоз (в т.ч. Flowwow): доставка сюда не относится.
+      if (!isOperationalPickup(order, deps.flowwowChannelId)) {
         throw new AppError('CONFLICT', {
           message: 'order is not a pickup order',
           publicMessage: 'Это не самовывозный заказ: его везёт курьер.',

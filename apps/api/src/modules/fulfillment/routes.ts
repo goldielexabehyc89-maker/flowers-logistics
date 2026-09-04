@@ -201,7 +201,12 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const [shift, activeOrders] = await Promise.all([
       ownShift(deps.db, actor.userId),
-      countActiveAssignments(deps.db, actor.userId, deps.config.OPERATIONS_START_DATE),
+      countActiveAssignments(
+        deps.db,
+        actor.userId,
+        deps.config.OPERATIONS_START_DATE,
+        deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+      ),
     ]);
     return { shift, activeOrders };
   });
@@ -292,6 +297,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
         limit: query.limit,
         offset: query.offset,
         operationsStartDate: deps.config.OPERATIONS_START_DATE,
+        flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
       },
     );
   });
@@ -309,7 +315,13 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   /** Состояние распределения: режим, готовность, назначение, ожидающие. */
   app.get('/api/florist/dispatch/status', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
-    return floristDispatchStatus(deps.db, actor, new Date(), deps.config.OPERATIONS_START_DATE);
+    return floristDispatchStatus(
+      deps.db,
+      actor,
+      new Date(),
+      deps.config.OPERATIONS_START_DATE,
+      deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+    );
   });
 
   /** «Готов к заказам» / выход из готовности. */
@@ -385,7 +397,11 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
     return assembleOrder(
       deps.db,
       actor,
-      { orderId: id, expectedProcessVersion: body.expectedProcessVersion },
+      {
+        orderId: id,
+        expectedProcessVersion: body.expectedProcessVersion,
+        flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+      },
       contextOf(request),
     );
   });

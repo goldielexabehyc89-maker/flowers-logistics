@@ -503,6 +503,7 @@ export async function registerWarehouseFlowRoutes(
       offset: query.offset,
       countOnly: query.countOnly,
       queueDateFrom: deps.config.PICKUP_WAREHOUSE_QUEUE_DATE_FROM,
+      flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
     });
   });
 
