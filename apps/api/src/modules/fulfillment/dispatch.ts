@@ -71,6 +71,7 @@ export async function dispatchFloristsTx(
   tx: TransactionClient,
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
+  flowwowChannelId?: string | undefined,
 ): Promise<number> {
   {
     // Сериализуем весь прогон: два параллельных запуска не спорят за заказы.
@@ -88,7 +89,7 @@ export async function dispatchFloristsTx(
 
     // Кандидаты раздачи — ТОТ ЖЕ список и порядок, что видит руководитель в
     // свободной очереди: одна функция, одна граница операций, одна сортировка.
-    const orderIds = await listDispatchableOrderIds(tx, now, operationsStartDate);
+    const orderIds = await listDispatchableOrderIds(tx, now, operationsStartDate, flowwowChannelId);
     if (orderIds.length === 0) {
       return 0;
     }
@@ -110,7 +111,13 @@ export async function dispatchFloristsTx(
         }
         const ok = await autoAssignTx(
           tx,
-          { orderId, floristId: florist.userId, shiftId: florist.id, operationsStartDate },
+          {
+            orderId,
+            floristId: florist.userId,
+            shiftId: florist.id,
+            operationsStartDate,
+            flowwowChannelId,
+          },
           DISPATCH_CONTEXT,
         );
         // Успех — занят этим флористом; неуспех — заказ уже перехвачен,
@@ -131,8 +138,11 @@ export async function dispatchFlorists(
   db: Database,
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
+  flowwowChannelId?: string | undefined,
 ): Promise<number> {
-  return db.$transaction((tx) => dispatchFloristsTx(tx, now, operationsStartDate));
+  return db.$transaction((tx) =>
+    dispatchFloristsTx(tx, now, operationsStartDate, flowwowChannelId),
+  );
 }
 
 /**
@@ -142,11 +152,14 @@ export async function dispatchFlorists(
  * ровно та же, что у свободной очереди в маршрутах. Так кандидаты раздачи и
  * видимая очередь строятся по одному и тому же набору заказов.
  */
-export function createDispatchHandler(operationsStartDate: string): OutboxHandler {
+export function createDispatchHandler(
+  operationsStartDate: string,
+  flowwowChannelId?: string | undefined,
+): OutboxHandler {
   return async (_message, tx) => {
     if (tx === undefined) {
       return;
     }
-    await dispatchFloristsTx(tx, new Date(), operationsStartDate);
+    await dispatchFloristsTx(tx, new Date(), operationsStartDate, flowwowChannelId);
   };
 }

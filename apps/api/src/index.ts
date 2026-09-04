@@ -103,7 +103,10 @@ async function main(): Promise<void> {
       }),
       // Автораспределение заказов флористам: раздаёт свободные заказы готовым.
       // Граница операций — из конфигурации, как у свободной очереди в маршрутах.
-      'florist.dispatch': createDispatchHandler(config.OPERATIONS_START_DATE),
+      'florist.dispatch': createDispatchHandler(
+        config.OPERATIONS_START_DATE,
+        config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+      ),
       // Автоматический расчёт расстояния за МКАД. Отсечку по дате доставки
       // держит обработчик: без `MKAD_DISTANCE_AUTO_CALC_FROM` он ничего не делает.
       'mkad.distance': createMkadDistanceHandler({

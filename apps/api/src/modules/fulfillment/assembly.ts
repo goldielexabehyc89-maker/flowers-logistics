@@ -31,6 +31,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
 import { offerableConstraints } from './queue-service.js';
+import { isOperationalPickup } from '../orders/operational-pickup.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
@@ -611,6 +612,7 @@ export async function autoAssignTx(
     floristId: string;
     shiftId: string;
     operationsStartDate?: string | undefined;
+    flowwowChannelId?: string | undefined;
   },
   context: RequestContext,
 ): Promise<boolean> {
@@ -630,7 +632,7 @@ export async function autoAssignTx(
       fulfillmentAssigneeId: null,
       cancelledInSource: false,
       cancelledByLogistAt: null,
-      ...offerableConstraints(input.operationsStartDate),
+      ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId),
     },
     data: {
       fulfillmentProcessState: 'IN_ASSEMBLY',
@@ -683,7 +685,11 @@ export interface AssembleResult extends ProcessResult {
 export async function assembleOrder(
   db: Database,
   actor: Actor,
-  input: { orderId: string; expectedProcessVersion: number },
+  input: {
+    orderId: string;
+    expectedProcessVersion: number;
+    flowwowChannelId?: string | undefined;
+  },
   context: RequestContext,
 ): Promise<AssembleResult> {
   return db.$transaction(async (tx) => {
@@ -795,8 +801,9 @@ export async function assembleOrder(
         sourceMissing: true,
         assemblyRound: true,
         // Способ получения решает исходящий статус сборки: доставка → «Ожидает
-        // отправку», самовывоз → «Готов к самовывозу».
+        // отправку», самовывоз (в т.ч. Flowwow по каналу) → «Готов к самовывозу».
         deliveryMethodId: true,
+        salesChannelId: true,
         // Деньги в МОМЕНТ сборки: синхронизация переписывает sumMinor позже,
         // поэтому статистика берёт зафиксированное здесь значение, а не живое.
         sumMinor: true,
@@ -969,12 +976,14 @@ export async function assembleOrder(
      * несёт круг сборки: повтор «Собран» того же круга дубликата не создаёт, а
      * новый круг — своё событие. Порядок и запрет регресса держит seq+ранг.
      */
-    const assembledTarget: OrderStateTarget | null =
-      order.deliveryMethodId === MOYSKLAD_IDS.deliveryMethodPickup
-        ? 'ready_for_pickup'
-        : order.deliveryMethodId === MOYSKLAD_IDS.deliveryMethodDelivery
-          ? 'awaiting_shipment'
-          : null;
+    const assembledTarget: OrderStateTarget | null = isOperationalPickup(
+      order,
+      input.flowwowChannelId,
+    )
+      ? 'ready_for_pickup'
+      : order.deliveryMethodId === MOYSKLAD_IDS.deliveryMethodDelivery
+        ? 'awaiting_shipment'
+        : null;
     if (assembledTarget !== null) {
       await enqueueOrderStateSync(tx, {
         orderId: order.id,

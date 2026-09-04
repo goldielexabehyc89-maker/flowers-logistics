@@ -45,6 +45,7 @@ export async function floristDispatchStatus(
   actor: AuthenticatedActor,
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
+  flowwowChannelId?: string | undefined,
 ): Promise<FloristDispatchStatus> {
   const mode = await readFloristDispatchMode(db);
   const shift = await db.floristShift.findFirst({
@@ -73,7 +74,7 @@ export async function floristDispatchStatus(
     finishAfterCurrent: shift?.dispatchFinishAfterCurrent ?? false,
     // Число ожидающих показываем и до готовности: флорист видит нагрузку.
     waitingCount: mode.value.auto
-      ? (await listDispatchableOrderIds(db, now, operationsStartDate)).length
+      ? (await listDispatchableOrderIds(db, now, operationsStartDate, flowwowChannelId)).length
       : 0,
     activeOrder:
       active === null
@@ -201,11 +202,12 @@ export async function requestRefusal(
       });
     }
 
-    // «Нет цветов» в АВТО-режиме — особый путь: заказ СРАЗУ снимается с флориста
-    // и уходит в карантин, а не ждёт решения руководителя занятым за флористом.
-    // В ручном режиме и по другим причинам сохраняется обычный запрос отказа.
-    const mode = await readFloristDispatchMode(tx);
-    if (input.reason === 'INSUFFICIENT_GOODS' && mode.value.auto) {
+    // «Нет товара» — особый путь в ЛЮБОМ режиме (AUTO и MANUAL): заказ СРАЗУ
+    // снимается с флориста и уходит в карантин «Решения», а не ждёт решения
+    // руководителя занятым за флористом. Одна доменная функция на оба режима —
+    // раньше карантин был только в AUTO, из-за чего ручной режим расходился.
+    // По остальным причинам сохраняется обычный запрос отказа (согласование).
+    if (input.reason === 'INSUFFICIENT_GOODS') {
       return quarantineNoFlowers(tx, actor, order, input.comment, context);
     }
 

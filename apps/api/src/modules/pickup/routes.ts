@@ -86,6 +86,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
         ...query,
         operationsStartDate: deps.config.OPERATIONS_START_DATE,
         queueDateFrom: deps.config.PICKUP_WAREHOUSE_QUEUE_DATE_FROM,
+        flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
       }),
       readWarehouseManualEntry(deps.db),
     ]);
@@ -100,7 +101,11 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
     await authenticateWithRoles(request, deps, PICKUP_ROLES);
     const { deliveryDate } = dayQuerySchema.parse(request.query);
 
-    return listIssuedOfDay(deps.db, deliveryDate ?? moscowToday(new Date()));
+    return listIssuedOfDay(
+      deps.db,
+      deliveryDate ?? moscowToday(new Date()),
+      deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+    );
   });
 
   /** Поиск или скан номера заказа. */
@@ -108,7 +113,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
     await authenticateWithRoles(request, deps, PICKUP_ROLES);
     const { number } = scanQuerySchema.parse(request.query);
 
-    return findPickupByNumber(deps.db, number);
+    return findPickupByNumber(deps.db, number, deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID);
   });
 
   /** «Выдан покупателю». Скан ячейки и проверка получателя не требуются. */
@@ -117,7 +122,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
     const body = issueSchema.parse(request.body);
 
     return issueToCustomer(
-      { db: deps.db },
+      { db: deps.db, flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID },
       actor,
       { orderNumber: body.orderNumber, source: body.source },
       contextOf(request),
@@ -136,7 +141,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
     const body = cancelSchema.parse(request.body);
 
     return cancelPickupLocally(
-      { db: deps.db },
+      { db: deps.db, flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID },
       actor,
       { orderNumber: body.orderNumber },
       contextOf(request),

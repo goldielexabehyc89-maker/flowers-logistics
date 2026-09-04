@@ -375,10 +375,12 @@ describe('отказ', () => {
       ),
     ).rejects.toThrow();
 
+    // Обычная причина (НЕ «Нет товара»): создаётся запрос отказа на согласование.
+    // «Нет товара» ушла бы в карантин, поэтому проверяем именно другую причину.
     const first = await requestRefusal(
       ctx.db,
       florist,
-      { orderId: order.id, reason: 'INSUFFICIENT_GOODS', comment: null },
+      { orderId: order.id, reason: 'CANNOT_ASSEMBLE', comment: null },
       CONTEXT,
     );
     expect(first.created).toBe(true);
@@ -387,7 +389,7 @@ describe('отказ', () => {
     const again = await requestRefusal(
       ctx.db,
       florist,
-      { orderId: order.id, reason: 'CANNOT_ASSEMBLE', comment: null },
+      { orderId: order.id, reason: 'PHYSICALLY_IMPOSSIBLE', comment: null },
       CONTEXT,
     );
     expect(again.created).toBe(false);
@@ -1179,12 +1181,13 @@ describe('карантин «Нет цветов»', () => {
     expect(await listDispatchableOrderIds(ctx.db, NOW)).not.toContain(order.id);
   });
 
-  it('MANUAL: «Нет цветов» идёт обычным запросом отказа, не в карантин', async () => {
-    const florist = await floristOnShift('Ручной отказ');
-    const order = await seedOrder();
-    await isolate([order.id]);
+  /** Ставит заказ IN_ASSEMBLY за флористом (для ручного сценария отказа). */
+  async function assignInAssembly(
+    orderId: string,
+    florist: AuthenticatedActor & { shiftId: string },
+  ): Promise<void> {
     await ctx.db.deliveryOrder.update({
-      where: { id: order.id },
+      where: { id: orderId },
       data: {
         fulfillmentProcessState: 'IN_ASSEMBLY',
         fulfillmentAssigneeId: florist.userId,
@@ -1192,6 +1195,100 @@ describe('карантин «Нет цветов»', () => {
         fulfillmentShiftId: florist.shiftId,
       },
     });
+  }
+
+  it('MANUAL: «Нет товара» уводит заказ в карантин (как AUTO), не в согласование', async () => {
+    const florist = await floristOnShift('Ручной Нет товара');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
+    await setAuto(false); // ручной режим
+
+    await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'INSUFFICIENT_GOODS', comment: 'нет роз' },
+      CONTEXT,
+    );
+
+    // Тот же карантин, что и в AUTO: заказ снят с флориста и в «Решениях».
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirst({
+      where: { orderId: order.id, activeKey: { not: null } },
+      select: { id: true },
+    });
+    expect(q).not.toBeNull();
+    // Согласования (обычного запроса отказа) для этой причины НЕ создаётся.
+    expect(
+      await ctx.db.orderRefusalRequest.count({ where: { orderId: order.id, state: 'PENDING' } }),
+    ).toBe(0);
+    const st = await processState(order.id);
+    expect(st.fulfillmentProcessState).toBe('NEW');
+    expect(st.fulfillmentAssigneeId).toBeNull();
+    // Вне очереди/поиска/раздачи.
+    expect(await listDispatchableOrderIds(ctx.db, NOW)).not.toContain(order.id);
+    const viewer = { userId: florist.userId, roles: ['FLORIST'] };
+    const queue = await readQueue(ctx.db, viewer, generalQuery, NOW);
+    expect(queue.items.some((i) => i.id === order.id)).toBe(false);
+  });
+
+  it('MANUAL: другая причина остаётся обычным запросом отказа (без карантина)', async () => {
+    const florist = await floristOnShift('Ручной другая причина');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
+    await setAuto(false);
+
+    await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'CANNOT_ASSEMBLE', comment: null },
+      CONTEXT,
+    );
+
+    expect(await ctx.db.orderNoFlowersQuarantine.count({ where: { orderId: order.id } })).toBe(0);
+    expect(
+      await ctx.db.orderRefusalRequest.count({ where: { orderId: order.id, state: 'PENDING' } }),
+    ).toBe(1);
+    expect((await processState(order.id)).fulfillmentAssigneeId).toBe(florist.userId);
+  });
+
+  it('«Нет товара» идемпотентен в MANUAL: повтор не создаёт дубль задачи', async () => {
+    const florist = await floristOnShift('Ручной идемпотентность');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
+    await setAuto(false);
+
+    const first = await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'INSUFFICIENT_GOODS', comment: null },
+      CONTEXT,
+    );
+    // Первый отказ уже снял заказ с флориста (карантин). Устаревший повтор
+    // клиента: возвращаем заказ IN_ASSEMBLY тому же флористу и жмём отказ снова —
+    // карантин идемпотентен и второй задачи не создаёт.
+    await assignInAssembly(order.id, florist);
+    const again = await requestRefusal(
+      ctx.db,
+      florist,
+      { orderId: order.id, reason: 'INSUFFICIENT_GOODS', comment: null },
+      CONTEXT,
+    );
+    expect(again.id).toBe(first.id);
+    expect(again.created).toBe(false);
+    expect(
+      await ctx.db.orderNoFlowersQuarantine.count({
+        where: { orderId: order.id, activeKey: { not: null } },
+      }),
+    ).toBe(1);
+  });
+
+  it('переключение MANUAL/AUTO не выпускает заказ из карантина', async () => {
+    const florist = await floristOnShift('Смена режима');
+    const order = await seedOrder();
+    await isolate([order.id]);
+    await assignInAssembly(order.id, florist);
     await setAuto(false);
     await requestRefusal(
       ctx.db,
@@ -1200,12 +1297,16 @@ describe('карантин «Нет цветов»', () => {
       CONTEXT,
     );
 
-    expect(await ctx.db.orderNoFlowersQuarantine.count({ where: { orderId: order.id } })).toBe(0);
-    const refusal = await ctx.db.orderRefusalRequest.findFirst({
-      where: { orderId: order.id, state: 'PENDING' },
-    });
-    expect(refusal).not.toBeNull();
-    expect((await processState(order.id)).fulfillmentAssigneeId).toBe(florist.userId);
+    // Меняем режим туда-обратно — карантин активен, заказ по-прежнему скрыт.
+    await setAuto(true);
+    expect(await listDispatchableOrderIds(ctx.db, NOW)).not.toContain(order.id);
+    await setAuto(false);
+    expect(await listDispatchableOrderIds(ctx.db, NOW)).not.toContain(order.id);
+    expect(
+      await ctx.db.orderNoFlowersQuarantine.count({
+        where: { orderId: order.id, activeKey: { not: null } },
+      }),
+    ).toBe(1);
   });
 });
 

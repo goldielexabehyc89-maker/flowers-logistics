@@ -457,21 +457,31 @@ export function FloristScreen(): React.JSX.Element {
   });
 
   /**
-   * Единый отказ с причиной для обеих точек входа.
+   * Единый отказ с причиной для обеих точек входа и обоих режимов.
    *
-   * И панель «Моя работа», и открытая карточка зовут ЭТО — один endpoint
-   * `/refusal`. «Нет цветов» сервер уводит в карантин (заказ снимается с
-   * флориста сразу), остальные причины — на согласование руководителю. Прямого
-   * `/release` в режиме авто у флориста больше нет.
+   * И панель «Моя работа», и открытая карточка зовут ЭТО.
+   *
+   *  · «Нет товара» (`INSUFFICIENT_GOODS`) — ВСЕГДА `/refusal`: сервер одинаково
+   *    в AUTO и MANUAL уводит заказ в карантин «Решения» (снимает с флориста).
+   *  · Прочие причины в AUTO — `/refusal`: согласование руководителю.
+   *  · Прочие причины в MANUAL — прежнее ручное поведение: прямое освобождение
+   *    заказа в очередь (`/release`), без нового согласования.
    */
   const requestRefusal = (
     orderId: string,
     input: { reason: RefusalReason; comment: string | null },
   ): void => {
+    if (input.reason === 'INSUFFICIENT_GOODS' || autoForFlorist) {
+      action.mutate({
+        path: `/api/florist/orders/${orderId}/refusal`,
+        body: { reason: input.reason, comment: input.comment },
+        success: 'Отказ отправлен',
+      });
+      return;
+    }
     action.mutate({
-      path: `/api/florist/orders/${orderId}/refusal`,
-      body: { reason: input.reason, comment: input.comment },
-      success: 'Отказ отправлен',
+      path: `/api/florist/orders/${orderId}/release`,
+      success: 'Заказ возвращён в очередь',
     });
   };
 
@@ -1346,17 +1356,10 @@ export function FloristScreen(): React.JSX.Element {
             hasActiveShift={hasActiveShift}
             florists={floristsQuery.data?.items ?? []}
             busy={action.isPending}
-            auto={autoForFlorist}
             onClaim={() =>
               action.mutate({
                 path: `/api/florist/orders/${card.id}/claim`,
                 success: `Заказ ${card.number} взят в работу`,
-              })
-            }
-            onRelease={() =>
-              action.mutate({
-                path: `/api/florist/orders/${card.id}/release`,
-                success: 'Заказ возвращён в очередь',
               })
             }
             onRequestRefusal={(input) => requestRefusal(card.id, input)}

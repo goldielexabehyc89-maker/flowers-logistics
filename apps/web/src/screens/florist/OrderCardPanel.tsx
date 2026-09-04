@@ -182,14 +182,12 @@ export interface OrderCardPanelProps {
   hasActiveShift: boolean;
   florists: FloristOption[];
   busy: boolean;
-  /**
-   * Режим авто-раздачи. В нём «Отказаться» открывает окно причины и уходит в
-   * `/refusal` (как в панели «Моя работа»), а не в прямое освобождение — иначе
-   * заказ тут же вернулся бы автораздачей.
-   */
-  auto: boolean;
   onClaim: () => void;
-  onRelease: () => void;
+  /**
+   * Единый отказ с выбором причины. «Отказаться» ВСЕГДА открывает окно причины
+   * (и в AUTO, и в MANUAL); маршрут («Нет товара» → карантин, прочие → согласование
+   * или ручное освобождение) решает вызывающий экран, а не карточка.
+   */
   onRequestRefusal: (input: { reason: RefusalReason; comment: string | null }) => void;
   onAssemble: () => void;
   onReopen: (reason: string) => void;
@@ -301,7 +299,7 @@ export function OrderCardPanel(props: OrderCardPanelProps): React.JSX.Element {
             variant="secondary"
             disabled={props.busy}
             data-testid="card-release"
-            onClick={props.auto ? () => setRefusalOpen(true) : props.onRelease}
+            onClick={() => setRefusalOpen(true)}
           >
             Отказаться
           </Button>
