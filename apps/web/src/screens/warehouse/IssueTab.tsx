@@ -19,7 +19,8 @@ import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
   ISSUE_READINESS_LABELS,
-  issueCellLabel,
+  RELOCATION_WARNING,
+  issueLocationLabel,
   type IssueBoard,
   type IssueRouteView,
 } from './warehouse-flow';
@@ -208,13 +209,11 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                             <span className="wh-route__position">{order.position}</span>
                             <span className="wh-route__order-number">{order.orderNumber}</span>
                             {/*
-                            Фактическая полка коробки: маршрутная или хранения.
-                            Прочерк — только когда размещения нет вовсе, и тогда
-                            же лист отгрузить нельзя.
-                          */}
-                            {/*
-                            Ячейка стоит вплотную к статусу и в скобках: вместе
-                            они и есть ответ «где коробка и можно ли её брать».
+                            Фактическое место коробки — сведение, а не запрет.
+                            Показывается всегда и полной подписью: своя
+                            маршрутная полка, чужая, хранение или «без ячейки».
+                            «Без ячейки» отгрузке не мешает — заказ сканируется
+                            и уходит, а факт выдачи держит сессия.
                           */}
                             <span
                               className={
@@ -224,13 +223,26 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                               }
                               data-testid="issue-order-cell"
                             >
-                              {order.cellCode ?? 'без ячейки'}
+                              {issueLocationLabel(order, route.routeNumber)}
                             </span>
                             <span className="wh-route__badges">
                               <StatusBadge tone={order.ready ? 'success' : 'warning'}>
                                 {order.ready ? 'Готов' : 'Не готов'}
                               </StatusBadge>
                             </span>
+
+                            {/*
+                            «Требовалось перемещение» — предупреждение, а не
+                            запрет: коробку всё равно можно взять. Держится
+                            рядом со строкой до самой отгрузки.
+                          */}
+                            {order.requiresRelocation && (
+                              <span className="wh-route__extra">
+                                <StatusBadge tone="warning" data-testid="issue-relocation-warning">
+                                  {RELOCATION_WARNING}
+                                </StatusBadge>
+                              </span>
+                            )}
 
                             {/* Добавочный статус — третьей строкой, как в «Сборке». */}
                             {order.checked && (
@@ -475,13 +487,23 @@ function ShipDialog({
             >
               <span className="wh-route__position">{order.position}</span>
               <span className="wh-route__order-number">{order.orderNumber}</span>
+              {/*
+                Место коробки и предупреждение остаются видимыми и в диалоге
+                отгрузки, рядом с отметкой «Проверен»: скан помечает заказ
+                проверенным, но не прячет, где коробка и что с ней.
+              */}
               <span className="wh-check__cell" data-testid="issue-check-cell">
-                {issueCellLabel(order)}
+                {issueLocationLabel(order, current.routeNumber)}
               </span>
               <span className="wh-route__badges">
                 <StatusBadge tone={order.checked ? 'success' : 'neutral'}>
                   {order.checked ? 'Проверен' : 'Ожидает'}
                 </StatusBadge>
+                {order.requiresRelocation && (
+                  <StatusBadge tone="warning" data-testid="issue-check-relocation">
+                    {RELOCATION_WARNING}
+                  </StatusBadge>
+                )}
               </span>
             </li>
           ))}

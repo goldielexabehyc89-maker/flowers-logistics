@@ -742,17 +742,156 @@ describe('счётчик готовых листов курьера', () => {
       CONTEXT,
     );
 
-    // Лист без коробки — не готов.
+    // Лист без коробки — тоже «Можно выдать»: место коробки больше не запрет,
+    // а настоящий гейт — скан каждого заказа. Раньше такой лист был «не готов».
     const emptyOrder = await seedOrder();
     await seedRoute([emptyOrder.id], { courierId: courier.userId });
+
+    // Не готов остаётся ровно отменённый: его выдавать нельзя.
+    const cancelledOrder = await seedOrder({
+      cancelledInSource: true,
+      cancelledInSourceAt: new Date(),
+    });
+    await seedRoute([cancelledOrder.id], { courierId: courier.userId });
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: cancelledOrder.number, cellCode: storage.code },
+      CONTEXT,
+    );
 
     const board = await readIssueBoard(ctx.db);
     const view = board.find((item) => item.courierUserId === courier.userId);
     expect(view).toBeDefined();
-    expect(view!.routes).toHaveLength(3);
-    expect(view!.readyRoutes).toBe(2);
+    expect(view!.routes).toHaveLength(4);
+    // Готовы все, кроме отменённого: собранный, в хранении и без коробки.
+    expect(view!.readyRoutes).toBe(3);
 
     const states = view!.routes.map((route) => route.readiness).sort();
-    expect(states).toEqual(['ASSEMBLED', 'CAN_ISSUE', 'NOT_READY']);
+    expect(states).toEqual(['ASSEMBLED', 'CAN_ISSUE', 'CAN_ISSUE', 'NOT_READY']);
+  });
+});
+
+describe('место коробки на доске выдачи — сведение, а не запрет', () => {
+  /*
+   * Каждый заказ показывает фактическую полку и остаётся годным: своя
+   * маршрутная ячейка, чужая, хранение или «без ячейки». Негодным делает
+   * только отмена. «Требуется перемещение» — предупреждение в поле, а не
+   * снятие готовности.
+   */
+  it('несёт место каждой коробки и не роняет готовность из-за него', async () => {
+    const keeper = await actorFor(['WAREHOUSE']);
+    const courier = await actorFor(['COURIER']);
+    const storage = await seedCell('STORAGE');
+    const ownCell = await seedCell('ROUTE');
+    const relocCell = await seedCell('ROUTE');
+
+    const own = await seedOrder();
+    const stored = await seedOrder();
+    const none = await seedOrder();
+    const foreign = await seedOrder();
+    const reloc = await seedOrder();
+
+    const route = await seedRoute([own.id, stored.id, none.id, foreign.id, reloc.id], {
+      courierId: courier.userId,
+    });
+    await bindRouteCell(flow, keeper, route.id, { cellCode: ownCell.code }, CONTEXT);
+    await bindRouteCell(flow, keeper, route.id, { cellCode: relocCell.code }, CONTEXT);
+
+    // Своя маршрутная полка.
+    await receiveOrder(flow, keeper, { orderNumber: own.number, cellCode: storage.code }, CONTEXT);
+    await pickOrderToRouteCell(
+      flow,
+      keeper,
+      route.id,
+      { orderNumber: own.number, cellCode: ownCell.code },
+      CONTEXT,
+    );
+
+    // Хранение.
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: stored.number, cellCode: storage.code },
+      CONTEXT,
+    );
+
+    // `none` — без размещения вовсе, коробку не принимали.
+
+    // Чужая маршрутная полка: у соседнего листа своя ячейка, наш заказ стоит в ней.
+    const foreignRoute = await seedRoute([], { courierId: courier.userId });
+    const foreignCell = await seedCell('ROUTE');
+    await bindRouteCell(flow, keeper, foreignRoute.id, { cellCode: foreignCell.code }, CONTEXT);
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: foreign.number, cellCode: foreignCell.code, allowRouteCell: true },
+      CONTEXT,
+    );
+
+    // Своя маршрутная полка, но с пометкой «требуется перемещение».
+    await receiveOrder(
+      flow,
+      keeper,
+      { orderNumber: reloc.number, cellCode: storage.code },
+      CONTEXT,
+    );
+    await pickOrderToRouteCell(
+      flow,
+      keeper,
+      route.id,
+      { orderNumber: reloc.number, cellCode: relocCell.code },
+      CONTEXT,
+    );
+    await ctx.db.orderPlacement.updateMany({
+      where: { orderId: reloc.id, releasedAt: null },
+      data: { requiresRelocation: true },
+    });
+
+    const board = await readIssueBoard(ctx.db);
+    const view = board.find((item) => item.courierUserId === courier.userId);
+    expect(view).toBeDefined();
+    const routeView = view!.routes.find((item) => item.routeId === route.id);
+    expect(routeView).toBeDefined();
+    const orders = new Map(routeView!.orders.map((order) => [order.orderNumber, order]));
+
+    // Своя маршрутная ячейка.
+    expect(orders.get(own.number)).toMatchObject({
+      ready: true,
+      cellKind: 'ROUTE',
+      inRouteCell: true,
+      routeCellNumber: route.number,
+      requiresRelocation: false,
+    });
+    // Хранение.
+    expect(orders.get(stored.number)).toMatchObject({
+      ready: true,
+      cellKind: 'STORAGE',
+      inRouteCell: false,
+      routeCellNumber: null,
+    });
+    // Без ячейки.
+    expect(orders.get(none.number)).toMatchObject({
+      ready: true,
+      cellCode: null,
+      cellKind: null,
+      routeCellNumber: null,
+    });
+    // Чужая маршрутная ячейка: владелец — соседний лист.
+    expect(orders.get(foreign.number)).toMatchObject({
+      ready: true,
+      cellKind: 'ROUTE',
+      inRouteCell: false,
+      routeCellNumber: foreignRoute.number,
+    });
+    // Требуется перемещение — предупреждение, готовность цела.
+    expect(orders.get(reloc.number)).toMatchObject({
+      ready: true,
+      requiresRelocation: true,
+    });
+
+    // Ни отмен, ни пустого листа: отгрузить лист можно, состояние — «Можно выдать».
+    expect(routeView!.shippable).toBe(true);
+    expect(routeView!.readiness).toBe('CAN_ISSUE');
   });
 });
