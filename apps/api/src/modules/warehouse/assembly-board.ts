@@ -314,9 +314,24 @@ export interface IssueOrderView {
   cellCode: string | null;
   /** Тип ячейки считает сервер: восстанавливать его по коду на клиенте нельзя. */
   cellKind: $Enums.StorageCellKind | null;
+  /**
+   * Заказ можно отгрузить: он не отменён. Место коробки на это больше не влияет —
+   * оно сведение, а не запрет. `false` остаётся ровно за отменённым заказом.
+   */
   ready: boolean;
   /** Коробка стоит в маршрутной ячейке ИМЕННО этого листа. */
   inRouteCell: boolean;
+  /**
+   * Номер листа, которому принадлежит маршрутная ячейка коробки: свой или
+   * чужой. `null` — коробка в хранении или размещения нет. Нужен, чтобы
+   * подписать «другой МЛ …», не угадывая владельца полки на клиенте.
+   */
+  routeCellNumber: string | null;
+  /**
+   * На коробке стоит «требуется перемещение». Это предупреждение, а не запрет:
+   * выдаче не мешает, но кладовщик должен его видеть.
+   */
+  requiresRelocation: boolean;
   /** Заказ уже внесён в лист текущей проверкой. */
   checked: boolean;
 }
@@ -433,6 +448,34 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
     },
   });
 
+  /*
+   * Владелец маршрутной полки — по всем листам, а не только по загруженным.
+   *
+   * Коробка может стоять в маршрутной ячейке ЧУЖОГО листа, в том числе уже
+   * отгруженного или ещё не подтверждённого, — таких листов на этой доске нет.
+   * Чтобы подписать «другой МЛ …», владелец каждой занятой маршрутной ячейки
+   * берётся одним запросом по действующим привязкам.
+   */
+  const routeCellIds = new Set<string>();
+  for (const route of routes) {
+    for (const participation of route.orders) {
+      const placement = participation.order.placements[0] ?? null;
+      if (placement !== null && placement.cell.kind === 'ROUTE') {
+        routeCellIds.add(placement.cell.id);
+      }
+    }
+  }
+  const routeCellOwner = new Map<string, string>();
+  if (routeCellIds.size > 0) {
+    const bindings = await db.routeCellBinding.findMany({
+      where: { cellId: { in: [...routeCellIds] }, releasedAt: null },
+      select: { cellId: true, route: { select: { number: true } } },
+    });
+    for (const binding of bindings) {
+      routeCellOwner.set(binding.cellId, binding.route.number);
+    }
+  }
+
   const byCourier = new Map<string, IssueCourierView>();
 
   for (const route of routes) {
@@ -450,25 +493,16 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
       const placement = order.placements[0] ?? null;
       const cancelled = order.cancelledInSource || order.cancelledByLogistAt !== null;
       /*
-       * Готовность к выдаче.
+       * Готовность к выдаче больше не зависит от места коробки.
        *
-       * Коробка годится, если она лежит либо в ячейке ЭТОГО листа, либо
-       * в обычном хранении: лист отгружается целиком, и нести его можно
-       * и с полки хранения. Чужая маршрутная ячейка по-прежнему готовностью
-       * не считается — это полка другого курьера, и коробка уедет с ним.
+       * Лист отгружается целиком и заказ за заказом под сканом, поэтому нести
+       * коробку можно из любой ячейки — своей маршрутной, чужой маршрутной,
+       * хранения — и даже когда действующего размещения нет вовсе. Место
+       * коробки теперь сведение на экране, а не запрет отгрузки. Единственное,
+       * что делает заказ негодным, — отмена.
        */
       const ownCell = placement !== null && cellIds.has(placement.cell.id);
-      const storageCell = placement !== null && placement.cell.kind === 'STORAGE';
-      /*
-       * Пометка «требуется перемещение» на МАРШРУТНОЙ полке означает, что
-       * после комплектования что-то изменилось: состав листа или сам заказ.
-       * В хранении та же пометка стоит на любой коробке, которую ждёт
-       * маршрут, и готовности не мешает — иначе отгрузить из хранения было
-       * бы нельзя вовсе.
-       */
-      const brokenRouteCell = ownCell && placement.requiresRelocation;
-      const ready =
-        placement !== null && (storageCell || ownCell) && !brokenRouteCell && !cancelled;
+      const ready = !cancelled;
 
       return {
         orderId: order.id,
@@ -479,6 +513,13 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
         cellKind: placement?.cell.kind ?? null,
         ready,
         inRouteCell: ownCell,
+        // Владелец маршрутной полки: свой лист или чужой. Хранение и «без
+        // ячейки» владельца не имеют.
+        routeCellNumber:
+          placement !== null && placement.cell.kind === 'ROUTE'
+            ? (routeCellOwner.get(placement.cell.id) ?? null)
+            : null,
+        requiresRelocation: placement?.requiresRelocation ?? false,
         checked: checkedIds.has(order.id),
       };
     });
@@ -498,9 +539,10 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
       /*
        * Готовность считает СЕРВЕР и пересчитывает каждый раз.
        *
-       * Отгрузить можно только лист, у которого каждый действующий заказ
-       * стоит на складе — в ячейке этого листа или в хранении — и не отменён.
-       * Пустой лист не отгружается: везти нечего.
+       * Отгрузить можно лист, в котором ни один действующий заказ не отменён;
+       * место коробок на это не влияет. Пустой лист не отгружается: везти
+       * нечего. Это подсказка для кнопки — настоящий запрет держит серверная
+       * отгрузка, требующая скана каждого заказа и повторной проверки состава.
        */
       shippable: orders.length > 0 && orders.every((order) => order.ready),
       readiness: issueReadiness(orders),

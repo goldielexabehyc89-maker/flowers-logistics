@@ -28,6 +28,7 @@ import {
 } from './placement.js';
 import { assertCourierAssignable } from '../routing/service.js';
 import { lockRouteCellBinding, releaseEmptyRouteBinding } from './route-cells.js';
+import { issuedOrderIdsForRoute } from './issue-guard.js';
 
 /**
  * Смена курьера и состояние листа нужны и складу, а не одной логистике.
@@ -858,6 +859,40 @@ async function releasePlacementToCourier(
   });
 }
 
+/**
+ * Фиксация выдачи заказа, у которого нет действующего размещения.
+ *
+ * Коробка ушла с полки раньше — её снял соседний процесс, — либо заказ стоял
+ * без размещения вовсе. Закрывать нечего, но выдача состоялась, и у неё обязан
+ * остаться такой же однозначный след, как у выданной из ячейки: сам факт живёт
+ * действующей отметкой в сессии, которая тут же завершается, а это — его аудит.
+ * Фиктивное размещение под это не заводится: оно солгало бы, что коробка где-то
+ * лежала.
+ */
+async function recordIssueWithoutPlacement(
+  tx: TransactionClient,
+  actor: AuthenticatedActor,
+  context: RequestContext,
+  input: { routeId: string; orderId: string; sessionId: string },
+): Promise<void> {
+  await writeAudit(tx, {
+    action: 'WAREHOUSE_ORDER_ISSUED',
+    entityType: 'RouteIssueSession',
+    entityId: input.sessionId,
+    actorUserId: actor.userId,
+    actorRoles: actor.roles,
+    source: 'api',
+    newValue: {
+      routeId: input.routeId,
+      orderId: input.orderId,
+      sessionId: input.sessionId,
+      withoutPlacement: true,
+    },
+    ip: context.ip,
+    userAgent: context.userAgent,
+  });
+}
+
 /*
  * Поштучной выдачи как ОПЕРАЦИИ больше нет.
  *
@@ -882,17 +917,14 @@ async function routeIssueProgress(
     return { issued: 0, total: 0, issuedOrderIds: new Set() };
   }
 
-  const issued = await tx.orderPlacement.findMany({
-    where: {
-      orderId: { in: orderIds },
-      releaseReason: 'ISSUED_TO_COURIER',
-      issueSession: { routeId },
-    },
-    select: { orderId: true },
-    distinct: ['orderId'],
-  });
-
-  const issuedOrderIds = new Set(issued.map((row) => row.orderId));
+  /*
+   * Выданными считаются заказы из обоих источников факта выдачи — закрытого
+   * размещения И действующей отметки завершённой сессии, — иначе заказ,
+   * уехавший без коробки на полке, не попал бы в счётчик и повтор финального
+   * запроса отчитался бы меньшим числом, чем уехало.
+   */
+  const issuedForRoute = await issuedOrderIdsForRoute(tx, routeId);
+  const issuedOrderIds = new Set(orderIds.filter((id) => issuedForRoute.has(id)));
   return { issued: issuedOrderIds.size, total: orderIds.length, issuedOrderIds };
 }
 
@@ -1157,7 +1189,7 @@ export async function checkOrderForIssue(
       });
     }
 
-    await assertReadyForIssue(tx, routeId, order.id, route.number);
+    await assertReadyForIssue(tx, order.id);
 
     /*
      * Отметка вставляется с пропуском дубликата.
@@ -1395,23 +1427,38 @@ export async function shipRoute(
         });
       }
 
-      const placement = await assertReadyForIssue(tx, routeId, order.id, route.number);
+      const placement = await assertReadyForIssue(tx, order.id);
 
-      await releasePlacementToCourier(tx, actor, context, {
-        placement,
-        routeId,
-        orderId: order.id,
-        sessionId: session.id,
-        now,
-      });
+      if (placement !== null) {
+        await releasePlacementToCourier(tx, actor, context, {
+          placement,
+          routeId,
+          orderId: order.id,
+          sessionId: session.id,
+          now,
+        });
 
-      /*
-       * Опустевшая полка освобождается той же доменной операцией, что и при
-       * обычном переносе. Для ячейки хранения это ничего не делает — за ней
-       * привязки нет, — но правило одно на все места ухода коробки, и ради
-       * одного исключения его заводить не за что.
-       */
-      await releaseEmptyRouteBinding(tx, actor, placement.cellId, now);
+        /*
+         * Опустевшая полка освобождается той же доменной операцией, что и при
+         * обычном переносе — и для чужой маршрутной ячейки тоже: привязка
+         * закрывается по самой ячейке, а не по листу. Осталась в ней другая
+         * коробка — привязка сохраняется. Для ячейки хранения это ничего не
+         * делает: за ней привязки нет.
+         */
+        await releaseEmptyRouteBinding(tx, actor, placement.cellId, now);
+      } else {
+        /*
+         * Коробки в ячейке нет: размещение закрыл соседний процесс или заказ
+         * стоял без него. Фиктивную ячейку и фиктивное размещение под это не
+         * заводим — факт выдачи держит отметка в завершаемой сессии, а аудит
+         * фиксирует саму выдачу заказа без размещения.
+         */
+        await recordIssueWithoutPlacement(tx, actor, context, {
+          routeId,
+          orderId: order.id,
+          sessionId: session.id,
+        });
+      }
     }
 
     await activateRouteWithinTransaction(tx, route, actor, context, now, {
@@ -1434,38 +1481,32 @@ export async function shipRoute(
 }
 
 /**
- * Заказ готов к передаче курьеру: коробка стоит на складе и доступна ЭТОМУ листу.
+ * Заказ можно передать курьеру: он не отменён. Где стоит коробка — сведение,
+ * а не запрет отгрузки.
  *
- * Годятся два места: маршрутная ячейка этого листа и обычное хранение. Лист
- * отгружается целиком и проверяется заказ за заказом, поэтому нести коробку
- * можно и прямо с полки хранения — перекладывать её на маршрутную полку
- * ради самого перекладывания незачем. Пометка «требуется перемещение» стоит
- * ровно на таких коробках и выдаче больше не мешает.
+ * Лист отгружается целиком и проверяется заказ за заказом под сканом, поэтому
+ * нести коробку можно из любой ячейки: маршрутной этого листа, маршрутной
+ * чужого листа (её привязку закроем при уходе коробки) или обычного хранения.
+ * Пометка «требуется перемещение» тоже больше не запрет, а предупреждение на
+ * экране. И даже действующего размещения может не быть вовсе — коробку успел
+ * снять с полки соседний процесс: фиктивную ячейку под это не заводим, факт
+ * выдачи держит отметка в завершаемой сессии.
  *
- * Чужая маршрутная ячейка по-прежнему отвергается: это полка другого курьера,
- * и коробка с неё уедет не туда.
+ * Единственный запрет, оставшийся ЗДЕСЬ, — отмена. Признаки заказа читаются
+ * выше по ходу выдачи ещё без замка, и между тем чтением и этой строкой отмена
+ * успевает записаться; раньше её страховала пометка «требуется перемещение» на
+ * маршрутной полке, но теперь она не блокирует, а из хранения её и не ставят.
+ * Поэтому отмена перечитывается ПОД ЗАМКОМ, где ответ уже не изменится.
  *
- * Размещение берётся `FOR UPDATE`: между проверкой и выдачей его не должны
- * переставить.
+ * Размещение берётся `FOR UPDATE`: между проверкой и выдачей его не переставят.
+ * Возвращается размещение, если оно есть, либо `null`.
  */
 async function assertReadyForIssue(
   tx: TransactionClient,
-  routeId: string,
   orderId: string,
-  routeNumber: string,
-): Promise<{ id: string; cellId: string }> {
+): Promise<{ id: string; cellId: string } | null> {
   await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
 
-  /*
-   * Отмена перечитывается ПОД ЗАМКОМ.
-   *
-   * Признаки заказа читаются выше по ходу выдачи ещё без замка, и между тем
-   * чтением и этой строкой отмена успевает записаться. Раньше такой заказ
-   * ловила пометка «требуется перемещение», которую отмена ставит на
-   * маршрутную полку, — но коробке в хранении её никто не ставит, а выдавать
-   * из хранения теперь можно. Поэтому отмена спрашивается ещё раз и там,
-   * где ответ уже не изменится.
-   */
   const fresh = await tx.deliveryOrder.findUniqueOrThrow({
     where: { id: orderId },
     select: { externalName: true, cancelledInSource: true, cancelledByLogistAt: true },
@@ -1478,56 +1519,12 @@ async function assertReadyForIssue(
     });
   }
 
-  const rows = await tx.$queryRaw<
-    { id: string; cellId: string; kind: string; requiresRelocation: boolean }[]
-  >`
-    SELECT p."id", p."cellId", p."requiresRelocation", c."kind"::text AS "kind"
+  const rows = await tx.$queryRaw<{ id: string; cellId: string }[]>`
+    SELECT p."id", p."cellId"
     FROM "OrderPlacement" p
-    JOIN "StorageCell" c ON c."id" = p."cellId"
     WHERE p."orderId" = ${orderId}::uuid AND p."releasedAt" IS NULL
     FOR UPDATE OF p
   `;
   const placement = rows[0] ?? null;
-
-  if (placement === null) {
-    throw new AppError('CONFLICT', {
-      message: 'order has no placement',
-      publicMessage: 'Заказа нет на складе: выдать его нельзя.',
-      conflict: { kind: 'ORDER_NOT_PLACED', orderIds: [orderId] },
-    });
-  }
-
-  /*
-   * Пометка «требуется перемещение» значит РАЗНОЕ на разных полках.
-   *
-   * В хранении её ставят при обычной приёмке коробки, которую ждёт маршрут, —
-   * это и есть отгрузка из хранения, и мешать ей нечему. В маршрутной ячейке
-   * её ставят там, где что-то пошло не так: состав листа изменился после
-   * комплектования или заказ отменили в источнике. Такую коробку выдавать
-   * нельзя — она и была тем предохранителем, который ловит отмену, дошедшую
-   * одновременно с отгрузкой.
-   */
-  if (placement.kind !== 'STORAGE' && placement.requiresRelocation) {
-    throw new AppError('CONFLICT', {
-      message: 'placement requires relocation',
-      publicMessage: 'Заказ требует перемещения: маршрут или заказ менялись после комплектования.',
-      conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', orderIds: [orderId] },
-    });
-  }
-
-  if (placement.kind !== 'STORAGE') {
-    const binding = await tx.routeCellBinding.findFirst({
-      where: { routeId, cellId: placement.cellId, releasedAt: null },
-      select: { id: true },
-    });
-    if (binding === null) {
-      throw new AppError('CONFLICT', {
-        message: 'order is in a route cell of another route',
-        publicMessage: 'Заказ стоит в маршрутной ячейке другого листа.',
-        conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION', routeNumber, orderIds: [orderId] },
-      });
-    }
-  }
-
-  return { id: placement.id, cellId: placement.cellId };
+  return placement === null ? null : { id: placement.id, cellId: placement.cellId };
 }

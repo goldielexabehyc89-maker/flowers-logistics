@@ -29,13 +29,50 @@ export async function issueStateOf(
 ): Promise<{ hasOpenSession: boolean; issuedOrders: number }> {
   const open = await tx.routeIssueSession.count({ where: { routeId, state: 'OPEN' } });
 
-  const issued = await tx.orderPlacement.findMany({
+  const issued = await issuedOrderIdsForRoute(tx, routeId);
+
+  return { hasOpenSession: open > 0, issuedOrders: issued.size };
+}
+
+/**
+ * Заказы маршрута, выдача которых состоялась как неизменяемый факт.
+ *
+ * Факт выдачи имеет два равноправных источника, и заказ без размещения — не
+ * исключение из правила, а второй его случай:
+ *   1) закрытое `ISSUED_TO_COURIER` размещение — коробка стояла в ячейке и
+ *      ушла с полки;
+ *   2) действующая отметка в ЗАВЕРШЁННОЙ сессии — коробки в ячейке не было,
+ *      но заказ отсканировали и лист отгрузили целиком.
+ *
+ * Оба доказывают одно: заказ физически передан курьеру. Завершённую сессию
+ * не переоткрывают, её отметки не сбрасывают (сброс живёт только на открытой),
+ * поэтому второй источник так же неизменяем, как первый. Отменённая сессия
+ * (`CANCELLED`) фактом выдачи не считается — её отметки сюда не попадают.
+ */
+export async function issuedOrderIdsForRoute(
+  tx: TransactionClient,
+  routeId: string,
+): Promise<Set<string>> {
+  const placed = await tx.orderPlacement.findMany({
     where: { releaseReason: 'ISSUED_TO_COURIER', issueSession: { routeId } },
     select: { orderId: true },
     distinct: ['orderId'],
   });
 
-  return { hasOpenSession: open > 0, issuedOrders: issued.length };
+  const checkedInCompleted = await tx.routeIssueCheck.findMany({
+    where: { clearedAt: null, session: { routeId, state: 'COMPLETED' } },
+    select: { orderId: true },
+    distinct: ['orderId'],
+  });
+
+  const ids = new Set<string>();
+  for (const row of placed) {
+    ids.add(row.orderId);
+  }
+  for (const row of checkedInCompleted) {
+    ids.add(row.orderId);
+  }
+  return ids;
 }
 
 /**

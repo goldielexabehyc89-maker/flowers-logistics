@@ -325,8 +325,41 @@ export interface IssueOrderView {
   ready: boolean;
   /** Коробка стоит в маршрутной ячейке именно этого листа. */
   inRouteCell: boolean;
+  /** Номер листа-владельца маршрутной полки: свой или чужой. Считает сервер. */
+  routeCellNumber: string | null;
+  /** На коробке стоит «требуется перемещение»: предупреждение, не запрет. */
+  requiresRelocation: boolean;
   checked: boolean;
 }
+
+/**
+ * Фактическое место коробки одной строкой.
+ *
+ * Четыре honest варианта, и ни один из них не «не готов»: коробка в
+ * маршрутной ячейке своего листа, в маршрутной ячейке чужого листа, в
+ * хранении или её на складе нет вовсе. Владельца чужой полки считает сервер —
+ * клиент его не угадывает. Номер своего листа передаётся явно: у заказа
+ * его нет, он есть у листа.
+ */
+export function issueLocationLabel(
+  order: Pick<IssueOrderView, 'cellCode' | 'cellKind' | 'inRouteCell' | 'routeCellNumber'>,
+  thisRouteNumber: string,
+): string {
+  if (order.cellCode === null || order.cellKind === null) {
+    return 'Без ячейки';
+  }
+  if (order.cellKind === 'STORAGE') {
+    return `Ячейка хранения №${order.cellCode}`;
+  }
+  if (order.inRouteCell) {
+    return `Маршрутная ячейка №${order.cellCode} — МЛ ${thisRouteNumber}`;
+  }
+  const owner = order.routeCellNumber ?? '—';
+  return `Маршрутная ячейка №${order.cellCode} — другой МЛ ${owner}`;
+}
+
+/** Предупреждение о требовавшемся перемещении. Показывается, но не блокирует. */
+export const RELOCATION_WARNING = 'Требовалось перемещение';
 
 /** Готовность листа к выдаче: считает сервер, клиент только показывает. */
 export type IssueReadiness = 'ASSEMBLED' | 'CAN_ISSUE' | 'NOT_READY';

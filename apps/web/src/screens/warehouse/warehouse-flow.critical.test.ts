@@ -11,10 +11,12 @@ import {
   BLOCK_LABELS,
   CELL_KIND_LABELS,
   SCAN_HINTS,
+  RELOCATION_WARNING,
   blockLabel,
   cellLabel,
   groupPlacements,
   issueCellLabel,
+  issueLocationLabel,
   mergePlacementPages,
   nextPlacementOffset,
   nextStep,
@@ -144,6 +146,58 @@ describe('ячейка заказа в строке листа', () => {
     expect(issueCellLabel({ cellCode: null, cellKind: null })).toBe('—');
     // Полка без вида — это тоже «размещения нет»: гадать по коду нечего.
     expect(issueCellLabel({ cellCode: 'S-14', cellKind: null })).toBe('—');
+  });
+});
+
+describe('место коробки в строке выдачи', () => {
+  /*
+   * Четыре честных варианта, и ни один из них не «не готов». Владельца чужой
+   * полки называет сервер; номер своего листа передаётся отдельно — у заказа
+   * его нет, он есть у листа.
+   */
+  const at = (over: Partial<Parameters<typeof issueLocationLabel>[0]>) => ({
+    cellCode: 'R-05',
+    cellKind: 'ROUTE' as const,
+    inRouteCell: true,
+    routeCellNumber: 'МЛ-100',
+    ...over,
+  });
+
+  it('маршрутная ячейка своего листа', () => {
+    expect(issueLocationLabel(at({ inRouteCell: true, routeCellNumber: 'МЛ-100' }), 'МЛ-100')).toBe(
+      'Маршрутная ячейка №R-05 — МЛ МЛ-100',
+    );
+  });
+
+  it('маршрутная ячейка чужого листа называет владельца', () => {
+    expect(
+      issueLocationLabel(
+        at({ cellCode: 'R-09', inRouteCell: false, routeCellNumber: 'МЛ-200' }),
+        'МЛ-100',
+      ),
+    ).toBe('Маршрутная ячейка №R-09 — другой МЛ МЛ-200');
+  });
+
+  it('ячейка хранения', () => {
+    expect(
+      issueLocationLabel(
+        at({ cellCode: 'S-14', cellKind: 'STORAGE', inRouteCell: false, routeCellNumber: null }),
+        'МЛ-100',
+      ),
+    ).toBe('Ячейка хранения №S-14');
+  });
+
+  it('без ячейки — не «не готов», а честное «без ячейки»', () => {
+    expect(
+      issueLocationLabel(
+        at({ cellCode: null, cellKind: null, inRouteCell: false, routeCellNumber: null }),
+        'МЛ-100',
+      ),
+    ).toBe('Без ячейки');
+  });
+
+  it('предупреждение о перемещении — отдельная неблокирующая подпись', () => {
+    expect(RELOCATION_WARNING).toBe('Требовалось перемещение');
   });
 });
 

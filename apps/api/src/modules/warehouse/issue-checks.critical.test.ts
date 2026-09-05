@@ -627,22 +627,17 @@ describe('отгрузка листа', () => {
     expect(await activePlacementCell(route.orders[0]!.id)).toBe(route.cellId);
   });
 
-  it('коробка, переставленная после проверки, отменяет отгрузку', async () => {
+  it('коробка в маршрутной ячейке другого листа выдаётся, а опустевшая полка освобождается', async () => {
+    /*
+     * Раньше это было отказом. Теперь место коробки — сведение, а не запрет:
+     * коробку нашего заказа нашли в маршрутной ячейке соседнего листа, скан
+     * её принимает, лист уезжает целиком. Старое размещение закрывается как
+     * ISSUED_TO_COURIER независимо от того, чья это была полка, и опустевшая
+     * привязка соседнего листа освобождается — на ней больше ничего нет.
+     */
     const route = await seedReadyRoute(1);
     const only = route.orders[0]!;
-    await checkOrderForIssue(
-      flow,
-      route.keeper,
-      route.routeId,
-      { orderNumber: only.number },
-      CONTEXT,
-    );
 
-    /*
-     * Переставили на полку ЧУЖОГО листа — это по-прежнему отказ: коробка
-     * стоит в очереди другого курьера и уедет не туда. Перенос в обычное
-     * хранение отгрузку больше не отменяет и проверяется отдельно.
-     */
     const admin = await actorFor(['ADMIN']);
     const foreignRoute = await ctx.db.deliveryRoute.create({
       data: {
@@ -669,14 +664,39 @@ describe('отгрузка листа', () => {
       CONTEXT,
     );
 
-    await expect(shipRoute(flow, route.keeper, route.routeId, CONTEXT)).rejects.toMatchObject({
-      conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION' },
-    });
+    // Скан принимает коробку из чужой ячейки.
+    const checked = await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: only.number },
+      CONTEXT,
+    );
+    expect(checked.checked).toBe(1);
+
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(1);
+
     const stored = await ctx.db.deliveryRoute.findUniqueOrThrow({
       where: { id: route.routeId },
       select: { state: true },
     });
-    expect(stored.state).toBe('CONFIRMED');
+    expect(stored.state).toBe('ACTIVE');
+
+    // Размещение закрыто выдачей.
+    expect(await activePlacementCell(only.id)).toBeNull();
+    const released = await ctx.db.orderPlacement.findFirst({
+      where: { orderId: only.id, releaseReason: 'ISSUED_TO_COURIER' },
+      select: { id: true },
+    });
+    expect(released).not.toBeNull();
+
+    // Опустевшая чужая привязка освобождена.
+    const foreignBinding = await ctx.db.routeCellBinding.findFirst({
+      where: { cellId: foreignCell.id, releasedAt: null },
+      select: { id: true },
+    });
+    expect(foreignBinding).toBeNull();
   });
 
   it('перенос коробки в хранение после проверки отгрузку не отменяет', async () => {
@@ -861,8 +881,16 @@ describe('отгрузка прямо из хранения', () => {
     expect(issued).toBe(1);
   });
 
-  it('снятая с хранения коробка отменяет всю отгрузку', async () => {
+  it('заказ без размещения сканируется и выдаётся, не заводя фиктивной ячейки', async () => {
+    /*
+     * Раньше это было отказом ORDER_NOT_PLACED. Теперь «нет действующего
+     * размещения» — разрешённый случай: коробку сняли с полки соседним
+     * процессом, но лист проверяется под сканом и уезжает целиком. Фиктивную
+     * ячейку под такой заказ не заводим — факт его выдачи держит действующая
+     * отметка в завершённой сессии, а не выдуманное размещение.
+     */
     const route = await seedMixedRoute(2, 0);
+    const withoutPlacement = route.orders[1]!;
     for (const order of route.orders) {
       await checkOrderForIssue(
         flow,
@@ -873,31 +901,62 @@ describe('отгрузка прямо из хранения', () => {
       );
     }
 
-    // Коробку унесли между проверкой и финалом: выдавать нечего.
+    // Коробку унесли между проверкой и финалом: действующего размещения нет.
     await withdrawOrder(
       flow,
       route.keeper,
-      { orderNumber: route.orders[1]!.number, reason: 'REASSEMBLY' },
+      { orderNumber: withoutPlacement.number, reason: 'REASSEMBLY' },
       CONTEXT,
     );
 
-    await expect(shipRoute(flow, route.keeper, route.routeId, CONTEXT)).rejects.toMatchObject({
-      conflict: { kind: 'ORDER_NOT_PLACED' },
-    });
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(2);
 
-    // Откат целиком: первая коробка осталась на полке, лист не уехал.
-    expect(await activePlacementCell(route.orders[0]!.id)).not.toBeNull();
     const stored = await ctx.db.deliveryRoute.findUniqueOrThrow({
       where: { id: route.routeId },
       select: { state: true },
     });
-    expect(stored.state).toBe('CONFIRMED');
+    expect(stored.state).toBe('ACTIVE');
+
+    // Никакого фиктивного размещения: ни действующего, ни закрытого выдачей.
+    expect(await activePlacementCell(withoutPlacement.id)).toBeNull();
+    const fabricated = await ctx.db.orderPlacement.count({
+      where: { orderId: withoutPlacement.id, releaseReason: 'ISSUED_TO_COURIER' },
+    });
+    expect(fabricated).toBe(0);
+
+    // Факт выдачи живёт действующей отметкой в ЗАВЕРШЁННОЙ сессии.
+    const proof = await ctx.db.routeIssueCheck.findFirst({
+      where: {
+        orderId: withoutPlacement.id,
+        clearedAt: null,
+        session: { routeId: route.routeId, state: 'COMPLETED' },
+      },
+      select: { id: true },
+    });
+    expect(proof).not.toBeNull();
+
+    // И аудит фиксирует выдачу заказа без размещения.
+    const audit = await ctx.db.auditLog.findFirst({
+      where: { action: 'WAREHOUSE_ORDER_ISSUED', entityType: 'RouteIssueSession' },
+      orderBy: { occurredAt: 'desc' },
+      select: { newValue: true },
+    });
+    const serializedAudit = JSON.stringify(audit?.newValue);
+    expect(serializedAudit).toContain('withoutPlacement');
+    expect(serializedAudit).toContain(withoutPlacement.id);
   });
 
-  it('чужая маршрутная полка выдачу по-прежнему не проходит', async () => {
+  it('чужая маршрутная полка со своими коробками при нашей выдаче не освобождается', async () => {
+    /*
+     * Ячейку соседнего листа мы не трогаем без нужды. Наш заказ уезжает,
+     * но в чужой полке осталась ещё одна коробка — её привязку не снимаем:
+     * система не двигает и не освобождает чужое молча.
+     */
     const route = await seedMixedRoute(1, 0);
+    const ours = route.orders[0]!;
     const foreignAdmin = await actorFor(['ADMIN']);
-    const foreignOrder = await seedOrder();
+    const stayer = await seedOrder();
     const foreignRoute = await ctx.db.deliveryRoute.create({
       data: {
         number: unique('FRT'),
@@ -911,7 +970,7 @@ describe('отгрузка прямо из хранения', () => {
     await ctx.db.routeOrder.create({
       data: {
         routeId: foreignRoute.id,
-        orderId: foreignOrder.id,
+        orderId: stayer.id,
         position: 1,
         addedById: foreignAdmin.userId,
       },
@@ -925,26 +984,58 @@ describe('отгрузка прямо из хранения', () => {
       CONTEXT,
     );
 
-    // Коробку нашего листа переставили на полку чужого курьера.
-    await receiveOrder(
-      flow,
-      route.keeper,
-      {
-        orderNumber: route.orders[0]!.number,
-        cellCode: foreignCell.code,
-        allowRouteCell: true,
-      },
-      CONTEXT,
-    );
-
-    await expect(
-      checkOrderForIssue(
+    // Обе коробки — наша и чужая — стоят в маршрутной ячейке соседнего листа.
+    for (const order of [ours, stayer]) {
+      await receiveOrder(
         flow,
         route.keeper,
-        route.routeId,
-        { orderNumber: route.orders[0]!.number },
+        { orderNumber: order.number, cellCode: foreignCell.code, allowRouteCell: true },
         CONTEXT,
-      ),
-    ).rejects.toMatchObject({ conflict: { kind: 'PLACEMENT_REQUIRES_RELOCATION' } });
+      );
+    }
+
+    // Наш заказ сканируется из чужой ячейки и уезжает.
+    await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: ours.number },
+      CONTEXT,
+    );
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(1);
+
+    // Чужая коробка на месте — привязка соседнего листа сохранена.
+    expect(await activePlacementCell(stayer.id)).toBe(foreignCell.id);
+    const foreignBinding = await ctx.db.routeCellBinding.findFirst({
+      where: { cellId: foreignCell.id, releasedAt: null },
+      select: { id: true },
+    });
+    expect(foreignBinding).not.toBeNull();
+  });
+
+  it('коробка с пометкой «требуется перемещение» выдаётся без запрета', async () => {
+    /*
+     * Пометка перестала быть предохранителем-запретом: теперь она
+     * предупреждение на экране. Стоит на маршрутной полке или в хранении —
+     * лист всё равно уезжает.
+     */
+    const route = await seedReadyRoute(1);
+    const only = route.orders[0]!;
+    await ctx.db.orderPlacement.updateMany({
+      where: { orderId: only.id, releasedAt: null },
+      data: { requiresRelocation: true },
+    });
+
+    await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: only.number },
+      CONTEXT,
+    );
+    const shipped = await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    expect(shipped.issued).toBe(1);
+    expect(await activePlacementCell(only.id)).toBeNull();
   });
 });

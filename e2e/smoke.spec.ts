@@ -162,6 +162,27 @@ function seedWarehouseStand(): Record<string, string> {
 }
 
 /**
+ * Фикстура «заказ нового листа в маршрутной ячейке старого».
+ *
+ * Отдельная от общего стенда: сценарий доводит лист до ACTIVE, а общий стенд
+ * держит те же листы для соседних проверок — менять его состояние под ними
+ * нельзя.
+ */
+function seedIssueForeignCell(): Record<string, string> {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-issue-foreign-cell'], {
+    encoding: 'utf8',
+  });
+  const values: Record<string, string> = {};
+  for (const match of output.matchAll(/^([^:\n]+):\s*(.+)$/gm)) {
+    values[(match[1] ?? '').trim()] = (match[2] ?? '').trim();
+  }
+  if (values['мл новый'] === undefined || values['заказ'] === undefined) {
+    throw new Error('сеялка выдачи из чужой ячейки не вернула лист и заказ');
+  }
+  return values;
+}
+
+/**
  * Разворачивает курьера, у которого лежит нужный лист.
  *
  * Свёрнутая карточка курьера номера листа не содержит — в этом и смысл
@@ -7555,6 +7576,52 @@ test('выдача: три уровня, отгрузка одного лист�
   await expect(emptyRoute).toBeVisible();
   // Соседний лист не тронут: ни один его заказ не внесён.
   await expect(emptyRoute.getByTestId('issue-route-counts')).toHaveText('2 (0 из 2)');
+});
+
+test('выдача: заказ нового листа стоит в ячейке старого — место показано, QR принят, лист уезжает', async ({
+  page,
+  request,
+}: {
+  page: Page;
+  request: APIRequestContext;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const fx = seedIssueForeignCell();
+  await enableManualEntry(request);
+
+  await login(page, fx['кладовщик'] ?? '', fx['пин'] ?? '');
+  await expect(page.getByRole('heading', { name: 'Склад', level: 1 })).toBeVisible();
+  await page.getByTestId('wh-tab-issue').click();
+
+  const route = await openIssueRoute(page, fx['мл новый'] ?? '', fx['курьер']);
+  await expect(route).toBeVisible();
+
+  await route.getByTestId('issue-ship').click();
+  const ship = page.getByTestId('issue-ship-dialog');
+  const confirm = page.getByTestId('issue-confirm-courier');
+  if ((await confirm.count()) > 0) {
+    await confirm.click();
+  }
+
+  /*
+   * Интерфейс честно показывает СТАРУЮ полку: маршрутная ячейка чужого листа
+   * с его номером. Это сведение, а не «не готов»: строку можно сканировать.
+   */
+  const location = ship.getByTestId('issue-check-cell').first();
+  await expect(location).toContainText('другой МЛ');
+  await expect(location).toContainText(fx['мл старый'] ?? '');
+
+  // Правильный QR принят: заказ вносится в лист.
+  await page.getByTestId('issue-manual-order').fill(fx['заказ'] ?? '');
+  await ship.getByRole('button', { name: 'Внести' }).click();
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 1 из 1');
+
+  // Лист уезжает целиком, несмотря на чужую полку.
+  await page.getByTestId('issue-ship-submit').click();
+  await expect(page.locator('.toast-region')).toContainText('отгружен курьеру');
+  await expect(
+    page.locator(`[data-testid="issue-route"][data-route-number="${fx['мл новый'] ?? ''}"]`),
+  ).toHaveCount(0);
 });
 
 /*
