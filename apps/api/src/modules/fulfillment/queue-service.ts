@@ -62,6 +62,7 @@ import {
 } from './paging.js';
 import { isPickupMethod } from '../pickup/views.js';
 import { operationalPickupOr } from '../orders/operational-pickup.js';
+import { excludeNewStateWhere } from '../orders/new-state.js';
 import { readFloristDispatchMode } from '../settings/service.js';
 import {
   effectiveMinutes,
@@ -195,6 +196,8 @@ export interface QueueQuery extends Partial<PageRequest> {
   operationsStartDate?: string;
   /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
   flowwowChannelId?: string | undefined;
+  /** UUID статуса «Новый»: его заказы исключаются из очереди целиком. */
+  newStateId?: string | null | undefined;
 }
 
 /**
@@ -328,11 +331,16 @@ const ACTIVE_WORK_STATES = ['IN_ASSEMBLY', 'NEEDS_REVIEW'] as const;
 export function offerableConstraints(
   operationsStartDate?: string | undefined,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): Prisma.DeliveryOrderWhereInput {
   return {
     fulfillmentInScope: true,
     sourceArchived: false,
     sourceMissing: false,
+    // Статус «Новый» исключается из очереди целиком и раньше всех послаблений:
+    // ни способ получения, ни канал, ни Flowwow, ни операционный самовывоз,
+    // ни статус оплаты его сюда не возвращают. Пустое условие без переменной.
+    ...excludeNewStateWhere(newStateId),
     // Отменённый заказ («Отменён — не собирать» из МоегоСклада ИЛИ отмена
     // логистом) собирать нельзя — его нет ни в очереди, ни в поиске, ни в
     // счётчиках, ни в автораздаче.
@@ -386,12 +394,14 @@ function buildScopeWhere(input: {
   operationsStartDate?: string | undefined;
   /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
   flowwowChannelId?: string | undefined;
+  /** UUID статуса «Новый»: его заказы исключаются из очереди. */
+  newStateId?: string | null | undefined;
 }) {
   return {
     // Пригодность к выдаче («Принят, Не оплачен» не собирается — кроме
     // самовывоза; пустой состав при PENDING в очередь не идёт; заказы раньше
-    // начала операций — тоже).
-    ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId),
+    // начала операций — тоже; статус «Новый» — тоже).
+    ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId, input.newStateId),
     ...dateCondition(input.date, input.includePast === true, input.flowwowChannelId),
     ...(input.assigneeId === null ? {} : { fulfillmentAssigneeId: input.assigneeId }),
     // Поиск сужает уже ограниченную выборку и не заменяет ни одного её
@@ -440,13 +450,21 @@ function buildSupervisorSearchWhere(input: {
   search: string;
   operationsStartDate?: string | undefined;
   flowwowChannelId?: string | undefined;
+  newStateId?: string | null | undefined;
 }): Prisma.DeliveryOrderWhereInput {
   return {
     externalName: { contains: input.search, mode: 'insensitive' as const },
     OR: [
       {
+        // Свободный пригодный заказ: «Новый» исключается здесь наравне с общей
+        // очередью. Уже НАЧАТАЯ работа (ветка ниже) остаётся находимой даже в
+        // статусе «Новый» — физический процесс не прячется.
         fulfillmentProcessState: 'NEW' as const,
-        ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId),
+        ...offerableConstraints(
+          input.operationsStartDate,
+          input.flowwowChannelId,
+          input.newStateId,
+        ),
       },
       { fulfillmentProcessState: { in: [...ACTIVE_WORK_STATES] } },
     ],
@@ -523,6 +541,7 @@ export async function countActiveAssignments(
   userId: string,
   operationsStartDate: string = OPERATIONS_START_DATE,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): Promise<number> {
   return db.deliveryOrder.count({
     where: {
@@ -532,6 +551,7 @@ export async function countActiveAssignments(
         search: null,
         operationsStartDate,
         flowwowChannelId,
+        newStateId,
       }),
       fulfillmentProcessState: { in: [...MINE_WORK_STATES] },
     },
@@ -550,8 +570,13 @@ export async function listDispatchableOrderIds(
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): Promise<string[]> {
-  const { sorted } = await orderedFreeQueue(db, { operationsStartDate, flowwowChannelId }, now);
+  const { sorted } = await orderedFreeQueue(
+    db,
+    { operationsStartDate, flowwowChannelId, newStateId },
+    now,
+  );
   return sorted.map((entry) => entry.id);
 }
 
@@ -569,7 +594,11 @@ export async function listDispatchableOrderIds(
  */
 async function orderedFreeQueue(
   db: Database | TransactionClient,
-  input: { operationsStartDate?: string | undefined; flowwowChannelId?: string | undefined },
+  input: {
+    operationsStartDate?: string | undefined;
+    flowwowChannelId?: string | undefined;
+    newStateId?: string | null | undefined;
+  },
   now: Date = new Date(),
 ): Promise<{ sorted: ReturnType<typeof sortQueue>; byId: Map<string, QueueRow> }> {
   const date = resolveQueueDate('today', now);
@@ -585,6 +614,7 @@ async function orderedFreeQueue(
     search: null,
     operationsStartDate: input.operationsStartDate,
     flowwowChannelId: input.flowwowChannelId,
+    newStateId: input.newStateId,
   });
 
   const rows = await fetchQueueRows(db, { ...scopeWhere, fulfillmentProcessState: 'NEW' });
@@ -704,6 +734,7 @@ export async function readQueue(
           search: search as string,
           operationsStartDate: query.operationsStartDate,
           flowwowChannelId: query.flowwowChannelId,
+          newStateId: query.newStateId,
         })
       : buildScopeWhere({
           date,
@@ -713,6 +744,7 @@ export async function readQueue(
           search,
           operationsStartDate: query.operationsStartDate,
           flowwowChannelId: query.flowwowChannelId,
+          newStateId: query.newStateId,
         });
 
   /**

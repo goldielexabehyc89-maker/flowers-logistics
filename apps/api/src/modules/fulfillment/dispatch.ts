@@ -72,6 +72,7 @@ export async function dispatchFloristsTx(
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): Promise<number> {
   {
     // Сериализуем весь прогон: два параллельных запуска не спорят за заказы.
@@ -89,7 +90,13 @@ export async function dispatchFloristsTx(
 
     // Кандидаты раздачи — ТОТ ЖЕ список и порядок, что видит руководитель в
     // свободной очереди: одна функция, одна граница операций, одна сортировка.
-    const orderIds = await listDispatchableOrderIds(tx, now, operationsStartDate, flowwowChannelId);
+    const orderIds = await listDispatchableOrderIds(
+      tx,
+      now,
+      operationsStartDate,
+      flowwowChannelId,
+      newStateId,
+    );
     if (orderIds.length === 0) {
       return 0;
     }
@@ -117,6 +124,7 @@ export async function dispatchFloristsTx(
             shiftId: florist.id,
             operationsStartDate,
             flowwowChannelId,
+            newStateId,
           },
           DISPATCH_CONTEXT,
         );
@@ -139,9 +147,10 @@ export async function dispatchFlorists(
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): Promise<number> {
   return db.$transaction((tx) =>
-    dispatchFloristsTx(tx, now, operationsStartDate, flowwowChannelId),
+    dispatchFloristsTx(tx, now, operationsStartDate, flowwowChannelId, newStateId),
   );
 }
 
@@ -155,11 +164,12 @@ export async function dispatchFlorists(
 export function createDispatchHandler(
   operationsStartDate: string,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): OutboxHandler {
   return async (_message, tx) => {
     if (tx === undefined) {
       return;
     }
-    await dispatchFloristsTx(tx, new Date(), operationsStartDate, flowwowChannelId);
+    await dispatchFloristsTx(tx, new Date(), operationsStartDate, flowwowChannelId, newStateId);
   };
 }

@@ -32,6 +32,7 @@ import type { Prisma } from '../../generated/prisma/client.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
 import { offerableConstraints } from './queue-service.js';
 import { isOperationalPickup } from '../orders/operational-pickup.js';
+import { excludeNewStateWhere, isNewState } from '../orders/new-state.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
@@ -102,6 +103,7 @@ interface StoredOrder {
   fulfillmentCompositionState: string;
   cancelledInSource: boolean;
   cancelledByLogistAt: Date | null;
+  externalStateId: string | null;
 }
 
 async function readOrder(db: Database | TransactionClient, id: string): Promise<StoredOrder> {
@@ -120,6 +122,7 @@ async function readOrder(db: Database | TransactionClient, id: string): Promise<
       fulfillmentCompositionState: true,
       cancelledInSource: true,
       cancelledByLogistAt: true,
+      externalStateId: true,
     },
   });
   if (order === null) {
@@ -217,7 +220,16 @@ function assertAssignmentShift(order: StoredOrder, shiftId: string | null): void
  * уже принято базой, и повторно «перепроверять» его нельзя — это вернуло бы
  * ровно ту гонку, от которой избавляет условная запись.
  */
-function explainClaimFailure(order: StoredOrder): never {
+function explainClaimFailure(order: StoredOrder, newStateId?: string | null | undefined): never {
+  // Статус «Новый» называется честно: заказ не «уже взят» и не сломан составом —
+  // он ещё не готов к операционной работе и в очередь не идёт.
+  if (isNewState(order, newStateId)) {
+    throw new AppError('CONFLICT', {
+      message: 'order is in the New state',
+      publicMessage: 'Заказ в статусе «Новый»: он ещё не готов к работе.',
+      conflict: { kind: 'ORDER_NOT_ASSEMBLABLE' },
+    });
+  }
   // Отмена называется отдельно: «состав не подтверждён» отправило бы флориста
   // искать несуществующую проблему в составе.
   if (order.cancelledInSource || order.cancelledByLogistAt !== null) {
@@ -257,6 +269,7 @@ export async function claimOrder(
   actor: Actor,
   orderId: string,
   context: RequestContext,
+  newStateId?: string | null | undefined,
 ): Promise<ProcessResult> {
   return db.$transaction(async (tx) => {
     // Смена блокируется ДО заказа и внутри той же транзакции: иначе между
@@ -270,7 +283,14 @@ export async function claimOrder(
     const updated = await tx.deliveryOrder.updateMany({
       // Всё условие целиком лежит в WHERE. Ни одной проверки «до» здесь нет
       // и быть не может: именно между проверкой и записью и происходит гонка.
-      where: { id: orderId, fulfillmentProcessState: 'NEW', ...ASSEMBLABLE },
+      // Статус «Новый» ручным взятием тоже не берётся — то же исключение, что
+      // и у очереди.
+      where: {
+        id: orderId,
+        fulfillmentProcessState: 'NEW',
+        ...ASSEMBLABLE,
+        ...excludeNewStateWhere(newStateId),
+      },
       data: {
         fulfillmentProcessState: 'IN_ASSEMBLY',
         fulfillmentAssigneeId: actor.userId,
@@ -282,7 +302,7 @@ export async function claimOrder(
 
     if (updated.count === 0) {
       // Проигравший не оставляет следов: ни аудита, ни события.
-      explainClaimFailure(await readOrder(tx, orderId));
+      explainClaimFailure(await readOrder(tx, orderId), newStateId);
     }
 
     const order = await readOrder(tx, orderId);
@@ -613,6 +633,7 @@ export async function autoAssignTx(
     shiftId: string;
     operationsStartDate?: string | undefined;
     flowwowChannelId?: string | undefined;
+    newStateId?: string | null | undefined;
   },
   context: RequestContext,
 ): Promise<boolean> {
@@ -632,7 +653,7 @@ export async function autoAssignTx(
       fulfillmentAssigneeId: null,
       cancelledInSource: false,
       cancelledByLogistAt: null,
-      ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId),
+      ...offerableConstraints(input.operationsStartDate, input.flowwowChannelId, input.newStateId),
     },
     data: {
       fulfillmentProcessState: 'IN_ASSEMBLY',

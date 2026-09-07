@@ -29,6 +29,7 @@ import {
   operationalPickupSql,
   operationalPickupOr,
 } from '../orders/operational-pickup.js';
+import { excludeNewStateSql } from '../orders/new-state.js';
 
 /**
  * Размер страницы очереди.
@@ -325,6 +326,8 @@ export async function listPickupQueue(
     queueDateFrom?: string | undefined;
     /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
     flowwowChannelId?: string | undefined;
+    /** UUID статуса «Новый»: его заказы из очереди выдачи исключаются целиком. */
+    newStateId?: string | null | undefined;
   } = {},
 ): Promise<PickupQueuePage> {
   const limit = Math.min(Math.max(input.limit ?? QUEUE_PAGE_SIZE, 1), MAX_QUEUE_PAGE_SIZE);
@@ -363,6 +366,9 @@ export async function listPickupQueue(
   const waiting = Prisma.sql`
     FROM "DeliveryOrder" AS o
     WHERE ${operationalPickupSql(input.flowwowChannelId)}
+      -- Статус «Новый» исключается из «Ожидают выдачи» целиком: ни самовывоз,
+      -- ни Flowwow его сюда не возвращают. По UUID; без переменной — TRUE.
+      AND ${excludeNewStateSql(input.newStateId)}
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
