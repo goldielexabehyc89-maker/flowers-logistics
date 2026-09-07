@@ -46,6 +46,7 @@ export async function floristDispatchStatus(
   now: Date = new Date(),
   operationsStartDate?: string | undefined,
   flowwowChannelId?: string | undefined,
+  newStateId?: string | null | undefined,
 ): Promise<FloristDispatchStatus> {
   const mode = await readFloristDispatchMode(db);
   const shift = await db.floristShift.findFirst({
@@ -74,7 +75,8 @@ export async function floristDispatchStatus(
     finishAfterCurrent: shift?.dispatchFinishAfterCurrent ?? false,
     // Число ожидающих показываем и до готовности: флорист видит нагрузку.
     waitingCount: mode.value.auto
-      ? (await listDispatchableOrderIds(db, now, operationsStartDate, flowwowChannelId)).length
+      ? (await listDispatchableOrderIds(db, now, operationsStartDate, flowwowChannelId, newStateId))
+          .length
       : 0,
     activeOrder:
       active === null

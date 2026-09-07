@@ -17,6 +17,7 @@ import { Prisma } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { OPERATIONS_START_DATE } from './operations-window.js';
+import { excludeNewStateSql } from './new-state.js';
 
 /** Что показывать: рабочие сделки, требующие внимания либо всё сразу. */
 export type DealsGroup = 'ROUTABLE' | 'ATTENTION' | 'ALL';
@@ -50,6 +51,12 @@ export interface DealsScope {
    * самовывоз этим НЕ трогается (его прежнее поведение в «Сделках» сохраняется).
    */
   flowwowChannelId?: string | null;
+  /**
+   * UUID статуса «Новый» (`MOYSKLAD_NEW_STATE_ID`). Заказы этого статуса из
+   * «Сделок» исключаются целиком, независимо от канала. Не задано — исключения
+   * нет.
+   */
+  newStateId?: string | null;
 }
 
 /**
@@ -165,6 +172,9 @@ export function dealsWhere(scope: DealsScope): Prisma.Sql {
     o."inScope" = true
     AND o."sourceArchived" = false
     AND o."sourceMissing" = false
+    -- Статус «Новый» из «Сделок» исключается целиком (единый предикат). По UUID,
+    -- не по названию; без переменной условие пустое (TRUE) — поведение прежнее.
+    AND ${excludeNewStateSql(scope.newStateId)}
     -- «Принят, Не оплачен» хранится и обновляется, но в «Сделках» не показывается,
     -- пока статус в источнике не станет допустимым. Сравнение по UUID состояния,
     -- не по строке. IS DISTINCT FROM оставляет заказы с неизвестным состоянием.

@@ -26,6 +26,7 @@ import type { Database } from '../../platform/db.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { normalizePageRequest, pageInfo, type PageInfo } from '../fulfillment/paging.js';
 import { isOperationalPickup, operationalPickupSql } from '../orders/operational-pickup.js';
+import { excludeNewStateSql } from '../orders/new-state.js';
 
 /** Роли, которым виден раздел и его API. Право проверяет сервер. */
 export const AWAITING_INTAKE_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'] as const;
@@ -87,6 +88,8 @@ export interface ListAwaitingInput {
   queueDateFrom?: string | undefined;
   /** UUID канала Flowwow: его заказы считаются операционным самовывозом. */
   flowwowChannelId?: string | undefined;
+  /** UUID статуса «Новый»: его заказы из «Ожидают приёмки» исключаются целиком. */
+  newStateId?: string | null | undefined;
 }
 
 /**
@@ -97,7 +100,10 @@ export interface ListAwaitingInput {
  * не списан; и ТЕКУЩИЙ круг сборки ещё не размещался (нет размещения этого
  * круга — ни активного, ни освобождённого).
  */
-function baseFilter(queueDateFrom?: string | undefined): Prisma.Sql {
+function baseFilter(
+  queueDateFrom?: string | undefined,
+  newStateId?: string | null | undefined,
+): Prisma.Sql {
   // Узкая граница очереди: старые хвосты не показываем. Заказ без даты остаётся
   // видимым — его нужно разобрать вручную. Без переменной — Prisma.empty.
   const cutoffClause =
@@ -112,6 +118,9 @@ function baseFilter(queueDateFrom?: string | undefined): Prisma.Sql {
       AND NOT o."sourceMissing"
       AND NOT o."cancelledInSource"
       AND o."cancelledByLogistAt" IS NULL
+      -- Статус «Новый» из «Ожидают приёмки» исключается целиком. По UUID; без
+      -- переменной — TRUE (прежнее поведение).
+      AND ${excludeNewStateSql(newStateId)}
       ${cutoffClause}
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupIssue" i WHERE i."orderId" = o."id")
       AND NOT EXISTS (SELECT 1 FROM "OrderPickupCancellation" c WHERE c."orderId" = o."id")
@@ -153,7 +162,7 @@ export async function listAwaitingIntake(
   input: ListAwaitingInput = {},
 ): Promise<AwaitingIntakeResult> {
   const search = (input.search ?? '').trim();
-  const base = baseFilter(input.queueDateFrom);
+  const base = baseFilter(input.queueDateFrom, input.newStateId);
   const sClause = searchClause(search);
 
   // Счётчики по типу, с учётом поиска: одним группированным запросом.

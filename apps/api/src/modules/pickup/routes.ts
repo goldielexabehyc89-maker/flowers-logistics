@@ -87,6 +87,7 @@ export async function registerPickupRoutes(app: AppServer, deps: PickupRouteDeps
         operationsStartDate: deps.config.OPERATIONS_START_DATE,
         queueDateFrom: deps.config.PICKUP_WAREHOUSE_QUEUE_DATE_FROM,
         flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+        newStateId: deps.config.MOYSKLAD_NEW_STATE_ID,
       }),
       readWarehouseManualEntry(deps.db),
     ]);

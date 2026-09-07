@@ -364,6 +364,7 @@ function scopeOf(
   operationsStartDate: string,
   excludedSalesChannelId: string | null,
   flowwowChannelId: string | null,
+  newStateId: string | null,
 ): DealsScope {
   return {
     deliveryDate: query.deliveryDate ?? moscowCalendarDate(new Date()),
@@ -375,6 +376,7 @@ function scopeOf(
     operationsStartDate,
     excludedSalesChannelId,
     flowwowChannelId,
+    newStateId,
   };
 }
 
@@ -1107,6 +1109,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       deps.config.OPERATIONS_START_DATE,
       deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
       deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID ?? null,
+      deps.config.MOYSKLAD_NEW_STATE_ID ?? null,
     );
 
     const [ids, total, withoutPoint] = await Promise.all([
@@ -1142,6 +1145,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
       deps.config.OPERATIONS_START_DATE,
       deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
       deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID ?? null,
+      deps.config.MOYSKLAD_NEW_STATE_ID ?? null,
     );
     const ids = await dealsIds(deps.db, scope);
 
@@ -1217,6 +1221,7 @@ export async function registerOrderRoutes(app: AppServer, deps: OrdersDeps): Pro
         deps.config.OPERATIONS_START_DATE,
         deps.config.DEALS_EXCLUDED_SALES_CHANNEL_ID ?? null,
         deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID ?? null,
+        deps.config.MOYSKLAD_NEW_STATE_ID ?? null,
       ),
       includeDrafts: false,
       group: 'ROUTABLE',

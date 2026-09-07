@@ -106,6 +106,7 @@ async function main(): Promise<void> {
       'florist.dispatch': createDispatchHandler(
         config.OPERATIONS_START_DATE,
         config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+        config.MOYSKLAD_NEW_STATE_ID,
       ),
       // Автоматический расчёт расстояния за МКАД. Отсечку по дате доставки
       // держит обработчик: без `MKAD_DISTANCE_AUTO_CALC_FROM` он ничего не делает.

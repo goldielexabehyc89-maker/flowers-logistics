@@ -211,4 +211,21 @@ describe('узкая синхронизация состояния заказа 
       loadConfig({ ...PROD, MOYSKLAD_TOKEN: 'live-token', MOYSKLAD_READ_ONLY: 'false' }),
     ).toThrow(/MOYSKLAD_READ_ONLY=false не поддерживается/);
   });
+
+  it('MOYSKLAD_NEW_STATE_ID: отсутствие не мешает запуску, пустая строка = не задано', () => {
+    // Переменной нет — приложение стартует штатно, исключения нет.
+    expect(loadConfig({ ...BASE }).MOYSKLAD_NEW_STATE_ID).toBeUndefined();
+    // Пустая строка приравнивается к «не задано», а не к ошибке.
+    expect(
+      loadConfig({ ...BASE, MOYSKLAD_NEW_STATE_ID: '' }).MOYSKLAD_NEW_STATE_ID,
+    ).toBeUndefined();
+  });
+
+  it('MOYSKLAD_NEW_STATE_ID: корректный UUID принимается, мусор роняет запуск', () => {
+    const id = '4553382b-2ea3-11ed-0a80-09c5000d6021';
+    expect(loadConfig({ ...BASE, MOYSKLAD_NEW_STATE_ID: id }).MOYSKLAD_NEW_STATE_ID).toBe(id);
+    expect(() => loadConfig({ ...BASE, MOYSKLAD_NEW_STATE_ID: 'не-uuid' })).toThrow(
+      /MOYSKLAD_NEW_STATE_ID/,
+    );
+  });
 });

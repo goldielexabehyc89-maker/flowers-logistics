@@ -206,6 +206,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
         actor.userId,
         deps.config.OPERATIONS_START_DATE,
         deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+        deps.config.MOYSKLAD_NEW_STATE_ID,
       ),
     ]);
     return { shift, activeOrders };
@@ -298,6 +299,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
         offset: query.offset,
         operationsStartDate: deps.config.OPERATIONS_START_DATE,
         flowwowChannelId: deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+        newStateId: deps.config.MOYSKLAD_NEW_STATE_ID,
       },
     );
   });
@@ -321,6 +323,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
       new Date(),
       deps.config.OPERATIONS_START_DATE,
       deps.config.MOYSKLAD_FLOWWOW_SALES_CHANNEL_ID,
+      deps.config.MOYSKLAD_NEW_STATE_ID,
     );
   });
 
@@ -367,7 +370,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   app.post('/api/florist/orders/:id/claim', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
     const { id } = idParamSchema.parse(request.params);
-    return claimOrder(deps.db, actor, id, contextOf(request));
+    return claimOrder(deps.db, actor, id, contextOf(request), deps.config.MOYSKLAD_NEW_STATE_ID);
   });
 
   app.post('/api/florist/orders/:id/release', async (request) => {
