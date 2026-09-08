@@ -20,6 +20,7 @@ import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { enqueueDispatch } from './dispatch-trigger.js';
+import { assertNotIssued, isIssuedLocked } from '../orders/issued-pickup.js';
 
 export const NO_FLOWERS_KIND = 'NO_FLOWERS_QUARANTINE';
 
@@ -39,6 +40,11 @@ export async function quarantineNoFlowers(
   comment: string | null,
   context: RequestContext,
 ): Promise<{ id: string; created: boolean }> {
+  // Выданный покупателю заказ в карантин «Нет товара» не уходит: он уже не
+  // производственная работа. Проверка под блокировкой строки — не спорит с
+  // одновременной выдачей. Устаревшая кнопка/прямой запрос получают отказ.
+  await assertNotIssued(tx, order.id);
+
   // Идемпотентность: открытый карантин уже есть — возвращаем его, второго не создаём.
   const existing = await tx.orderNoFlowersQuarantine.findFirst({
     where: { orderId: order.id, activeKey: { not: null } },
@@ -272,15 +278,17 @@ export interface ReturnResult {
   returned: boolean;
   alreadyClosed: boolean;
   closedUnfit: boolean;
+  /** Закрыто, потому что заказ уже выдан покупателю (частный случай `closedUnfit`). */
+  closedIssued: boolean;
 }
 
 /**
- * Возврат заказа из карантина в очередь (в КОНЕЦ).
+ * Возврат заказа из карантина в очередь (в НАЧАЛО — высший приоритет).
  *
  * Идемпотентно: повторный вызов на уже закрытом карантине ничего не создаёт и
  * не двигает. Если заказ во время карантина стал непригоден к сборке (отменён,
- * архивирован, пропал из источника, вышел из области или уже не `NEW`), задача
- * закрывается штатно БЕЗ возврата в очередь.
+ * архивирован, пропал из источника, вышел из области, уже не `NEW` ИЛИ уже
+ * ВЫДАН покупателю), задача закрывается штатно БЕЗ возврата в очередь.
  */
 export async function returnFromQuarantine(
   db: Database,
@@ -300,8 +308,13 @@ export async function returnFromQuarantine(
       });
     }
     if (q.activeKey === null) {
-      return { returned: false, alreadyClosed: true, closedUnfit: false };
+      return { returned: false, alreadyClosed: true, closedUnfit: false, closedIssued: false };
     }
+
+    // Факт выдачи проверяется ПОД БЛОКИРОВКОЙ строки заказа: возврат из
+    // карантина не должен разойтись с одновременной выдачей. Выданный заказ в
+    // очередь не возвращается — карантин закрывается штатно, без возврата.
+    const issued = await isIssuedLocked(tx, q.orderId);
 
     const order = await tx.deliveryOrder.findUnique({
       where: { id: q.orderId },
@@ -315,6 +328,7 @@ export async function returnFromQuarantine(
       },
     });
     const unfit =
+      issued ||
       order === null ||
       order.cancelledInSource ||
       order.cancelledByLogistAt !== null ||
@@ -325,17 +339,20 @@ export async function returnFromQuarantine(
       // Иной статус — знак, что заказ ушёл другим допустимым процессом.
       order.fulfillmentProcessState !== 'NEW';
 
+    // Причина закрытия называется точно: выдача — отдельный, понятный случай.
+    const closedReason = issued ? 'ORDER_ALREADY_ISSUED' : 'ORDER_NOT_FULFILLABLE';
+
     const now = new Date();
     // Атомарное закрытие: только если ещё активен (гонка двух возвратов).
     const closed = await tx.orderNoFlowersQuarantine.updateMany({
       where: { id: q.id, activeKey: { not: null } },
       data: unfit
-        ? { activeKey: null, closedAt: now, closedReason: 'ORDER_NOT_FULFILLABLE' }
+        ? { activeKey: null, closedAt: now, closedReason }
         : { activeKey: null, returnedAt: now, returnedById: actor.userId },
     });
     if (closed.count === 0) {
       // Кто-то успел закрыть раньше — идемпотентно ничего не делаем.
-      return { returned: false, alreadyClosed: true, closedUnfit: false };
+      return { returned: false, alreadyClosed: true, closedUnfit: false, closedIssued: false };
     }
 
     if (!unfit) {
@@ -353,9 +370,7 @@ export async function returnFromQuarantine(
       entityId: q.orderId,
       actorUserId: actor.userId,
       actorRoles: actor.roles,
-      newValue: unfit
-        ? { quarantineId: q.id, closedReason: 'ORDER_NOT_FULFILLABLE' }
-        : { quarantineId: q.id },
+      newValue: unfit ? { quarantineId: q.id, closedReason } : { quarantineId: q.id },
       ip: context.ip,
       userAgent: context.userAgent,
     });
@@ -374,6 +389,6 @@ export async function returnFromQuarantine(
       await enqueueDispatch(tx);
     }
 
-    return { returned: !unfit, alreadyClosed: false, closedUnfit: unfit };
+    return { returned: !unfit, alreadyClosed: false, closedUnfit: unfit, closedIssued: issued };
   });
 }

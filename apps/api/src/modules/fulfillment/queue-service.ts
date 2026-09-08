@@ -63,6 +63,7 @@ import {
 import { isPickupMethod } from '../pickup/views.js';
 import { operationalPickupOr } from '../orders/operational-pickup.js';
 import { excludeNewStateWhere } from '../orders/new-state.js';
+import { NOT_ISSUED_WHERE } from '../orders/issued-pickup.js';
 import { readFloristDispatchMode } from '../settings/service.js';
 import {
   effectiveMinutes,
@@ -351,6 +352,10 @@ export function offerableConstraints(
     // ни в счётчики, ни в приоритет самовывоза, ни в ручное взятие, ни в
     // авто-раздачу. Возврат в очередь — только решением менеджера.
     noFlowersQuarantines: { none: { activeKey: { not: null } } },
+    // Уже выданный покупателю самовывоз (есть OrderPickupIssue) не может снова
+    // стать работой флориста — ни в очереди, ни в поиске, ни в счётчиках, ни в
+    // автораздаче. Признак — сам факт выдачи, независимо от состояния и круга.
+    ...NOT_ISSUED_WHERE,
     AND: [
       {
         // «Принят, Не оплачен» из работы флориста исключается — КРОМЕ самовывоза

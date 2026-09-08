@@ -79,9 +79,19 @@ export function DecisionsTab(): React.JSX.Element {
 
   const returnToQueue = useMutation({
     mutationFn: (quarantineId: string) =>
-      client.post(`/api/logistics/no-flowers/quarantines/${quarantineId}/return`, {}),
-    onSuccess: () => {
-      showToast('Заказ возвращён в очередь', 'success');
+      client.post<{ returned: boolean; closedIssued: boolean; closedUnfit: boolean }>(
+        `/api/logistics/no-flowers/quarantines/${quarantineId}/return`,
+        {},
+      ),
+    onSuccess: (result) => {
+      // Выданный покупателю заказ в очередь не возвращается: задача штатно
+      // закрыта, и сообщение об этом честное, а не «возвращён».
+      const message = result.closedIssued
+        ? 'Заказ уже выдан покупателю — задача закрыта без возврата'
+        : result.returned
+          ? 'Заказ возвращён в очередь'
+          : 'Задача закрыта: заказ больше не пригоден к сборке';
+      showToast(message, result.closedIssued || !result.returned ? 'info' : 'success');
       void queryClient.invalidateQueries({ queryKey: ['no-flowers'] });
       void queryClient.invalidateQueries({ queryKey: ['no-flowers-count'] });
     },
