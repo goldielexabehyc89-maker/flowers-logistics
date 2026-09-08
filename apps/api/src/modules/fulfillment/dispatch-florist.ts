@@ -10,6 +10,7 @@
 import type { Database } from '../../platform/db.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import { AppError } from '../../platform/errors.js';
+import { NOT_ISSUED_WHERE } from '../orders/issued-pickup.js';
 import { writeAudit } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { readFloristDispatchMode } from '../settings/service.js';
@@ -57,6 +58,9 @@ export async function floristDispatchStatus(
     where: {
       fulfillmentAssigneeId: actor.userId,
       fulfillmentProcessState: { in: ['IN_ASSEMBLY', 'NEEDS_REVIEW'] },
+      // Выданный покупателю заказ активной работой флориста не считается —
+      // панель AUTO не показывает его как текущее задание.
+      ...NOT_ISSUED_WHERE,
     },
     select: { id: true, externalName: true, assemblyRound: true },
   });

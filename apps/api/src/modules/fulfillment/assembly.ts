@@ -459,12 +459,19 @@ export async function reassignOrder(
       });
     }
 
+    // Выданный покупателю заказ переназначением в производство не возвращается:
+    // устаревшая карточка/прямой запрос не должны возобновить его сборку.
+    // Проверка под блокировкой строки — согласована с одновременной выдачей.
+    await assertNotIssued(tx, input.orderId);
+
     const before = await readOrder(tx, input.orderId);
     const updated = await tx.deliveryOrder.updateMany({
       where: {
         id: input.orderId,
         fulfillmentProcessState: { in: ['NEW', 'IN_ASSEMBLY'] },
         ...ASSEMBLABLE,
+        // …и не выданный покупателю (WHERE отсекает и гонку).
+        ...NOT_ISSUED_WHERE,
       },
       data: {
         fulfillmentProcessState: 'IN_ASSEMBLY',
@@ -794,6 +801,12 @@ export async function assembleOrder(
     if (current === undefined) {
       throw new AppError('NOT_FOUND', { message: 'order not found' });
     }
+
+    // Уже выданный покупателю заказ «Собран» завершить нельзя: устаревшая
+    // карточка или прямой запрос не должны возобновить его производство. Строка
+    // уже под блокировкой этой транзакции, поэтому проверка согласована с
+    // одновременной выдачей.
+    await assertNotIssued(tx, input.orderId);
 
     if (current.fulfillmentProcessState !== 'IN_ASSEMBLY') {
       throw new AppError('CONFLICT', {
