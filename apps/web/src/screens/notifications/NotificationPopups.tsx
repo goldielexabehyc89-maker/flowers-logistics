@@ -25,7 +25,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../auth/AuthContext';
 import { Button, Modal } from '../../ui/components';
 import { subscribeRealtimeEvents } from '../../realtime/event-bus';
-import { type NotificationView } from './notifications';
+import { NO_FLOWERS_QUARANTINE_KIND, type NotificationView } from './notifications';
 import { NotificationBody, ReassemblyDialog, RefusalDialog } from './NotificationParts';
 
 export function NotificationPopups(): React.JSX.Element | null {
@@ -53,7 +53,14 @@ export function NotificationPopups(): React.JSX.Element | null {
         return;
       }
       try {
-        const parsed = JSON.parse(data) as { notificationId?: string };
+        const parsed = JSON.parse(data) as { notificationId?: string; kind?: string };
+        // Карантин «Нет цветов» — не сюда: у него своё окно (NoFlowersPopups)
+        // со своей операцией «Вернуть в очередь». Общий механизм его пропускает,
+        // иначе окно задвоилось бы, а тело уведомления (без полей/состава) ещё и
+        // роняло бы интерфейс.
+        if (parsed.kind === NO_FLOWERS_QUARANTINE_KIND) {
+          return;
+        }
         const id = parsed.notificationId;
         // Дедуп: одно событие — одно окно, даже если пришло повторно.
         if (typeof id === 'string') {
