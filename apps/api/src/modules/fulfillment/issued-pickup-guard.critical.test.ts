@@ -26,11 +26,14 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { snapshotHash, type FulfillmentSnapshot } from './composition.js';
 import { claimOrder, reopenOrder, assignReassembly } from './assembly.js';
-import { listDispatchableOrderIds } from './queue-service.js';
-import { offerableConstraints } from './queue-service.js';
+import { listDispatchableOrderIds, offerableConstraints, readQueue } from './queue-service.js';
 import { quarantineNoFlowers, returnFromQuarantine } from './no-flowers.js';
+import { floristDispatchStatus } from './dispatch-florist.js';
+import { dispatchFlorists } from './dispatch.js';
 import { applyFulfillmentSnapshot } from './service.js';
 import { startShift } from './shifts.js';
+import { issueToCustomer } from '../pickup/service.js';
+import { readFloristDispatchMode, saveFloristDispatchMode } from '../settings/service.js';
 
 let ctx: TestContext;
 const CONTEXT = { ip: null, userAgent: null };
@@ -416,5 +419,200 @@ describe('невыданный заказ из карантина сохраня
       select: { dispatchRequeuedAt: true },
     });
     expect(stored.dispatchRequeuedAt).not.toBeNull();
+  });
+});
+
+// --- Реальные функции чтения очереди / «Моих заказов» / статуса AUTO ---------
+
+async function setAuto(auto: boolean): Promise<void> {
+  const current = await readFloristDispatchMode(ctx.db);
+  await saveFloristDispatchMode(ctx.db, admin, {
+    value: { auto },
+    expectedVersion: current.version,
+    ip: null,
+    userAgent: null,
+  });
+}
+
+describe('реальные функции чтения не показывают выданный заказ работой', () => {
+  it('readQueue «Мои заказы»: выданный NEEDS_REVIEW не в активной работе, но собранный — в истории', async () => {
+    const florist = await floristOnShift('Мои заказы выдачи');
+    // Ошибочное состояние: выдан, но по прежней ошибке в NEEDS_REVIEW за флористом.
+    const stuck = await seedOrder({
+      deliveryMethodId: PICKUP,
+      state: 'NEEDS_REVIEW',
+      assignee: florist.userId,
+    });
+    await issue(stuck.id, false);
+    // Нормальная история: собран и выдан — остаётся в «Собранных».
+    const assembledIssued = await seedOrder({
+      deliveryMethodId: PICKUP,
+      state: 'ASSEMBLED',
+      assignee: florist.userId,
+    });
+    await issue(assembledIssued.id, true);
+
+    const work = await readQueue(
+      ctx.db,
+      { userId: florist.userId, roles: ['FLORIST'] },
+      {
+        day: 'today',
+        scope: 'mine',
+        group: 'work',
+        includeAssigned: false,
+        operationsStartDate: OPS,
+      },
+      NOW,
+    );
+    expect(work.items.map((i) => i.id)).not.toContain(stuck.id);
+
+    const assembled = await readQueue(
+      ctx.db,
+      { userId: florist.userId, roles: ['FLORIST'] },
+      {
+        day: 'today',
+        scope: 'mine',
+        group: 'assembled',
+        includeAssigned: false,
+        operationsStartDate: OPS,
+      },
+      NOW,
+    );
+    // Собранный выданный заказ сохраняется как история (не пропал).
+    expect(assembled.items.map((i) => i.id)).toContain(assembledIssued.id);
+    expect(assembled.assembledTotal ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('floristDispatchStatus: выданный NEEDS_REVIEW не показывается активным заданием', async () => {
+    const florist = await floristOnShift('AUTO-панель выдачи');
+    const stuck = await seedOrder({
+      deliveryMethodId: PICKUP,
+      state: 'NEEDS_REVIEW',
+      assignee: florist.userId,
+    });
+    await issue(stuck.id, false);
+
+    const status = await floristDispatchStatus(ctx.db, florist, NOW, OPS, FLOWWOW);
+    expect(status.activeOrder).toBeNull();
+  });
+
+  it('AUTO: флорист с одним лишь выданным заказом считается свободным и получает работу', async () => {
+    const florist = await floristOnShift('AUTO занятость выдачи');
+    await ctx.db.floristShift.update({
+      where: { id: florist.shiftId },
+      data: { dispatchReadyAt: new Date('2029-09-15T05:00:00.000Z') },
+    });
+    // За флористом — только ВЫДАННЫЙ IN_ASSEMBLY (фантом): занятостью быть не должен.
+    const phantom = await seedOrder({
+      deliveryMethodId: PICKUP,
+      state: 'IN_ASSEMBLY',
+      assignee: florist.userId,
+    });
+    await issue(phantom.id, false);
+    // Свободный обычный заказ на раздачу.
+    const fresh = await seedOrder({ deliveryMethodId: DELIVERY });
+    // Изоляция общей базы: остальные свободные заказы выводим из области, чтобы
+    // единственным кандидатом раздачи был `fresh` (иначе флорист получил бы
+    // чужой NEW-заказ из соседнего теста, и проверка «получил работу» плавала).
+    await ctx.db.deliveryOrder.updateMany({
+      where: { fulfillmentProcessState: 'NEW', id: { not: fresh.id } },
+      data: { inScope: false, fulfillmentInScope: false },
+    });
+
+    try {
+      await setAuto(true);
+      await dispatchFlorists(ctx.db, NOW, OPS, FLOWWOW);
+    } finally {
+      await setAuto(false);
+    }
+
+    const assigned = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: fresh.id },
+      select: { fulfillmentAssigneeId: true, fulfillmentProcessState: true },
+    });
+    expect(assigned.fulfillmentAssigneeId).toBe(florist.userId);
+    expect(assigned.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+    // Выданный фантом при этом никому не выдавался повторно и остался как был.
+    const phantomAfter = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: phantom.id },
+      select: { fulfillmentProcessState: true },
+    });
+    expect(phantomAfter.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+  });
+});
+
+// --- Конкурентные гонки штатной issueToCustomer с производственными действиями -
+
+describe('гонка выдачи и производственного действия (оба порядка)', () => {
+  const pickupDeps = () => ({ db: ctx.db, flowwowChannelId: FLOWWOW });
+  const issueReal = (orderNumber: string) =>
+    issueToCustomer(pickupDeps(), admin, { orderNumber, source: 'SCAN' }, CONTEXT);
+
+  /** Инвариант: выданный заказ не остаётся доступным к производству. */
+  async function assertNotProductionAvailable(orderId: string): Promise<void> {
+    expect(await offerableCount(orderId)).toBe(0);
+    const dispatchable = await listDispatchableOrderIds(ctx.db, NOW, OPS, FLOWWOW);
+    expect(dispatchable).not.toContain(orderId);
+    // Завершить сборку выданного нельзя даже при IN_ASSEMBLY.
+    const stored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { fulfillmentProcessState: true, fulfillmentProcessVersion: true },
+    });
+    if (stored.fulfillmentProcessState === 'IN_ASSEMBLY') {
+      await expect(
+        assembleOrderForRace(orderId, stored.fulfillmentProcessVersion),
+      ).rejects.toMatchObject({ conflict: { kind: 'ORDER_ALREADY_ISSUED' } });
+    }
+  }
+  async function assembleOrderForRace(orderId: string, version: number): Promise<unknown> {
+    const { assembleOrder } = await import('./assembly.js');
+    return assembleOrder(
+      ctx.db,
+      admin,
+      { orderId, expectedProcessVersion: version, flowwowChannelId: FLOWWOW },
+      CONTEXT,
+    );
+  }
+
+  it('порядок A (выдача → взятие): взятие отклонено, заказ выдан', async () => {
+    const order = await seedOrder({ deliveryMethodId: PICKUP, state: 'NEW' });
+    const florist = await floristOnShift('Гонка A');
+    await issueReal(order.number);
+    await expect(claimOrder(ctx.db, florist, order.id, CONTEXT)).rejects.toMatchObject({
+      conflict: { kind: 'ORDER_ALREADY_ISSUED' },
+    });
+    await assertNotProductionAvailable(order.id);
+  });
+
+  it('порядок B (взятие → выдача): выдача проходит, заказ недоступен к сборке', async () => {
+    const order = await seedOrder({ deliveryMethodId: PICKUP, state: 'NEW' });
+    const florist = await floristOnShift('Гонка B');
+    await claimOrder(ctx.db, florist, order.id, CONTEXT);
+    await issueReal(order.number);
+    await assertNotProductionAvailable(order.id);
+  });
+
+  it('порядок B (возврат в работу → выдача): выдача проходит, сборка недоступна', async () => {
+    const order = await seedOrder({ deliveryMethodId: PICKUP, state: 'ASSEMBLED' });
+    await reopenOrder(ctx.db, admin, { orderId: order.id, reason: 'вернуть до выдачи' }, CONTEXT);
+    await issueReal(order.number);
+    await assertNotProductionAvailable(order.id);
+  });
+
+  it('истинно конкурентно (взятие ∥ выдача): один результат, инвариант сохранён', async () => {
+    for (let round = 0; round < 6; round += 1) {
+      const order = await seedOrder({ deliveryMethodId: PICKUP, state: 'NEW' });
+      const florist = await floristOnShift(`Гонка concurrent ${round}`);
+      const [claimRes, issueRes] = await Promise.allSettled([
+        claimOrder(ctx.db, florist, order.id, CONTEXT),
+        issueReal(order.number),
+      ]);
+      // Выдача штатной операцией под блокировкой строки не срывается.
+      expect(issueRes.status).toBe('fulfilled');
+      // Заказ выдан — и в производство как работа не попадает ни при каком исходе взятия.
+      expect(await ctx.db.orderPickupIssue.count({ where: { orderId: order.id } })).toBe(1);
+      await assertNotProductionAvailable(order.id);
+      void claimRes;
+    }
   });
 });

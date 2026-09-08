@@ -459,6 +459,10 @@ function buildSupervisorSearchWhere(input: {
 }): Prisma.DeliveryOrderWhereInput {
   return {
     externalName: { contains: input.search, mode: 'insensitive' as const },
+    // Уже выданный покупателю заказ поиском руководителя во вкладке флориста НЕ
+    // представляется доступной производственной работой — ни как свободный, ни
+    // как «начатый». Его историю смотрят на экране истории заказа, а не здесь.
+    ...NOT_ISSUED_WHERE,
     OR: [
       {
         // Свободный пригодный заказ: «Новый» исключается здесь наравне с общей
@@ -837,8 +841,13 @@ export async function readQueue(
     db,
     // Поиск руководителя уже несёт состояния в своём `OR`; остальным путям
     // состояние добавляется здесь. Без границы дня участие в листе ищется по
-    // дню самого заказа — иначе вчерашний заказ терял бы маршрут.
-    supervisorSearch ? scopeWhere : { ...scopeWhere, fulfillmentProcessState: { in: states } },
+    // дню самого заказа — иначе вчерашний заказ терял бы маршрут. Выданный
+    // покупателю заказ исключается из АКТИВНОЙ работы (и «Моих заказов», и общей
+    // очереди): производственной работой он больше не является. «Собранные»
+    // (история) считаются отдельно (readAssembledPage) и этим не затрагиваются.
+    supervisorSearch
+      ? scopeWhere
+      : { ...scopeWhere, fulfillmentProcessState: { in: states }, ...NOT_ISSUED_WHERE },
   );
 
   const routes = await readRoutes(db, rows);

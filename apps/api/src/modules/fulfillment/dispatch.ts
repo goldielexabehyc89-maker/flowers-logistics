@@ -19,6 +19,7 @@ import { readFloristDispatchMode } from '../settings/service.js';
 import type { OutboxHandler } from '../outbox/worker.js';
 import { autoAssignTx } from './assembly.js';
 import { listDispatchableOrderIds } from './queue-service.js';
+import { NOT_ISSUED_WHERE } from '../orders/issued-pickup.js';
 
 /** Ключ advisory-блокировки распределения: один на весь процесс. */
 const DISPATCH_LOCK_KEY = 918_273_645;
@@ -41,11 +42,14 @@ async function availableFlorists(tx: TransactionClient): Promise<{ id: string; u
 
   const available: { id: string; userId: string }[] = [];
   for (const shift of shifts) {
-    // Занят обычным заказом или пересборкой — пропускаем.
+    // Занят обычным заказом или пересборкой — пропускаем. Уже выданный
+    // покупателю заказ занятостью НЕ считается: фантомная выдача не должна
+    // держать флориста без работы.
     const active = await tx.deliveryOrder.count({
       where: {
         fulfillmentAssigneeId: shift.userId,
         fulfillmentProcessState: { in: ['IN_ASSEMBLY', 'NEEDS_REVIEW'] },
+        ...NOT_ISSUED_WHERE,
       },
     });
     if (active > 0) {
