@@ -33,7 +33,7 @@ import { writeAudit, type AuditAction } from '../audit/service.js';
 import { offerableConstraints } from './queue-service.js';
 import { isOperationalPickup } from '../orders/operational-pickup.js';
 import { excludeNewStateWhere, isNewState } from '../orders/new-state.js';
-import { assertNotIssued, NOT_ISSUED_WHERE } from '../orders/issued-pickup.js';
+import { assertNotIssued, isIssuedLocked, NOT_ISSUED_WHERE } from '../orders/issued-pickup.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
@@ -281,9 +281,17 @@ export async function claimOrder(
       throw shiftRequired();
     }
 
+    // Факт выдачи проверяется ДО назначения и ПОД блокировкой строки заказа —
+    // тем же `SELECT … FOR UPDATE`, что берёт issueToCustomer. Если выдача идёт
+    // прямо сейчас, взятие ждёт снятия её блокировки и, увидев зафиксированную
+    // выдачу, отказывает `ORDER_ALREADY_ISSUED` вместо назначения. Порядок
+    // блокировок сохранён: FloristShift (выше) → DeliveryOrder (здесь).
+    // Условие в WHERE ниже остаётся поясом от прочих гонок.
+    await assertNotIssued(tx, orderId);
+
     const updated = await tx.deliveryOrder.updateMany({
-      // Всё условие целиком лежит в WHERE. Ни одной проверки «до» здесь нет
-      // и быть не может: именно между проверкой и записью и происходит гонка.
+      // Остальное условие целиком лежит в WHERE: именно между проверкой и записью
+      // происходят прочие гонки (перехват другим флористом, смена статуса).
       // Статус «Новый» ручным взятием тоже не берётся — то же исключение, что
       // и у очереди.
       where: {
@@ -291,8 +299,7 @@ export async function claimOrder(
         fulfillmentProcessState: 'NEW',
         ...ASSEMBLABLE,
         ...excludeNewStateWhere(newStateId),
-        // Уже выданный покупателю заказ вручную не берётся: то же исключение,
-        // что и у очереди/автораздачи. Понятную причину даёт разбор ниже.
+        // Уже выданный покупателю заказ вручную не берётся (пояс к проверке выше).
         ...NOT_ISSUED_WHERE,
       },
       data: {
@@ -308,10 +315,8 @@ export async function claimOrder(
     });
 
     if (updated.count === 0) {
-      // Выданный покупателю заказ называется отдельно и понятно — раньше общего
-      // «уже взят». Проверка под блокировкой строки: не спорит с одновременной
-      // выдачей.
-      await assertNotIssued(tx, orderId);
+      // Выдача уже отсеяна проверкой выше (под блокировкой строки). Здесь
+      // объясняется остальной проигрыш: отмена, вне области, «Новый», перехват.
       // Проигравший не оставляет следов: ни аудита, ни события.
       explainClaimFailure(await readOrder(tx, orderId), newStateId);
     }
@@ -673,6 +678,16 @@ export async function autoAssignTx(
    * могут разойтись. Условная запись атомарна: если заказ уже перехвачен или
    * перестал подходить, обновится 0 строк и назначение не состоится.
    */
+  // Факт выдачи проверяется ДО назначения и ПОД блокировкой строки заказа — тем
+  // же `SELECT … FOR UPDATE`, что берёт issueToCustomer. Если выдача идёт прямо
+  // сейчас, автораздача ждёт снятия её блокировки и, увидев зафиксированную
+  // выдачу, ПРОПУСКАЕТ заказ (возвращает false) — прогон продолжает искать
+  // подходящий. Порядок блокировок сохранён: FloristShift (выше по стеку) →
+  // DeliveryOrder (здесь). Условие в WHERE ниже — пояс от прочих гонок.
+  if (await isIssuedLocked(tx, input.orderId)) {
+    return false;
+  }
+
   const updated = await tx.deliveryOrder.updateMany({
     where: {
       id: input.orderId,
