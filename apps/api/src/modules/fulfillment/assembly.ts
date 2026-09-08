@@ -297,6 +297,9 @@ export async function claimOrder(
         fulfillmentAssignedAt: new Date(),
         fulfillmentShiftId: shift.id,
         fulfillmentProcessVersion: { increment: 1 },
+        // Заказ ушёл из свободной очереди в сборку — приоритет возврата из
+        // карантина отработал и снимается: он не переносится на будущие циклы.
+        dispatchRequeuedAt: null,
       },
     });
 
@@ -461,6 +464,9 @@ export async function reassignOrder(
         fulfillmentAssignedAt: new Date(),
         fulfillmentShiftId: shift.id,
         fulfillmentProcessVersion: { increment: 1 },
+        // Переназначение забирает заказ из свободной очереди: приоритет возврата
+        // снимается — на новую сборку он не переносится.
+        dispatchRequeuedAt: null,
       },
     });
 
@@ -661,6 +667,9 @@ export async function autoAssignTx(
       fulfillmentAssignedAt: new Date(),
       fulfillmentShiftId: input.shiftId,
       fulfillmentProcessVersion: { increment: 1 },
+      // Автораздача забрала заказ из свободной очереди: приоритет возврата из
+      // карантина отработал и снимается — на будущие циклы не переносится.
+      dispatchRequeuedAt: null,
     },
   });
   if (updated.count === 0) {
