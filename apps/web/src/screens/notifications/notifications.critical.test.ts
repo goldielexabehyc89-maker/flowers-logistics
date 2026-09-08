@@ -7,7 +7,10 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  changeComposition,
+  changeFields,
   hasCompositionChange,
+  noFlowersData,
   orderStateLabel,
   refusalReasonLabel,
   refusalStateLabel,
@@ -80,5 +83,37 @@ describe('подписи отказа', () => {
     expect(refusalStateLabel('PENDING')).toBe('Ожидает решения');
     expect(refusalStateLabel('APPROVED')).toBe('Отказ подтверждён');
     expect(refusalStateLabel('ZZZ')).toBe('ZZZ');
+  });
+});
+
+describe('безопасное чтение payload разных типов', () => {
+  it('поля изменений: массив как есть, всё прочее — пустой массив (не падает)', () => {
+    const fields = [{ category: 'ADDRESS', label: 'Адрес', old: 'a', new: 'b' }];
+    expect(changeFields({ fields })).toEqual(fields);
+    // Карантин/эскалация/неполные — полей нет: безопасный пустой массив.
+    expect(changeFields({})).toEqual([]);
+    expect(changeFields(undefined)).toEqual([]);
+    expect(changeFields({ composition: null })).toEqual([]);
+  });
+
+  it('состав: diff как есть или null, без обращения к отсутствующему полю', () => {
+    const diff = { added: [], removed: [], quantityChanged: [], parameterChanged: [] };
+    expect(changeComposition({ composition: diff })).toEqual(diff);
+    expect(changeComposition({})).toBeNull();
+    expect(changeComposition(undefined)).toBeNull();
+  });
+
+  it('данные карантина «Нет цветов» читаются безопасно из любой формы', () => {
+    expect(
+      noFlowersData({ floristName: 'Аня', reason: 'INSUFFICIENT_GOODS', comment: 'нет роз' }),
+    ).toEqual({ floristName: 'Аня', reason: 'INSUFFICIENT_GOODS', comment: 'нет роз' });
+    // Неполный/неизвестный payload не выдумывает значения — только null.
+    expect(noFlowersData({})).toEqual({ floristName: null, reason: null, comment: null });
+    expect(noFlowersData(undefined)).toEqual({ floristName: null, reason: null, comment: null });
+    expect(noFlowersData({ floristName: 42 })).toEqual({
+      floristName: null,
+      reason: null,
+      comment: null,
+    });
   });
 });

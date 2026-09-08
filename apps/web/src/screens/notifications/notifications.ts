@@ -13,9 +13,52 @@ export interface CompositionDiff {
   parameterChanged: { name: string }[];
 }
 
+/**
+ * Полезная нагрузка уведомления.
+ *
+ * `fields`/`composition` есть ТОЛЬКО у уведомлений об изменении заказа. У других
+ * типов (карантин «Нет цветов», эскалация, отказ) их нет вовсе — поэтому оба
+ * поля необязательны, и читать их надо через {@link changeFields} /
+ * {@link changeComposition}, а не напрямую: прямое `payload.fields.length`
+ * роняло весь интерфейс на записи без этих полей.
+ */
 export interface NotificationPayload {
-  fields: { category: string; label: string; old: string | null; new: string | null }[];
-  composition: CompositionDiff | null;
+  fields?: { category: string; label: string; old: string | null; new: string | null }[];
+  composition?: CompositionDiff | null;
+}
+
+/** `kind` уведомления карантина «Нет цветов»/«Нет товара» (совпадает с сервером). */
+export const NO_FLOWERS_QUARANTINE_KIND = 'NO_FLOWERS_QUARANTINE';
+
+/** Данные карантина «Нет цветов» в payload уведомления. Все поля необязательны. */
+export interface NoFlowersNotificationData {
+  floristName: string | null;
+  reason: string | null;
+  comment: string | null;
+}
+
+/** Безопасно читает данные карантина из payload неизвестной формы. */
+export function noFlowersData(payload: unknown): NoFlowersNotificationData {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  return {
+    floristName: typeof p['floristName'] === 'string' ? p['floristName'] : null,
+    reason: typeof p['reason'] === 'string' ? p['reason'] : null,
+    comment: typeof p['comment'] === 'string' ? p['comment'] : null,
+  };
+}
+
+/** Список изменённых полей заказа или пустой массив — безопасно к любой форме. */
+export function changeFields(
+  payload: NotificationPayload | undefined,
+): { category: string; label: string; old: string | null; new: string | null }[] {
+  return Array.isArray(payload?.fields) ? payload.fields : [];
+}
+
+/** Diff состава или `null` — безопасно к любой форме. */
+export function changeComposition(
+  payload: NotificationPayload | undefined,
+): CompositionDiff | null {
+  return payload?.composition ?? null;
 }
 
 export interface OrderStateView {

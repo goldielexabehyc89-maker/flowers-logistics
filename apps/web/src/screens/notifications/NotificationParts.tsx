@@ -13,13 +13,17 @@ import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
 import { Button, Modal } from '../../ui/components';
 import {
+  changeComposition,
+  changeFields,
   hasCompositionChange,
+  noFlowersData,
   orderStateLabel,
   refusalReasonLabel,
   refusalStateLabel,
   resolutionKindLabel,
   sourceLabel,
   LOGIST_TASK_ESCALATION_KIND,
+  NO_FLOWERS_QUARANTINE_KIND,
   type NotificationView,
 } from './notifications';
 import './notifications.css';
@@ -86,16 +90,60 @@ export function NotificationBody({ item }: { item: NotificationView }): React.JS
     );
   }
 
-  const composition = item.payload.composition;
+  /*
+   * Карантин «Нет цветов»/«Нет товара»: у него своя форма (флорист, причина,
+   * комментарий) и НЕТ полей/состава — раньше общий низ обрушал весь интерфейс
+   * на `payload.fields.length`. Управление возвратом остаётся в «Самовывоз →
+   * Решения»: здесь только показ, без небезопасных действий.
+   */
+  if (item.kind === NO_FLOWERS_QUARANTINE_KIND) {
+    const data = noFlowersData(item.payload);
+    const reason = data.reason === 'INSUFFICIENT_GOODS' ? 'Нет цветов' : (data.reason ?? '—');
+    return (
+      <div className="stack stack--tight" data-testid="notif-no-flowers">
+        <div className="muted text-sm">
+          {sourceLabel(item.source)} · {formatMoscowDateTime(item.occurredAt)}
+        </div>
+        <div className="notif__field">
+          <span className="notif__field-label">Флорист</span>
+          <span>{data.floristName ?? '—'}</span>
+        </div>
+        <div className="notif__field">
+          <span className="notif__field-label">Причина</span>
+          <span>{reason}</span>
+        </div>
+        {data.comment !== null && data.comment.trim() !== '' && (
+          <div className="notif__field">
+            <span className="notif__field-label">Комментарий</span>
+            <span>{data.comment}</span>
+          </div>
+        )}
+        <div className="notif__state" data-testid="notif-state">
+          <span className="notif__field-label">Сейчас</span> {orderStateLabel(item.currentState)}
+        </div>
+      </div>
+    );
+  }
+
+  /*
+   * Обычное изменение заказа. Поля и состав читаются ЗАЩИЩЁННО: у неизвестного,
+   * старого или неполного уведомления их может не быть, и это не должно ронять
+   * список. Если показать нечего — безопасная подпись, без выдуманных значений
+   * и без небезопасных действий.
+   */
+  const fields = changeFields(item.payload);
+  const composition = changeComposition(item.payload);
+  const hasComposition = hasCompositionChange(composition);
+  const hasDetails = fields.length > 0 || hasComposition;
   return (
     <div className="stack stack--tight">
       <div className="muted text-sm">
         {sourceLabel(item.source)} · {formatMoscowDateTime(item.occurredAt)}
       </div>
 
-      {item.payload.fields.length > 0 && (
+      {fields.length > 0 && (
         <ul className="notif__fields">
-          {item.payload.fields.map((field) => (
+          {fields.map((field) => (
             <li key={field.category} className="notif__field">
               <span className="notif__field-label">{field.label}</span>
               <span className="notif__field-change">
@@ -108,7 +156,13 @@ export function NotificationBody({ item }: { item: NotificationView }): React.JS
         </ul>
       )}
 
-      {hasCompositionChange(composition) && composition !== null && (
+      {!hasDetails && (
+        <p className="muted text-sm" data-testid="notif-no-details">
+          Подробности этого уведомления недоступны.
+        </p>
+      )}
+
+      {hasComposition && composition !== null && (
         <div className="notif__composition" data-testid="notif-composition">
           <span className="notif__field-label">Состав заказа</span>
           <ul className="notif__diff">

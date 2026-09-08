@@ -182,6 +182,21 @@ function seedIssueForeignCell(): Record<string, string> {
   return values;
 }
 
+/** Смешанный список уведомлений: обычное + карантин «Нет цветов» + неизвестный формат. */
+function seedNotificationsMixed(): Record<string, string> {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-notifications-mixed'], {
+    encoding: 'utf8',
+  });
+  const values: Record<string, string> = {};
+  for (const match of output.matchAll(/^([^:\n]+):\s*(.+)$/gm)) {
+    values[(match[1] ?? '').trim()] = (match[2] ?? '').trim();
+  }
+  if (values['заказ карантин'] === undefined || values['логист'] === undefined) {
+    throw new Error('сеялка уведомлений не вернула логиста и заказы');
+  }
+  return values;
+}
+
 /**
  * Разворачивает курьера, у которого лежит нужный лист.
  *
@@ -5421,6 +5436,58 @@ test('«Сделки» на большом экране: доли, своя пр
   expect(overflow).toBeLessThanOrEqual(0);
 
   await context.close();
+});
+
+test('уведомления: смешанный список (карантин + обычное + неизвестное) не рушит интерфейс', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const fx = seedNotificationsMixed();
+  const cardOf = (n: string) =>
+    page.locator(`[data-testid="notification-card"][data-order-number="${n}"]`);
+
+  await login(page, fx['логист'] ?? '', fx['пин'] ?? '');
+
+  // 1. Прямая ссылка: интерфейс раздела остаётся рабочим.
+  await page.goto('/logistics/notifications');
+  await expect(page.getByTestId('notifications-screen')).toBeVisible();
+  await expect(page.getByTestId('notifications-list')).toBeVisible();
+
+  const change = cardOf(fx['заказ изменение'] ?? '');
+  const quarantine = cardOf(fx['заказ карантин'] ?? '');
+  const unknown = cardOf(fx['заказ неизвестный'] ?? '');
+
+  // Проблемная карантинная запись рисуется без ошибки: флорист + причина.
+  await expect(quarantine).toBeVisible();
+  await expect(quarantine.getByTestId('notif-no-flowers')).toBeVisible();
+  await expect(quarantine).toContainText('Флорист карантина');
+  await expect(quarantine).toContainText('Нет цветов');
+
+  // Неизвестный/неполный формат — безопасная карточка, без выдуманных данных.
+  await expect(unknown).toBeVisible();
+  await expect(unknown.getByTestId('notif-no-details')).toBeVisible();
+
+  // Соседнее обычное уведомление доступно и показывает поля изменения.
+  await expect(change).toBeVisible();
+  await expect(change).toContainText('Адрес');
+
+  // Карантин не предлагает небезопасных действий на вкладке (управление — в «Решениях»).
+  await expect(quarantine.getByTestId('notif-reassembly')).toHaveCount(0);
+  await expect(quarantine.getByTestId('notif-refusal')).toHaveCount(0);
+
+  // 2. Навигация по ссылке раздела после ухода и возврата.
+  await page.goto('/logistics/routing');
+  await page.locator('a[href$="/logistics/notifications"]').first().click();
+  await expect(page.getByTestId('notifications-screen')).toBeVisible();
+  await expect(quarantine.getByTestId('notif-no-flowers')).toBeVisible();
+
+  // 3. Обновление страницы на прямом URL — раздел по-прежнему рабочий.
+  await page.reload();
+  await expect(page.getByTestId('notifications-screen')).toBeVisible();
+  await expect(quarantine.getByTestId('notif-no-flowers')).toBeVisible();
+  await expect(unknown.getByTestId('notif-no-details')).toBeVisible();
 });
 
 /**
