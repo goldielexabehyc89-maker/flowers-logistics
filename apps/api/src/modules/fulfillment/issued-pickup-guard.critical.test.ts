@@ -25,7 +25,7 @@ import type { AuthenticatedActor } from '../auth/guards.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { snapshotHash, type FulfillmentSnapshot } from './composition.js';
-import { claimOrder, reopenOrder, assignReassembly } from './assembly.js';
+import { claimOrder, reopenOrder, assignReassembly, autoAssignTx } from './assembly.js';
 import { listDispatchableOrderIds, offerableConstraints, readQueue } from './queue-service.js';
 import { quarantineNoFlowers, returnFromQuarantine } from './no-flowers.js';
 import { floristDispatchStatus } from './dispatch-florist.js';
@@ -509,15 +509,18 @@ describe('реальные функции чтения не показывают
       assignee: florist.userId,
     });
     await issue(phantom.id, false);
-    // Свободный обычный заказ на раздачу.
-    const fresh = await seedOrder({ deliveryMethodId: DELIVERY });
-    // Изоляция общей базы: остальные свободные заказы выводим из области, чтобы
-    // единственным кандидатом раздачи был `fresh` (иначе флорист получил бы
-    // чужой NEW-заказ из соседнего теста, и проверка «получил работу» плавала).
-    await ctx.db.deliveryOrder.updateMany({
-      where: { fulfillmentProcessState: 'NEW', id: { not: fresh.id } },
-      data: { inScope: false, fulfillmentInScope: false },
+    // Собственная фикстура на раздачу. Данные соседних тестов не трогаем: этот
+    // флорист — единственный готовый в этом файле, поэтому он и получит работу;
+    // достаточно проверить, что он НЕ пропущен как занятый (получил не-выданный
+    // заказ), не выводя чужие NEW-заказы из области массовым обновлением.
+    const before = await ctx.db.deliveryOrder.count({
+      where: {
+        fulfillmentAssigneeId: florist.userId,
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        pickupIssue: null,
+      },
     });
+    await seedOrder({ deliveryMethodId: PICKUP });
 
     try {
       await setAuto(true);
@@ -526,18 +529,22 @@ describe('реальные функции чтения не показывают
       await setAuto(false);
     }
 
-    const assigned = await ctx.db.deliveryOrder.findUniqueOrThrow({
-      where: { id: fresh.id },
-      select: { fulfillmentAssigneeId: true, fulfillmentProcessState: true },
+    // Флорист получил НЕвыданную работу — значит фантомная выдача не сочла его занятым.
+    const after = await ctx.db.deliveryOrder.count({
+      where: {
+        fulfillmentAssigneeId: florist.userId,
+        fulfillmentProcessState: 'IN_ASSEMBLY',
+        pickupIssue: null,
+      },
     });
-    expect(assigned.fulfillmentAssigneeId).toBe(florist.userId);
-    expect(assigned.fulfillmentProcessState).toBe('IN_ASSEMBLY');
-    // Выданный фантом при этом никому не выдавался повторно и остался как был.
+    expect(after).toBeGreaterThan(before);
+    // Выданный фантом никому повторно не выдавался и остался как был.
     const phantomAfter = await ctx.db.deliveryOrder.findUniqueOrThrow({
       where: { id: phantom.id },
-      select: { fulfillmentProcessState: true },
+      select: { fulfillmentProcessState: true, fulfillmentAssigneeId: true },
     });
     expect(phantomAfter.fulfillmentProcessState).toBe('IN_ASSEMBLY');
+    expect(phantomAfter.fulfillmentAssigneeId).toBe(florist.userId);
   });
 });
 
@@ -614,5 +621,114 @@ describe('гонка выдачи и производственного дейс
       await assertNotProductionAvailable(order.id);
       void claimRes;
     }
+  });
+});
+
+// --- Управляемая гонка: выдача удерживает блокировку строки до фиксации -------
+
+describe('управляемая гонка: выдача держит блокировку → назначение ждёт → не происходит', () => {
+  /**
+   * Детерминированно закрепляет порядок «выдача первой взяла блокировку строки».
+   * Держатель повторяет ровно то, что делает issueToCustomer при фиксации выдачи:
+   * `SELECT … FOR UPDATE` строки заказа и вставку OrderPickupIssue — но НЕ
+   * фиксируется, пока тест не отпустит. Пока блокировка удержана, стартует
+   * производственное действие: по правилу оно берёт ту же строку `FOR UPDATE` и
+   * обязано заблокироваться. Затем выдача фиксируется, блокировка снимается — и
+   * действие, разблокировавшись УЖЕ ПОСЛЕ фиксации, видит выдачу и не назначает.
+   * Пауза перед release лишь подтверждает «ждёт»; корректность обеспечивает сама
+   * блокировка строки, а не тайминг.
+   */
+  async function underHeldIssue<T>(orderId: string, startOp: () => Promise<T>): Promise<T> {
+    let signalAcquired!: () => void;
+    let release!: () => void;
+    const acquired = new Promise<void>((r) => (signalAcquired = r));
+    const released = new Promise<void>((r) => (release = r));
+    const holder = ctx.db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
+        await tx.orderPickupIssue.create({ data: { orderId, issuedById: admin.userId } });
+        signalAcquired();
+        await released;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+    await acquired; // выдача держит блокировку строки и вставила OrderPickupIssue (не зафиксировано)
+    const op = startOp(); // действие стартует и обязано ждать снятия блокировки
+    await new Promise((r) => setTimeout(r, 200)); // подтверждаем «ждёт», а не «успело до»
+    release(); // выдача фиксируется, блокировка снимается
+    await holder;
+    return op; // действие разблокировано уже после фиксации выдачи
+  }
+
+  async function countAudit(
+    orderId: string,
+    action: 'ORDER_FULFILLMENT_CLAIMED' | 'ORDER_FULFILLMENT_AUTO_ASSIGNED',
+  ): Promise<number> {
+    return ctx.db.auditLog.count({ where: { entityId: orderId, action } });
+  }
+
+  it('ручное взятие: ждёт → выдача фиксируется → ORDER_ALREADY_ISSUED, ни назначения, ни аудита', async () => {
+    const order = await seedOrder({ deliveryMethodId: PICKUP, state: 'NEW' });
+    const florist = await floristOnShift('Управляемая claim');
+    const auditBefore = await countAudit(order.id, 'ORDER_FULFILLMENT_CLAIMED');
+
+    // Результат операции не игнорируем: взятие обязано отклониться.
+    await expect(
+      underHeldIssue(order.id, () => claimOrder(ctx.db, florist, order.id, CONTEXT)),
+    ).rejects.toMatchObject({ conflict: { kind: 'ORDER_ALREADY_ISSUED' } });
+
+    // Проверяем не только отсутствие карточки, но и отсутствие НОВОГО назначения…
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: {
+        fulfillmentProcessState: true,
+        fulfillmentAssigneeId: true,
+        fulfillmentShiftId: true,
+      },
+    });
+    expect(after.fulfillmentProcessState).toBe('NEW');
+    expect(after.fulfillmentAssigneeId).toBeNull();
+    expect(after.fulfillmentShiftId).toBeNull();
+    // …и отсутствие аудита успешного назначения после выдачи.
+    expect(await countAudit(order.id, 'ORDER_FULFILLMENT_CLAIMED')).toBe(auditBefore);
+    // Выдача при этом состоялась и заказ недоступен производству.
+    expect(await ctx.db.orderPickupIssue.count({ where: { orderId: order.id } })).toBe(1);
+    expect(await offerableCount(order.id)).toBe(0);
+  });
+
+  it('AUTO: ждёт → выдача фиксируется → заказ пропущен (false), ни назначения, ни аудита; раздача ищет дальше', async () => {
+    const order = await seedOrder({ deliveryMethodId: PICKUP, state: 'NEW' });
+    const florist = await floristOnShift('Управляемая AUTO');
+    const auditBefore = await countAudit(order.id, 'ORDER_FULFILLMENT_AUTO_ASSIGNED');
+
+    // Штатный кандидат автораздачи в её собственной транзакции.
+    const result = await underHeldIssue(order.id, () =>
+      ctx.db.$transaction((tx) =>
+        autoAssignTx(
+          tx,
+          {
+            orderId: order.id,
+            floristId: florist.userId,
+            shiftId: florist.shiftId,
+            operationsStartDate: OPS,
+            flowwowChannelId: FLOWWOW,
+          },
+          CONTEXT,
+        ),
+      ),
+    );
+
+    // Результат не игнорируем: AUTO пропускает заказ (false) — прогон продолжит искать подходящий.
+    expect(result).toBe(false);
+    const after = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { fulfillmentProcessState: true, fulfillmentAssigneeId: true },
+    });
+    expect(after.fulfillmentProcessState).toBe('NEW');
+    expect(after.fulfillmentAssigneeId).toBeNull();
+    // Ни нового назначения, ни аудита автораздачи после выдачи.
+    expect(await countAudit(order.id, 'ORDER_FULFILLMENT_AUTO_ASSIGNED')).toBe(auditBefore);
+    expect(await ctx.db.orderPickupIssue.count({ where: { orderId: order.id } })).toBe(1);
+    expect(await offerableCount(order.id)).toBe(0);
   });
 });
