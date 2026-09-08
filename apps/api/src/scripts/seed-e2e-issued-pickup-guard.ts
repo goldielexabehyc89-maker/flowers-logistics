@@ -133,19 +133,19 @@ async function main(): Promise<number> {
     }
 
     // Выданный покупателю самовывоз, по ошибке оставшийся в NEW (как 145588A).
+    // Контрольного «свободного» заказа НЕ создаём: он был бы обычным NEW-заказом
+    // в ОБЩЕЙ свободной очереди и полез бы в соседние тесты (группа ближайших
+    // самовывозов). Достаточно проверить, что выданный заказ в очереди
+    // отсутствует, а экран очереди при этом рабочий.
     const issued = await seedOrder('issued');
     await db.orderPickupIssue.create({
       data: { orderId: issued.id, issuedById: admin.id },
     });
 
-    // Обычный свободный самовывоз — контроль: он в очереди быть должен.
-    const clean = await seedOrder('clean');
-
     const lines: [string, string][] = [
       ['флорист', floristPhone],
       ['пин', PIN],
       ['заказ выдан', issued.number],
-      ['заказ свободен', clean.number],
     ];
     for (const [key, value] of lines) {
       process.stdout.write(`${key}: ${value}\n`);

@@ -5512,23 +5512,20 @@ test('выданный самовывоз не возвращается в ра�
 }) => {
   test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
   const fx = seedIssuedPickupGuard();
-  const clean = page.locator(
-    `[data-testid="florist-row"][data-order-number="${fx['заказ свободен'] ?? ''}"]`,
-  );
   const issued = page.locator(
     `[data-testid="florist-row"][data-order-number="${fx['заказ выдан'] ?? ''}"]`,
   );
 
   await login(page, fx['флорист'] ?? '', fx['пин'] ?? '');
 
-  // Флорист на смене и в ручном режиме — «Очередь» видна сразу. Контрольный
-  // свободный заказ в ней есть, а выданный покупателю — нет.
-  await expect(clean.first()).toBeVisible({ timeout: 25_000 });
+  // Флорист на смене и в ручном режиме — экран «Очередь» рабочий (счётчик виден),
+  // а выданный покупателю заказ в очереди отсутствует.
+  await expect(page.getByTestId('florist-queue-count')).toBeVisible({ timeout: 25_000 });
   await expect(issued).toHaveCount(0);
 
   // Обновление страницы не воскрешает выданный заказ в очереди.
   await page.reload();
-  await expect(clean.first()).toBeVisible({ timeout: 25_000 });
+  await expect(page.getByTestId('florist-queue-count')).toBeVisible({ timeout: 25_000 });
   await expect(issued).toHaveCount(0);
 });
 
