@@ -197,6 +197,21 @@ function seedNotificationsMixed(): Record<string, string> {
   return values;
 }
 
+/** Выданный самовывоз (в NEW) + свободный контроль + флорист на смене, ручной режим. */
+function seedIssuedPickupGuard(): Record<string, string> {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-issued-pickup-guard'], {
+    encoding: 'utf8',
+  });
+  const values: Record<string, string> = {};
+  for (const match of output.matchAll(/^([^:\n]+):\s*(.+)$/gm)) {
+    values[(match[1] ?? '').trim()] = (match[2] ?? '').trim();
+  }
+  if (values['заказ выдан'] === undefined || values['флорист'] === undefined) {
+    throw new Error('сеялка guard выдачи не вернула флориста и заказы');
+  }
+  return values;
+}
+
 /**
  * Разворачивает курьера, у которого лежит нужный лист.
  *
@@ -5488,6 +5503,30 @@ test('уведомления: смешанный список (карантин 
   await expect(page.getByTestId('notifications-screen')).toBeVisible();
   await expect(quarantine.getByTestId('notif-no-flowers')).toBeVisible();
   await expect(unknown.getByTestId('notif-no-details')).toBeVisible();
+});
+
+test('выданный самовывоз не возвращается в рабочую очередь флориста, в т.ч. после reload', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+  const fx = seedIssuedPickupGuard();
+  const issued = page.locator(
+    `[data-testid="florist-row"][data-order-number="${fx['заказ выдан'] ?? ''}"]`,
+  );
+
+  await login(page, fx['флорист'] ?? '', fx['пин'] ?? '');
+
+  // Флорист на смене и в ручном режиме — экран «Очередь» рабочий (счётчик виден),
+  // а выданный покупателю заказ в очереди отсутствует.
+  await expect(page.getByTestId('florist-queue-count')).toBeVisible({ timeout: 25_000 });
+  await expect(issued).toHaveCount(0);
+
+  // Обновление страницы не воскрешает выданный заказ в очереди.
+  await page.reload();
+  await expect(page.getByTestId('florist-queue-count')).toBeVisible({ timeout: 25_000 });
+  await expect(issued).toHaveCount(0);
 });
 
 /**

@@ -33,6 +33,7 @@ import { writeAudit, type AuditAction } from '../audit/service.js';
 import { offerableConstraints } from './queue-service.js';
 import { isOperationalPickup } from '../orders/operational-pickup.js';
 import { excludeNewStateWhere, isNewState } from '../orders/new-state.js';
+import { assertNotIssued, NOT_ISSUED_WHERE } from '../orders/issued-pickup.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
@@ -290,6 +291,9 @@ export async function claimOrder(
         fulfillmentProcessState: 'NEW',
         ...ASSEMBLABLE,
         ...excludeNewStateWhere(newStateId),
+        // Уже выданный покупателю заказ вручную не берётся: то же исключение,
+        // что и у очереди/автораздачи. Понятную причину даёт разбор ниже.
+        ...NOT_ISSUED_WHERE,
       },
       data: {
         fulfillmentProcessState: 'IN_ASSEMBLY',
@@ -304,6 +308,10 @@ export async function claimOrder(
     });
 
     if (updated.count === 0) {
+      // Выданный покупателю заказ называется отдельно и понятно — раньше общего
+      // «уже взят». Проверка под блокировкой строки: не спорит с одновременной
+      // выдачей.
+      await assertNotIssued(tx, orderId);
       // Проигравший не оставляет следов: ни аудита, ни события.
       explainClaimFailure(await readOrder(tx, orderId), newStateId);
     }
@@ -560,12 +568,18 @@ export async function assignReassemblyTx(
       });
     }
 
+    // Выданный покупателю заказ пересобирать нельзя: факт выдачи выше любого
+    // изменения состава. Проверка под блокировкой строки — не спорит с выдачей.
+    await assertNotIssued(tx, input.orderId);
+
     const before = await readOrder(tx, input.orderId);
     const updated = await tx.deliveryOrder.updateMany({
       where: {
         id: input.orderId,
         // Пересборка возможна только у уже собранного заказа.
         fulfillmentProcessState: { in: ['ASSEMBLED', 'NEEDS_REVIEW'] },
+        // …и не у выданного покупателю (защита от гонки — WHERE тоже отсекает).
+        ...NOT_ISSUED_WHERE,
       },
       data: {
         fulfillmentProcessState: 'IN_ASSEMBLY',
@@ -1083,10 +1097,16 @@ export async function reopenOrder(
       }
     }
 
+    // Выданный покупателю заказ в работу не возвращается: факт выдачи
+    // окончателен. Проверка под блокировкой строки — не спорит с выдачей.
+    await assertNotIssued(tx, input.orderId);
+
     const updated = await tx.deliveryOrder.updateMany({
       where: {
         id: input.orderId,
         fulfillmentProcessState: { in: ['ASSEMBLED', 'NEEDS_REVIEW'] },
+        // …и не выданный покупателю (WHERE отсекает и гонку).
+        ...NOT_ISSUED_WHERE,
       },
       data: {
         fulfillmentProcessState: 'IN_ASSEMBLY',

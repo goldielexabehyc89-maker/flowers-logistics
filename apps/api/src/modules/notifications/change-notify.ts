@@ -253,8 +253,14 @@ export async function recordOrderChangeNotification(
 
   // Состав изменён у заказа, который уже прошёл сборку (есть печатный бланк) —
   // это уведомление с решением о пересборке, а не простое информирование.
+  //
+  // НО не для уже ВЫДАННОГО покупателю заказа: выдача окончательна, пересборку
+  // ему предлагать нельзя. Ответственный всё равно получит уведомление об
+  // изменении — но как информирование (INFO), без «На пересборку».
+  const issued = (await tx.orderPickupIssue.count({ where: { orderId: input.orderId } })) > 0;
   const assembled =
     composition !== null &&
+    !issued &&
     (await tx.orderPrintForm.count({ where: { orderId: input.orderId } })) > 0;
   const kind = assembled ? 'COMPOSITION_AFTER_ASSEMBLY' : 'INFO';
 

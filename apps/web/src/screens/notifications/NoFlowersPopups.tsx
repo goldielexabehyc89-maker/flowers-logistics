@@ -132,8 +132,17 @@ export function NoFlowersPopups(): React.JSX.Element | null {
 
   const returnToQueue = async (): Promise<void> => {
     try {
-      await client.post(`/api/logistics/no-flowers/quarantines/${q.id}/return`, {});
-      showToast('Заказ возвращён в очередь', 'success');
+      const result = await client.post<{ returned: boolean; closedIssued: boolean }>(
+        `/api/logistics/no-flowers/quarantines/${q.id}/return`,
+        {},
+      );
+      // Выданный покупателю заказ в очередь не возвращается — задача закрыта.
+      const message = result.closedIssued
+        ? 'Заказ уже выдан покупателю — задача закрыта без возврата'
+        : result.returned
+          ? 'Заказ возвращён в очередь'
+          : 'Задача закрыта: заказ больше не пригоден к сборке';
+      showToast(message, result.closedIssued || !result.returned ? 'info' : 'success');
     } catch (error) {
       showToast((error as { message?: string }).message ?? 'Не удалось вернуть заказ', 'error');
     }
