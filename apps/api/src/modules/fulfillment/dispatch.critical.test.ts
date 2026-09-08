@@ -1088,11 +1088,13 @@ describe('карантин «Нет цветов»', () => {
     expect(await countOpenNoFlowersQuarantines(ctx.db)).toBeGreaterThanOrEqual(1);
   });
 
-  it('«Вернуть в очередь» ставит заказ в КОНЕЦ и снова делает назначаемым', async () => {
+  it('«Вернуть в очередь» ставит заказ в НАЧАЛО и первым в AUTO — тем же порядком, что видит руководитель', async () => {
     const manager = await managerActor();
     const florist = await floristOnShift('Возврат');
-    const returned = await seedOrder(540); // раннее время — иначе стоял бы выше
-    const normal = await seedOrder(600);
+    // Позднее время — чтобы обычным порядком возвращённый стоял бы НИЖЕ: так
+    // видно, что наверх его поднимает именно приоритет возврата, а не время.
+    const returned = await seedOrder(1200);
+    const normal = await seedOrder(540);
     await isolate([returned.id, normal.id]);
     await quarantine(returned.id, florist);
 
@@ -1103,11 +1105,128 @@ describe('карантин «Нет цветов»', () => {
     const res = await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
     expect(res.returned).toBe(true);
 
+    // AUTO-кандидаты: возвращённый первым, несмотря на более позднее время.
     const ids = await listDispatchableOrderIds(ctx.db, NOW);
     expect(ids).toContain(returned.id);
     expect(ids).toContain(normal.id);
-    // В КОНЦЕ: обычный заказ раньше возвращённого, хотя у возвращённого время раньше.
-    expect(ids.indexOf(normal.id)).toBeLessThan(ids.indexOf(returned.id));
+    expect(ids.indexOf(returned.id)).toBeLessThan(ids.indexOf(normal.id));
+
+    // Видимая очередь руководителя (MANUAL) — тот же порядок: возвращённый сверху.
+    await setAuto(false);
+    const view = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false },
+      NOW,
+    );
+    const viewIds = view.items.map((item) => item.id);
+    expect(viewIds.indexOf(returned.id)).toBeLessThan(viewIds.indexOf(normal.id));
+    expect(viewIds[0]).toBe(returned.id);
+  });
+
+  it('несколько возвращённых идут по времени возврата (раньше вернули — выше)', async () => {
+    const manager = await managerActor();
+    const f1 = await floristOnShift('Возврат-1');
+    const f2 = await floristOnShift('Возврат-2');
+    const first = await seedOrder(600);
+    const second = await seedOrder(540);
+    await isolate([first.id, second.id]);
+    await quarantine(first.id, f1);
+    await quarantine(second.id, f2);
+
+    const qFirst = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: first.id },
+      select: { id: true },
+    });
+    const qSecond = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: second.id },
+      select: { id: true },
+    });
+    // Возвращаем first раньше second — раздельными моментами.
+    await returnFromQuarantine(ctx.db, manager, qFirst.id, CONTEXT);
+    await new Promise((r) => setTimeout(r, 5));
+    await returnFromQuarantine(ctx.db, manager, qSecond.id, CONTEXT);
+
+    const ids = await listDispatchableOrderIds(ctx.db, NOW);
+    // Оба — в самом верху, first раньше second (по времени возврата), хотя у
+    // second более раннее время доставки.
+    expect(ids[0]).toBe(first.id);
+    expect(ids[1]).toBe(second.id);
+  });
+
+  it('приоритет возврата действует и за пределами первой страницы очереди', async () => {
+    const manager = await managerActor();
+    const florist = await floristOnShift('Возврат-страница');
+    const returned = await seedOrder(1200);
+    // Много обычных заказов с более ранним временем: без приоритета возвращённый
+    // ушёл бы далеко вниз, за первую страницу.
+    const bulk: string[] = [];
+    for (let i = 0; i < 60; i += 1) {
+      bulk.push((await seedOrder(480 + i)).id);
+    }
+    await isolate([returned.id, ...bulk]);
+    await quarantine(returned.id, florist);
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: returned.id },
+      select: { id: true },
+    });
+    await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
+
+    // Первый кандидат AUTO.
+    const ids = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(ids[0]).toBe(returned.id);
+    // Первая страница видимой очереди (limit 50) — возвращённый в самом верху.
+    await setAuto(false);
+    const page = await readQueue(
+      ctx.db,
+      { userId: admin.userId, roles: ['ADMIN'] },
+      { day: 'today', scope: 'general', includeAssigned: false, limit: 50, offset: 0 },
+      NOW,
+    );
+    expect(page.items[0]?.id).toBe(returned.id);
+  });
+
+  it('маркер приоритета снимается при взятии: не переносится на следующий цикл', async () => {
+    const manager = await managerActor();
+    const florist = await floristOnShift('Возврат-жизненный-цикл');
+    const order = await seedOrder(1200);
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+    const q = await ctx.db.orderNoFlowersQuarantine.findFirstOrThrow({
+      where: { orderId: order.id },
+      select: { id: true },
+    });
+    await returnFromQuarantine(ctx.db, manager, q.id, CONTEXT);
+    expect(
+      (
+        await ctx.db.deliveryOrder.findUniqueOrThrow({
+          where: { id: order.id },
+          select: { dispatchRequeuedAt: true },
+        })
+      ).dispatchRequeuedAt,
+    ).not.toBeNull();
+
+    // Флорист берёт заказ вручную — приоритет отработал и снимается.
+    await setAuto(false);
+    await claimOrder(ctx.db, florist, order.id, CONTEXT);
+    expect(
+      (
+        await ctx.db.deliveryOrder.findUniqueOrThrow({
+          where: { id: order.id },
+          select: { dispatchRequeuedAt: true },
+        })
+      ).dispatchRequeuedAt,
+    ).toBeNull();
+  });
+
+  it('карантинный (не возвращённый) заказ не назначается и не поднимается', async () => {
+    const florist = await floristOnShift('Карантин-без-возврата');
+    const order = await seedOrder(540);
+    await isolate([order.id]);
+    await quarantine(order.id, florist);
+    // Возврат НЕ нажат: заказ в карантине, недоступен и не имеет приоритета.
+    const ids = await listDispatchableOrderIds(ctx.db, NOW);
+    expect(ids).not.toContain(order.id);
   });
 
   it('«Вернуть в очередь» идемпотентно: повтор ничего не создаёт и не двигает', async () => {

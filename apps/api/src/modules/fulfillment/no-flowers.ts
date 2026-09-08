@@ -339,7 +339,8 @@ export async function returnFromQuarantine(
     }
 
     if (!unfit) {
-      // В КОНЕЦ очереди: метку читают и отображение очереди, и авто-раздача.
+      // Высший приоритет свободной очереди: метку читают и отображение очереди,
+      // и авто-раздача. Снимается при уходе заказа в сборку (см. assembly.ts).
       await tx.deliveryOrder.update({
         where: { id: q.orderId },
         data: { dispatchRequeuedAt: now },
