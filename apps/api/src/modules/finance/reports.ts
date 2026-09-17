@@ -23,6 +23,13 @@ export interface SettlementTotals {
   /** Баланс на начало периода: сумма всех записей строго до его первого дня. */
   openingBalanceMinor: string;
   cashReceivedMinor: string;
+  /**
+   * Корректировки наличных после оплаты в источнике: со знаком, обычно минус.
+   *
+   * Отдельно от наличных и БЕЗ модуля: иначе период, в котором есть только
+   * корректировка, показал бы снятие как приход.
+   */
+  cashCorrectionsMinor: string;
   handedToLogistMinor: string;
   issuedToCourierMinor: string;
   deliveryFeesMinor: string;
@@ -72,6 +79,11 @@ export interface SettlementRow {
   totalMinor: string;
   /** Расчёта нет: тарифного снимка у маршрута не существует. */
   settlementMissing: boolean;
+  /**
+   * Финансовый результат доставки снят (отмена в источнике или обратные
+   * записи). Физический факт доставки при этом сохраняется.
+   */
+  financeCancelled: boolean;
 }
 
 export interface SettlementReport {
@@ -99,6 +111,31 @@ function sumOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): b
   return entries
     .filter((entry) => kinds.includes(entry.kind))
     .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+}
+
+/**
+ * Записи, погашенные внутри периода: сама операция и её обратная запись.
+ *
+ * Пара «начисление + его отмена» даёт в сумме ноль, поэтому в ДЕЙСТВУЮЩЕМ
+ * результате её не показывают вовсе: иначе отменённый заказ продолжал бы
+ * увеличивать зарплату и километры в колонках, хотя денег по нему нет.
+ *
+ * Гасится именно ПАРА и только когда обе записи попали в период. Если отмена
+ * пришла позже выбранного периода, исходное начисление в нём действительно
+ * было — и остаётся видимым; если раньше периода лежит начисление, а в периоде
+ * только отмена, видимой остаётся отмена. Так сумма показанных движений всегда
+ * объясняет изменение баланса, а даты не переписываются задним числом.
+ */
+function settledWithinPeriod(entries: readonly LedgerEntryView[]): ReadonlySet<string> {
+  const present = new Set(entries.map((entry) => entry.id));
+  const settled = new Set<string>();
+  for (const entry of entries) {
+    if (entry.reversesEntryId !== null && present.has(entry.reversesEntryId)) {
+      settled.add(entry.reversesEntryId);
+      settled.add(entry.id);
+    }
+  }
+  return settled;
 }
 
 /** Модуль суммы: в отчёте расходы показываются положительными числами. */
@@ -138,18 +175,30 @@ export async function buildSettlementReport(
 
   const periodSum = entries.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
 
+  /*
+   * Действующий результат периода считается по непогашенным записям, а баланс —
+   * по всем. Расхождения между ними нет: погашенная пара в сумме даёт ноль.
+   */
+  const settled = settledWithinPeriod(entries);
+  const active = entries.filter((entry) => !settled.has(entry.id));
+
   const totals: SettlementTotals = {
     openingBalanceMinor: opening.toString(),
-    // Наличные за период — за вычетом того, что оплатили в источнике уже после
-    // доставки: итог обязан сходиться с журналом и со строками заказов.
-    cashReceivedMinor: abs(sumOf(entries, ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'])).toString(),
-    handedToLogistMinor: abs(sumOf(entries, ['CASH_HANDED_TO_LOGIST'])).toString(),
-    issuedToCourierMinor: abs(sumOf(entries, ['CASH_ISSUED_TO_COURIER'])).toString(),
-    deliveryFeesMinor: abs(sumOf(entries, ['DELIVERY_FEE'])).toString(),
-    attemptFeesMinor: abs(sumOf(entries, ['ATTEMPT_FEE'])).toString(),
-    distanceFeesMinor: abs(sumOf(entries, ['DISTANCE_FEE'])).toString(),
+    cashReceivedMinor: abs(sumOf(active, ['CASH_RECEIVED'])).toString(),
+    /*
+     * Корректировки наличных — ОТДЕЛЬНАЯ строка и со своим знаком.
+     *
+     * Складывать их с наличными и брать модуль нельзя: в периоде, где есть
+     * только корректировка, −5 000 ₽ превратились бы в приход +5 000 ₽.
+     */
+    cashCorrectionsMinor: sumOf(active, ['CASH_PAYMENT_CORRECTION']).toString(),
+    handedToLogistMinor: abs(sumOf(active, ['CASH_HANDED_TO_LOGIST'])).toString(),
+    issuedToCourierMinor: abs(sumOf(active, ['CASH_ISSUED_TO_COURIER'])).toString(),
+    deliveryFeesMinor: abs(sumOf(active, ['DELIVERY_FEE'])).toString(),
+    attemptFeesMinor: abs(sumOf(active, ['ATTEMPT_FEE'])).toString(),
+    distanceFeesMinor: abs(sumOf(active, ['DISTANCE_FEE'])).toString(),
     expensesMinor: abs(
-      sumOf(entries, [
+      sumOf(active, [
         'EXPENSE_PARKING',
         'EXPENSE_TOLL',
         'EXPENSE_TRANSIT',
@@ -158,9 +207,9 @@ export async function buildSettlementReport(
         'EXPENSE_OTHER',
       ]),
     ).toString(),
-    bonusesMinor: abs(sumOf(entries, ['BONUS'])).toString(),
-    adjustmentsMinor: sumOf(entries, ['ADJUSTMENT']).toString(),
-    openingDebtMinor: sumOf(entries, ['OPENING_DEBT']).toString(),
+    bonusesMinor: abs(sumOf(active, ['BONUS'])).toString(),
+    adjustmentsMinor: sumOf(active, ['ADJUSTMENT']).toString(),
+    openingDebtMinor: sumOf(active, ['OPENING_DEBT']).toString(),
     closingBalanceMinor: (opening + periodSum).toString(),
   };
 
@@ -186,7 +235,7 @@ export async function buildSettlementReport(
           outcome: true,
           routeOrderId: true,
           cancellation: { select: { id: true } },
-          order: { select: { externalName: true } },
+          order: { select: { externalName: true, cancelledInSource: true } },
           route: { select: { number: true, deliveryDate: true } },
         },
       },
@@ -218,6 +267,12 @@ export async function buildSettlementReport(
 
   const rows: SettlementRow[] = facts.map((fact) => {
     const own = byAttempt.get(fact.attemptId) ?? [];
+    /*
+     * Колонки показывают ДЕЙСТВУЮЩИЙ результат доставки, а `totalMinor` — её
+     * вклад в баланс. Погашенные внутри периода пары исключаются из колонок и
+     * в сумме дают ноль, поэтому итог строки от этого не меняется.
+     */
+    const activeOwn = own.filter((entry) => !settled.has(entry.id));
     const snapshot = snapshotByRoute.get(fact.routeId) ?? null;
     const distance = distanceByRouteOrder.get(fact.attempt.routeOrderId) ?? null;
 
@@ -248,25 +303,18 @@ export async function buildSettlementReport(
        * покупатель доплатил в МойСклад, и сдавать столько он не должен.
        * Суммы корректировок отрицательные, поэтому просто складываются.
        */
-      cashMinor: own
-        .filter(
-          (entry) =>
-            (entry.kind === 'CASH_RECEIVED' || entry.kind === 'CASH_PAYMENT_CORRECTION') &&
-            !entry.reversed,
-        )
-        .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
-        .toString(),
+      cashMinor: sumOf(activeOwn, ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION']).toString(),
       paymentTypeName: fact.paymentTypeName,
       vehicleType: snapshot === null ? null : (snapshot.vehicleType as 'CAR' | 'FOOT'),
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),
       beyondMkadKmTenths: distance?.roundedKmTenths ?? null,
       distanceSource: (distance?.source ?? null) as 'COMPUTED' | 'MANUAL' | null,
-      deliveryFeeMinor: abs(sumOf(own, ['DELIVERY_FEE'])).toString(),
-      distanceFeeMinor: abs(sumOf(own, ['DISTANCE_FEE'])).toString(),
-      attemptFeeMinor: abs(sumOf(own, ['ATTEMPT_FEE'])).toString(),
+      deliveryFeeMinor: abs(sumOf(activeOwn, ['DELIVERY_FEE'])).toString(),
+      distanceFeeMinor: abs(sumOf(activeOwn, ['DISTANCE_FEE'])).toString(),
+      attemptFeeMinor: abs(sumOf(activeOwn, ['ATTEMPT_FEE'])).toString(),
       expensesMinor: abs(
-        sumOf(own, [
+        sumOf(activeOwn, [
           'EXPENSE_PARKING',
           'EXPENSE_TOLL',
           'EXPENSE_TRANSIT',
@@ -275,7 +323,17 @@ export async function buildSettlementReport(
           'EXPENSE_OTHER',
         ]),
       ).toString(),
-      bonusesMinor: abs(sumOf(own, ['BONUS'])).toString(),
+      bonusesMinor: abs(sumOf(activeOwn, ['BONUS'])).toString(),
+      /*
+       * Финансовый результат доставки снят.
+       *
+       * Отмена из МоегоСклада НЕ создаёт отмену результата доставки: физический
+       * факт остаётся, снимаются только деньги. Поэтому признак отдельный от
+       * `cancelled` — иначе отменённый заказ выглядел бы обычной доставкой
+       * с нулевыми колонками и без объяснения.
+       */
+      financeCancelled:
+        fact.attempt.order.cancelledInSource || own.some((entry) => entry.reversesEntryId !== null),
       totalMinor: own.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n).toString(),
       settlementMissing: snapshot === null,
     };

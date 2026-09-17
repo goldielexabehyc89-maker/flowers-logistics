@@ -28,11 +28,17 @@ import {
 import type { AuthenticatedActor } from '../auth/guards.js';
 import type { Role } from '@fl/shared';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { accrueDeliveryResult } from './accrual.js';
+import ExcelJS from 'exceljs';
+import { accrueDeliveryResult, accrueDistanceFee } from './accrual.js';
 import { appendEntry, balanceOf } from './ledger.js';
 import { LEDGER_SETTING_KEY, readLedgerActivation } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
-import { applyCashPaymentCorrection, stripCancelledOrderFinance } from './order-sync.js';
+import { buildSettlementWorkbook } from './export-xlsx.js';
+import {
+  applyCashPaymentCorrection,
+  createOrderFinanceHandler,
+  stripCancelledOrderFinance,
+} from './order-sync.js';
 
 let ctx: TestContext;
 
@@ -238,6 +244,26 @@ async function seedDelivered(input: {
  * Поля заказа держат инвариант базы: остаток к получению равен неоплаченной
  * части, а переплата помечается аномалией — ровно так их пишет импорт.
  */
+/**
+ * Ещё одна попытка доставки того же заказа.
+ *
+ * `activeKey` не заполняется: действующий результат остаётся у первой попытки,
+ * а здесь важна лишь возможность начислить по второй.
+ */
+async function seedAttemptFor(delivery: Delivery): Promise<string> {
+  const attempt = await ctx.db.deliveryAttempt.create({
+    data: {
+      routeOrderId: delivery.routeOrderId,
+      orderId: delivery.orderId,
+      routeId: delivery.routeId,
+      outcome: 'DELIVERED',
+      courierUserId: delivery.courierId,
+    },
+    select: { id: true },
+  });
+  return attempt.id;
+}
+
 async function payInSource(delivery: Delivery, payed: bigint): Promise<void> {
   const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
     where: { id: delivery.orderId },
@@ -258,6 +284,18 @@ async function payInSource(delivery: Delivery, payed: bigint): Promise<void> {
       now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
     }),
   );
+}
+
+/** Отчёт за период по одному курьеру: учёт включён с начала месяца. */
+async function report(from: string, to: string, courierUserId: string) {
+  return buildSettlementReport(ctx.db, {
+    from,
+    to,
+    courierUserId,
+    ledgerActiveFrom: '2030-08-01',
+    limit: 50,
+    offset: 0,
+  });
 }
 
 /** Сумма записей одного вида по заказу, без учёта отменённых. */
@@ -332,17 +370,26 @@ describe('оплата в источнике уменьшает наличные
       data: { payedSumMinor: 300_000n, cashToCollectMinor: 200_000n },
     });
 
-    const run = (): Promise<void> =>
-      ctx.db
-        .$transaction((tx) =>
-          applyCashPaymentCorrection(tx, {
-            orderId: delivery.orderId,
-            now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
-          }),
-        )
-        .catch(() => undefined);
+    const run = (): Promise<boolean> =>
+      ctx.db.$transaction((tx) =>
+        applyCashPaymentCorrection(tx, {
+          orderId: delivery.orderId,
+          now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+        }),
+      );
 
-    await Promise.all([run(), run()]);
+    /*
+     * Ошибки не глушатся: проигравшая транзакция вправе упереться ТОЛЬКО в
+     * уникальность ключа. Любая другая — настоящий отказ, и тест обязан упасть.
+     */
+    const results = await Promise.allSettled([run(), run()]);
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        const code = (result.reason as { code?: string }).code ?? String(result.reason);
+        expect(code).toBe('P2002');
+      }
+    }
+    expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
 
     expect(
       await ctx.db.courierLedgerEntry.count({
@@ -381,23 +428,82 @@ describe('оплата в источнике уменьшает наличные
     expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(distanceBefore);
   });
 
-  it('итог отчёта сходится с журналом, когда доставка и корректировка в разных днях', async () => {
+  /*
+   * Три отдельных отчёта: день доставки, день корректировки и общий период.
+   *
+   * Раньше отчёт ТОЛЬКО за день корректировки показывал снятие как приход
+   * наличных (модуль суммы) и терял саму строку: доставка вне периода, а
+   * журнал группы пропускал все операции с привязкой к доставке. Баланс при
+   * этом менялся, и объяснить его было нечем.
+   */
+  it('день доставки: наличные начислены, корректировок нет', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
     await payInSource(delivery, 300_000n);
 
-    // Период, охватывающий оба дня: наличные показаны за вычетом корректировки.
-    const report = await buildSettlementReport(ctx.db, {
-      from: DAY,
-      to: NEXT_DAY,
-      courierUserId: delivery.courierId,
-      limit: 50,
-      offset: 0,
-    });
-    expect(report.totals.cashReceivedMinor).toBe('200000');
-    const row = report.rows.find((item) => item.attemptId === delivery.attemptId);
-    expect(row?.cashMinor).toBe('200000');
-    expect(report.totals.closingBalanceMinor).toBe(
+    const onDelivery = await report(DAY, DAY, delivery.courierId);
+    expect(onDelivery.totals.cashReceivedMinor).toBe('400000');
+    expect(onDelivery.totals.cashCorrectionsMinor).toBe('0');
+    expect(onDelivery.totals.closingBalanceMinor).toBe('400000');
+    const row = onDelivery.rows.find((item) => item.attemptId === delivery.attemptId);
+    expect(row?.cashMinor).toBe('400000');
+  });
+
+  it('день корректировки: снятие показано минусом и отдельной строкой журнала', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
+    await payInSource(delivery, 300_000n);
+
+    const onCorrection = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
+
+    // Приход наличных в этот день не возникает из ниоткуда.
+    expect(onCorrection.totals.cashReceivedMinor).toBe('0');
+    // Снятие — со знаком минус, а не модулем.
+    expect(onCorrection.totals.cashCorrectionsMinor).toBe('-200000');
+    // Баланс: 4 000 ₽ входящих минус 2 000 ₽ снятых.
+    expect(onCorrection.totals.openingBalanceMinor).toBe('400000');
+    expect(onCorrection.totals.closingBalanceMinor).toBe('200000');
+
+    // Строка корректировки видна в дне её учёта, с заказом и основанием.
+    const day = onCorrection.days.find((item) => item.date === NEXT_DAY);
+    const operations = day?.couriers[0]?.operations.entries ?? [];
+    const correction = operations.find((entry) => entry.kind === 'CASH_PAYMENT_CORRECTION');
+    expect(correction).toBeDefined();
+    expect(correction?.amountMinor).toBe('-200000');
+    expect(correction?.orderId).toBe(delivery.orderId);
+    expect(correction?.reason ?? '').toContain('Корректировка наличных: оплата в МойСклад');
+
+    // Видимые движения объясняют изменение баланса.
+    const visible = operations.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+    expect(visible).toBe(
+      BigInt(onCorrection.totals.closingBalanceMinor) -
+        BigInt(onCorrection.totals.openingBalanceMinor),
+    );
+  });
+
+  it('общий период: и начисление, и корректировка, без двойного учёта', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
+    await payInSource(delivery, 300_000n);
+
+    const both = await report(DAY, NEXT_DAY, delivery.courierId);
+    expect(both.totals.cashReceivedMinor).toBe('400000');
+    expect(both.totals.cashCorrectionsMinor).toBe('-200000');
+    expect(both.totals.closingBalanceMinor).toBe(
       (await balanceOf(ctx.db, delivery.courierId, NEXT_DAY)).toString(),
+    );
+
+    // Корректировка учтена строкой доставки и НЕ продублирована в журнале дня.
+    const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
+    expect(row?.cashMinor).toBe('200000');
+    const journal = both.days
+      .flatMap((day) => day.couriers)
+      .flatMap((courier) => courier.operations.entries);
+    expect(journal.some((entry) => entry.kind === 'CASH_PAYMENT_CORRECTION')).toBe(false);
+
+    // Сумма итогов групп равна изменению баланса за период.
+    const groups = both.days
+      .flatMap((day) => day.couriers)
+      .reduce((total, courier) => total + BigInt(courier.totalMinor), 0n);
+    expect(groups).toBe(
+      BigInt(both.totals.closingBalanceMinor) - BigInt(both.totals.openingBalanceMinor),
     );
   });
 });
@@ -459,18 +565,18 @@ describe('отмена в источнике исключает заказ из 
 
   it('повторная отмена ничего не меняет', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
-    const strip = (): Promise<void> =>
-      ctx.db
-        .$transaction((tx) =>
-          stripCancelledOrderFinance(tx, {
-            orderId: delivery.orderId,
-            now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
-          }),
-        )
-        .catch(() => undefined);
+    const strip = (): Promise<boolean> =>
+      ctx.db.$transaction((tx) =>
+        stripCancelledOrderFinance(tx, {
+          orderId: delivery.orderId,
+          now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+        }),
+      );
 
-    await strip();
-    await strip();
+    // Первая отмена снимает начисления, вторая не находит что снимать — и это
+    // не ошибка: результат «ничего не изменилось», без исключения.
+    expect(await strip()).toBe(true);
+    expect(await strip()).toBe(false);
 
     expect(await orderContribution(delivery.orderId)).toBe(0n);
     expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(0n);
@@ -540,5 +646,347 @@ describe('отмена в источнике исключает заказ из 
     expect(await orderContribution(delivery.orderId)).toBe(0n);
     expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(untouched);
     expect(await sumKind(delivery.orderId, 'OPENING_DEBT')).toBe(0n);
+  });
+});
+
+// --- Гонки доставки и финансовой синхронизации --------------------------------
+
+describe('порядок доставки и синхронизации не оставляет непоправленных денег', () => {
+  /**
+   * Отмена обработана РАНЬШЕ, чем доставка успела начислить.
+   *
+   * Так и выглядел найденный дефект: задание снимало пустой журнал, помечалось
+   * DONE, а начисление появлялось следом — и возвращало отменённому заказу
+   * ненулевой результат, снимать который уже некому.
+   */
+  it('начисление доставки по отменённому заказу не создаётся вовсе', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
+
+    // Заказ отменён, деньги сняты — журнал по нему пуст по вкладу.
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+      }),
+    );
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+
+    // Повторная фиксация результата доставки (второй круг, пересчёт, гонка).
+    const second = await seedAttemptFor(delivery);
+    await accrueDeliveryResult(ctx.db, await readLedgerActivation(ctx.db), {
+      attemptId: second,
+      routeOrderId: delivery.routeOrderId,
+      routeId: delivery.routeId,
+      orderId: delivery.orderId,
+      courierUserId: delivery.courierId,
+      actorUserId: delivery.courierId,
+      outcome: 'DELIVERED',
+    });
+
+    // Ни наличных, ни оплаты доставки: вклад остаётся нулевым.
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { attemptId: second } })).toBe(0);
+    // Физический факт доставки при этом сохранён.
+    expect(await ctx.db.deliveryMoneyFact.count({ where: { attemptId: second } })).toBe(1);
+  });
+
+  it('поздний расчёт МКАД по отменённому заказу денег не начисляет', async () => {
+    const delivery = await seedDelivered({ sum: 0n, payed: 0n, perOrder: 20_000n });
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    await ctx.db.$transaction((tx) =>
+      accrueDistanceFee(tx, {
+        attemptId: delivery.attemptId,
+        routeOrderId: delivery.routeOrderId,
+        routeId: delivery.routeId,
+        orderId: delivery.orderId,
+        courierUserId: delivery.courierId,
+        actorUserId: delivery.courierId,
+        operationDate: NEXT_DAY,
+        perKmMinor: 5_000n,
+      }),
+    );
+
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(0n);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+  });
+
+  /**
+   * Управляемый порядок: доставка прочитала СТАРУЮ оплату и держит транзакцию,
+   * импорт и задание идут следом. Пауза не доказывает ничего сама по себе —
+   * доказывает общая блокировка строки заказа: пока доставка не зафиксирована,
+   * ни импорт, ни задание не проходят.
+   */
+  it('доставка со старой оплатой → импорт → задание: наличные обнуляются', async () => {
+    /*
+     * Заказ оплачен полностью, поэтому первая попытка наличных не начисляет:
+     * в проверке участвует ровно одна доставка — управляемая.
+     */
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 500_000n });
+    expect(await sumKind(delivery.orderId, 'CASH_RECEIVED')).toBe(0n);
+
+    // Источник «откатывает» оплату: доставка будет считать по 0 оплачено.
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { payedSumMinor: 0n, cashToCollectMinor: 500_000n, cashAnomaly: false },
+    });
+
+    const second = await seedAttemptFor(delivery);
+
+    let accrued!: () => void;
+    let release!: () => void;
+    const accruedSignal = new Promise<void>((resolve) => (accrued = resolve));
+    const releaseSignal = new Promise<void>((resolve) => (release = resolve));
+
+    const activation = await readLedgerActivation(ctx.db);
+    const deliveryTx = ctx.db.$transaction(
+      async (tx) => {
+        await accrueDeliveryResult(tx, activation, {
+          attemptId: second,
+          routeOrderId: delivery.routeOrderId,
+          routeId: delivery.routeId,
+          orderId: delivery.orderId,
+          courierUserId: delivery.courierId,
+          actorUserId: delivery.courierId,
+          outcome: 'DELIVERED',
+        });
+        accrued();
+        await releaseSignal;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+
+    await accruedSignal;
+
+    // Импорт и задание стартуют ДО фиксации доставки и обязаны её дождаться.
+    const afterDelivery = (async (): Promise<void> => {
+      await ctx.db.deliveryOrder.update({
+        where: { id: delivery.orderId },
+        data: { payedSumMinor: 500_000n, cashToCollectMinor: 0n },
+      });
+      await ctx.db.$transaction((tx) =>
+        applyCashPaymentCorrection(tx, {
+          orderId: delivery.orderId,
+          now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+        }),
+      );
+    })();
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    release();
+    await deliveryTx;
+    await afterDelivery;
+
+    // Начислено по старой оплате 5 000 ₽ и снято ровно столько же.
+    expect(await sumKind(delivery.orderId, 'CASH_RECEIVED')).toBe(500_000n);
+    expect(await sumKind(delivery.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(-500_000n);
+    expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(0n);
+  });
+});
+
+// --- Отменённый заказ в отчёте -------------------------------------------------
+
+describe('отменённый заказ не остаётся в действующих начислениях', () => {
+  it('колонки обнуляются, строка помечена, история проводок сохранена', async () => {
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      distanceFee: 10_000n,
+    });
+
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${DAY}T12:00:00.000Z`),
+      }),
+    );
+
+    const built = await report(DAY, DAY, delivery.courierId);
+    const row = built.rows.find((item) => item.attemptId === delivery.attemptId);
+
+    // Заработок по отменённому заказу больше не начисляется.
+    expect(row?.deliveryFeeMinor).toBe('0');
+    expect(row?.distanceFeeMinor).toBe('0');
+    expect(row?.cashMinor).toBe('0');
+    expect(row?.totalMinor).toBe('0');
+    expect(row?.financeCancelled).toBe(true);
+    // Физический факт доставки остаётся.
+    expect(row?.outcome).toBe('DELIVERED');
+
+    // Итоги тоже без исходных начислений, а баланс сошёлся.
+    expect(built.totals.deliveryFeesMinor).toBe('0');
+    expect(built.totals.distanceFeesMinor).toBe('0');
+    expect(built.totals.cashReceivedMinor).toBe('0');
+    expect(built.totals.closingBalanceMinor).toBe('0');
+    const group = built.days.find((day) => day.date === DAY)?.couriers[0];
+    expect(group?.accruedMinor).toBe('0');
+
+    // История проводок цела: и начисления, и их отмены на месте.
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: delivery.orderId, kind: 'DELIVERY_FEE' },
+      }),
+    ).toBe(1);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: delivery.orderId, kind: 'ADJUSTMENT' },
+      }),
+    ).toBe(3);
+  });
+});
+
+// --- Содержимое выгрузки -------------------------------------------------------
+
+describe('выгрузка показывает корректировки, а не только непустой файл', () => {
+  it('XLSX: подписи, знаки и суммы итогов и журнала', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
+    await payInSource(delivery, 300_000n);
+
+    // День корректировки: именно здесь снятие обязано читаться минусом.
+    const built = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(await buildSettlementWorkbook(built));
+
+    const summary = workbook.getWorksheet('Итоги');
+    const named = new Map<string, unknown>();
+    summary?.eachRow((row) => {
+      named.set(String(row.getCell(1).value ?? ''), row.getCell(2).value);
+    });
+
+    expect(named.get('Начальный баланс')).toBe(4000);
+    expect(named.get('Наличные, полученные курьером')).toBe(0);
+    // Знак сохранён: снятие показано отрицательным числом, а не модулем.
+    expect(named.get('Корректировки наличных (оплата в МойСклад)')).toBe(-2000);
+    expect(named.get('Конечный баланс')).toBe(2000);
+
+    // Журнал выгрузки называет операцию и показывает её сумму со знаком.
+    const operations = workbook.getWorksheet('Операции');
+    const journal: { kind: string; amount: unknown }[] = [];
+    operations?.eachRow((row) =>
+      journal.push({ kind: String(row.getCell(7).value ?? ''), amount: row.getCell(8).value }),
+    );
+    const line = journal.find((item) => item.kind === 'Корректировка наличных: оплата в МойСклад');
+    expect(line).toBeDefined();
+    expect(line?.amount).toBe(-2000);
+  });
+});
+
+// --- Обновление отчётов без F5 -------------------------------------------------
+
+describe('автоматические корректировки публикуют финансовое событие', () => {
+  /*
+   * Курсор по идентификатору, а не по времени.
+   *
+   * `occurredAt` ставит СУБД, а отметку «до» брал процесс тестов: при малейшем
+   * расхождении часов событие предыдущего шага попадало в окно следующего, и
+   * проверка «лишнего события нет» становилась плавающей. Идентификатор
+   * возрастает монотонно и от часов не зависит.
+   */
+  async function lastEventId(): Promise<bigint> {
+    const row = await ctx.db.realtimeEvent.findFirst({
+      orderBy: { id: 'desc' },
+      select: { id: true },
+    });
+    return row?.id ?? 0n;
+  }
+
+  /** События финансового журнала, появившиеся после курсора. */
+  async function ledgerEventsAfter(cursor: bigint): Promise<{ audienceRoles: string[] }[]> {
+    return ctx.db.realtimeEvent.findMany({
+      where: { topic: 'finance.ledger_changed', id: { gt: cursor } },
+      select: { audienceRoles: true },
+    });
+  }
+
+  it('корректировка оплаты шлёт событие всем ролям отчёта', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { payedSumMinor: 300_000n, cashToCollectMinor: 200_000n },
+    });
+
+    const cursor = await lastEventId();
+    const handler = createOrderFinanceHandler({
+      now: () => new Date(`${NEXT_DAY}T09:00:00.000Z`),
+    });
+    await ctx.db.$transaction((tx) =>
+      handler(
+        {
+          id: randomUUID(),
+          topic: 'finance.order_sync',
+          idempotencyKey: unique('job'),
+          payload: { reason: 'PAYMENT', orderId: delivery.orderId },
+          attempts: 0,
+          maxAttempts: 5,
+        },
+        tx,
+      ),
+    );
+
+    /*
+     * Событие импорта заказа отчёт не инвалидирует и приходит раньше задания,
+     * поэтому его недостаточно: нужно ИМЕННО финансовое событие и в той же
+     * транзакции, что и запись в журнал.
+     */
+    const events = await ledgerEventsAfter(cursor);
+    expect(events).toHaveLength(1);
+    expect([...(events[0]?.audienceRoles ?? [])].sort()).toEqual([
+      'ADMIN',
+      'LOGISTICIAN',
+      'SUPERVISOR',
+    ]);
+  });
+
+  it('отмена шлёт событие, а задание без изменений — не шлёт', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+
+    const handler = createOrderFinanceHandler({
+      now: () => new Date(`${NEXT_DAY}T09:00:00.000Z`),
+    });
+    const run = (): Promise<void> =>
+      ctx.db.$transaction((tx) =>
+        handler(
+          {
+            id: randomUUID(),
+            topic: 'finance.order_sync',
+            idempotencyKey: unique('job'),
+            payload: { reason: 'CANCEL', orderId: delivery.orderId },
+            attempts: 0,
+            maxAttempts: 5,
+          },
+          tx,
+        ),
+      );
+
+    const firstCursor = await lastEventId();
+    await run();
+    expect(await ledgerEventsAfter(firstCursor)).toHaveLength(1);
+
+    // Повтор снимать уже нечего — лишнего события не появляется.
+    const secondCursor = await lastEventId();
+    await run();
+    expect(await ledgerEventsAfter(secondCursor)).toHaveLength(0);
   });
 });

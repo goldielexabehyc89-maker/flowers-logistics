@@ -101,6 +101,20 @@ export async function accrueDeliveryResult(
     return;
   }
 
+  /*
+   * Строка заказа блокируется ДО чтения сумм.
+   *
+   * Импорт из МоегоСклада блокирует ту же строку, и без этой блокировки
+   * доставка читала бы оплату «до», импорт фиксировал бы новую оплату, а
+   * финансовое задание успевало отработать по ещё пустому журналу — начисление
+   * появлялось бы после него и оставалось непоправленным. Под общей блокировкой
+   * порядок любой: либо мы считаем уже по новой оплате, либо задание увидит наши
+   * записи и снимет разницу.
+   *
+   * Порядок блокировок прежний: DeliveryRoute (выше по стеку) → DeliveryOrder.
+   */
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
+
   const order = await tx.deliveryOrder.findUnique({
     where: { id: input.orderId },
     select: {
@@ -109,6 +123,7 @@ export async function accrueDeliveryResult(
       payedSumMinor: true,
       paymentTypeId: true,
       paymentTypeName: true,
+      cancelledInSource: true,
     },
   });
   if (order === null) {
@@ -139,6 +154,19 @@ export async function accrueDeliveryResult(
   });
 
   if (input.outcome !== 'DELIVERED') {
+    return;
+  }
+
+  /*
+   * Заказ, отменённый в источнике, денег не приносит.
+   *
+   * Денежный факт выше уже записан — физическая доставка остаётся историей, — а
+   * вот начислений быть не должно: иначе отмена, обработанная РАНЬШЕ доставки,
+   * снимала бы пустой журнал, а доставка потом возвращала заказу ненулевой
+   * результат, который снимать уже некому. Проверка стоит под той же
+   * блокировкой строки, что и чтение сумм.
+   */
+  if (order.cancelledInSource) {
     return;
   }
 
@@ -219,6 +247,23 @@ export async function accrueDistanceFee(
   input: DistanceFeeInput,
 ): Promise<void> {
   if (input.perKmMinor <= 0n) {
+    return;
+  }
+
+  /*
+   * Отменённому заказу километры не начисляются.
+   *
+   * Это ВТОРОЙ путь начисления, и он срабатывает позже доставки — когда
+   * Valhalla ответила уже после неё. Без проверки поздний расчёт возвращал бы
+   * отменённому заказу ненулевой результат. Строка заказа блокируется, чтобы
+   * отмена не проскочила между проверкой и записью.
+   */
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
+  const order = await tx.deliveryOrder.findUnique({
+    where: { id: input.orderId },
+    select: { cancelledInSource: true },
+  });
+  if (order === null || order.cancelledInSource) {
     return;
   }
 

@@ -69,6 +69,10 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { name: 'Период', value: `${report.period.from} — ${report.period.to}` },
     { name: 'Начальный баланс', value: toRubles(report.totals.openingBalanceMinor) },
     { name: 'Наличные, полученные курьером', value: toRubles(report.totals.cashReceivedMinor) },
+    {
+      name: 'Корректировки наличных (оплата в МойСклад)',
+      value: toRubles(report.totals.cashCorrectionsMinor),
+    },
     { name: 'Сдано логисту', value: toRubles(report.totals.handedToLogistMinor) },
     { name: 'Выдано курьеру', value: toRubles(report.totals.issuedToCourierMinor) },
     { name: 'Базовая оплата доставок', value: toRubles(report.totals.deliveryFeesMinor) },
@@ -164,7 +168,9 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
             ? 'Расчёт отсутствует'
             : row.cancelled
               ? 'Результат отменён'
-              : '',
+              : row.financeCancelled
+                ? 'Финансовый результат отменён'
+                : '',
         });
       }
     }

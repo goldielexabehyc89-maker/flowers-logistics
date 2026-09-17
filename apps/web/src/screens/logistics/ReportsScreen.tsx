@@ -46,6 +46,8 @@ interface SettlementTotals {
   adjustmentsMinor: string;
   /** Начальный долг, заведённый в этом периоде: отдельная строка, не заработок. */
   openingDebtMinor: string;
+  /** Корректировки наличных после оплаты в источнике: со знаком, обычно минус. */
+  cashCorrectionsMinor: string;
   closingBalanceMinor: string;
 }
 
@@ -69,6 +71,8 @@ interface SettlementRow {
   bonusesMinor: string;
   totalMinor: string;
   settlementMissing: boolean;
+  /** Финансовый результат доставки снят: деньги по заказу не действуют. */
+  financeCancelled: boolean;
 }
 
 interface LedgerEntry {
@@ -80,6 +84,9 @@ interface LedgerEntry {
   actorName: string | null;
   reason: string | null;
   reversed: boolean;
+  /** Что именно отменяет обратная запись. */
+  reversesKind: string | null;
+  reversesEntryId: string | null;
 }
 
 interface CourierGroup {
@@ -239,6 +246,42 @@ export function journalColumn(kind: string): number {
     return 10;
   }
   return 9;
+}
+
+/**
+ * Операции, которым нужна СВОЯ строка журнала.
+ *
+ * Их нельзя ставить под денежные и зарплатные столбцы: начальный долг, его
+ * отмена и корректировка наличных меняют только баланс. В общем виде сумма
+ * встала бы под «Доп.» или «Начислено», и снятие долга читалось бы как
+ * положительная зарплата. Поэтому такие строки называют операцию словами,
+ * показывают знак и направление и ссылаются на исходную запись.
+ */
+export function correctiveOperation(
+  entry: Pick<LedgerEntry, 'kind' | 'amountMinor' | 'reversesKind'>,
+): { title: string; direction: string } | null {
+  if (entry.kind === 'OPENING_DEBT') {
+    return { title: 'Начальный долг', direction: 'увеличивает долг' };
+  }
+  if (entry.kind === 'CASH_PAYMENT_CORRECTION') {
+    return {
+      title: 'Корректировка наличных: оплата в МойСклад',
+      direction: 'уменьшает наличные за курьером',
+    };
+  }
+  if (entry.kind === 'ADJUSTMENT') {
+    const negative = BigInt(entry.amountMinor) < 0n;
+    return {
+      title: entry.reversesKind === 'OPENING_DEBT' ? 'Отмена начального долга' : 'Отмена операции',
+      direction: negative ? 'уменьшает долг' : 'увеличивает долг',
+    };
+  }
+  return null;
+}
+
+/** Знак суммы словом-символом: направление должно читаться без догадок. */
+export function signOf(minor: string): string {
+  return BigInt(minor) < 0n ? '−' : '+';
 }
 
 /** Величина суммы без знака: направление задаёт вид операции или столбец. */
@@ -724,6 +767,19 @@ export function ReportsScreen(): React.JSX.Element {
               его заработок и не движение наличных, и смешивать их нельзя.
               В периодах после дня учёта сумма уже сидит в начальном балансе.
             */}
+            {settlements.data.totals.cashCorrectionsMinor !== '0' && (
+              <p
+                className="reports__notice"
+                role="status"
+                data-testid="reports-cash-corrections-total"
+              >
+                Корректировки наличных за период:{' '}
+                {signOf(settlements.data.totals.cashCorrectionsMinor)}
+                {formatMoney(absMoney(settlements.data.totals.cashCorrectionsMinor))} — заказы
+                оплатили в МоемСкладе уже после доставки, столько наличных курьер не сдаёт.
+              </p>
+            )}
+
             {settlements.data.totals.openingDebtMinor !== '0' && (
               <p className="reports__notice" role="status" data-testid="reports-opening-debt-total">
                 Начальный долг за период: {formatMoney(settlements.data.totals.openingDebtMinor)} —
@@ -932,6 +988,19 @@ export function ReportsScreen(): React.JSX.Element {
                                 <td>
                                   {row.settlementMissing ? (
                                     <span className="reports__missing">Расчёт отсутствует</span>
+                                  ) : row.financeCancelled ? (
+                                    /*
+                                      Доставка состоялась, но денег по ней нет.
+                                      Без этой пометки строка с нулями читалась
+                                      бы как ошибка расчёта, а не как отмена.
+                                    */
+                                    <span
+                                      className="reports__missing"
+                                      data-testid="reports-finance-cancelled"
+                                      title="Заказ отменён в источнике: начисления сняты обратными записями, факт доставки сохранён"
+                                    >
+                                      Финрезультат отменён
+                                    </span>
                                   ) : (
                                     formatMoney(row.totalMinor)
                                   )}
@@ -957,7 +1026,8 @@ export function ReportsScreen(): React.JSX.Element {
                              * направлении, рядом видно основание, а отменить
                              * её может только администратор.
                              */
-                            if (entry.kind === 'OPENING_DEBT') {
+                            const corrective = correctiveOperation(entry);
+                            if (corrective !== null) {
                               rows.push(
                                 <tr
                                   key={entry.id}
@@ -966,9 +1036,7 @@ export function ReportsScreen(): React.JSX.Element {
                                   data-testid="reports-payment"
                                 >
                                   <td>{formatMoscowDateTime(entry.occurredAt)}</td>
-                                  <td className="reports__detail-order">
-                                    {OPERATION_LABELS[entry.kind]}
-                                  </td>
+                                  <td className="reports__detail-order">{corrective.title}</td>
                                   <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                   <td
                                     className="reports__detail-reason"
@@ -981,6 +1049,7 @@ export function ReportsScreen(): React.JSX.Element {
                                     {entry.reversed ? (
                                       <span className="muted text-sm">отменён</span>
                                     ) : (
+                                      entry.kind === 'OPENING_DEBT' &&
                                       isAdmin && (
                                         <button
                                           type="button"
@@ -1003,9 +1072,10 @@ export function ReportsScreen(): React.JSX.Element {
                                       )
                                     )}
                                   </td>
-                                  <td data-testid="reports-opening-debt-amount">
-                                    +{formatMoney(absMoney(entry.amountMinor))}
-                                    <span className="muted text-sm"> увеличивает долг</span>
+                                  <td data-testid="reports-corrective-amount">
+                                    {signOf(entry.amountMinor)}
+                                    {formatMoney(absMoney(entry.amountMinor))}
+                                    <span className="muted text-sm"> {corrective.direction}</span>
                                   </td>
                                 </tr>,
                               );

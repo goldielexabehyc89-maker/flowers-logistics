@@ -6670,6 +6670,113 @@ test('начальный долг: администратор вносит ег�
 });
 
 /**
+ * Отчёт обновляется сам во втором и третьем сеансе.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ: курьер и наблюдатели заводятся специально для проверки.
+ * Реальные курьеры и их расчёты не затрагиваются.
+ */
+test('расчёты: внесённый долг виден логисту и управляющему без перезагрузки', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const adminContext = await browser.newContext();
+  const adminPage = await adminContext.newPage();
+  await login(adminPage, ADMIN_PHONE, ADMIN_PIN);
+
+  const today = await adminPage.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+  const auth = await adminPage.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  const courier = await seedOwnCourier(adminPage, token);
+
+  /** Наблюдатель нужной роли: заводится и активируется через API администратора. */
+  const seedWatcher = async (
+    role: 'LOGISTICIAN' | 'SUPERVISOR',
+  ): Promise<{ phone: string; pin: string }> => {
+    const phone = uniquePhone();
+    const pin = '9753';
+    const created = await adminPage.request.post('/api/users', {
+      headers: { authorization: `Bearer ${token}` },
+      data: { fullName: `Наблюдатель ${role}`, phone, roles: [role] },
+    });
+    expect(created.status()).toBe(201);
+    const body = (await created.json()) as { activationCode: string };
+    const activated = await adminPage.request.post('/api/auth/activate', {
+      data: { phone, code: body.activationCode, pin },
+    });
+    expect(activated.status()).toBe(200);
+    return { phone, pin };
+  };
+
+  /** Открывает отчёт по нужному курьеру и ждёт нулевого баланса. */
+  const openReport = async (account: { phone: string; pin: string }): Promise<Page> => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await login(page, account.phone, account.pin);
+    await openSection(page, 'Логистика');
+    await page.getByRole('link', { name: 'Отчёты' }).first().click();
+    await page.waitForURL('**/logistics/reports', { timeout: 30_000 });
+    await expect(page.getByTestId('reports-screen')).toBeVisible({ timeout: 30_000 });
+    await page.getByTestId('reports-courier-combobox-field').fill(courier.phone);
+    await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
+    await page.getByTestId('reports-courier-combobox-option').first().click();
+    await expect(page.getByTestId('reports-closing')).toContainText('0,00 ₽', { timeout: 20_000 });
+    return page;
+  };
+
+  const logistPage = await openReport(await seedWatcher('LOGISTICIAN'));
+  const supervisorPage = await openReport(await seedWatcher('SUPERVISOR'));
+
+  // Идентификатор курьера — по телефону из справочника.
+  const courierUserId = await adminPage.request
+    .get('/api/users?role=COURIER&status=ACTIVE&limit=100', {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    .then(async (response) => {
+      const body = (await response.json()) as { items: { id: string; phone: string }[] };
+      return body.items.find((item) => item.phone === courier.phone)?.id ?? '';
+    });
+  expect(courierUserId).not.toBe('');
+
+  // Администратор вносит долг в СВОЁМ сеансе.
+  const recorded = await adminPage.request.post('/api/logistics/ledger/opening-debt', {
+    headers: { authorization: `Bearer ${token}` },
+    data: {
+      courierUserId,
+      amountMinor: '500000',
+      operationDate: today,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: `opening-debt:e2e-${Date.now()}`,
+    },
+  });
+  expect(recorded.status()).toBe(201);
+
+  /*
+   * Ни одной перезагрузки: обе открытые вкладки обязаны обновиться сами по
+   * финансовому событию. Событие заказа для этого не годится — оно не
+   * инвалидирует расчёты.
+   */
+  await expect(logistPage.getByTestId('reports-closing')).toContainText('5000,00 ₽', {
+    timeout: 20_000,
+  });
+  await expect(supervisorPage.getByTestId('reports-closing')).toContainText('5000,00 ₽', {
+    timeout: 20_000,
+  });
+
+  await adminContext.close();
+  await logistPage.context().close();
+  await supervisorPage.context().close();
+});
+
+/**
  * «Отчёты» открываются на сегодняшнем московском дне.
  *
  * Логист приходит в отчёты за сегодняшней кассой и сегодняшним расчётом.

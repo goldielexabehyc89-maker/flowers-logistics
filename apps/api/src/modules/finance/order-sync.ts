@@ -29,6 +29,7 @@ import { moscowCalendarDate } from '@fl/shared';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { OutboxHandler } from '../outbox/worker.js';
 import { enqueueOutbox } from '../outbox/producer.js';
+import { publishRealtimeEvent } from '../realtime/events.js';
 import { appendEntry } from './ledger.js';
 import { reverseDeliveryAccruals } from './accrual.js';
 
@@ -99,7 +100,19 @@ function rubles(minor: bigint): string {
 export async function applyCashPaymentCorrection(
   tx: TransactionClient,
   input: { orderId: string; now: Date },
-): Promise<void> {
+): Promise<boolean> {
+  /*
+   * Строка заказа блокируется ПЕРВОЙ.
+   *
+   * Ту же строку блокируют импорт и начисление доставки. Без этого обработчик
+   * мог прочитать ещё пустой журнал незавершённой доставки, успешно завершиться
+   * и стать DONE, а начисление появлялось бы следом — по старой оплате и уже
+   * некому его поправить. Под общей блокировкой обработчик либо ждёт доставку и
+   * видит её записи, либо отрабатывает раньше, а доставка считает уже по новой
+   * оплате.
+   */
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
+
   const order = await tx.deliveryOrder.findUnique({
     where: { id: input.orderId },
     select: {
@@ -110,7 +123,7 @@ export async function applyCashPaymentCorrection(
     },
   });
   if (order === null) {
-    return;
+    return false;
   }
 
   /*
@@ -118,7 +131,7 @@ export async function applyCashPaymentCorrection(
    * Оплата, пришедшая после отмены, ничего не меняет — итог остаётся нулевым.
    */
   if (order.cancelledInSource) {
-    return;
+    return false;
   }
 
   // Наличные бывают только по успешной доставке: корректировать нечего, пока
@@ -140,6 +153,7 @@ export async function applyCashPaymentCorrection(
   const outstanding = order.sumMinor - order.payedSumMinor;
   const remaining = outstanding > 0n ? outstanding : 0n;
 
+  let changed = false;
   for (const entry of accrued) {
     if (entry.attemptId === null) {
       continue;
@@ -176,7 +190,10 @@ export async function applyCashPaymentCorrection(
       attemptId: entry.attemptId,
       idempotencyKey: cashCorrectionEntryKey(entry.attemptId, order.payedSumMinor),
     });
+    changed = true;
   }
+
+  return changed;
 }
 
 /**
@@ -195,7 +212,11 @@ export async function applyCashPaymentCorrection(
 export async function stripCancelledOrderFinance(
   tx: TransactionClient,
   input: { orderId: string; now: Date },
-): Promise<void> {
+): Promise<boolean> {
+  // Та же блокировка, что у доставки и импорта: снимать нужно ПОСЛЕ того, как
+  // параллельная доставка зафиксировала свои начисления, иначе снимать нечего.
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
+
   const entries = await tx.courierLedgerEntry.findMany({
     where: {
       orderId: input.orderId,
@@ -222,6 +243,8 @@ export async function stripCancelledOrderFinance(
       operationDate,
     });
   }
+
+  return attempts.size > 0;
 }
 
 export interface OrderFinanceHandlerDeps {
@@ -246,11 +269,26 @@ export function createOrderFinanceHandler(deps: OrderFinanceHandlerDeps = {}): O
       return;
     }
 
-    if (payload.reason === 'CANCEL') {
-      await stripCancelledOrderFinance(tx, { orderId, now: now() });
-      return;
-    }
+    const at = now();
+    const changed =
+      payload.reason === 'CANCEL'
+        ? await stripCancelledOrderFinance(tx, { orderId, now: at })
+        : await applyCashPaymentCorrection(tx, { orderId, now: at });
 
-    await applyCashPaymentCorrection(tx, { orderId, now: now() });
+    /*
+     * Открытый отчёт обязан обновиться сам.
+     *
+     * Событие публикуется В ТОЙ ЖЕ транзакции и только когда журнал
+     * действительно изменился: события импорта заказа отчёт не инвалидируют и
+     * приходят раньше этого задания. Аудитория — все роли, которым разрешён
+     * отчёт расчётов, включая управляющего.
+     */
+    if (changed) {
+      await publishRealtimeEvent(tx, {
+        topic: 'finance.ledger_changed',
+        payload: { operationDate: moscowCalendarDate(at) },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+      });
+    }
   };
 }

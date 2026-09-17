@@ -35,6 +35,7 @@ import {
   appendEntry,
   balanceOf,
   entryByIdempotencyKey,
+  toLedgerView,
   EXPENSE_KINDS,
   openingDebtsOf,
   reverseEntry,
@@ -190,6 +191,17 @@ function assertPeriod(from: string, to: string): void {
 }
 
 export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDeps): Promise<void> {
+  /**
+   * Обратная запись, созданная победителем гонки.
+   *
+   * Две одновременные отмены одной записи упираются в уникальность: выживает
+   * одна. Проигравшая транзакция к этому моменту уже аварийна, поэтому читать
+   * победителя можно только ПОСЛЕ её отката — здесь. Обоим запросам отдаётся
+   * один и тот же результат: обратная запись одна, баланс меняется один раз.
+   */
+  const reversalWinner = async (entryId: string): Promise<unknown | null> =>
+    entryByIdempotencyKey(deps.db, `reversal:${entryId}`);
+
   // --- История -------------------------------------------------------------
 
   app.get('/api/logistics/history', async (request) => {
@@ -461,7 +473,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         await publishRealtimeEvent(tx, {
           topic: 'finance.ledger_changed',
           payload: { operationDate: result.courierEntry.operationDate },
-          audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
         });
 
         return result.courierEntry;
@@ -507,7 +519,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       await publishRealtimeEvent(tx, {
         topic: 'finance.ledger_changed',
         payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
       });
 
       return created;
@@ -521,66 +533,94 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = reversalSchema.parse(request.body);
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const source = await tx.courierLedgerEntry.findUnique({
-        where: { id },
-        select: { transferId: true, kind: true },
-      });
-
-      /*
-       * Начальный долг отменяется только администратором и только своим
-       * действием.
-       *
-       * Этот эндпоинт открыт всему финансовому контуру (логист, управляющий),
-       * поэтому отмену начального долга он не выполняет НИ ДЛЯ КОГО — иначе
-       * ограничение «только ADMIN» обходилось бы прямым запросом сюда.
-       */
-      if (source !== null && source.kind === 'OPENING_DEBT') {
-        throw new AppError('FORBIDDEN', {
-          publicMessage: 'Отмена начального долга выполняется отдельным действием администратора.',
+    let entry;
+    try {
+      entry = await deps.db.$transaction(async (tx) => {
+        const source = await tx.courierLedgerEntry.findUnique({
+          where: { id },
+          select: { transferId: true, kind: true },
         });
-      }
 
-      const created = await reverseEntry(tx, {
-        entryId: id,
-        actorUserId: actor.userId,
-        reason: body.reason,
-        operationDate: moscowCalendarDate(new Date()),
-      });
+        /*
+         * Начальный долг отменяется только администратором и только своим
+         * действием.
+         *
+         * Этот эндпоинт открыт всему финансовому контуру (логист, управляющий),
+         * поэтому отмену начального долга он не выполняет НИ ДЛЯ КОГО — иначе
+         * ограничение «только ADMIN» обходилось бы прямым запросом сюда.
+         */
+        if (source !== null && source.kind === 'OPENING_DEBT') {
+          throw new AppError('FORBIDDEN', {
+            publicMessage:
+              'Отмена начального долга выполняется отдельным действием администратора.',
+          });
+        }
 
-      /*
-       * У передачи две стороны, и отменяются они вместе.
-       *
-       * Отменённая наполовину передача оставила бы деньги в кассе, которых
-       * у логиста нет, или долг у курьера, которого он не делал.
-       */
-      if (source !== null && source.transferId !== null) {
-        await reverseTransfer(tx, {
-          transferId: source.transferId,
+        /*
+         * Отмена уже проведена — отдаём её и НЕ пишем аудит второй раз.
+         *
+         * Повторный запрос (сетевой повтор, вторая вкладка) обязан быть
+         * идемпотентным целиком: одна обратная запись и одна строка аудита.
+         */
+        const already = await tx.courierLedgerEntry.findUnique({
+          where: { idempotencyKey: `reversal:${id}` },
+          include: {
+            reversedBy: { select: { id: true } },
+            reversesEntry: { select: { kind: true } },
+            actor: { select: { fullName: true } },
+          },
+        });
+        if (already !== null) {
+          return toLedgerView(already);
+        }
+
+        const created = await reverseEntry(tx, {
+          entryId: id,
           actorUserId: actor.userId,
           reason: body.reason,
           operationDate: moscowCalendarDate(new Date()),
         });
+
+        /*
+         * У передачи две стороны, и отменяются они вместе.
+         *
+         * Отменённая наполовину передача оставила бы деньги в кассе, которых
+         * у логиста нет, или долг у курьера, которого он не делал.
+         */
+        if (source !== null && source.transferId !== null) {
+          await reverseTransfer(tx, {
+            transferId: source.transferId,
+            actorUserId: actor.userId,
+            reason: body.reason,
+            operationDate: moscowCalendarDate(new Date()),
+          });
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_OPERATION_REVERSED',
+          entityType: 'CourierLedgerEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
+      });
+    } catch (error) {
+      const winner = await reversalWinner(id);
+      if (winner === null) {
+        throw error;
       }
-
-      await writeAudit(tx, {
-        action: 'FINANCE_OPERATION_REVERSED',
-        entityType: 'CourierLedgerEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
-        ...contextOf(request),
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+      entry = winner;
+    }
 
     return { entry };
   });
@@ -653,6 +693,31 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     let entry;
     try {
       entry = await deps.db.$transaction(async (tx) => {
+        /*
+         * Запись могла появиться между предварительной проверкой и этой
+         * транзакцией.
+         *
+         * Тогда `appendEntry` молча вернул бы чужую запись, и запрос с ДРУГОЙ
+         * суммой получил бы 201 «сохранено» вместе с лишней строкой аудита.
+         * Поэтому повтор распознаётся здесь же, до записи: контракт сверяется
+         * на КАЖДОМ пути возврата существующей операции.
+         */
+        const existing = await tx.courierLedgerEntry.findUnique({
+          where: { idempotencyKey: body.idempotencyKey },
+          include: {
+            reversedBy: { select: { id: true } },
+            reversesEntry: { select: { kind: true } },
+            actor: { select: { fullName: true } },
+          },
+        });
+        if (existing !== null) {
+          const view = toLedgerView(existing);
+          if (!sameOperation(view)) {
+            conflict();
+          }
+          return view;
+        }
+
         const created = await appendEntry(tx, {
           courierUserId: body.courierUserId,
           kind: 'OPENING_DEBT',
@@ -683,7 +748,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         await publishRealtimeEvent(tx, {
           topic: 'finance.ledger_changed',
           payload: { operationDate: created.operationDate },
-          audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
         });
 
         return created;
@@ -722,45 +787,76 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = reversalSchema.parse(request.body);
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const source = await tx.courierLedgerEntry.findUnique({
-        where: { id },
-        select: { kind: true },
-      });
-      if (source === null) {
-        throw new AppError('NOT_FOUND', { publicMessage: 'Операция не найдена.' });
-      }
-      if (source.kind !== 'OPENING_DEBT') {
-        throw new AppError('VALIDATION_FAILED', {
-          publicMessage: 'Этим действием отменяется только начальный долг.',
+    let entry;
+    try {
+      entry = await deps.db.$transaction(async (tx) => {
+        const source = await tx.courierLedgerEntry.findUnique({
+          where: { id },
+          select: { kind: true },
         });
+        if (source === null) {
+          throw new AppError('NOT_FOUND', { publicMessage: 'Операция не найдена.' });
+        }
+        if (source.kind !== 'OPENING_DEBT') {
+          throw new AppError('VALIDATION_FAILED', {
+            publicMessage: 'Этим действием отменяется только начальный долг.',
+          });
+        }
+
+        /*
+         * Отмена уже проведена — отдаём её и НЕ пишем аудит второй раз.
+         *
+         * Повторный запрос (сетевой повтор, вторая вкладка) обязан быть
+         * идемпотентным целиком: одна обратная запись и одна строка аудита.
+         */
+        const already = await tx.courierLedgerEntry.findUnique({
+          where: { idempotencyKey: `reversal:${id}` },
+          include: {
+            reversedBy: { select: { id: true } },
+            reversesEntry: { select: { kind: true } },
+            actor: { select: { fullName: true } },
+          },
+        });
+        if (already !== null) {
+          return toLedgerView(already);
+        }
+
+        const created = await reverseEntry(tx, {
+          entryId: id,
+          actorUserId: actor.userId,
+          reason: body.reason,
+          operationDate: moscowCalendarDate(new Date()),
+        });
+
+        await writeAudit(tx, {
+          action: 'FINANCE_OPERATION_REVERSED',
+          entityType: 'CourierLedgerEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
+      });
+    } catch (error) {
+      /*
+       * Проигравший гонку получает ту же обратную запись, а не 500: отмена
+       * идемпотентна, и оба запроса обязаны увидеть один результат.
+       */
+      const winner = await reversalWinner(id);
+      if (winner === null) {
+        throw error;
       }
-
-      const created = await reverseEntry(tx, {
-        entryId: id,
-        actorUserId: actor.userId,
-        reason: body.reason,
-        operationDate: moscowCalendarDate(new Date()),
-      });
-
-      await writeAudit(tx, {
-        action: 'FINANCE_OPERATION_REVERSED',
-        entityType: 'CourierLedgerEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
-        ...contextOf(request),
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+      entry = winner;
+    }
 
     return { entry };
   });
@@ -873,7 +969,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       await publishRealtimeEvent(tx, {
         topic: 'finance.ledger_changed',
         payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
       });
 
       return created;
@@ -931,7 +1027,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       await publishRealtimeEvent(tx, {
         topic: 'finance.ledger_changed',
         payload: { operationDate: moscowCalendarDate(new Date()) },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
       });
 
       return created;

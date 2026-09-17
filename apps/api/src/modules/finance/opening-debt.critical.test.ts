@@ -325,18 +325,23 @@ describe('исправление — только обратной запись�
     expect(source.kind).toBe('OPENING_DEBT');
     expect(source.amountMinor).toBe(2_000_00n);
 
-    // Вторая отмена той же записи новой суммы не снимает.
-    await ctx.db
-      .$transaction((tx) =>
-        reverseEntry(tx, {
-          entryId: created.id,
-          actorUserId: admin.id,
-          reason: 'повторная отмена',
-          operationDate: AFTER,
-        }),
-      )
-      .catch(() => undefined);
+    /*
+     * Вторая отмена не падает и не снимает сумму второй раз: она возвращает ту
+     * же обратную запись. Ошибку здесь не глушим — её быть не должно.
+     */
+    const again = await ctx.db.$transaction((tx) =>
+      reverseEntry(tx, {
+        entryId: created.id,
+        actorUserId: admin.id,
+        reason: 'повторная отмена',
+        operationDate: AFTER,
+      }),
+    );
+    expect(again.reversesEntryId).toBe(created.id);
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: created.id } })).toBe(
+      1,
+    );
   });
 });
 
@@ -413,7 +418,10 @@ describe('права и идемпотентность на уровне API', (
     const entryId = created.json().entry?.id ?? '';
     expect(await balanceOf(ctx.db, courier, null)).toBe(400_000n);
 
-    const reverseOnce = (): Promise<{ statusCode: number }> =>
+    const reverseOnce = (): Promise<{
+      statusCode: number;
+      json: () => { entry?: { id: string } };
+    }> =>
       ctx.app.inject({
         method: 'POST',
         url: `/api/logistics/ledger/opening-debt/${entryId}/reverse`,
@@ -421,14 +429,99 @@ describe('права и идемпотентность на уровне API', (
         payload: { reason: 'внесено по ошибке' },
       }) as never;
 
-    await Promise.all([reverseOnce(), reverseOnce()]);
+    const [first, second] = await Promise.all([reverseOnce(), reverseOnce()]);
+
+    /*
+     * Проверяются ОБА ответа. Уникальный индекс и раньше не давал списать
+     * дважды, но проигравший получал 500: победителя читали внутри уже
+     * аварийной транзакции. Отмена идемпотентна — значит успешны оба.
+     */
+    expect([first.statusCode, second.statusCode]).toEqual([200, 200]);
+    expect(first.json().entry?.id).toBe(second.json().entry?.id);
 
     expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
 
-    // Ещё одна отмена баланс уже не трогает.
-    await reverseOnce();
+    // Ещё одна отмена баланс не трогает и лишнего аудита не пишет.
+    const third = await reverseOnce();
+    expect(third.statusCode).toBe(200);
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+    expect(
+      await ctx.db.auditLog.count({
+        where: {
+          action: 'FINANCE_OPERATION_REVERSED',
+          entityId: first.json().entry?.id ?? '',
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('конкурентное создание с одним ключом и разной суммой: один 201, другой 409', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('http-race-mismatch');
+
+    /*
+     * Оба запроса проходят предварительную проверку «записи ещё нет», и лишь
+     * внутри транзакции один видит чужую операцию. Раньше на этом пути контракт
+     * не сверялся: второй получал 201 «сохранено» про чужую сумму и лишний аудит.
+     */
+    const [first, second] = await Promise.all([
+      postDebt(token, {
+        courierUserId: courier,
+        amountMinor: '500000',
+        operationDate: DAY,
+        reason: 'первая сумма',
+        idempotencyKey: key,
+      }),
+      postDebt(token, {
+        courierUserId: courier,
+        amountMinor: '700000',
+        operationDate: DAY,
+        reason: 'другая сумма тем же ключом',
+        idempotencyKey: key,
+      }),
+    ]);
+
+    const statuses = [first.statusCode, second.statusCode].sort((left, right) => left - right);
+    expect(statuses).toEqual([201, 409]);
+
+    const entries = await ctx.db.courierLedgerEntry.findMany({
+      where: { courierUserId: courier, kind: 'OPENING_DEBT' },
+      select: { id: true, amountMinor: true },
+    });
+    expect(entries).toHaveLength(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(entries[0]?.amountMinor);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_OPERATION_RECORDED', entityId: entries[0]?.id ?? '' },
+      }),
+    ).toBe(1);
+  });
+
+  it('повтор той же операции не пишет второй аудит создания', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const body: DebtBody = {
+      courierUserId: courier,
+      amountMinor: '300000',
+      operationDate: DAY,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: unique('http-audit-once'),
+    };
+
+    const first = await postDebt(token, body);
+    const second = await postDebt(token, body);
+    expect([first.statusCode, second.statusCode]).toEqual([201, 201]);
+
+    const entryId = first.json().entry?.id ?? '';
+    expect(second.json().entry?.id).toBe(entryId);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_OPERATION_RECORDED', entityId: entryId },
+      }),
+    ).toBe(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(300_000n);
   });
 
   it('не-администратору запрещено вносить и отменять начальный долг', async () => {

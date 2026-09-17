@@ -102,6 +102,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   const lines: [string, string][] = [
     ['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)],
     ['Наличные, полученные курьером', formatRubles(report.totals.cashReceivedMinor)],
+    ['Корректировки наличных', formatRubles(report.totals.cashCorrectionsMinor)],
     ['Сдано логисту', formatRubles(report.totals.handedToLogistMinor)],
     ['Выдано курьеру', formatRubles(report.totals.issuedToCourierMinor)],
     ['Базовая оплата доставок', formatRubles(report.totals.deliveryFeesMinor)],
