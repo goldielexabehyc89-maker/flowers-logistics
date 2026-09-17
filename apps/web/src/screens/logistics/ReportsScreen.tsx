@@ -17,6 +17,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { useToast } from '../../ui/ToastProvider';
 import {
   Button,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   Field,
@@ -43,6 +44,8 @@ interface SettlementTotals {
   expensesMinor: string;
   bonusesMinor: string;
   adjustmentsMinor: string;
+  /** Начальный долг, заведённый в этом периоде: отдельная строка, не заработок. */
+  openingDebtMinor: string;
   closingBalanceMinor: string;
 }
 
@@ -156,6 +159,7 @@ const OPERATION_LABELS: Record<string, string> = {
   EXPENSE_OTHER: 'Дополнительный расход',
   BONUS: 'Доплата курьеру',
   ADJUSTMENT: 'Обратная корректировка',
+  OPENING_DEBT: 'Начальный долг',
 };
 
 /** Сколько групп «день + курьер» показывать за раз. */
@@ -252,10 +256,17 @@ export function debtWords(minor: string): string {
 }
 
 export function ReportsScreen(): React.JSX.Element {
-  const { client } = useAuth();
+  const { client, user } = useAuth();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const today = moscowToday();
+  /**
+   * Начальный долг заводит и отменяет только администратор.
+   *
+   * Кнопка скрыта не вместо проверки прав, а вместе с ней: сервер отвечает
+   * отказом и на прямой запрос, поэтому скрытие здесь — только про удобство.
+   */
+  const isAdmin = (user?.roles ?? []).includes('ADMIN');
 
   const [mode, setMode] = useState<'SETTLEMENTS' | 'CASH' | 'OPERATIONS'>('SETTLEMENTS');
   /*
@@ -289,6 +300,24 @@ export function ReportsScreen(): React.JSX.Element {
      */
     nonce: string;
   } | null>(null);
+  /**
+   * Форма начального долга.
+   *
+   * `nonce` — ключ идемпотентности окна: двойное нажатие и сетевой повтор
+   * ссылаются на один и тот же ключ и не создают вторую запись. Новое окно
+   * получает новый ключ, поэтому осознанно внести второй долг по-прежнему можно.
+   */
+  const [openingDebt, setOpeningDebt] = useState<{
+    courierUserId: string;
+    amount: string;
+    operationDate: string;
+    reason: string;
+    nonce: string;
+  } | null>(null);
+  const [openingDebtError, setOpeningDebtError] = useState<string | null>(null);
+  /** Шаг подтверждения: показываем, на сколько и кому вырастет долг. */
+  const [openingDebtConfirm, setOpeningDebtConfirm] = useState(false);
+
   /** Касса логиста для передач наличных. */
   const [deskId, setDeskId] = useState('');
   const [amount, setAmount] = useState('');
@@ -429,6 +458,62 @@ export function ReportsScreen(): React.JSX.Element {
       showToast((error as { message?: string }).message ?? 'Не удалось отменить операцию', 'error'),
   });
 
+  /*
+   * Уже заведённые начальные долги выбранного курьера.
+   *
+   * Долг до перехода на ERP по смыслу вносится один раз, поэтому перед вторым
+   * внесением администратор обязан увидеть первое — иначе долг удвоится молча.
+   */
+  const existingOpeningDebts = useQuery({
+    queryKey: ['opening-debts', openingDebt?.courierUserId ?? ''],
+    enabled: isAdmin && openingDebt !== null && openingDebt.courierUserId !== '',
+    queryFn: () =>
+      client.get<{ entries: LedgerEntry[] }>(
+        `/api/logistics/ledger/opening-debt?courierUserId=${openingDebt?.courierUserId ?? ''}`,
+      ),
+  });
+
+  const addOpeningDebt = useMutation({
+    mutationFn: (input: { minor: bigint }) =>
+      client.post('/api/logistics/ledger/opening-debt', {
+        courierUserId: openingDebt?.courierUserId ?? '',
+        amountMinor: input.minor.toString(),
+        operationDate: openingDebt?.operationDate ?? today,
+        reason: openingDebt?.reason.trim() ?? '',
+        idempotencyKey: `opening-debt:${openingDebt?.nonce ?? ''}`,
+      }),
+    onSuccess: () => {
+      setOpeningDebt(null);
+      setOpeningDebtConfirm(false);
+      showToast('Начальный долг внесён', 'success');
+      void queryClient.invalidateQueries({ queryKey: ['opening-debts'] });
+      refresh();
+    },
+    onError: (error: unknown) => {
+      setOpeningDebtConfirm(false);
+      setOpeningDebtError(
+        (error as { message?: string }).message ?? 'Не удалось внести начальный долг',
+      );
+    },
+  });
+
+  const reverseOpeningDebt = useMutation({
+    mutationFn: (input: { id: string; reason: string }) =>
+      client.post(`/api/logistics/ledger/opening-debt/${input.id}/reverse`, {
+        reason: input.reason,
+      }),
+    onSuccess: () => {
+      showToast('Начальный долг отменён обратной записью', 'success');
+      void queryClient.invalidateQueries({ queryKey: ['opening-debts'] });
+      refresh();
+    },
+    onError: (error: unknown) =>
+      showToast(
+        (error as { message?: string }).message ?? 'Не удалось отменить начальный долг',
+        'error',
+      ),
+  });
+
   // Выгрузка отдаёт ВЕСЬ отбор, а не показанную страницу.
   const exportUrl = (format: 'xlsx' | 'pdf'): string =>
     `/api/logistics/reports/settlements.${format}?${params(false)}`;
@@ -538,6 +623,32 @@ export function ReportsScreen(): React.JSX.Element {
             <a className="reports__export" href={exportUrl('pdf')} data-testid="reports-pdf">
               Итог в PDF
             </a>
+            {/*
+              Долг до перехода на ERP заводит только администратор: это ручной
+              ввод исторической суммы, которую система ничем не подтверждает.
+              Форма работает и для курьера без единой доставки.
+            */}
+            {isAdmin && (
+              <Button
+                data-testid="reports-opening-debt-open"
+                onClick={() => {
+                  setOpeningDebtError(null);
+                  setOpeningDebtConfirm(false);
+                  setOpeningDebt({
+                    courierUserId,
+                    amount: '',
+                    // День учёта выбирает человек. По умолчанию — сегодняшний
+                    // московский день, а не дата перехода на ERP и не дата
+                    // выкладки: подставить их молча означало бы решить за него.
+                    operationDate: today,
+                    reason: '',
+                    nonce: globalThis.crypto.randomUUID(),
+                  });
+                }}
+              >
+                Внести начальный долг
+              </Button>
+            )}
           </>
         )}
       </div>
@@ -605,6 +716,20 @@ export function ReportsScreen(): React.JSX.Element {
                 </div>
               </div>
             </div>
+
+            {/*
+              Начальный долг стоит отдельной строкой, а не плиткой среди
+              показателей периода: это долг курьера до перехода на ERP, а не
+              его заработок и не движение наличных, и смешивать их нельзя.
+              В периодах после дня учёта сумма уже сидит в начальном балансе.
+            */}
+            {settlements.data.totals.openingDebtMinor !== '0' && (
+              <p className="reports__notice" role="status" data-testid="reports-opening-debt-total">
+                Начальный долг за период: {formatMoney(settlements.data.totals.openingDebtMinor)} —
+                долг курьера перед компанией, возникший до перехода на ERP. Не заработок и не
+                движение наличных.
+              </p>
+            )}
 
             {settlements.data.days.length === 0 ? (
               <EmptyState title="За период доставок и операций не было" />
@@ -820,6 +945,72 @@ export function ReportsScreen(): React.JSX.Element {
                            * исправление только обратной корректировкой.
                            */
                           for (const entry of group.operations.entries) {
+                            /*
+                             * Начальный долг показывается своей строкой.
+                             *
+                             * В общем виде сумма встала бы под столбец «Доп.»,
+                             * то есть выглядела бы дополнительным начислением
+                             * зарплаты. Это не так: долг до перехода на ERP
+                             * меняет только баланс. Поэтому сумма стоит под
+                             * «Итогом», названа со знаком и словами о
+                             * направлении, рядом видно основание, а отменить
+                             * её может только администратор.
+                             */
+                            if (entry.kind === 'OPENING_DEBT') {
+                              rows.push(
+                                <tr
+                                  key={entry.id}
+                                  className="reports__detail reports__payment"
+                                  data-entry-kind={entry.kind}
+                                  data-testid="reports-payment"
+                                >
+                                  <td>{formatMoscowDateTime(entry.occurredAt)}</td>
+                                  <td className="reports__detail-order">
+                                    {OPERATION_LABELS[entry.kind]}
+                                  </td>
+                                  <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
+                                  <td
+                                    className="reports__detail-reason"
+                                    colSpan={7}
+                                    title={entry.reason ?? undefined}
+                                  >
+                                    {entry.reason ?? ''}
+                                  </td>
+                                  <td>
+                                    {entry.reversed ? (
+                                      <span className="muted text-sm">отменён</span>
+                                    ) : (
+                                      isAdmin && (
+                                        <button
+                                          type="button"
+                                          className="reports__reverse"
+                                          data-testid="reports-opening-debt-reverse"
+                                          onClick={() => {
+                                            const value = globalThis.prompt(
+                                              `Причина отмены начального долга. Отмена будет записана отдельной обратной записью за ${formatDate(today)} и уменьшит долг на ${formatMoney(absMoney(entry.amountMinor))}.`,
+                                            );
+                                            if (value !== null && value.trim().length >= 3) {
+                                              reverseOpeningDebt.mutate({
+                                                id: entry.id,
+                                                reason: value.trim(),
+                                              });
+                                            }
+                                          }}
+                                        >
+                                          Отменить
+                                        </button>
+                                      )
+                                    )}
+                                  </td>
+                                  <td data-testid="reports-opening-debt-amount">
+                                    +{formatMoney(absMoney(entry.amountMinor))}
+                                    <span className="muted text-sm"> увеличивает долг</span>
+                                  </td>
+                                </tr>,
+                              );
+                              continue;
+                            }
+
                             rows.push(
                               <tr
                                 key={entry.id}
@@ -1103,6 +1294,206 @@ export function ReportsScreen(): React.JSX.Element {
             </div>
           </div>
         </Modal>
+      )}
+
+      {/*
+        Внесение начального долга.
+
+        Форма работает и для курьера, у которого ещё нет ни одной доставки и ни
+        одной строки в отчёте: список курьеров не зависит от наличия расчётов.
+      */}
+      {openingDebt !== null && !openingDebtConfirm && (
+        <Modal
+          open
+          title="Внести начальный долг"
+          onClose={() => {
+            setOpeningDebt(null);
+            setOpeningDebtConfirm(false);
+          }}
+        >
+          <div className="stack" data-testid="opening-debt-form">
+            <p className="muted text-sm">
+              Долг курьера перед компанией, возникший до перехода на ERP. Не влияет на кассы, на
+              оплату доставок и на расходы.
+            </p>
+
+            <Field label="Курьер" hint="Можно выбрать курьера без доставок">
+              {() => (
+                <CourierCombobox
+                  options={couriers.data?.items ?? []}
+                  value={
+                    (couriers.data?.items ?? []).find(
+                      (item) => item.id === openingDebt.courierUserId,
+                    ) ?? null
+                  }
+                  label="Курьер"
+                  emptyLabel="Выберите курьера"
+                  testId="opening-debt-courier"
+                  onChange={(courier) => {
+                    setOpeningDebtError(null);
+                    setOpeningDebt({
+                      ...openingDebt,
+                      courierUserId: courier === null ? '' : courier.id,
+                    });
+                  }}
+                />
+              )}
+            </Field>
+
+            {/*
+              Долг по смыслу вносится один раз. Если он уже заводился, человек
+              обязан увидеть это до второго внесения — иначе долг удвоится.
+            */}
+            {(existingOpeningDebts.data?.entries ?? []).length > 0 && (
+              <div className="reports__notice" role="status" data-testid="opening-debt-existing">
+                <strong>Начальный долг этому курьеру уже вносили.</strong> Повторное внесение
+                увеличит долг ещё раз.
+                <ul>
+                  {(existingOpeningDebts.data?.entries ?? []).map((entry) => (
+                    <li key={entry.id}>
+                      {formatDate(entry.operationDate)} · {formatMoney(absMoney(entry.amountMinor))}
+                      {entry.reversed ? ' · отменён' : ''}
+                      {entry.reason === null ? '' : ` · ${entry.reason}`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <Field label="Сумма долга, ₽" hint="Строго больше нуля. Можно считать: 1000+500">
+              {(props) => (
+                <TextInput
+                  {...props}
+                  value={openingDebt.amount}
+                  inputMode="text"
+                  autoFocus
+                  data-testid="opening-debt-amount"
+                  onChange={(event) => {
+                    setOpeningDebtError(null);
+                    setOpeningDebt({ ...openingDebt, amount: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+
+            {previewOf(openingDebt.amount) !== null && (
+              <p className="muted text-sm" data-testid="opening-debt-preview">
+                Получится {previewOf(openingDebt.amount)}
+              </p>
+            )}
+
+            <Field label="Дата учёта" hint="День, к которому относится долг">
+              {(props) => (
+                <TextInput
+                  {...props}
+                  type="date"
+                  value={openingDebt.operationDate}
+                  data-testid="opening-debt-date"
+                  onChange={(event) => {
+                    setOpeningDebtError(null);
+                    setOpeningDebt({ ...openingDebt, operationDate: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+
+            {/*
+              Дата решает, в каком отчёте долг виден операцией, а в каком уже
+              лежит в начальном балансе. Без объяснения это выглядит произволом.
+            */}
+            <p className="muted text-sm" data-testid="opening-debt-date-hint">
+              В отчётах, которые заканчиваются раньше {formatDate(openingDebt.operationDate)}, долг
+              не виден. В отчёте за {formatDate(openingDebt.operationDate)} он показан отдельной
+              операцией. В отчётах со следующего дня входит в начальный баланс.
+            </p>
+
+            <Field label="Основание" hint="Обязательно: на каком основании внесён долг">
+              {(props) => (
+                <TextInput
+                  {...props}
+                  value={openingDebt.reason}
+                  data-testid="opening-debt-reason"
+                  onChange={(event) => {
+                    setOpeningDebtError(null);
+                    setOpeningDebt({ ...openingDebt, reason: event.target.value });
+                  }}
+                />
+              )}
+            </Field>
+
+            {openingDebtError !== null && (
+              <p className="reports__error" role="alert" data-testid="opening-debt-error">
+                {openingDebtError}
+              </p>
+            )}
+
+            <div className="reports__actions">
+              <Button
+                data-testid="opening-debt-cancel"
+                onClick={() => {
+                  setOpeningDebt(null);
+                  setOpeningDebtConfirm(false);
+                }}
+              >
+                Отмена
+              </Button>
+              <Button
+                variant="primary"
+                disabled={addOpeningDebt.isPending}
+                data-testid="opening-debt-submit"
+                onClick={() => {
+                  if (openingDebt.courierUserId === '') {
+                    setOpeningDebtError('Выберите курьера.');
+                    return;
+                  }
+                  const value = evaluateMoney(openingDebt.amount);
+                  if (value.minor === null) {
+                    setOpeningDebtError(value.error ?? 'Введите сумму.');
+                    return;
+                  }
+                  if (openingDebt.operationDate === '') {
+                    setOpeningDebtError('Укажите дату учёта.');
+                    return;
+                  }
+                  if (openingDebt.reason.trim().length < 3) {
+                    setOpeningDebtError('Укажите основание: не меньше трёх символов.');
+                    return;
+                  }
+                  setOpeningDebtConfirm(true);
+                }}
+              >
+                Внести долг
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/*
+        Подтверждение называет направление, сумму, курьера и дату: вводится
+        историческая сумма, которую система ничем не проверит.
+      */}
+      {openingDebt !== null && (
+        <ConfirmDialog
+          open={openingDebtConfirm}
+          title="Внести начальный долг?"
+          description={`Долг курьера перед компанией увеличится на ${previewOf(openingDebt.amount) ?? ''}. Курьер: ${
+            (couriers.data?.items ?? []).find((item) => item.id === openingDebt.courierUserId)
+              ?.fullName ?? '—'
+          }. Дата учёта: ${formatDate(openingDebt.operationDate)}.`}
+          confirmLabel="Подтвердить внесение"
+          busy={addOpeningDebt.isPending}
+          onCancel={() => setOpeningDebtConfirm(false)}
+          onConfirm={() => {
+            const value = evaluateMoney(openingDebt.amount);
+            if (value.minor === null) {
+              setOpeningDebtConfirm(false);
+              setOpeningDebtError(value.error ?? 'Введите сумму.');
+              return;
+            }
+            addOpeningDebt.mutate({ minor: value.minor });
+          }}
+        />
       )}
     </section>
   );

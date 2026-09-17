@@ -40,6 +40,7 @@ const KIND_LABELS: Record<string, string> = {
   EXPENSE_OTHER: 'Дополнительный расход',
   BONUS: 'Доплата курьеру',
   ADJUSTMENT: 'Обратная корректировка',
+  OPENING_DEBT: 'Начальный долг',
 };
 
 export function ledgerKindLabel(kind: string): string {
@@ -75,6 +76,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { name: 'Расходы', value: toRubles(report.totals.expensesMinor) },
     { name: 'Доплаты', value: toRubles(report.totals.bonusesMinor) },
     { name: 'Обратные корректировки', value: toRubles(report.totals.adjustmentsMinor) },
+    { name: 'Начальный долг', value: toRubles(report.totals.openingDebtMinor) },
     { name: 'Конечный баланс', value: toRubles(report.totals.closingBalanceMinor) },
   ]);
   summary.getRow(1).font = { bold: true };

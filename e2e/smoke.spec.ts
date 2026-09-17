@@ -6567,6 +6567,109 @@ test('история и отчёты: тариф, доставка, расчёт
 });
 
 /**
+ * Начальный долг курьера: долг перед компанией до перехода на ERP.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Курьер заводится специально для проверки, доставок у него
+ * нет ни одной — это и есть проверяемый случай. Реальные курьеры и их расчёты
+ * не затрагиваются, деньги никуда не передаются.
+ */
+test('начальный долг: администратор вносит его курьеру без доставок и отменяет обратной записью', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  // У этого курьера нет ни одной доставки и ни одной строки в отчёте.
+  const courier = await seedOwnCourier(page, token);
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await page.waitForURL('**/logistics/reports', { timeout: 30_000 });
+  await expect(page.getByTestId('reports-screen')).toBeVisible({ timeout: 30_000 });
+
+  // Отбор по курьеру: баланс считается по одному человеку.
+  await page.getByTestId('reports-courier-combobox-field').fill(courier.phone);
+  await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
+  await page.getByTestId('reports-courier-combobox-option').first().click();
+  await expect(page.getByTestId('reports-closing')).toContainText('0,00 ₽', { timeout: 15_000 });
+
+  // --- Внесение -------------------------------------------------------------
+
+  await page.getByTestId('reports-opening-debt-open').click();
+  await expect(page.getByTestId('opening-debt-form')).toBeVisible();
+
+  await page.getByTestId('opening-debt-courier-field').fill(courier.phone);
+  await expect(page.getByTestId('opening-debt-courier-option')).toHaveCount(1);
+  await page.getByTestId('opening-debt-courier-option').first().click();
+
+  await page.getByTestId('opening-debt-amount').fill('5000');
+  await expect(page.getByTestId('opening-debt-preview')).toContainText('5000,00 ₽');
+  await page.getByTestId('opening-debt-date').fill(today);
+  await page.getByTestId('opening-debt-reason').fill('долг до перехода на ERP');
+
+  // Подтверждение обязано назвать направление, сумму, курьера и день.
+  await page.getByTestId('opening-debt-submit').click();
+  await expect(page.getByText('Долг курьера перед компанией увеличится на')).toBeVisible();
+  await page.getByRole('button', { name: 'Подтвердить внесение' }).click();
+  await expect(page.getByTestId('opening-debt-form')).toHaveCount(0);
+
+  /*
+   * Долг виден отдельным итогом и отдельной строкой журнала — и НЕ как
+   * заработок: у него собственная строка, а не колонка «Доп.».
+   */
+  await expect(page.getByTestId('reports-opening-debt-total')).toContainText('5000,00 ₽', {
+    timeout: 15_000,
+  });
+  await expect(page.getByTestId('reports-closing')).toContainText('5000,00 ₽');
+
+  const group = page
+    .getByTestId('reports-rows')
+    .locator(`[data-testid="reports-group"][data-group-date="${today}"]`)
+    .first();
+  await group.getByTestId('reports-group-toggle').click();
+  const debtRow = page.locator('[data-testid="reports-payment"][data-entry-kind="OPENING_DEBT"]');
+  await expect(debtRow).toHaveCount(1);
+  await expect(debtRow).toContainText('Начальный долг');
+  await expect(debtRow).toContainText('долг до перехода на ERP');
+  await expect(debtRow).toContainText('увеличивает долг');
+
+  // Выгрузка знает новый вид операции.
+  const xlsx = await page.request.get(
+    `/api/logistics/reports/settlements.xlsx?from=${today}&to=${today}`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  expect(xlsx.status()).toBe(200);
+  expect((await xlsx.body()).subarray(0, 2).toString('latin1')).toBe('PK');
+
+  // --- Отмена ---------------------------------------------------------------
+
+  page.once('dialog', (dialog) => void dialog.accept('внесено по ошибке'));
+  await debtRow.getByTestId('reports-opening-debt-reverse').click();
+
+  // Отмена — обратной записью: баланс вернулся, исходная строка осталась.
+  await expect(page.getByTestId('reports-closing')).toContainText('0,00 ₽', { timeout: 15_000 });
+  await expect(debtRow).toHaveCount(1);
+
+  await context.close();
+});
+
+/**
  * «Отчёты» открываются на сегодняшнем московском дне.
  *
  * Логист приходит в отчёты за сегодняшней кассой и сегодняшним расчётом.

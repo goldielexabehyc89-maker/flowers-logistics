@@ -3008,6 +3008,9 @@ enum CourierLedgerKind {
   EXPENSE_OTHER
   BONUS
   ADJUSTMENT
+  /// Долг курьера, существовавший до перехода на ERP. Заводит только
+  /// администратор; кассы и оплату работы не затрагивает.
+  OPENING_DEBT
 }
 
 /**

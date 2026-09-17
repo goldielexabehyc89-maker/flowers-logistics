@@ -95,6 +95,7 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
   'apps/api/src/modules/fulfillment/issued-pickup-guard.critical.test.ts': Object.freeze([
     '2029-09',
   ]),
+  'apps/api/src/modules/finance/opening-debt.critical.test.ts': Object.freeze(['2030-07']),
 });
 
 /** Месяц даты `ГГГГ-ММ-ДД`. */
