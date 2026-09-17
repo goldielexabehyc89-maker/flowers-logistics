@@ -97,6 +97,7 @@ const PAYMENT_LABELS: Record<string, string> = {
   CASH_HANDED_TO_LOGIST: 'Курьер сдал',
   CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
   ADJUSTMENT: 'Обратная корректировка',
+  OPENING_DEBT: 'Начальный долг',
   DESK_RECEIVED_FROM_COURIER: 'Касса: получено от курьера',
   DESK_ISSUED_TO_COURIER: 'Касса: выдано курьеру',
   DESK_TAKEN_FROM_COMPANY: 'Касса: взято из компании',

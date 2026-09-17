@@ -31,6 +31,15 @@ export interface SettlementTotals {
   expensesMinor: string;
   bonusesMinor: string;
   adjustmentsMinor: string;
+  /**
+   * Начальный долг, заведённый В ЭТОМ периоде.
+   *
+   * Отдельная строка, а не часть заработка, наличных или расходов: это долг
+   * курьера до перехода на ERP, и смешивать его с фактическими движениями
+   * денег нельзя. В периодах ПОСЛЕ дня учёта сумма уже сидит в
+   * `openingBalanceMinor`, и здесь будет ноль.
+   */
+  openingDebtMinor: string;
   closingBalanceMinor: string;
 }
 
@@ -149,6 +158,7 @@ export async function buildSettlementReport(
     ).toString(),
     bonusesMinor: abs(sumOf(entries, ['BONUS'])).toString(),
     adjustmentsMinor: sumOf(entries, ['ADJUSTMENT']).toString(),
+    openingDebtMinor: sumOf(entries, ['OPENING_DEBT']).toString(),
     closingBalanceMinor: (opening + periodSum).toString(),
   };
 

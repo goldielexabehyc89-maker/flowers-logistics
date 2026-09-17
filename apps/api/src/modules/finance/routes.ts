@@ -31,7 +31,15 @@ import {
   toTariffView,
   validateTariffPeriod,
 } from './tariffs.js';
-import { appendEntry, balanceOf, EXPENSE_KINDS, reverseEntry } from './ledger.js';
+import {
+  appendEntry,
+  balanceOf,
+  entryByIdempotencyKey,
+  EXPENSE_KINDS,
+  openingDebtsOf,
+  reverseEntry,
+  signedAmount,
+} from './ledger.js';
 import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
 import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
@@ -102,6 +110,20 @@ const operationSchema = z.object({
 });
 
 const reversalSchema = z.object({ reason: z.string().trim().min(3).max(500) });
+
+/**
+ * Начальный долг курьера — долг перед компанией, возникший ДО перехода на ERP.
+ *
+ * Основание уходит в `reason`, а не в `comment`: журнал расчётов показывает
+ * именно причину, и в комментарии основание осталось бы невидимым.
+ */
+const openingDebtSchema = z.object({
+  courierUserId: z.string().uuid(),
+  amountMinor: moneySchema,
+  operationDate: dateSchema,
+  reason: z.string().trim().min(3).max(500),
+  idempotencyKey: z.string().trim().min(8).max(120),
+});
 
 const tariffSchema = z.object({
   kind: z.enum(['REGULAR', 'HOLIDAY']),
@@ -502,8 +524,22 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const entry = await deps.db.$transaction(async (tx) => {
       const source = await tx.courierLedgerEntry.findUnique({
         where: { id },
-        select: { transferId: true },
+        select: { transferId: true, kind: true },
       });
+
+      /*
+       * Начальный долг отменяется только администратором и только своим
+       * действием.
+       *
+       * Этот эндпоинт открыт всему финансовому контуру (логист, управляющий),
+       * поэтому отмену начального долга он не выполняет НИ ДЛЯ КОГО — иначе
+       * ограничение «только ADMIN» обходилось бы прямым запросом сюда.
+       */
+      if (source !== null && source.kind === 'OPENING_DEBT') {
+        throw new AppError('FORBIDDEN', {
+          publicMessage: 'Отмена начального долга выполняется отдельным действием администратора.',
+        });
+      }
 
       const created = await reverseEntry(tx, {
         entryId: id,
@@ -547,6 +583,194 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     });
 
     return { entry };
+  });
+
+  // --- Начальный долг курьера ----------------------------------------------
+
+  /**
+   * Долг курьера перед компанией, возникший ДО перехода на ERP.
+   *
+   * Это именно долг курьера, а не задолженность компании по оплате его работы:
+   * знак «плюс» увеличивает долг. Операция не двигает наличные, не относится
+   * к заработку и расходам и не создаёт ни заказа, ни доставки, ни передачи
+   * денег — поэтому ни касса логиста, ни касса компании ею не меняются.
+   *
+   * Заводит только администратор: это ручной ввод исторической суммы, который
+   * ничем в системе не подтверждается.
+   */
+  app.post('/api/logistics/ledger/opening-debt', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, ADMIN_ONLY);
+    const body = openingDebtSchema.parse(request.body);
+
+    /*
+     * Получатель долга обязан быть курьером.
+     *
+     * Проверки формата UUID недостаточно: без этого долг молча лёг бы на
+     * логиста, администратора или на несуществующего пользователя, и отчёт
+     * расчётов с курьерами показал бы сумму у того, кто в нём не участвует.
+     */
+    const courier = await deps.db.user.findFirst({
+      where: { id: body.courierUserId, roles: { some: { role: 'COURIER' } } },
+      select: { id: true },
+    });
+    if (courier === null) {
+      throw new AppError('VALIDATION_FAILED', {
+        publicMessage: 'Начальный долг заводится только курьеру.',
+      });
+    }
+
+    /*
+     * Тот же ключ с другими данными — это не повтор, а другая операция.
+     *
+     * Повтор той же самой операции (двойной клик, сетевой повтор, гонка двух
+     * запросов) обязан вернуть ту же запись и не создать вторую. А вот молча
+     * отдать её в ответ на запрос с ДРУГОЙ суммой, датой или курьером значило
+     * бы ответить «сохранено» о том, что не сохранялось.
+     */
+    const sameOperation = (candidate: {
+      kind: string;
+      courierUserId: string;
+      operationDate: string;
+      amountMinor: string;
+    }): boolean =>
+      candidate.kind === 'OPENING_DEBT' &&
+      candidate.courierUserId === body.courierUserId &&
+      candidate.operationDate === body.operationDate &&
+      BigInt(candidate.amountMinor) === signedAmount('OPENING_DEBT', body.amountMinor);
+
+    const conflict = (): never => {
+      throw new AppError('CONFLICT', {
+        publicMessage: 'Этот ключ идемпотентности уже использован для другой операции.',
+      });
+    };
+
+    // Повтор уже сохранённой операции: ни второй записи, ни второй строки аудита.
+    const known = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
+    if (known !== null) {
+      return sameOperation(known) ? reply.code(201).send({ entry: known }) : conflict();
+    }
+
+    let entry;
+    try {
+      entry = await deps.db.$transaction(async (tx) => {
+        const created = await appendEntry(tx, {
+          courierUserId: body.courierUserId,
+          kind: 'OPENING_DEBT',
+          amountMinor: body.amountMinor,
+          operationDate: body.operationDate,
+          actorUserId: actor.userId,
+          // Основание — в «причину»: журнал расчётов показывает именно её.
+          reason: body.reason,
+          idempotencyKey: body.idempotencyKey,
+        });
+
+        await writeAudit(tx, {
+          action: 'FINANCE_OPERATION_RECORDED',
+          entityType: 'CourierLedgerEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          // Основание не пишем: в аудите вид, сумма, день и курьер.
+          newValue: {
+            kind: created.kind,
+            amountMinor: created.amountMinor,
+            operationDate: created.operationDate,
+            courierUserId: created.courierUserId,
+          },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+        });
+
+        return created;
+      });
+    } catch (error) {
+      /*
+       * Гонку выигрывает один запрос, и его запись — это и есть результат.
+       *
+       * Проигравший узнаёт об этом по-разному: нарушение уникальности переводит
+       * транзакцию PostgreSQL в аварийное состояние, и следующий же запрос в ней
+       * падает уже не кодом уникальности. Поэтому признак гонки здесь не код
+       * ошибки, а факт: запись с ЭТИМ ключом существует. Если её нет, ошибка
+       * настоящая и должна остаться ошибкой.
+       */
+      const winner = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
+      if (winner === null) {
+        throw error;
+      }
+      if (!sameOperation(winner)) {
+        return conflict();
+      }
+      entry = winner;
+    }
+
+    return reply.code(201).send({ entry });
+  });
+
+  /**
+   * Отмена начального долга — обратной записью, а не правкой исходной суммы.
+   *
+   * Исходная запись остаётся в своём дне; отмена относится к дню, когда её
+   * действительно провели, поэтому прошлые отчёты не переписываются.
+   */
+  app.post('/api/logistics/ledger/opening-debt/:id/reverse', async (request) => {
+    const actor = await authenticateWithRoles(request, deps, ADMIN_ONLY);
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = reversalSchema.parse(request.body);
+
+    const entry = await deps.db.$transaction(async (tx) => {
+      const source = await tx.courierLedgerEntry.findUnique({
+        where: { id },
+        select: { kind: true },
+      });
+      if (source === null) {
+        throw new AppError('NOT_FOUND', { publicMessage: 'Операция не найдена.' });
+      }
+      if (source.kind !== 'OPENING_DEBT') {
+        throw new AppError('VALIDATION_FAILED', {
+          publicMessage: 'Этим действием отменяется только начальный долг.',
+        });
+      }
+
+      const created = await reverseEntry(tx, {
+        entryId: id,
+        actorUserId: actor.userId,
+        reason: body.reason,
+        operationDate: moscowCalendarDate(new Date()),
+      });
+
+      await writeAudit(tx, {
+        action: 'FINANCE_OPERATION_REVERSED',
+        entityType: 'CourierLedgerEntry',
+        entityId: created.id,
+        actorUserId: actor.userId,
+        actorRoles: actor.roles,
+        newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
+        ...contextOf(request),
+      });
+
+      await publishRealtimeEvent(tx, {
+        topic: 'finance.ledger_changed',
+        payload: { operationDate: created.operationDate },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+      });
+
+      return created;
+    });
+
+    return { entry };
+  });
+
+  /** Уже заведённые начальные долги курьера: форма предупреждает о повторе. */
+  app.get('/api/logistics/ledger/opening-debt', async (request) => {
+    await authenticateWithRoles(request, deps, ADMIN_ONLY);
+    const { courierUserId } = z.object({ courierUserId: z.string().uuid() }).parse(request.query);
+
+    return { entries: await openingDebtsOf(deps.db, courierUserId) };
   });
 
   // --- Касса логистов -----------------------------------------------------

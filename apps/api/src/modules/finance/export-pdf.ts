@@ -110,6 +110,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
     ['Расходы', formatRubles(report.totals.expensesMinor)],
     ['Доплаты', formatRubles(report.totals.bonusesMinor)],
     ['Обратные корректировки', formatRubles(report.totals.adjustmentsMinor)],
+    ['Начальный долг', formatRubles(report.totals.openingDebtMinor)],
   ];
 
   for (const [name, value] of lines) {

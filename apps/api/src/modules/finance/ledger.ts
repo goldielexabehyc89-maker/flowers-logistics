@@ -22,7 +22,13 @@ import type { TransactionClient } from '../auth/sessions.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 
 /** Виды, увеличивающие долг курьера компании. */
-const POSITIVE_KINDS: readonly CourierLedgerKind[] = ['CASH_RECEIVED', 'CASH_ISSUED_TO_COURIER'];
+const POSITIVE_KINDS: readonly CourierLedgerKind[] = [
+  'CASH_RECEIVED',
+  'CASH_ISSUED_TO_COURIER',
+  // Долг до перехода на ERP — это долг курьера компании, поэтому плюс. Он не
+  // наличные и не оплата работы: в денежные и расходные итоги отчёта не входит.
+  'OPENING_DEBT',
+];
 
 /** Расходы: отдельный список нужен и отчёту, и проверке прав. */
 export const EXPENSE_KINDS: readonly CourierLedgerKind[] = [
@@ -234,27 +240,48 @@ export async function reverseEntry(
     throw new AppError('CONFLICT', { publicMessage: 'Эта операция уже отменена.' });
   }
 
-  const created = await tx.courierLedgerEntry.create({
-    data: {
-      courierUserId: source.courierUserId,
-      kind: 'ADJUSTMENT',
-      // Обратная сумма: знак уже стоит в исходной записи, поэтому здесь
-      // достаточно её отрицания и никакого правила вида не применяется.
-      amountMinor: -source.amountMinor,
-      operationDate: toDateColumn(input.operationDate),
-      actorUserId: input.actorUserId,
-      reason: input.reason,
-      routeId: source.routeId,
-      orderId: source.orderId,
-      attemptId: source.attemptId,
-      transferId: source.transferId,
-      reversesEntryId: source.id,
-      idempotencyKey: reversalKey(source.id),
-    },
-    include: { reversedBy: { select: { id: true } } },
-  });
+  try {
+    const created = await tx.courierLedgerEntry.create({
+      data: {
+        courierUserId: source.courierUserId,
+        kind: 'ADJUSTMENT',
+        // Обратная сумма: знак уже стоит в исходной записи, поэтому здесь
+        // достаточно её отрицания и никакого правила вида не применяется.
+        amountMinor: -source.amountMinor,
+        operationDate: toDateColumn(input.operationDate),
+        actorUserId: input.actorUserId,
+        reason: input.reason,
+        routeId: source.routeId,
+        orderId: source.orderId,
+        attemptId: source.attemptId,
+        transferId: source.transferId,
+        reversesEntryId: source.id,
+        idempotencyKey: reversalKey(source.id),
+      },
+      include: { reversedBy: { select: { id: true } } },
+    });
 
-  return toView(created);
+    return toView(created);
+  } catch (error) {
+    /*
+     * Гонка двух отмен одной записи.
+     *
+     * Обе увидели `reversedBy === null` и обе пытаются создать обратную запись;
+     * уникальность `reversesEntryId`/ключа пропускает ровно одну. Проигравшему
+     * отдаём победившую запись, а не ошибку: обратная запись одна, и баланс
+     * меняется один раз.
+     */
+    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+      const winner = await tx.courierLedgerEntry.findUnique({
+        where: { idempotencyKey: reversalKey(input.entryId) },
+        include: { reversedBy: { select: { id: true } } },
+      });
+      if (winner !== null) {
+        return toView(winner);
+      }
+    }
+    throw error;
+  }
 }
 
 /** Баланс курьера на конец дня включительно. `null` — по всем записям. */
@@ -271,6 +298,48 @@ export async function balanceOf(
     _sum: { amountMinor: true },
   });
   return result._sum.amountMinor ?? 0n;
+}
+
+/**
+ * Запись по ключу идемпотентности.
+ *
+ * Нужна ПОСЛЕ отката транзакции: нарушение уникальности переводит транзакцию
+ * PostgreSQL в аварийное состояние, и дочитать в ней победившую запись уже
+ * нельзя — читать приходится отдельным запросом.
+ */
+export async function entryByIdempotencyKey(
+  db: Database,
+  idempotencyKey: string,
+): Promise<LedgerEntryView | null> {
+  const row = await db.courierLedgerEntry.findUnique({
+    where: { idempotencyKey },
+    include: {
+      reversedBy: { select: { id: true } },
+      actor: { select: { fullName: true } },
+    },
+  });
+  return row === null ? null : toView(row);
+}
+
+/**
+ * Все записи начального долга курьера, включая отменённые.
+ *
+ * Нужны форме внесения: администратор должен видеть, что долг уже заводили,
+ * прежде чем завести его второй раз.
+ */
+export async function openingDebtsOf(
+  db: Database,
+  courierUserId: string,
+): Promise<LedgerEntryView[]> {
+  const rows = await db.courierLedgerEntry.findMany({
+    where: { courierUserId, kind: 'OPENING_DEBT' },
+    orderBy: [{ operationDate: 'asc' }, { occurredAt: 'asc' }],
+    include: {
+      reversedBy: { select: { id: true } },
+      actor: { select: { fullName: true } },
+    },
+  });
+  return rows.map(toView);
 }
 
 /** Записи периода одного курьера в порядке появления. */
