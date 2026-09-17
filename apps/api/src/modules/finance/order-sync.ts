@@ -1,0 +1,256 @@
+/**
+ * Денежные последствия изменений заказа в МоемСкладе.
+ *
+ * Два события источника меняют деньги курьера уже ПОСЛЕ доставки:
+ *
+ * 1. Выросла оплаченная сумма. Наличных, которые курьер должен сдать, стало
+ *    меньше — ровно на разницу. Оплата работы курьера и километры за МКАД при
+ *    этом не трогаются: он всё отвёз, и его труд оплачивается независимо от
+ *    того, как покупатель рассчитался.
+ * 2. Заказ отменён в источнике. Финансовый результат этой доставки снимается
+ *    целиком: заказ перестаёт давать и плюс, и минус.
+ *
+ * Оба случая идут через ОБЩИЙ журнал связанными записями: исходное начисление
+ * не переписывается и не удаляется, история остаётся читаемой.
+ *
+ * ПОЧЕМУ ОТДЕЛЬНЫМ ЗАДАНИЕМ, А НЕ ПРЯМО В ИМПОРТЕ. Импорт блокирует строку
+ * ЗАКАЗА, фиксация доставки — строку МАРШРУТА. Запись в журнал прямо из импорта
+ * свела бы в одной транзакции два разных порядка блокировок, а это взаимная
+ * блокировка при одновременных «Доставлен» и импорте. Задание ставится в
+ * транзакции импорта и выполняется отдельно, уже после её фиксации, поэтому
+ * любой порядок событий даёт один и тот же итог:
+ *   • доставка зафиксирована раньше импорта — начисление посчитано по прежней
+ *     оплате, и обработчик снимает разницу;
+ *   • импорт раньше доставки — начисление сразу считается по новой оплате,
+ *     и снимать уже нечего: обработчик видит нулевую разницу и молчит.
+ */
+
+import { moscowCalendarDate } from '@fl/shared';
+import type { TransactionClient } from '../auth/sessions.js';
+import type { OutboxHandler } from '../outbox/worker.js';
+import { enqueueOutbox } from '../outbox/producer.js';
+import { appendEntry } from './ledger.js';
+import { reverseDeliveryAccruals } from './accrual.js';
+
+export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
+
+/**
+ * Ключ задания на корректировку наличных.
+ *
+ * В ключ входит оплаченная сумма: один и тот же приход из источника не
+ * обрабатывается дважды, а новое изменение оплаты — это уже другое задание.
+ */
+export function cashCorrectionJobKey(orderId: string, payedSumMinor: bigint): string {
+  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${payedSumMinor.toString()}`;
+}
+
+/** Ключ задания на снятие денег отменённого заказа: отмена бывает один раз. */
+export function cancellationJobKey(orderId: string): string {
+  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}`;
+}
+
+/** Ключ самой корректирующей записи: одна на попытку и состояние оплаты. */
+export function cashCorrectionEntryKey(attemptId: string, payedSumMinor: bigint): string {
+  return `cash-correction:${attemptId}:${payedSumMinor.toString()}`;
+}
+
+export async function enqueueCashPaymentCorrection(
+  tx: TransactionClient,
+  input: { orderId: string; payedSumMinor: bigint },
+): Promise<void> {
+  await enqueueOutbox(tx, {
+    topic: ORDER_FINANCE_TOPIC,
+    idempotencyKey: cashCorrectionJobKey(input.orderId, input.payedSumMinor),
+    payload: { reason: 'PAYMENT', orderId: input.orderId },
+  });
+}
+
+export async function enqueueCancelledOrderFinance(
+  tx: TransactionClient,
+  input: { orderId: string },
+): Promise<void> {
+  await enqueueOutbox(tx, {
+    topic: ORDER_FINANCE_TOPIC,
+    idempotencyKey: cancellationJobKey(input.orderId),
+    payload: { reason: 'CANCEL', orderId: input.orderId },
+  });
+}
+
+/** Рубли из копеек для человекочитаемой причины в журнале. */
+function rubles(minor: bigint): string {
+  const value = minor < 0n ? -minor : minor;
+  const whole = value / 100n;
+  const cents = value % 100n;
+  return `${whole.toString()},${cents.toString().padStart(2, '0')} ₽`;
+}
+
+/**
+ * Уменьшение наличных за курьером после оплаты заказа в источнике.
+ *
+ * Считается не «сколько доплатили», а «сколько наличных должно остаться»:
+ * остаток = сумма заказа − оплачено, но не меньше нуля и не больше того, что
+ * когда-то начислили. Уже снятое учитывается, поэтому повторная синхронизация и
+ * частичные оплаты подряд не снимают одно и то же дважды, а переплата не уводит
+ * остаток в минус.
+ *
+ * Обратного хода нет: если оплату в источнике уменьшат, снятое не возвращается
+ * само — это отдельное решение человека, а не молчаливое действие обмена.
+ */
+export async function applyCashPaymentCorrection(
+  tx: TransactionClient,
+  input: { orderId: string; now: Date },
+): Promise<void> {
+  const order = await tx.deliveryOrder.findUnique({
+    where: { id: input.orderId },
+    select: {
+      externalName: true,
+      sumMinor: true,
+      payedSumMinor: true,
+      cancelledInSource: true,
+    },
+  });
+  if (order === null) {
+    return;
+  }
+
+  /*
+   * У отменённого заказа финансового результата уже нет: он снят целиком.
+   * Оплата, пришедшая после отмены, ничего не меняет — итог остаётся нулевым.
+   */
+  if (order.cancelledInSource) {
+    return;
+  }
+
+  // Наличные бывают только по успешной доставке: корректировать нечего, пока
+  // начисления нет.
+  const accrued = await tx.courierLedgerEntry.findMany({
+    where: {
+      orderId: input.orderId,
+      kind: 'CASH_RECEIVED',
+      reversedBy: { is: null },
+    },
+    select: {
+      amountMinor: true,
+      attemptId: true,
+      courierUserId: true,
+      routeId: true,
+    },
+  });
+
+  const outstanding = order.sumMinor - order.payedSumMinor;
+  const remaining = outstanding > 0n ? outstanding : 0n;
+
+  for (const entry of accrued) {
+    if (entry.attemptId === null) {
+      continue;
+    }
+
+    // Снятое ранее по этой же попытке: суммы отрицательные, берём величину.
+    const corrections = await tx.courierLedgerEntry.aggregate({
+      where: {
+        attemptId: entry.attemptId,
+        kind: 'CASH_PAYMENT_CORRECTION',
+        reversedBy: { is: null },
+      },
+      _sum: { amountMinor: true },
+    });
+    const alreadyRemoved = -(corrections._sum.amountMinor ?? 0n);
+
+    // Остаток не может превышать когда-то начисленное: предоплату, которую и
+    // так не начисляли, второй раз не вычитаем.
+    const target = remaining < entry.amountMinor ? remaining : entry.amountMinor;
+    const delta = entry.amountMinor - alreadyRemoved - target;
+    if (delta <= 0n) {
+      continue;
+    }
+
+    await appendEntry(tx, {
+      courierUserId: entry.courierUserId,
+      kind: 'CASH_PAYMENT_CORRECTION',
+      amountMinor: delta,
+      operationDate: moscowCalendarDate(input.now),
+      actorUserId: entry.courierUserId,
+      reason: `Корректировка наличных: оплата в МойСклад. Заказ ${order.externalName}, ${rubles(delta)}`,
+      routeId: entry.routeId,
+      orderId: input.orderId,
+      attemptId: entry.attemptId,
+      idempotencyKey: cashCorrectionEntryKey(entry.attemptId, order.payedSumMinor),
+    });
+  }
+}
+
+/**
+ * Снятие финансового результата отменённого заказа.
+ *
+ * Каждое начисление этой доставки получает связанную обратную запись: наличные,
+ * оплата доставки, километры за МКАД и уже сделанные корректировки наличных.
+ * В сумме вклад заказа становится нулевым — ни плюса, ни минуса, — а история
+ * показывает и исходные суммы, и их снятие.
+ *
+ * Не трогается ничто, что к этой доставке не относится: начальный долг,
+ * фактические передачи денег курьер ↔ логист и ручные операции без привязки
+ * к попытке остаются как были. Физическая доставка не отменяется: снимаются
+ * только деньги.
+ */
+export async function stripCancelledOrderFinance(
+  tx: TransactionClient,
+  input: { orderId: string; now: Date },
+): Promise<void> {
+  const entries = await tx.courierLedgerEntry.findMany({
+    where: {
+      orderId: input.orderId,
+      attemptId: { not: null },
+      kind: { not: 'ADJUSTMENT' },
+      reversedBy: { is: null },
+    },
+    select: { attemptId: true, courierUserId: true },
+  });
+
+  const attempts = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.attemptId !== null && !attempts.has(entry.attemptId)) {
+      attempts.set(entry.attemptId, entry.courierUserId);
+    }
+  }
+
+  const operationDate = moscowCalendarDate(input.now);
+  for (const [attemptId, courierUserId] of attempts) {
+    await reverseDeliveryAccruals(tx, {
+      attemptId,
+      actorUserId: courierUserId,
+      reason: 'Отмена в МойСклад: заказ исключён из расчётов с курьером',
+      operationDate,
+    });
+  }
+}
+
+export interface OrderFinanceHandlerDeps {
+  now?: () => Date;
+}
+
+/**
+ * Обработчик задания: выполняется в транзакции воркера, уже после фиксации
+ * импорта, поэтому читает окончательное состояние заказа.
+ */
+export function createOrderFinanceHandler(deps: OrderFinanceHandlerDeps = {}): OutboxHandler {
+  const now = deps.now ?? ((): Date => new Date());
+
+  return async (message, tx) => {
+    if (tx === undefined) {
+      return;
+    }
+
+    const payload = message.payload as { reason?: unknown; orderId?: unknown };
+    const orderId = typeof payload.orderId === 'string' ? payload.orderId : null;
+    if (orderId === null) {
+      return;
+    }
+
+    if (payload.reason === 'CANCEL') {
+      await stripCancelledOrderFinance(tx, { orderId, now: now() });
+      return;
+    }
+
+    await applyCashPaymentCorrection(tx, { orderId, now: now() });
+  };
+}

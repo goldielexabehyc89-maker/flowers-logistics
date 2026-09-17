@@ -40,6 +40,7 @@ import {
   type AddressContract,
 } from '../../orders/address.js';
 import { enqueueGeocoding } from '../../orders/geocoding/queue.js';
+import { enqueueCashPaymentCorrection } from '../../finance/order-sync.js';
 
 /** События заказов видят только эти роли. Курьеру глобальный поток заказов не нужен. */
 const ORDER_AUDIENCE = ['ADMIN', 'LOGISTICIAN'] as const;
@@ -530,6 +531,26 @@ async function updateOrder(
       ...(conflictDetected ? { addressConflict: true, addressConflictDetectedAt: now } : {}),
     },
   });
+
+  /*
+   * Выросла оплаченная сумма — значит наличных за курьером стало меньше.
+   *
+   * Ставится ЗАДАНИЕ, а не запись в журнал: импорт держит блокировку строки
+   * заказа, а фиксация доставки — строки маршрута, и писать деньги отсюда
+   * означало бы свести два порядка блокировок в одной транзакции. Задание
+   * выполнится после фиксации импорта и увидит окончательные суммы.
+   *
+   * Только рост: уменьшение оплаты в источнике само по себе ничего не
+   * возвращает — снятое возвращается отдельным решением человека.
+   */
+  const previousPayedMinor = BigInt(previous?.payedSumMinor ?? snapshot.payedSumMinor);
+  const nextPayedMinor = BigInt(snapshot.payedSumMinor);
+  if (changedFields.includes('payedSumMinor') && nextPayedMinor > previousPayedMinor) {
+    await enqueueCashPaymentCorrection(tx, {
+      orderId: existing.id,
+      payedSumMinor: nextPayedMinor,
+    });
+  }
 
   /*
    * История нового контракта.

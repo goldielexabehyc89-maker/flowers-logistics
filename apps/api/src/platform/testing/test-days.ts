@@ -96,6 +96,7 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
     '2029-09',
   ]),
   'apps/api/src/modules/finance/opening-debt.critical.test.ts': Object.freeze(['2030-07']),
+  'apps/api/src/modules/finance/order-sync.critical.test.ts': Object.freeze(['2030-08']),
 });
 
 /** Месяц даты `ГГГГ-ММ-ДД`. */

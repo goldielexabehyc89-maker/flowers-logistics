@@ -12,6 +12,7 @@
 import type { TransactionClient } from '../../auth/sessions.js';
 import { writeAudit } from '../../audit/service.js';
 import { publishRealtimeEvent } from '../../realtime/events.js';
+import { enqueueCancelledOrderFinance } from '../../finance/order-sync.js';
 
 /**
  * Отменён ли заказ в источнике по этому снимку.
@@ -83,6 +84,16 @@ export async function applyCancellation(
   if (input.cancelled) {
     await markRouteCellPlacement(tx, input.orderId);
     await openCorrectionTaskIfDelivered(tx, input.orderId);
+    /*
+     * Деньги снимаются САМИ, не дожидаясь решения логиста.
+     *
+     * Задача разбора отмены остаётся и дальше решает товарные вопросы, но
+     * финансовый результат доставки к её решению больше не привязан: иначе
+     * отменённый заказ продолжал бы висеть в расчётах с курьером всё время
+     * разбора. Задание ставится здесь, а выполняется отдельно — импорт держит
+     * блокировку строки заказа, и писать журнал прямо отсюда нельзя.
+     */
+    await enqueueCancelledOrderFinance(tx, { orderId: input.orderId });
     // Отмена пришла на назначенный, но ещё не собранный заказ — снимаем
     // назначение, освобождая флориста. В свободную очередь он не вернётся:
     // отменённый заказ из неё исключён (см. offerableConstraints/buildMineWhere).

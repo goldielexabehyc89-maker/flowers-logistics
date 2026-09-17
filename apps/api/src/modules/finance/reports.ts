@@ -140,7 +140,9 @@ export async function buildSettlementReport(
 
   const totals: SettlementTotals = {
     openingBalanceMinor: opening.toString(),
-    cashReceivedMinor: abs(sumOf(entries, ['CASH_RECEIVED'])).toString(),
+    // Наличные за период — за вычетом того, что оплатили в источнике уже после
+    // доставки: итог обязан сходиться с журналом и со строками заказов.
+    cashReceivedMinor: abs(sumOf(entries, ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'])).toString(),
     handedToLogistMinor: abs(sumOf(entries, ['CASH_HANDED_TO_LOGIST'])).toString(),
     issuedToCourierMinor: abs(sumOf(entries, ['CASH_ISSUED_TO_COURIER'])).toString(),
     deliveryFeesMinor: abs(sumOf(entries, ['DELIVERY_FEE'])).toString(),
@@ -239,8 +241,19 @@ export async function buildSettlementReport(
        * балансу, а итог группы завышался. Отменённая доставка тем же правилом
        * обнуляет наличные: её запись отменена обратной операцией.
        */
+      /*
+       * Корректировка после оплаты в источнике уменьшает эту же цифру.
+       *
+       * Иначе строка показывала бы наличные, которых у курьера уже нет:
+       * покупатель доплатил в МойСклад, и сдавать столько он не должен.
+       * Суммы корректировок отрицательные, поэтому просто складываются.
+       */
       cashMinor: own
-        .filter((entry) => entry.kind === 'CASH_RECEIVED' && !entry.reversed)
+        .filter(
+          (entry) =>
+            (entry.kind === 'CASH_RECEIVED' || entry.kind === 'CASH_PAYMENT_CORRECTION') &&
+            !entry.reversed,
+        )
         .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
         .toString(),
       paymentTypeName: fact.paymentTypeName,
