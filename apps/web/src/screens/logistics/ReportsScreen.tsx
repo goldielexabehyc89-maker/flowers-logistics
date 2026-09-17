@@ -160,6 +160,7 @@ const OPERATION_LABELS: Record<string, string> = {
   BONUS: 'Доплата курьеру',
   ADJUSTMENT: 'Обратная корректировка',
   OPENING_DEBT: 'Начальный долг',
+  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
 };
 
 /** Сколько групп «день + курьер» показывать за раз. */

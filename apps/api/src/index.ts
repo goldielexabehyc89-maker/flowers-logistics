@@ -18,6 +18,7 @@ import { createOutboxWorker } from './modules/outbox/worker.js';
 import { createTestPingHandler } from './modules/outbox/handlers.js';
 import { createDispatchHandler } from './modules/fulfillment/dispatch.js';
 import { createMkadDistanceHandler } from './modules/finance/mkad-auto.js';
+import { createOrderFinanceHandler } from './modules/finance/order-sync.js';
 import { MoyskladClient } from './modules/integrations/moysklad/client.js';
 import { createMoyskladOrderStateHandler } from './modules/integrations/moysklad/state-sync.js';
 import { MOYSKLAD_BASE_URL, MOYSKLAD_IDS } from './modules/integrations/moysklad/config.js';
@@ -116,6 +117,9 @@ async function main(): Promise<void> {
         calcFrom: config.MKAD_DISTANCE_AUTO_CALC_FROM,
         valhallaUrl: config.VALHALLA_URL ?? null,
       }),
+      // Денежные последствия изменений заказа в источнике: рост оплаченной
+      // суммы уменьшает наличные за курьером, отмена снимает результат доставки.
+      'finance.order_sync': createOrderFinanceHandler(),
     },
   });
   outbox.start();

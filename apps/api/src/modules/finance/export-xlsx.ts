@@ -41,6 +41,7 @@ const KIND_LABELS: Record<string, string> = {
   BONUS: 'Доплата курьеру',
   ADJUSTMENT: 'Обратная корректировка',
   OPENING_DEBT: 'Начальный долг',
+  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
 };
 
 export function ledgerKindLabel(kind: string): string {

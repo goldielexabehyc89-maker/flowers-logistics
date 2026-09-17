@@ -207,6 +207,7 @@ export function createMkadDistanceHandler(deps: MkadDistanceHandlerDeps): Outbox
             geoState: true,
             geoLatMicro: true,
             geoLonMicro: true,
+            cancelledInSource: true,
           },
         },
       },
@@ -284,7 +285,16 @@ export function createMkadDistanceHandler(deps: MkadDistanceHandlerDeps): Outbox
       where: { routeOrderId, activeKey: { not: null }, outcome: 'DELIVERED' },
       select: { id: true, courierUserId: true },
     });
-    if (attempt !== null) {
+    /*
+     * У отменённого в источнике заказа финансовый результат уже снят.
+     *
+     * Расстояние посчитано и сохранено выше — снимок остаётся историей, — но
+     * НАЧИСЛЯТЬ по нему нельзя: поздний расчёт вернул бы отменённому заказу
+     * ненулевой вклад в расчёты с курьером. Проверка стоит именно здесь, а не
+     * только у постановщиков задания: восстановительный проход ставит задание
+     * заново и прошёл бы мимо них.
+     */
+    if (attempt !== null && !ro.order.cancelledInSource) {
       const snapshot = await tx.routeTariffSnapshot.findUnique({
         where: { routeId: ro.route.id },
         select: { perKmMinor: true },
