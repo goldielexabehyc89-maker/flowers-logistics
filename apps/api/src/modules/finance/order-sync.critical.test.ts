@@ -143,7 +143,15 @@ async function seedDelivered(input: {
     data: {
       number: unique('ROS'),
       deliveryDate: toDateColumn(DAY),
-      state: 'ACTIVE',
+      /*
+       * Черновик, а не активный маршрут.
+       *
+       * Начислению состояние маршрута безразлично — оно читает только дату
+       * доставки, — а экран маршрутных листов показывает лишь подтверждённые,
+       * отгруженные и завершённые. Активный маршрут далёкого месяца занимал бы
+       * место в общем списке дней и вытеснял оттуда дни соседних проверок.
+       */
+      state: 'DRAFT',
       vehicleType: 'CAR',
       createdById: admin.userId,
       courierUserId: courier.userId,
