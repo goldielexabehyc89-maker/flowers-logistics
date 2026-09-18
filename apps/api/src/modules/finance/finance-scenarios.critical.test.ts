@@ -806,6 +806,24 @@ describe('отмена до доставки', () => {
     expect(await runQueue(new Date(`${NEXT_DAY}T09:00:00.000Z`), scenario)).toBe(1);
     expect(await contribution(scenario.orderId)).toBe(0n);
 
+    /*
+     * И ровно два задания на весь заказ: повторные импорты уже отменённого
+     * заказа номеров не плодят. Иначе счётчик рос бы от каждого прохода
+     * синхронизации, а очередь наполнялась пустой работой.
+     */
+    await syncSource(scenario, { sum: 400_000, payedSum: 0, cancelled: true });
+    await syncSource(scenario, { sum: 400_000, payedSum: 0, cancelled: true });
+    expect(
+      await ctx.db.outboxMessage.count({
+        where: {
+          topic: ORDER_FINANCE_TOPIC,
+          payload: { path: ['reason'], equals: 'CANCEL' },
+          idempotencyKey: { startsWith: `${ORDER_FINANCE_TOPIC}:cancel:${scenario.orderId}:` },
+        },
+      }),
+    ).toBe(2);
+    expect(await runQueue(new Date(`${NEXT_DAY}T10:00:00.000Z`), scenario)).toBe(0);
+
     // Исходные записи целы, снятие сделано обратными: 3 начисления — 3 отмены.
     expect(await entryCount(scenario.orderId, 'CASH_RECEIVED')).toBe(1);
     expect(await entryCount(scenario.orderId, 'DELIVERY_FEE')).toBe(1);
@@ -1027,7 +1045,7 @@ describe('один набор данных: журнал → API → дни → 
     const manual = [
       { kind: 'OPENING_DEBT' as const, amountMinor: 100_000n, reason: 'долг до перехода на ERP' },
       { kind: 'CASH_HANDED_TO_LOGIST' as const, amountMinor: 200_000n, reason: 'сдача выручки' },
-      { kind: 'EXPENSE_PARKING' as const, amountMinor: 15_000n, reason: 'парковка у подъезда' },
+      { kind: 'EXPENSE_PARKING' as const, amountMinor: 10_000n, reason: 'парковка у подъезда' },
     ];
     for (const operation of manual) {
       await ctx.db.$transaction((tx) =>
@@ -1043,6 +1061,29 @@ describe('один набор данных: журнал → API → дни → 
       );
     }
 
+    /*
+     * Ещё один расход — ПРИВЯЗАННЫЙ к доставке.
+     *
+     * У отчёта две дороги: запись без попытки показывается журналом дня,
+     * а запись своей попытки уходит в строку заказа. Набор без второй дороги
+     * не проверил бы согласие строки с итогом дня.
+     */
+    const attemptId = await activeAttemptOf(scenario);
+    await ctx.db.$transaction((tx) =>
+      appendEntry(tx, {
+        courierUserId: scenario.courierId,
+        kind: 'EXPENSE_TOLL',
+        amountMinor: 5_000n,
+        operationDate: DAY,
+        actorUserId: admin.userId,
+        reason: 'платная дорога по пути к адресу',
+        routeId: scenario.routeId,
+        orderId: scenario.orderId,
+        attemptId,
+        idempotencyKey: unique('EXPENSE_TOLL'),
+      }),
+    );
+
     // 1. ЖУРНАЛ. Знак и день каждой записи — то, из чего растёт всё остальное.
     const journal = await ctx.db.courierLedgerEntry.findMany({
       where: { courierUserId: scenario.courierId },
@@ -1054,7 +1095,8 @@ describe('один набор данных: журнал → API → дни → 
     expect(byKind.get('DISTANCE_FEE')).toBe(-50_000n);
     expect(byKind.get('OPENING_DEBT')).toBe(100_000n);
     expect(byKind.get('CASH_HANDED_TO_LOGIST')).toBe(-200_000n);
-    expect(byKind.get('EXPENSE_PARKING')).toBe(-15_000n);
+    expect(byKind.get('EXPENSE_PARKING')).toBe(-10_000n);
+    expect(byKind.get('EXPENSE_TOLL')).toBe(-5_000n);
     for (const entry of journal) {
       expect(entry.operationDate.toISOString().slice(0, 10)).toBe(DAY);
     }
@@ -1072,6 +1114,7 @@ describe('один набор данных: журнал → API → дни → 
       'DELIVERY_FEE',
       'DISTANCE_FEE',
       'EXPENSE_PARKING',
+      'EXPENSE_TOLL',
       'OPENING_DEBT',
     ]);
 
@@ -1153,6 +1196,20 @@ describe('один набор данных: журнал → API → дни → 
     expect(dayRow?.getCell(18).value).toBe(950); // Начислено
     expect(dayRow?.getCell(19).value).toBe(2000); // Курьер сдал
     expect(dayRow?.getCell(21).value).toBe(3050); // Итог
+
+    /*
+     * Строка заказа: её «Доп.» и «Начислено» обязаны нести привязанный
+     * к попытке расход. Без этого сумма строк не сходится с итогом дня,
+     * и объяснить разницу человеку нечем.
+     */
+    const orderRow = orders?.getRow(3);
+    expect(orderRow?.getCell(1).value).toBe('Заказ');
+    expect(orderRow?.getCell(11).value).toBe(5000); // Наличные
+    expect(orderRow?.getCell(14).value).toBe(300); // За заказ
+    expect(orderRow?.getCell(16).value).toBe(500); // За МКАД, ₽
+    expect(orderRow?.getCell(17).value).toBe(50); // Доп. строки: расход попытки
+    expect(orderRow?.getCell(18).value).toBe(850); // Начислено строки
+    expect(orderRow?.getCell(21).value).toBe(4150); // Итог строки
 
     /*
      * 6. PDF. Проверяются те самые подписи и суммы, что уходят на бумагу.

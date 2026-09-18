@@ -73,12 +73,22 @@ export async function applyCancellation(
     return false;
   }
 
-  await tx.deliveryOrder.update({
+  /*
+   * Счётчик отмен растёт ТОЙ ЖЕ записью, что ставит отметку.
+   *
+   * Номер нужен ключу задания на снятие денег: у каждого события отмены своё
+   * задание, иначе второе снятие не выполнится никогда. Увеличение и чтение
+   * одним запросом: строка уже заблокирована этим `update`, и два события
+   * отмены одного заказа не могут получить один номер.
+   */
+  const updated = await tx.deliveryOrder.update({
     where: { id: input.orderId },
     data: {
       cancelledInSource: input.cancelled,
       cancelledInSourceAt: input.cancelled ? input.now : null,
+      ...(input.cancelled ? { cancellationCount: { increment: 1 } } : {}),
     },
+    select: { cancellationCount: true },
   });
 
   if (input.cancelled) {
@@ -93,7 +103,10 @@ export async function applyCancellation(
      * разбора. Задание ставится здесь, а выполняется отдельно — импорт держит
      * блокировку строки заказа, и писать журнал прямо отсюда нельзя.
      */
-    await enqueueCancelledOrderFinance(tx, { orderId: input.orderId });
+    await enqueueCancelledOrderFinance(tx, {
+      orderId: input.orderId,
+      generation: updated.cancellationCount,
+    });
     // Отмена пришла на назначенный, но ещё не собранный заказ — снимаем
     // назначение, освобождая флориста. В свободную очередь он не вернётся:
     // отменённый заказ из неё исключён (см. offerableConstraints/buildMineWhere).

@@ -105,6 +105,20 @@ export function toCashView(row: CashRow): CashEntryView {
   };
 }
 
+/**
+ * Движение кассы по ключу идемпотентности.
+ *
+ * Нужна вызывающим для разбора гонки ПОСЛЕ отката: внутри аварийной
+ * транзакции читать уже нельзя.
+ */
+export async function cashEntryByIdempotencyKey(
+  db: Database | TransactionClient,
+  idempotencyKey: string,
+): Promise<CashEntryView | null> {
+  const row = await db.logistCashEntry.findUnique({ where: { idempotencyKey }, select: SELECT });
+  return row === null ? null : toCashView(row);
+}
+
 /** Остаток кассы на конец дня включительно. `null` — по всем записям. */
 export async function cashBalanceOf(
   db: Database | TransactionClient,

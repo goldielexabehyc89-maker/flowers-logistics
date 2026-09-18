@@ -22,6 +22,7 @@ import type { Role } from '@fl/shared';
 import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
 import { buildSettlementReport } from './reports.js';
 import { buildCashReport } from './cash-report.js';
+import { cashBalanceOf } from './cash.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 
 let ctx: TestContext;
@@ -1099,6 +1100,74 @@ describe('ключ идемпотентности общих операций', 
     ).toBe(1);
   });
 
+  it('управляемая гонка: оба запроса встают на очередь по ключу и оба успешны', async () => {
+    /*
+     * Одновременный старт сам по себе гонки не воспроизводит: второй запрос
+     * вправе успеть сделать предварительный поиск уже ПОСЛЕ фиксации первого
+     * и уйти по быстрому пути повтора. Тогда ни очередь по ключу, ни признак
+     * «запись создана», ни разбор ошибки не выполняются вовсе, а все итоги
+     * всё равно сходятся — проверка не отличает «механизм сработал» от
+     * «гонки не было». Барьер держит ключ до тех пор, пока ОБА запроса не
+     * встанут на него.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('op-barrier');
+    const cursor = await lastEventId();
+
+    let release!: () => void;
+    let locked!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
+
+    const holder = ctx.db.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ledger-operation:${key}`})::bigint)`;
+        locked();
+        await released;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+    await lockedSignal;
+
+    const body = {
+      courierUserId: courier,
+      kind: 'EXPENSE_TOLL',
+      amountMinor: '40000',
+      operationDate: DAY,
+      reason: 'платная дорога',
+      idempotencyKey: key,
+    };
+
+    let settled = 0;
+    const first = postOperation(token, body).then((response) => {
+      settled += 1;
+      return response;
+    });
+    const second = postOperation(token, body).then((response) => {
+      settled += 1;
+      return response;
+    });
+
+    expect(await waitForBlocked(2)).toBeGreaterThanOrEqual(2);
+    expect(settled).toBe(0);
+
+    release();
+    await holder;
+    const [a, b] = await Promise.all([first, second]);
+
+    expect([a.statusCode, b.statusCode]).toEqual([201, 201]);
+    expect(a.json().entry?.id).toBe(b.json().entry?.id);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { courierUserId: courier } })).toBe(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(-40_000n);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_OPERATION_RECORDED', entityId: a.json().entry?.id ?? '' },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
+  });
+
   it('два одновременных запроса с одним ключом: оба успешны, запись одна', async () => {
     const { token } = await tokenFor(['ADMIN']);
     const courier = await courierId();
@@ -1140,5 +1209,187 @@ describe('ключ идемпотентности общих операций', 
       }),
     ).toBe(1);
     expect(await ledgerEventsAfter(cursor)).toBe(1);
+  });
+});
+
+/**
+ * Передача наличных и касса логиста через НАСТОЯЩИЕ маршруты.
+ *
+ * `recordTransfer` и `appendCash` проверялись прямыми вызовами, минуя всю
+ * обвязку маршрута: права на кассу, сверку контракта ключа, признак «запись
+ * создана» и разбор гонки. Именно поэтому дефект «двойное нажатие даёт 500»
+ * жил в кассе незамеченным.
+ */
+describe('передача наличных и касса через маршруты', () => {
+  const postOperation = (
+    token: string,
+    body: Record<string, unknown>,
+  ): Promise<{ statusCode: number; json: () => { entry?: { id: string } } }> =>
+    ctx.app.inject({
+      method: 'POST',
+      url: '/api/logistics/ledger/operations',
+      headers: { authorization: `Bearer ${token}` },
+      payload: body,
+    }) as never;
+
+  const postCompany = (
+    token: string,
+    body: Record<string, unknown>,
+  ): Promise<{ statusCode: number; json: () => { entry?: { id: string } } }> =>
+    ctx.app.inject({
+      method: 'POST',
+      url: '/api/logistics/cash/company',
+      headers: { authorization: `Bearer ${token}` },
+      payload: body,
+    }) as never;
+
+  it('повтор передачи идемпотентен, чужая сумма и чужая касса — конфликт', async () => {
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const deskA = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const deskB = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const courier = await courierId();
+    const key = unique('transfer');
+
+    const body = {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '150000',
+      operationDate: DAY,
+      logistUserId: deskA.id,
+      idempotencyKey: key,
+    };
+
+    const first = await postOperation(adminToken, body);
+    expect(first.statusCode).toBe(201);
+
+    // Повтор той же передачи: та же запись, без второй строки кассы и аудита.
+    const repeat = await postOperation(adminToken, body);
+    expect(repeat.statusCode).toBe(201);
+    expect(repeat.json().entry?.id).toBe(first.json().entry?.id);
+
+    // Чужая сумма с тем же ключом — другая операция.
+    const otherAmount = await postOperation(adminToken, { ...body, amountMinor: '250000' });
+    expect(otherAmount.statusCode).toBe(409);
+
+    /*
+     * Чужая КАССА с тем же ключом — тоже другая операция.
+     *
+     * Без сверки второй стороны ответ был бы «сохранено», а наличные так и
+     * остались бы числиться за прежним логистом.
+     */
+    const otherDesk = await postOperation(adminToken, { ...body, logistUserId: deskB.id });
+    expect(otherDesk.statusCode).toBe(409);
+
+    // Ровно одна передача: одна запись долга, одна запись кассы, один аудит.
+    expect(await ctx.db.courierLedgerEntry.count({ where: { courierUserId: courier } })).toBe(1);
+    expect(await ctx.db.logistCashEntry.count({ where: { logistUserId: deskA.id } })).toBe(1);
+    expect(await ctx.db.logistCashEntry.count({ where: { logistUserId: deskB.id } })).toBe(0);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(-150_000n);
+    expect(
+      await ctx.db.auditLog.count({
+        where: {
+          action: 'FINANCE_OPERATION_RECORDED',
+          entityId: first.json().entry?.id ?? '',
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('повтор по чужому ключу не выдаёт логисту операцию по чужой кассе', async () => {
+    /*
+     * Проверка прав на кассу стояла только внутри транзакции, а быстрый путь
+     * повтора отвечал раньше неё: логист получал 201 с чужой передачей —
+     * суммой, курьером и днём.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const { token: logistToken, userId: logistId } = await tokenFor(['LOGISTICIAN']);
+    const foreignDesk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const courier = await courierId();
+    const key = unique('foreign-desk');
+
+    const created = await postOperation(adminToken, {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '120000',
+      operationDate: DAY,
+      logistUserId: foreignDesk.id,
+      idempotencyKey: key,
+    });
+    expect(created.statusCode).toBe(201);
+
+    // Логист повторяет тот же ключ: своей кассой он эту операцию не объяснит.
+    const replay = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/logistics/ledger/operations',
+      headers: { authorization: `Bearer ${logistToken}` },
+      payload: {
+        courierUserId: courier,
+        kind: 'CASH_HANDED_TO_LOGIST',
+        amountMinor: '120000',
+        operationDate: DAY,
+        idempotencyKey: key,
+      },
+    });
+    expect(replay.statusCode).toBe(409);
+    expect(await ctx.db.logistCashEntry.count({ where: { logistUserId: logistId } })).toBe(0);
+  });
+
+  it('двойное нажатие «Взять из компании» не даёт отказа и не удваивает кассу', async () => {
+    const { token, userId } = await tokenFor(['LOGISTICIAN']);
+    const key = unique('company');
+    const body = {
+      direction: 'TAKE',
+      amountMinor: '400000',
+      operationDate: DAY,
+      idempotencyKey: key,
+    };
+
+    /*
+     * Оба запроса обязаны завершиться успешно. Внутри `appendCash` поиск по
+     * ключу стоит ДО блокировки кассы, поэтому без внешней очереди второй
+     * запрос доходил до вставки и получал отказ сервера.
+     */
+    const [first, second] = await Promise.all([postCompany(token, body), postCompany(token, body)]);
+    expect([first.statusCode, second.statusCode]).toEqual([201, 201]);
+    expect(first.json().entry?.id).toBe(second.json().entry?.id);
+
+    expect(await ctx.db.logistCashEntry.count({ where: { logistUserId: userId } })).toBe(1);
+    expect(await cashBalanceOf(ctx.db, userId, null)).toBe(400_000n);
+
+    // Тот же ключ с другой суммой — другая операция, а не повтор.
+    const otherAmount = await postCompany(token, { ...body, amountMinor: '900000' });
+    expect(otherAmount.statusCode).toBe(409);
+    expect(await cashBalanceOf(ctx.db, userId, null)).toBe(400_000n);
+  });
+
+  it('две одновременные отмены движения кассы: одна обратная запись, без отказа сервера', async () => {
+    const { token, userId } = await tokenFor(['LOGISTICIAN']);
+    const created = await postCompany(token, {
+      direction: 'TAKE',
+      amountMinor: '300000',
+      operationDate: DAY,
+      idempotencyKey: unique('company-reverse'),
+    });
+    expect(created.statusCode).toBe(201);
+    const entryId = created.json().entry?.id ?? '';
+
+    const reverseOnce = (): Promise<{ statusCode: number }> =>
+      ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/cash/${entryId}/reverse`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { reason: 'ошибочная запись' },
+      }) as never;
+
+    const [a, b] = await Promise.all([reverseOnce(), reverseOnce()]);
+    /*
+     * Один успех, один понятный отказ «уже отменена» — но НЕ 500. Невнятный
+     * отказ сервера человек повторяет новым ключом, и в кассе появляется
+     * лишняя запись.
+     */
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+
+    expect(await ctx.db.logistCashEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
+    expect(await cashBalanceOf(ctx.db, userId, null)).toBe(0n);
   });
 });

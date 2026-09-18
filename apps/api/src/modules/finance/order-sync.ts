@@ -45,11 +45,6 @@ export function cashCorrectionJobKey(orderId: string, payedSumMinor: bigint): st
   return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${payedSumMinor.toString()}`;
 }
 
-/** Общее начало ключей заданий на снятие денег этого заказа. */
-function cancellationKeyPrefix(orderId: string): string {
-  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}:`;
-}
-
 /**
  * Ключ задания на снятие денег отменённого заказа.
  *
@@ -64,7 +59,7 @@ function cancellationKeyPrefix(orderId: string): string {
  * тогда, когда часы отдали одно и то же значение.
  */
 export function cancellationJobKey(orderId: string, generation: number): string {
-  return `${cancellationKeyPrefix(orderId)}${generation}`;
+  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}:${generation}`;
 }
 
 /** Ключ самой корректирующей записи: одна на попытку и состояние оплаты. */
@@ -85,25 +80,11 @@ export async function enqueueCashPaymentCorrection(
 
 export async function enqueueCancelledOrderFinance(
   tx: TransactionClient,
-  input: { orderId: string },
+  input: { orderId: string; generation: number },
 ): Promise<void> {
-  /*
-   * Номер этой отмены — сколько заданий по заказу уже стояло, плюс одно.
-   *
-   * Считать безопасно: вызывающий уже изменил строку заказа в этой же
-   * транзакции, то есть держит её блокировку, и два события отмены одного
-   * заказа не могут считать одновременно.
-   */
-  const previous = await tx.outboxMessage.count({
-    where: {
-      topic: ORDER_FINANCE_TOPIC,
-      idempotencyKey: { startsWith: cancellationKeyPrefix(input.orderId) },
-    },
-  });
-
   await enqueueOutbox(tx, {
     topic: ORDER_FINANCE_TOPIC,
-    idempotencyKey: cancellationJobKey(input.orderId, previous + 1),
+    idempotencyKey: cancellationJobKey(input.orderId, input.generation),
     payload: { reason: 'CANCEL', orderId: input.orderId },
   });
 }

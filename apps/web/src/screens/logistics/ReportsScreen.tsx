@@ -73,6 +73,7 @@ interface SettlementRow {
   settlementMissing: boolean;
   /** Финансовый результат доставки снят: деньги по заказу не действуют. */
   financeCancelled: boolean;
+  sourceCancelled: boolean;
 }
 
 interface LedgerEntry {
@@ -969,7 +970,14 @@ export function ReportsScreen(): React.JSX.Element {
                                     tone={row.outcome === 'DELIVERED' ? 'success' : 'error'}
                                   >
                                     {row.outcome === 'DELIVERED' ? 'Доставлен' : 'Не доставлен'}
-                                    {row.cancelled ? ' (отменён)' : ''}
+                                    {row.cancelled ? ' (результат отменён)' : ''}
+                                    {/*
+                                      Отмена заказа в источнике — не отмена
+                                      результата. Показывается всегда, в каком
+                                      бы дне ни сняли деньги: иначе отменённый
+                                      заказ читался бы как обычная доставка.
+                                    */}
+                                    {row.sourceCancelled ? ' (отменён в МоемСкладе)' : ''}
                                   </StatusBadge>
                                 </td>
                                 <td>{formatMoney(row.cashMinor)}</td>

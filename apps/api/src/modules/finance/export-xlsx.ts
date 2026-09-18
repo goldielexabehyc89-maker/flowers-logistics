@@ -176,13 +176,17 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           total: toRubles(row.totalMinor),
           note: row.settlementMissing
             ? 'Расчёт отсутствует'
-            : row.cancelled
-              ? 'Результат отменён'
-              : row.financeCancelled
-                ? // Итог строки остаётся числом: пометка объясняет ноль, а не
-                  // заменяет сумму. Так файл и экран говорят одно и то же.
-                  'Финансовый результат отменён'
-                : '',
+            : [
+                row.cancelled ? 'Результат отменён' : '',
+                // Отмена заказа в источнике и снятие его денег — разные
+                // факты: в день доставки первый истинен, а второй нет.
+                row.sourceCancelled ? 'Отменён в МоемСкладе' : '',
+                // Итог строки остаётся числом: пометка объясняет ноль,
+                // а не заменяет сумму. Файл и экран говорят одно и то же.
+                row.financeCancelled ? 'Начисления дня сняты' : '',
+              ]
+                .filter((note) => note !== '')
+                .join('; '),
         });
       }
     }

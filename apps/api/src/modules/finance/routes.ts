@@ -1,7 +1,9 @@
 /**
  * API логистической истории, отчётов и денежных операций.
  *
- * Читают и пишут только `ADMIN` и `LOGISTICIAN`: это управленческий контур.
+ * Управленческий контур: `ADMIN`, `LOGISTICIAN` и `SUPERVISOR` (`FINANCE_ROLES`).
+ * Управляющий читает отчёты и ведёт операции наравне с логистом; отдельные
+ * действия — начальный долг, тарифы, включение учёта — остаются за `ADMIN`.
  * Курьерская история (`/api/delivery/history`) остаётся отдельной и здесь
  * не подменяется — у неё другой смысл и другая аудитория.
  *
@@ -41,7 +43,13 @@ import {
   openingDebtsOf,
   signedAmount,
 } from './ledger.js';
-import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
+import {
+  appendCash,
+  cashBalanceOf,
+  cashEntryByIdempotencyKey,
+  reverseCash,
+  signedCash,
+} from './cash.js';
 import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
@@ -450,13 +458,24 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
           : null;
 
     /*
+     * Владелец кассы определяется ДО любого ответа.
+     *
+     * `resolveDeskOwner` — это проверка права, а не деталь записи: логист
+     * работает только со своей кассой, администратор обязан назвать чужую.
+     * Выполненная только внутри транзакции, она пропускалась на быстром пути
+     * повтора, и логист по чужому ключу получал в ответ операцию по ЧУЖОЙ
+     * кассе — с суммой, курьером и днём.
+     */
+    const logistUserId = transfer === null ? null : resolveDeskOwner(actor, body.logistUserId);
+
+    /*
      * Тот же ключ с другими данными — это не повтор, а другая операция.
      *
      * Повтор (двойной клик, сетевой повтор, гонка) обязан вернуть ту же запись
      * и не создать второй. А молча отдать её в ответ на запрос с ДРУГОЙ суммой,
-     * датой, видом или курьером значило бы ответить «сохранено» о том, что не
-     * сохранялось. Путь достижим: форма не закрывается при ошибке и оставляет
-     * прежний ключ, а человек правит сумму и отправляет снова.
+     * датой, видом, курьером или КАССОЙ значило бы ответить «сохранено» о том,
+     * что не сохранялось. Путь достижим: форма не закрывается при ошибке и
+     * оставляет прежний ключ, а человек правит данные и отправляет снова.
      */
     const sameOperation = (candidate: {
       kind: string;
@@ -469,6 +488,26 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       candidate.operationDate === body.operationDate &&
       BigInt(candidate.amountMinor) === signedAmount(body.kind, body.amountMinor);
 
+    /**
+     * У передачи есть вторая сторона — касса, и она тоже часть операции.
+     *
+     * Иначе тот же ключ с другой кассой отвечал бы «сохранено», а наличные
+     * так и оставались бы числиться за прежним логистом.
+     */
+    const sameDesk = async (candidate: { transferId: string | null }): Promise<boolean> => {
+      if (transfer === null) {
+        return true;
+      }
+      if (candidate.transferId === null) {
+        return false;
+      }
+      const cashSide = await deps.db.logistCashEntry.findFirst({
+        where: { transferId: candidate.transferId, kind: { not: 'ADJUSTMENT' } },
+        select: { logistUserId: true },
+      });
+      return cashSide !== null && cashSide.logistUserId === logistUserId;
+    };
+
     const conflict = (): never => {
       throw new AppError('CONFLICT', {
         publicMessage: 'Этот ключ идемпотентности уже использован для другой операции.',
@@ -478,7 +517,9 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     // Повтор уже сохранённой операции: ни второй записи, ни второй строки аудита.
     const known = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
     if (known !== null) {
-      return sameOperation(known) ? reply.code(201).send({ entry: known }) : conflict();
+      return sameOperation(known) && (await sameDesk(known))
+        ? reply.code(201).send({ entry: known })
+        : conflict();
     }
 
     const runOperation = async (): Promise<unknown> =>
@@ -492,8 +533,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
          */
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ledger-operation:${body.idempotencyKey}`})::bigint)`;
 
-        if (transfer !== null) {
-          const logistUserId = resolveDeskOwner(actor, body.logistUserId);
+        if (transfer !== null && logistUserId !== null) {
           const result = await recordTransfer(tx, actor, {
             kind: transfer,
             courierUserId: body.courierUserId,
@@ -503,7 +543,15 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
             idempotencyKey: body.idempotencyKey,
           });
 
-          if (!sameOperation(result.courierEntry)) {
+          /*
+           * Контракт сверяется и по кассе: `appendCash` находит запись по
+           * ключу, не глядя на владельца, и без этой проверки тот же ключ
+           * с другой кассой отвечал бы «сохранено».
+           */
+          if (
+            !sameOperation(result.courierEntry) ||
+            result.cashEntry.logistUserId !== logistUserId
+          ) {
             conflict();
           }
 
@@ -616,7 +664,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       if (winner === null) {
         throw error;
       }
-      if (!sameOperation(winner)) {
+      if (!sameOperation(winner) || !(await sameDesk(winner))) {
         conflict();
       }
       entry = winner;
@@ -1039,42 +1087,102 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
     const body = companySchema.parse(request.body);
     const logistUserId = resolveDeskOwner(actor, body.logistUserId);
+    const kind = body.direction === 'TAKE' ? 'TAKEN_FROM_COMPANY' : 'HANDED_TO_COMPANY';
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const created = await appendCash(tx, {
-        logistUserId,
-        kind: body.direction === 'TAKE' ? 'TAKEN_FROM_COMPANY' : 'HANDED_TO_COMPANY',
-        amountMinor: body.amountMinor,
-        operationDate: body.operationDate,
-        actorUserId: actor.userId,
-        idempotencyKey: body.idempotencyKey,
+    /*
+     * Тот же ключ с другими данными — другая операция, а не повтор.
+     *
+     * Правило то же, что у журнала курьера: молчаливый возврат чужой записи
+     * означал бы ответ «сохранено» о том, что не сохранялось.
+     */
+    const sameCashOperation = (candidate: {
+      logistUserId: string;
+      kind: string;
+      amountMinor: string;
+      operationDate: string;
+    }): boolean =>
+      candidate.logistUserId === logistUserId &&
+      candidate.kind === kind &&
+      candidate.operationDate === body.operationDate &&
+      BigInt(candidate.amountMinor) === signedCash(kind, body.amountMinor);
+
+    const cashConflict = (): never => {
+      throw new AppError('CONFLICT', {
+        publicMessage: 'Этот ключ идемпотентности уже использован для другой операции.',
       });
+    };
 
-      await writeAudit(tx, {
-        action: 'FINANCE_CASH_MOVED',
-        entityType: 'LogistCashEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        // Автор и владелец кассы хранятся раздельно: действие администратора
-        // не превращается в кассу владельца системы.
-        newValue: {
-          kind: created.kind,
-          amountMinor: created.amountMinor,
-          operationDate: created.operationDate,
+    const run = async (): Promise<unknown> =>
+      deps.db.$transaction(async (tx) => {
+        /*
+         * Запросы с одним ключом выстраиваются в очередь.
+         *
+         * Внутри `appendCash` поиск по ключу стоит ДО блокировки кассы, поэтому
+         * два одновременных запроса оба решают «ключа нет» и второй доходит до
+         * вставки. Без этой блокировки обычное двойное нажатие давало отказ.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash:${body.idempotencyKey}`})::bigint)`;
+
+        const created = await appendCash(tx, {
           logistUserId,
-        },
-        ...contextOf(request),
+          kind,
+          amountMinor: body.amountMinor,
+          operationDate: body.operationDate,
+          actorUserId: actor.userId,
+          idempotencyKey: body.idempotencyKey,
+        });
+
+        if (!sameCashOperation(created)) {
+          cashConflict();
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_CASH_MOVED',
+          entityType: 'LogistCashEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          // Автор и владелец кассы хранятся раздельно: действие администратора
+          // не превращается в кассу владельца системы.
+          newValue: {
+            kind: created.kind,
+            amountMinor: created.amountMinor,
+            operationDate: created.operationDate,
+            logistUserId,
+          },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
       });
 
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
-      });
-
-      return created;
-    });
+    let entry;
+    try {
+      entry = await run();
+    } catch (error) {
+      /*
+       * Победитель гонки читается снаружи: нарушение уникальности делает
+       * транзакцию аварийной, и перечитывать запись внутри неё нельзя.
+       * Любая другая ошибка остаётся ошибкой.
+       */
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const winner = await cashEntryByIdempotencyKey(deps.db, body.idempotencyKey);
+      if (winner === null) {
+        throw error;
+      }
+      if (!sameCashOperation(winner)) {
+        cashConflict();
+      }
+      entry = winner;
+    }
 
     return reply.code(201).send({ entry });
   });
@@ -1085,54 +1193,82 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = reversalSchema.parse(request.body);
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const source = await tx.logistCashEntry.findUnique({
-        where: { id },
-        select: { logistUserId: true, transferId: true },
-      });
-      if (source === null) {
-        throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
-      }
-      // Логист отменяет только в своей кассе.
-      resolveDeskOwner(actor, source.logistUserId);
+    const runReversal = async (): Promise<unknown> =>
+      deps.db.$transaction(async (tx) => {
+        /*
+         * Отмены одной записи кассы выстраиваются в очередь по ключу — так же,
+         * как отмены в журнале курьера. Без этого две одновременные отмены
+         * (в том числе со стороны кассы и со стороны передачи) упирались
+         * в уникальность и доходили до человека отказом.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash-reversal:${id}`})::bigint)`;
 
-      const created =
-        source.transferId === null
-          ? await reverseCash(tx, {
-              entryId: id,
-              actorUserId: actor.userId,
-              reason: body.reason,
-              operationDate: moscowCalendarDate(new Date()),
-            })
-          : null;
-
-      if (source.transferId !== null) {
-        await reverseTransfer(tx, {
-          transferId: source.transferId,
-          actorUserId: actor.userId,
-          reason: body.reason,
-          operationDate: moscowCalendarDate(new Date()),
+        const source = await tx.logistCashEntry.findUnique({
+          where: { id },
+          select: { logistUserId: true, transferId: true },
         });
+        if (source === null) {
+          throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
+        }
+        // Логист отменяет только в своей кассе.
+        resolveDeskOwner(actor, source.logistUserId);
+
+        const created =
+          source.transferId === null
+            ? await reverseCash(tx, {
+                entryId: id,
+                actorUserId: actor.userId,
+                reason: body.reason,
+                operationDate: moscowCalendarDate(new Date()),
+              })
+            : null;
+
+        if (source.transferId !== null) {
+          await reverseTransfer(tx, {
+            transferId: source.transferId,
+            actorUserId: actor.userId,
+            reason: body.reason,
+            operationDate: moscowCalendarDate(new Date()),
+          });
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_CASH_REVERSED',
+          entityType: 'LogistCashEntry',
+          entityId: id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { logistUserId: source.logistUserId, transfer: source.transferId !== null },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: moscowCalendarDate(new Date()) },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
+      });
+
+    let entry;
+    try {
+      entry = await runReversal();
+    } catch (error) {
+      /*
+       * Ту же запись успел отменить кто-то ещё — например, через отмену
+       * передачи со стороны журнала курьера: там свой ключ блокировки, и от
+       * этой очереди он не защищает. Человеку отвечаем тем же, что и на
+       * обычный повтор, а не невнятным отказом сервера.
+       */
+      if (
+        !isUniqueViolation(error) ||
+        (await cashEntryByIdempotencyKey(deps.db, `cash-reversal:${id}`)) === null
+      ) {
+        throw error;
       }
-
-      await writeAudit(tx, {
-        action: 'FINANCE_CASH_REVERSED',
-        entityType: 'LogistCashEntry',
-        entityId: id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        newValue: { logistUserId: source.logistUserId, transfer: source.transferId !== null },
-        ...contextOf(request),
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: moscowCalendarDate(new Date()) },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
-      });
-
-      return created;
-    });
+      throw new AppError('CONFLICT', { publicMessage: 'Эта операция кассы уже отменена.' });
+    }
 
     return { entry };
   });

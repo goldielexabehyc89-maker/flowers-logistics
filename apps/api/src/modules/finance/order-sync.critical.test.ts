@@ -1204,18 +1204,43 @@ describe('выгрузка показывает корректировки, а �
      * день. Её итог остаётся настоящим числом, а обратные записи видны
      * отдельной строкой своего дня — именно так это выглядит и на экране.
      */
+    /*
+     * Утверждения привязаны к КОНКРЕТНОЙ строке по столбцу «Уровень».
+     *
+     * Сбор значений по всему листу выполнялся бы и тогда, когда строка заказа
+     * исчезла: её итог совпадает с итогом группы, и «есть такое число где-то
+     * на листе» не доказывает ничего.
+     */
     const rows = workbook.getWorksheet('Заказы');
-    const notes: string[] = [];
-    const totals: unknown[] = [];
+    const orderRows: { total: unknown; note: string; date: unknown }[] = [];
+    const dayRows: { total: unknown; date: unknown }[] = [];
     rows?.eachRow((row) => {
-      notes.push(String(row.getCell(22).value ?? ''));
-      totals.push(row.getCell(21).value);
+      const level = String(row.getCell(1).value ?? '');
+      if (level === 'Заказ') {
+        orderRows.push({
+          total: row.getCell(21).value,
+          note: String(row.getCell(22).value ?? ''),
+          date: row.getCell(2).value,
+        });
+      }
+      if (level === 'Итог дня') {
+        dayRows.push({ total: row.getCell(21).value, date: row.getCell(2).value });
+      }
     });
-    expect(notes).not.toContain('Финансовый результат отменён');
-    // 4 700 ₽ дня доставки: 5 000 наличных минус 200 оплаты работы и 100 МКАД.
-    expect(totals).toContain(4700);
-    // И ровно столько же снято в день отмены — не спрятано, а показано минусом.
-    expect(totals).toContain(-4700);
+
+    // Строка заказа одна, стоит в дне доставки и несёт настоящий итог.
+    expect(orderRows).toHaveLength(1);
+    // 4 700 ₽: 5 000 наличных минус 200 оплаты работы и 100 МКАД.
+    expect(orderRows[0]?.total).toBe(4700);
+    expect(orderRows[0]?.date).toBe(DAY);
+    // «Начисления дня сняты» к этому дню не относится — снятие в следующем.
+    expect(orderRows[0]?.note).not.toContain('Начисления дня сняты');
+    // Но отмена заказа в источнике названа прямо.
+    expect(orderRows[0]?.note).toContain('Отменён в МоемСкладе');
+
+    // День отмены показан отдельной группой и ровно тем же числом со знаком минус.
+    expect(dayRows.find((row) => row.date === DAY)?.total).toBe(4700);
+    expect(dayRows.find((row) => row.date === NEXT_DAY)?.total).toBe(-4700);
   });
 
   it('XLSX: подписи, знаки и суммы итогов и журнала', async () => {
