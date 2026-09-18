@@ -1047,6 +1047,52 @@ describe('ключ идемпотентности общих операций', 
       payload: body,
     }) as never;
 
+  it('передача наличных не принимает привязку к доставке — отказ, а не ложный конфликт', async () => {
+    /*
+     * У передачи вторая сторона — касса логиста, и привязку она не сохраняет.
+     * Принятая молча, привязка превращала ПЕРВЫЙ же запрос с новым ключом в
+     * «ключ уже использован»: сверка сравнивала присланный uuid с пустым полем
+     * сохранённой записи. Человек читал бы про чужой ключ там, где ошибка в
+     * его собственном запросе.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const desk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+
+    const response = await postOperation(token, {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '30000',
+      operationDate: DAY,
+      logistUserId: desk.id,
+      attemptId: randomUUID(),
+      idempotencyKey: unique('transfer-binding'),
+    } as never);
+
+    expect(response.statusCode).toBe(400);
+    // И денег такой запрос не создаёт.
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(0n);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+  });
+
+  it('передача наличных без привязки проходит обычным порядком', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const desk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+
+    const response = await postOperation(token, {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '30000',
+      operationDate: DAY,
+      logistUserId: desk.id,
+      idempotencyKey: unique('transfer-plain'),
+    } as never);
+
+    expect(response.statusCode).toBe(201);
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(30_000n);
+  });
+
   it('тот же ключ с другой ПРИВЯЗКОЙ — тоже конфликт: это другая операция', async () => {
     /*
      * Привязка к доставке — не пометка. Ею отчёт решает, показать сумму

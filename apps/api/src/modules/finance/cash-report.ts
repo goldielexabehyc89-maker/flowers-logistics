@@ -286,8 +286,12 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
   ]);
 
   const profileById = new Map(deskProfiles.map((row) => [row.id, row]));
-  const balanceById = new Map(balances.map((row) => [row.logistUserId, row._sum.amountMinor ?? 0n]));
-  const closingById = new Map(closings.map((row) => [row.logistUserId, row._sum.amountMinor ?? 0n]));
+  const balanceById = new Map(
+    balances.map((row) => [row.logistUserId, row._sum.amountMinor ?? 0n]),
+  );
+  const closingById = new Map(
+    closings.map((row) => [row.logistUserId, row._sum.amountMinor ?? 0n]),
+  );
 
   const desks = deskIds.map((id) => ({
     id,

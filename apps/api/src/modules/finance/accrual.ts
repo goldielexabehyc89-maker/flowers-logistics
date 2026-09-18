@@ -268,6 +268,24 @@ export async function accrueDistanceFee(
     return;
   }
 
+  /*
+   * Километры оплачиваются ОДИН раз — правилом, а не совпадением ключей.
+   *
+   * Догоняющее начисление опиралось на занятость ключа `attempt:<id>:
+   * DISTANCE_FEE`. Но доставка бывает отмечена ДО того, как расстояние
+   * посчитано: тогда записи нет, ключ свободен, а логист успевает поставить
+   * километры вручную. Валгалла отвечала позже, ручной снимок признавался
+   * подходящим — и те же километры начислялись ВТОРОЙ раз, по 246 ₽ вместо
+   * 123 ₽. Признак — действующая запись километров у этой попытки, чем бы
+   * она ни была заведена.
+   */
+  const alreadyPaid = await tx.courierLedgerEntry.count({
+    where: { attemptId: input.attemptId, kind: 'DISTANCE_FEE', reversedBy: { is: null } },
+  });
+  if (alreadyPaid > 0) {
+    return;
+  }
+
   const distance = await tx.routeOrderDistance.findFirst({
     where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
     select: { roundedKmTenths: true },
@@ -296,6 +314,19 @@ export async function accrueDistanceFee(
     idempotencyKey: accrualKey(input.attemptId, 'DISTANCE_FEE'),
   });
 }
+
+/**
+ * Виды, которые начисляет САМА система по результату доставки.
+ *
+ * Список закрытый и сверен с местами записи: `accrueDeliveryResult`,
+ * `accrueDistanceFee` и корректировка наличных после оплаты в источнике.
+ */
+const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
+  'CASH_RECEIVED',
+  'DELIVERY_FEE',
+  'DISTANCE_FEE',
+  'CASH_PAYMENT_CORRECTION',
+];
 
 /**
  * Пересчёт километров после того, как деньги уже начислены.
@@ -371,10 +402,38 @@ export async function restateDistanceFee(
       ? 0n
       : (snapshot.perKmMinor * BigInt(distance.roundedKmTenths)) / 10n;
 
+  /*
+   * Снятый финансовый результат правкой километров не оживляется.
+   *
+   * После отмены заказа в источнике все начисления сняты; снятие отмены денег
+   * не возвращает. Правка километров в этом состоянии завела бы оплату одних
+   * километров — заказ, за который заплачены только они, и ничего больше.
+   * Признак — отменённая оплата доставки при отсутствии действующей.
+   */
+  const systemAccruals = await tx.courierLedgerEntry.findMany({
+    where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] } },
+    select: { id: true, reversedBy: { select: { id: true } } },
+  });
+  const stripped =
+    systemAccruals.length > 0 && systemAccruals.every((entry) => entry.reversedBy !== null);
+  if (stripped) {
+    return false;
+  }
+
   const existing = await tx.courierLedgerEntry.findMany({
     where: { attemptId: attempt.id, kind: 'DISTANCE_FEE', reversedBy: { is: null } },
     select: { id: true, amountMinor: true },
   });
+  /*
+   * Был ли базовый ключ когда-либо занят: отменённая запись его не освобождает.
+   * Без этого повторная правка после отмены упиралась бы в занятый ключ и
+   * возвращала снятую запись вместо новой.
+   */
+  const hadAnyDistanceFee =
+    (await tx.courierLedgerEntry.count({
+      where: { attemptId: attempt.id, kind: 'DISTANCE_FEE' },
+    })) > 0;
+
   // В журнале заработок отрицателен: начисленная величина — со сменой знака.
   const accrued = existing.reduce((total, entry) => total - entry.amountMinor, 0n);
   if (accrued === target) {
@@ -403,16 +462,23 @@ export async function restateDistanceFee(
       orderId: routeOrder.order.id,
       attemptId: attempt.id,
       /*
-       * Ключ — по СНИМКУ расстояния, а не по величине километров.
+       * Ключ: базовый, пока он свободен, дальше — по СНИМКУ расстояния.
        *
-       * Прежний `attempt:<id>:DISTANCE_FEE` занят исходным начислением, а
-       * ключ из самих километров повторялся бы при возврате к прежнему
-       * значению: правка 12,5 → 20,0 → 12,5 → 20,0 на четвёртом шаге попала бы
-       * в УЖЕ ОТМЕНЁННУЮ запись, вернула бы её и оставила курьера без денег.
-       * Каждая правка создаёт новый снимок, поэтому его идентификатор
-       * различает правки и оставляет повтор одной записью.
+       * Базовый `attempt:<id>:DISTANCE_FEE` занимается первым начислением —
+       * не важно, системным или этой правкой. Занять его здесь обязательно:
+       * иначе догоняющее начисление Valhalla придёт на свободный ключ и
+       * оплатит те же километры второй раз.
+       *
+       * Ключ из самих километров не годится: он повторялся бы при возврате к
+       * прежнему значению, и правка 12,5 → 20,0 → 12,5 → 20,0 на четвёртом
+       * шаге попала бы в УЖЕ ОТМЕНЁННУЮ запись, вернула бы её и оставила
+       * курьера без денег. Каждая правка создаёт новый снимок, поэтому его
+       * идентификатор различает правки и оставляет повтор одной записью.
        */
-      idempotencyKey: `${accrualKey(attempt.id, 'DISTANCE_FEE')}:snapshot:${distance?.id ?? 'none'}`,
+      idempotencyKey:
+        existing.length === 0 && !hadAnyDistanceFee
+          ? accrualKey(attempt.id, 'DISTANCE_FEE')
+          : `${accrualKey(attempt.id, 'DISTANCE_FEE')}:snapshot:${distance?.id ?? 'none'}`,
     });
   }
 
@@ -426,18 +492,6 @@ export async function restateDistanceFee(
  * Исходные записи остаются: по ним видно, что деньги начислялись и почему были
  * сняты. Денежный факт не удаляется — он остаётся историей.
  */
-/**
- * Виды, которые начисляет САМА система по результату доставки.
- *
- * Список закрытый и сверен с местами записи: `accrueDeliveryResult`,
- * `accrueDistanceFee` и корректировка наличных после оплаты в источнике.
- */
-const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
-  'CASH_RECEIVED',
-  'DELIVERY_FEE',
-  'DISTANCE_FEE',
-  'CASH_PAYMENT_CORRECTION',
-];
 
 /**
  * Оплата ЗА САМУ ПОПЫТКУ.

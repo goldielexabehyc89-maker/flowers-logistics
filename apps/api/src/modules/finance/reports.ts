@@ -416,7 +416,9 @@ export async function buildSettlementReport(
   const visibleEntries = entries.filter(
     (entry) =>
       visibleJournal.has(entry.id) ||
-      (entry.attemptId !== null && takenByRows.has(entry.id) && visibleAttempts.has(entry.attemptId)),
+      (entry.attemptId !== null &&
+        takenByRows.has(entry.id) &&
+        visibleAttempts.has(entry.attemptId)),
   );
 
   return {

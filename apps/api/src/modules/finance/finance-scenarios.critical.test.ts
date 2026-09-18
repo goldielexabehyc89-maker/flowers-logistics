@@ -41,7 +41,11 @@ import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
 import { recordDeliveryResult, type DeliveryDeps } from '../delivery/service.js';
 import { processOutboxOnce, type OutboxHandlers } from '../outbox/worker.js';
 import { createOrderFinanceHandler, ORDER_FINANCE_TOPIC } from './order-sync.js';
-import { createMkadDistanceHandler, MKAD_DISTANCE_TOPIC } from './mkad-auto.js';
+import {
+  createMkadDistanceHandler,
+  enqueueMkadDistanceForRouteOrder,
+  MKAD_DISTANCE_TOPIC,
+} from './mkad-auto.js';
 import { LEDGER_SETTING_KEY } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
 import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
@@ -1492,6 +1496,99 @@ describe('исправленные километры и деньги за ни�
         },
       }),
     ).toBe(1);
+  });
+
+  it('ручная правка до расчёта Valhalla не даёт оплатить километры дважды', async () => {
+    /*
+     * Доставку отмечают РАНЬШЕ, чем посчитано расстояние: Valhalla недоступна,
+     * задание висит в очереди. Записи километров нет — и базовый ключ
+     * начисления свободен. Логист ставит километры руками, правка их
+     * оплачивает. Позже задание выполняется, ручной снимок признаётся
+     * подходящим (перетирать его нельзя) — и догоняющее начисление платило те
+     * же километры ВТОРОЙ раз: 246 ₽ вместо 123 ₽ за одну доставку.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    // Расстояния ещё нет: доставка фиксируется до ответа маршрутизатора.
+    await deliver(scenario);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { courierUserId: scenario.courierId, kind: 'DISTANCE_FEE' },
+      }),
+    ).toBe(0);
+
+    // Задание на расчёт стоит в очереди — оно и придёт «догоняющим».
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+
+    // Логист ставит километры руками, и правка их оплачивает.
+    await seedDistance(scenario, 125);
+    const admin = await actorFor(['ADMIN']);
+    expect(
+      await ctx.db.$transaction((tx) =>
+        restateDistanceFee(tx, {
+          routeOrderId: scenario.routeOrderId,
+          actorUserId: admin.userId,
+          reason: 'Правка километров: маршрутизатор не ответил',
+        }),
+      ),
+    ).toBe(true);
+
+    // Valhalla поднялась, задание выполняется.
+    expect(await runQueue(new Date(`${DAY}T18:00:00.000Z`), scenario)).toBe(1);
+
+    const built = await report(DAY, DAY, scenario.courierId);
+    // 12,5 км × 40 ₽ = 500 ₽ — ровно один раз.
+    expect(BigInt(built.totals.distanceFeesMinor)).toBe(50_000n);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: {
+          courierUserId: scenario.courierId,
+          kind: 'DISTANCE_FEE',
+          reversedBy: { is: null },
+        },
+      }),
+    ).toBe(1);
+    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(
+      BigInt(built.totals.closingBalanceMinor),
+    );
+  });
+
+  it('после снятой отмены правка километров не оживляет деньги по частям', async () => {
+    /*
+     * Отмена в источнике снимает все начисления, а снятие отмены денег не
+     * возвращает — это решение принимает человек. Правка километров в этом
+     * состоянии заводила оплату ОДНИХ километров: заказ, за который заплачены
+     * только они, без оплаты доставки и без наличных.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+
+    // Отмена в источнике снимает финансовый результат.
+    await syncSource(scenario, { sum: 100_000, payedSum: 0, cancelled: true });
+    // Заданий может быть и два (снятие денег и корректировка оплаты): важно,
+    // что после них финансового результата у заказа не осталось.
+    expect(await runQueue(new Date(`${DAY}T15:00:00.000Z`), scenario)).toBeGreaterThan(0);
+    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(0n);
+
+    // Отмену снимают, но деньги сами не возвращаются.
+    await syncSource(scenario, { sum: 100_000, payedSum: 0 });
+    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(0n);
+
+    await seedDistance(scenario, 200);
+    const admin = await actorFor(['ADMIN']);
+    const changed = await ctx.db.$transaction((tx) =>
+      restateDistanceFee(tx, {
+        routeOrderId: scenario.routeOrderId,
+        actorUserId: admin.userId,
+        reason: 'Правка километров после снятой отмены',
+      }),
+    );
+
+    expect(changed).toBe(false);
+    // Баланс прежний: по частям деньги не оживают.
+    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(0n);
   });
 
   it('повторная правка тем же значением денег не трогает', async () => {

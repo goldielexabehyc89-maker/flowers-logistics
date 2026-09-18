@@ -56,7 +56,7 @@ import {
 import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
-import { computeBeyondMkad, saveDistanceSnapshot } from './mkad.js';
+import { computeBeyondMkad, saveDistanceSnapshot, saveDistanceSnapshotTx } from './mkad.js';
 import { restateDistanceFee } from './accrual.js';
 import { activeRing, bundle } from './mkad-bundle.js';
 import { ValhallaClient } from '../integrations/valhalla/client.js';
@@ -106,31 +106,64 @@ const moneySchema = z.coerce
   .bigint()
   .refine((value) => value > 0n, 'Сумма должна быть больше нуля');
 
-const operationSchema = z.object({
-  courierUserId: z.string().uuid(),
-  kind: z.enum([
-    'CASH_HANDED_TO_LOGIST',
-    'CASH_ISSUED_TO_COURIER',
-    'BONUS',
-    'ATTEMPT_FEE',
-    'EXPENSE_PARKING',
-    'EXPENSE_TOLL',
-    'EXPENSE_TRANSIT',
-    'EXPENSE_REPAIR',
-    'EXPENSE_LOADING',
-    'EXPENSE_OTHER',
-  ]),
-  amountMinor: moneySchema,
-  operationDate: dateSchema,
-  reason: z.string().trim().min(3).max(500).optional(),
-  comment: z.string().trim().min(1).max(500).optional(),
-  routeId: z.string().uuid().optional(),
-  orderId: z.string().uuid().optional(),
-  attemptId: z.string().uuid().optional(),
-  /** Чья касса участвует в передаче. Логисту разрешена только своя. */
-  logistUserId: z.string().uuid().optional(),
-  idempotencyKey: z.string().trim().min(8).max(120),
-});
+/**
+ * Виды, у которых есть вторая сторона — касса логиста.
+ *
+ * Привязка к доставке им не передаётся (`recordTransfer` её не сохраняет),
+ * поэтому принимать её молча нельзя: сверка ключа идемпотентности сравнивала
+ * бы присланный uuid с пустым полем сохранённой записи и отвечала конфликтом
+ * на ПЕРВЫЙ же запрос с новым ключом.
+ */
+const TRANSFER_KINDS: readonly string[] = ['CASH_HANDED_TO_LOGIST', 'CASH_ISSUED_TO_COURIER'];
+
+const operationSchema = z
+  .object({
+    courierUserId: z.string().uuid(),
+    kind: z.enum([
+      'CASH_HANDED_TO_LOGIST',
+      'CASH_ISSUED_TO_COURIER',
+      'BONUS',
+      'ATTEMPT_FEE',
+      'EXPENSE_PARKING',
+      'EXPENSE_TOLL',
+      'EXPENSE_TRANSIT',
+      'EXPENSE_REPAIR',
+      'EXPENSE_LOADING',
+      'EXPENSE_OTHER',
+    ]),
+    amountMinor: moneySchema,
+    operationDate: dateSchema,
+    reason: z.string().trim().min(3).max(500).optional(),
+    comment: z.string().trim().min(1).max(500).optional(),
+    routeId: z.string().uuid().optional(),
+    orderId: z.string().uuid().optional(),
+    attemptId: z.string().uuid().optional(),
+    /** Чья касса участвует в передаче. Логисту разрешена только своя. */
+    logistUserId: z.string().uuid().optional(),
+    idempotencyKey: z.string().trim().min(8).max(120),
+  })
+  .superRefine((value, context) => {
+    /*
+     * Передача наличных к доставке не привязывается.
+     *
+     * Её вторая сторона — касса логиста, и привязку `recordTransfer` не
+     * сохраняет. Принять её молча значило бы обещать то, чего не будет, и
+     * заодно превратить первый же запрос с новым ключом в «ключ уже
+     * использован»: сверка сравнивала бы присланный uuid с пустым полем.
+     */
+    if (!TRANSFER_KINDS.includes(value.kind)) {
+      return;
+    }
+    for (const field of ['routeId', 'orderId', 'attemptId'] as const) {
+      if (value[field] !== undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'Передача наличных не привязывается к доставке.',
+        });
+      }
+    }
+  });
 
 const reversalSchema = z.object({ reason: z.string().trim().min(3).max(500) });
 
@@ -224,7 +257,8 @@ function assertPeriod(from: string, to: string): void {
    * Длина считается по календарю, а не вычитанием дат строками: у месяцев
    * разное число дней, и «31-е минус 1-е» не является длиной ни в одном месяце.
    */
-  const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  const days =
+    Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
   if (days > MAX_PERIOD_DAYS) {
     throw new AppError('VALIDATION_FAILED', {
       publicMessage: `Период длиннее года: выберите срок не больше ${MAX_PERIOD_DAYS} дней.`,
@@ -1721,31 +1755,34 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       });
     }
 
-    await saveDistanceSnapshot(deps.db, {
-      routeOrderId: body.routeOrderId,
-      ringVersionId: ring.id,
-      graphSha256: null,
-      meters: body.kmTenths * 100,
-      insideMkad: body.kmTenths === 0,
-      source: 'MANUAL',
-      actorUserId: actor.userId,
-      reason: body.reason,
-    });
-
     /*
      * Правка километров — это правка ДЕНЕГ, а не подписи под ними.
      *
      * Строка отчёта показывает километры живьём, а оплату — замороженной
      * записью. Без пересчёта правка расходилась с деньгами молча: в отчёте
      * и в выгрузке стояли исправленные километры и прежняя сумма.
+     *
+     * Снимок и деньги пишутся ОДНОЙ транзакцией. Двумя отказ между ними
+     * оставлял бы ровно то расхождение, ради устранения которого пересчёт и
+     * заведён, — и следа об этом не осталось бы: аудит пишется позже.
      */
-    const restated = await deps.db.$transaction((tx) =>
-      restateDistanceFee(tx, {
+    const restated = await deps.db.$transaction(async (tx) => {
+      await saveDistanceSnapshotTx(tx, {
+        routeOrderId: body.routeOrderId,
+        ringVersionId: ring.id,
+        graphSha256: null,
+        meters: body.kmTenths * 100,
+        insideMkad: body.kmTenths === 0,
+        source: 'MANUAL',
+        actorUserId: actor.userId,
+        reason: body.reason,
+      });
+      return restateDistanceFee(tx, {
         routeOrderId: body.routeOrderId,
         actorUserId: actor.userId,
         reason: `Правка километров: ${body.reason}`,
-      }),
-    );
+      });
+    });
 
     await writeAudit(deps.db, {
       action: 'FINANCE_DISTANCE_CORRECTED',
@@ -1756,6 +1793,21 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       newValue: { kmTenths: body.kmTenths, restated },
       ...contextOf(request),
     });
+
+    /*
+     * Открытые отчёты перечитываются сами.
+     *
+     * Маршрут меняет деньги — значит, обязан сказать об этом, как и все
+     * остальные: иначе у логиста на экране висят прежние суммы, и разницу он
+     * увидит только после обновления страницы.
+     */
+    if (restated) {
+      await publishRealtimeEvent(deps.db, {
+        topic: 'finance.ledger_changed',
+        payload: { routeOrderId: body.routeOrderId },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+      });
+    }
 
     return { ok: true };
   });
