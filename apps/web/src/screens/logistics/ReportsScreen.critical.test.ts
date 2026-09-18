@@ -66,6 +66,42 @@ describe('столбец суммы в журнале', () => {
   });
 });
 
+describe('ширина строки журнала', () => {
+  /*
+   * Строка журнала складывается из ячеек с colSpan, посчитанным от номера
+   * столбца. Ошибка на единицу не роняет ничего: таблица просто уезжает вбок
+   * за край страницы, и заметить это можно лишь глазами на широком периоде.
+   */
+  const KINDS = [
+    'CASH_RECEIVED',
+    'DELIVERY_FEE',
+    'DISTANCE_FEE',
+    'ATTEMPT_FEE',
+    'EXPENSE_PARKING',
+    'BONUS',
+    'CASH_HANDED_TO_LOGIST',
+    'CASH_ISSUED_TO_COURIER',
+    'ВИД_КОТОРОГО_ЕЩЁ_НЕТ',
+  ];
+
+  it('любой вид операции даёт ровно столько ячеек, сколько столбцов в шапке', () => {
+    for (const kind of KINDS) {
+      const column = journalColumn(kind);
+      // Дата + название + автор(2) + основание + сумма + отмена.
+      const reason = column - 5;
+      const tail = SETTLEMENT_COLUMNS.length - column;
+      expect(reason, `основание у ${kind}`).toBeGreaterThan(0);
+      expect(tail, `хвост у ${kind}`).toBeGreaterThan(0);
+      expect(1 + 1 + 2 + reason + 1 + tail).toBe(SETTLEMENT_COLUMNS.length);
+    }
+  });
+
+  it('строка отдельной операции тоже во всю ширину шапки', () => {
+    // Дата + название + автор(2) + основание + отмена + сумма.
+    expect(1 + 1 + 2 + (SETTLEMENT_COLUMNS.length - 6) + 1 + 1).toBe(SETTLEMENT_COLUMNS.length);
+  });
+});
+
 describe('подпись итога периода', () => {
   it('без отбора по курьеру это ИЗМЕНЕНИЕ, а не баланс', () => {
     /*
