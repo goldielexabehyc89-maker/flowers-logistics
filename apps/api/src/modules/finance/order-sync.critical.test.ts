@@ -1171,7 +1171,11 @@ describe('выгрузка показывает корректировки, а �
 
     const built = await report(DAY, NEXT_DAY, delivery.courierId);
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(await buildSettlementWorkbook(built));
+    // ExcelJS объявляет собственный `Buffer extends ArrayBuffer`, несовместимый
+    // с Buffer из Node. Приведение стоит на границе чужой декларации.
+    await workbook.xlsx.load(
+      (await buildSettlementWorkbook(built)) as unknown as Parameters<typeof workbook.xlsx.load>[0],
+    );
 
     const summary = workbook.getWorksheet('Итоги');
     const named = new Map<string, unknown>();
@@ -1197,7 +1201,11 @@ describe('выгрузка показывает корректировки, а �
     // День корректировки: именно здесь снятие обязано читаться минусом.
     const built = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(await buildSettlementWorkbook(built));
+    // ExcelJS объявляет собственный `Buffer extends ArrayBuffer`, несовместимый
+    // с Buffer из Node. Приведение стоит на границе чужой декларации.
+    await workbook.xlsx.load(
+      (await buildSettlementWorkbook(built)) as unknown as Parameters<typeof workbook.xlsx.load>[0],
+    );
 
     const summary = workbook.getWorksheet('Итоги');
     const named = new Map<string, unknown>();

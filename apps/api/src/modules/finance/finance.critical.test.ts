@@ -67,19 +67,29 @@ async function seedTariff(input: {
   from: string;
   to?: string | null;
   /** Единая ставка «За заказ»: если не заданы раздельные, обе равны ей. */
-  perOrder: bigint;
+  perOrder?: bigint;
   perOrderWalk?: bigint;
   perOrderCar?: bigint;
   perKm: bigint;
 }): Promise<string> {
   const admin = await actorFor(['ADMIN']);
+  /*
+   * Ставка обязана быть задана явно — единой или раздельными.
+   * Молчаливый ноль означал бы «работа курьера не оплачивается», и тест
+   * доказывал бы не выбор ставки, а отсутствие начисления.
+   */
+  const walk = input.perOrderWalk ?? input.perOrder;
+  const car = input.perOrderCar ?? input.perOrder;
+  if (walk === undefined || car === undefined) {
+    throw new Error('seedTariff: нужна единая ставка perOrder либо обе раздельные');
+  }
   const row = await ctx.db.courierTariffVersion.create({
     data: {
       kind: input.kind ?? 'REGULAR',
       effectiveFrom: toDateColumn(input.from),
       effectiveTo: input.to === undefined || input.to === null ? null : toDateColumn(input.to),
-      perOrderWalkMinor: input.perOrderWalk ?? input.perOrder,
-      perOrderCarMinor: input.perOrderCar ?? input.perOrder,
+      perOrderWalkMinor: walk,
+      perOrderCarMinor: car,
       perKmMinor: input.perKm,
       createdById: admin.userId,
     },
@@ -810,6 +820,7 @@ describe('группировка отчёта', () => {
         bonusesMinor: '0',
         totalMinor: '600',
         settlementMissing: false,
+        financeCancelled: false,
       },
       {
         attemptId: 'a2',
@@ -836,6 +847,7 @@ describe('группировка отчёта', () => {
         bonusesMinor: '0',
         totalMinor: '-2600',
         settlementMissing: false,
+        financeCancelled: false,
       },
     ];
 
@@ -848,6 +860,7 @@ describe('группировка отчёта', () => {
         operationDate: '2028-04-10',
         occurredAt: '2028-04-10T10:00:00.000Z',
         actorUserId: 'l1',
+        actorName: 'Логист',
         reason: null,
         comment: null,
         routeId: null,
@@ -855,6 +868,8 @@ describe('группировка отчёта', () => {
         attemptId: null,
         reversesEntryId: null,
         reversed: false,
+        reversesKind: null,
+        transferId: null,
       },
     ];
 
@@ -905,6 +920,7 @@ describe('группировка отчёта', () => {
       bonusesMinor: '0',
       totalMinor: '0',
       settlementMissing: true,
+      financeCancelled: false,
     };
 
     const days = groupSettlement([base], [], new Map());

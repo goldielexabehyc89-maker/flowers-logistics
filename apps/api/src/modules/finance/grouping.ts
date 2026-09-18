@@ -70,7 +70,13 @@ export function rawOf(entries: readonly LedgerEntryView[], kinds: readonly strin
 /** Наличные строки и дня: приход минус корректировки после оплаты в источнике. */
 export const CASH_KINDS: readonly string[] = ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'];
 
-/** Виды, попадающие в столбец «Доп.». */
+/**
+ * Виды, попадающие в столбец «Доп.».
+ *
+ * Оплачиваемой попытки здесь НЕТ: у неё собственный столбец, и подсчёт в обоих
+ * сразу удваивал её в «Начислено» — одна попытка на 200 ₽ давала 400 ₽.
+ * Каждый вид принадлежит ровно одной категории заработка.
+ */
 export const EXTRA_KINDS: readonly string[] = [
   'EXPENSE_PARKING',
   'EXPENSE_TOLL',
@@ -79,7 +85,6 @@ export const EXTRA_KINDS: readonly string[] = [
   'EXPENSE_LOADING',
   'EXPENSE_OTHER',
   'BONUS',
-  'ATTEMPT_FEE',
 ];
 
 /** Расходные и прочие операции, не привязанные к конкретной доставке. */
@@ -239,7 +244,18 @@ export function groupSettlement(
        */
       const journal = group.operations.entries;
 
-      group.extraExpensesMinor = changeOf(journal, EXTRA_KINDS).toString();
+      /*
+       * «Доп.» собирается и со строк доставок, и из журнала.
+       *
+       * Расход или доплату можно привязать к попытке — тогда они попадают
+       * в строку. Без слагаемого по строкам такие суммы исчезали бы из
+       * «Начислено», хотя баланс их учитывает.
+       */
+      group.extraExpensesMinor = (
+        sum(group.rows.map((row) => row.expensesMinor)) +
+        sum(group.rows.map((row) => row.bonusesMinor)) +
+        changeOf(journal, EXTRA_KINDS)
+      ).toString();
       group.handedMinor = changeOf(journal, ['CASH_HANDED_TO_LOGIST']).toString();
       group.issuedMinor = changeOf(journal, ['CASH_ISSUED_TO_COURIER']).toString();
 

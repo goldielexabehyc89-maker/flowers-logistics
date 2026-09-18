@@ -192,6 +192,7 @@ describe('день учёта решает, где долг виден', () => {
       from: BEFORE,
       to: BEFORE,
       courierUserId: courier,
+      ledgerActiveFrom: null,
       limit: 50,
       offset: 0,
     });
@@ -204,6 +205,7 @@ describe('день учёта решает, где долг виден', () => {
       from: DAY,
       to: DAY,
       courierUserId: courier,
+      ledgerActiveFrom: null,
       limit: 50,
       offset: 0,
     });
@@ -217,6 +219,7 @@ describe('день учёта решает, где долг виден', () => {
       from: AFTER,
       to: AFTER,
       courierUserId: courier,
+      ledgerActiveFrom: null,
       limit: 50,
       offset: 0,
     });
@@ -258,6 +261,7 @@ describe('начальный долг не смешивается с деньг�
       from: DAY,
       to: DAY,
       courierUserId: courier,
+      ledgerActiveFrom: null,
       limit: 50,
       offset: 0,
     });
@@ -306,6 +310,7 @@ describe('начальный долг не смешивается с деньг�
       from: DAY,
       to: DAY,
       courierUserId: courier,
+      ledgerActiveFrom: null,
       limit: 50,
       offset: 0,
     });
@@ -718,6 +723,111 @@ describe('права и идемпотентность на уровне API', (
         where: { action: 'FINANCE_OPERATION_REVERSED', entityId: a.json().entry?.id ?? '' },
       }),
     ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
+  });
+
+  it('управляемая гонка «внесение и отмена»: повтор внесения не воскрешает долг', async () => {
+    /*
+     * Два разных действия над одним долгом одновременно.
+     *
+     * Внесение и отмена сериализуются по РАЗНЫМ ключам, поэтому блокировка
+     * ключа их друг от друга не защищает — защищать обязан сам контракт.
+     * Барьер держит ключ ОТМЕНЫ: отмена уже в работе и ещё не зафиксирована,
+     * а повторное внесение с тем же ключом приходит именно в это окно. Долг
+     * не должен ожить, а второго аудита и второго события у повтора быть не
+     * должно.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('barrier-create-reverse');
+
+    const created = await postDebt(token, {
+      courierUserId: courier,
+      amountMinor: '500000',
+      operationDate: DAY,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: key,
+    });
+    expect(created.statusCode).toBe(201);
+    const entryId = created.json().entry?.id ?? '';
+    const cursor = await lastEventId();
+
+    let release!: () => void;
+    let locked!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
+
+    // Барьер держит ключ ОТМЕНЫ: она встанет на него, внесение пройдёт мимо.
+    const holder = ctx.db.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${entryId}`})::bigint)`;
+        locked();
+        await released;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+    await lockedSignal;
+
+    let reversalSettled = 0;
+    const reverse = (
+      ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/ledger/opening-debt/${entryId}/reverse`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { reason: 'внесено по ошибке' },
+      }) as unknown as Promise<{ statusCode: number; json: () => { entry?: { id: string } } }>
+    ).then((response) => {
+      reversalSettled += 1;
+      return response;
+    });
+
+    expect(await waitForBlocked(1)).toBeGreaterThanOrEqual(1);
+    expect(reversalSettled).toBe(0);
+
+    /*
+     * Повторное внесение приходит, пока отмена ещё не зафиксирована.
+     * Оно обязано ответить той же записью и ничего не создать.
+     */
+    const repeated = await postDebt(token, {
+      courierUserId: courier,
+      amountMinor: '500000',
+      operationDate: DAY,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: key,
+    });
+    expect(repeated.statusCode).toBe(201);
+    expect(repeated.json().entry?.id).toBe(entryId);
+
+    release();
+    await holder;
+
+    const reversal = await reverse;
+    expect(reversal.statusCode).toBe(200);
+
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { kind: 'OPENING_DEBT', courierUserId: courier },
+      }),
+    ).toBe(1);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
+    // Долг не ожил: повтор внесения баланс не вернул.
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+
+    // Аудит: одно внесение и одна отмена, без вторых записей от повтора.
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_OPERATION_RECORDED', entityId: entryId },
+      }),
+    ).toBe(1);
+    expect(
+      await ctx.db.auditLog.count({
+        where: {
+          action: 'FINANCE_OPERATION_REVERSED',
+          entityId: reversal.json().entry?.id ?? '',
+        },
+      }),
+    ).toBe(1);
+    // Событие ровно одно — от отмены. Повтор журнал не менял.
     expect(await ledgerEventsAfter(cursor)).toBe(1);
   });
 
