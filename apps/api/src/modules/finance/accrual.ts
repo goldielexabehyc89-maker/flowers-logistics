@@ -364,7 +364,7 @@ export async function restateDistanceFee(
 
   const distance = await tx.routeOrderDistance.findFirst({
     where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
-    select: { roundedKmTenths: true },
+    select: { id: true, roundedKmTenths: true },
   });
   const target =
     distance === null || distance.roundedKmTenths <= 0
@@ -403,11 +403,16 @@ export async function restateDistanceFee(
       orderId: routeOrder.order.id,
       attemptId: attempt.id,
       /*
-       * Ключ включает сами километры: прежний `attempt:<id>:DISTANCE_FEE`
-       * занят исходным начислением, а повтор той же правки обязан остаться
-       * одной записью.
+       * Ключ — по СНИМКУ расстояния, а не по величине километров.
+       *
+       * Прежний `attempt:<id>:DISTANCE_FEE` занят исходным начислением, а
+       * ключ из самих километров повторялся бы при возврате к прежнему
+       * значению: правка 12,5 → 20,0 → 12,5 → 20,0 на четвёртом шаге попала бы
+       * в УЖЕ ОТМЕНЁННУЮ запись, вернула бы её и оставила курьера без денег.
+       * Каждая правка создаёт новый снимок, поэтому его идентификатор
+       * различает правки и оставляет повтор одной записью.
        */
-      idempotencyKey: `${accrualKey(attempt.id, 'DISTANCE_FEE')}:km:${distance?.roundedKmTenths ?? 0}`,
+      idempotencyKey: `${accrualKey(attempt.id, 'DISTANCE_FEE')}:snapshot:${distance?.id ?? 'none'}`,
     });
   }
 

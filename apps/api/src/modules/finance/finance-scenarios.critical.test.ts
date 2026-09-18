@@ -1447,6 +1447,53 @@ describe('исправленные километры и деньги за ни�
     );
   });
 
+  it('возврат к прежним километрам начисляет заново, а не оживляет снятую запись', async () => {
+    /*
+     * Ключ идемпотентности брался из самих километров, и правка
+     * 12,5 → 20,0 → 12,5 → 20,0 на четвёртом шаге попадала в УЖЕ ОТМЕНЁННУЮ
+     * запись: вместо нового начисления возвращалась снятая, и курьер оставался
+     * без денег при исправленных километрах на экране.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+    const admin = await actorFor(['ADMIN']);
+
+    const restate = (): Promise<boolean> =>
+      ctx.db.$transaction((tx) =>
+        restateDistanceFee(tx, {
+          routeOrderId: scenario.routeOrderId,
+          actorUserId: admin.userId,
+          reason: 'Правка километров: уточнение маршрута',
+        }),
+      );
+
+    for (const km of [200, 125, 200]) {
+      await seedDistance(scenario, km);
+      expect(await restate()).toBe(true);
+    }
+
+    const built = await report(DAY, DAY, scenario.courierId);
+    // 20,0 км × 40 ₽ = 800 ₽ — и в деньгах, и в километрах строки.
+    expect(built.rows[0]?.beyondMkadKmTenths).toBe(200);
+    expect(BigInt(built.totals.distanceFeesMinor)).toBe(80_000n);
+    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(
+      BigInt(built.totals.closingBalanceMinor),
+    );
+
+    // Непогашенной осталась ровно одна запись километров.
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: {
+          courierUserId: scenario.courierId,
+          kind: 'DISTANCE_FEE',
+          reversedBy: { is: null },
+        },
+      }),
+    ).toBe(1);
+  });
+
   it('повторная правка тем же значением денег не трогает', async () => {
     const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
     await seedGeo(scenario);
