@@ -546,9 +546,22 @@ async function updateOrder(
   const previousPayedMinor = BigInt(previous?.payedSumMinor ?? snapshot.payedSumMinor);
   const nextPayedMinor = BigInt(snapshot.payedSumMinor);
   if (changedFields.includes('payedSumMinor') && nextPayedMinor > previousPayedMinor) {
+    /*
+     * Номер события, а не величина оплаты.
+     *
+     * Ключ задания из величины занимался навсегда: та же сумма после отмены
+     * результата и новой доставки второго задания не ставила. Счётчик растёт
+     * ровно здесь — на РОСТЕ оплаты, — поэтому повторный импорт одного снимка
+     * его не двигает и новых денег не создаёт.
+     */
+    const counted = await tx.deliveryOrder.update({
+      where: { id: existing.id },
+      data: { paymentSyncCount: { increment: 1 } },
+      select: { paymentSyncCount: true },
+    });
     await enqueueCashPaymentCorrection(tx, {
       orderId: existing.id,
-      payedSumMinor: nextPayedMinor,
+      generation: counted.paymentSyncCount,
     });
   }
 

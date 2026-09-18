@@ -38,7 +38,11 @@ import { MOYSKLAD_IDS } from '../integrations/moysklad/config.js';
 import { mapOrder } from '../integrations/moysklad/mapper.js';
 import type { MoyskladOrderDto } from '../integrations/moysklad/dto.js';
 import { applyOrderSnapshot } from '../integrations/moysklad/import-service.js';
-import { recordDeliveryResult, type DeliveryDeps } from '../delivery/service.js';
+import {
+  cancelDeliveryResult,
+  recordDeliveryResult,
+  type DeliveryDeps,
+} from '../delivery/service.js';
 import { processOutboxOnce, type OutboxHandlers } from '../outbox/worker.js';
 import { createOrderFinanceHandler, ORDER_FINANCE_TOPIC } from './order-sync.js';
 import {
@@ -46,6 +50,7 @@ import {
   enqueueMkadDistanceForRouteOrder,
   MKAD_DISTANCE_TOPIC,
 } from './mkad-auto.js';
+import { ensureBundledRing } from './mkad-bundle.js';
 import { LEDGER_SETTING_KEY } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
 import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
@@ -73,6 +78,11 @@ let tariffVersionId = '';
 
 beforeAll(async () => {
   ctx = await createTestContext();
+  /*
+   * Настоящее кольцо МКАД из поставки: обработчик расстояния ищет версию по
+   * контрольной сумме файла, и выдуманное кольцо ему не подходит.
+   */
+  await ensureBundledRing(ctx.db);
   deliveryDeps = { db: ctx.db };
   await activateLedger(LEDGER_FROM);
 
@@ -341,7 +351,12 @@ const PARKED_UNTIL = new Date('2099-01-01T00:00:00.000Z');
  * только задания ЭТОГО сценария, а всё прочее откладывается и возвращается
  * ровно как было.
  */
-async function runQueue(now: Date, scenario: Scenario): Promise<number> {
+async function runQueue(
+  now: Date,
+  scenario: Scenario,
+  /** Ответ маршрутизатора, когда обработчик обязан посчитать заново. */
+  routed?: { meters: number },
+): Promise<number> {
   const mine = await ctx.db.outboxMessage.findMany({
     where: {
       status: { in: ['PENDING', 'ERROR'] },
@@ -377,10 +392,16 @@ async function runQueue(now: Date, scenario: Scenario): Promise<number> {
       valhallaUrl: null,
       // Маршрутизатор не вызывается: действующий снимок расстояния уже есть,
       // и обработчик переходит сразу к догоняющему начислению.
-      router: {
-        configured: false,
-        route: async () => ({ distanceMeters: null }),
-      },
+      router:
+        routed === undefined
+          ? {
+              configured: false,
+              route: async () => ({ distanceMeters: null }),
+            }
+          : {
+              configured: true,
+              route: async () => ({ distanceMeters: routed.meters }),
+            },
     }),
   };
 
@@ -421,6 +442,24 @@ async function sumKind(orderId: string, kind: string): Promise<bigint> {
 async function contribution(orderId: string): Promise<bigint> {
   const result = await ctx.db.courierLedgerEntry.aggregate({
     where: { orderId },
+    _sum: { amountMinor: true },
+  });
+  return result._sum.amountMinor ?? 0n;
+}
+
+/**
+ * Наличные, числящиеся за курьером по заказу СЕЙЧАС.
+ *
+ * Начисление плюс корректировки после оплаты, без отменённых записей: именно
+ * эту цифру человек видит в строке отчёта.
+ */
+async function cashOf(orderId: string): Promise<bigint> {
+  const result = await ctx.db.courierLedgerEntry.aggregate({
+    where: {
+      orderId,
+      kind: { in: ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'] },
+      reversedBy: { is: null },
+    },
     _sum: { amountMinor: true },
   });
   return result._sum.amountMinor ?? 0n;
@@ -523,7 +562,16 @@ async function seedGeo(scenario: Scenario): Promise<void> {
 }
 
 /** Действующий ненулевой снимок расстояния за МКАД. */
-async function seedDistance(scenario: Scenario, kmTenths: number): Promise<void> {
+async function seedDistance(
+  scenario: Scenario,
+  kmTenths: number,
+  /*
+   * Автоматический снимок отличается от ручного: у него есть координаты, по
+   * которым он посчитан, и нет причины. Обработчик смены координат ручную
+   * правку не перетирает, поэтому проверять его можно только на COMPUTED.
+   */
+  computed?: { lat: number; lon: number },
+): Promise<void> {
   const admin = await actorFor(['ADMIN']);
   const ring =
     (await ctx.db.mkadRingVersion.findFirst({ select: { id: true } })) ??
@@ -553,9 +601,17 @@ async function seedDistance(scenario: Scenario, kmTenths: number): Promise<void>
     graphSha256: null,
     meters: kmTenths * 100,
     insideMkad: false,
-    source: 'MANUAL',
-    actorUserId: admin.userId,
-    reason: 'проверка позднего начисления',
+    ...(computed === undefined
+      ? {
+          source: 'MANUAL' as const,
+          actorUserId: admin.userId,
+          reason: 'проверка позднего начисления',
+        }
+      : {
+          source: 'COMPUTED' as const,
+          targetLatMicro: computed.lat,
+          targetLonMicro: computed.lon,
+        }),
   });
 }
 
@@ -1399,13 +1455,14 @@ describe('один набор данных: журнал → API → дни → 
 // --- Сценарий: правка километров после доставки --------------------------------
 
 describe('исправленные километры и деньги за них', () => {
-  it('правка километров после доставки пересчитывает оплату, а не только подпись', async () => {
+  it('правка километров отражается ДНЁМ ИСПРАВЛЕНИЯ и не переписывает день доставки', async () => {
     /*
-     * Строка отчёта берёт километры ЖИВЬЁМ из действующего снимка, а деньги —
-     * из замороженной записи `DISTANCE_FEE`. После ручной правки строка
-     * показывала «20,0 км · 500,00 ₽» при ставке 40 ₽/км: арифметика строки
-     * не сходилась сама с собой, пометки об этом не было ни на экране, ни в
-     * файле, а начислить заново было нечем — ключ уже занят.
+     * Правка, сделанная сегодня, не меняет итоги закрытого дня — по тому же
+     * правилу, по которому живут все остальные отмены в модуле. Связь с
+     * доставкой держат маршрут, заказ и попытка, а строка доставки показывает
+     * километры, ПО КОТОРЫМ начислены деньги, и называет текущий расчёт
+     * отдельно. Иначе строка показывала «20,0 км · 500,00 ₽» при ставке
+     * 40 ₽/км — арифметику, не сходящуюся ни с чем.
      */
     const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
     await seedGeo(scenario);
@@ -1413,29 +1470,46 @@ describe('исправленные километры и деньги за ни�
     await deliver(scenario);
 
     const before = await report(DAY, DAY, scenario.courierId);
-    const beforeRow = before.rows[0];
-    expect(beforeRow?.beyondMkadKmTenths).toBe(125);
+    expect(before.rows[0]?.beyondMkadKmTenths).toBe(125);
+    expect(before.rows[0]?.currentKmTenths).toBeNull();
     // 12,5 км × 40 ₽ = 500 ₽.
     expect(BigInt(before.totals.distanceFeesMinor)).toBe(50_000n);
 
-    // Логист исправляет километры: было 12,5, стало 20,0.
+    /*
+     * Автоматический пересчёт уточнил расстояние — деньги он не трогает.
+     * Строка по-прежнему сходится сама с собой, а новый расчёт назван рядом.
+     */
     await seedDistance(scenario, 200);
+    const stale = await report(DAY, DAY, scenario.courierId);
+    expect(stale.rows[0]?.beyondMkadKmTenths).toBe(125);
+    expect(stale.rows[0]?.currentKmTenths).toBe(200);
+    expect(BigInt(stale.totals.distanceFeesMinor)).toBe(50_000n);
+
+    // Решение человека: пересчитать деньги, датой исправления.
     const admin = await actorFor(['ADMIN']);
     const changed = await ctx.db.$transaction((tx) =>
       restateDistanceFee(tx, {
         routeOrderId: scenario.routeOrderId,
         actorUserId: admin.userId,
         reason: 'Правка километров: маршрут построен по неверной точке',
+        operationDate: NEXT_DAY,
       }),
     );
     expect(changed).toBe(true);
 
-    const after = await report(DAY, DAY, scenario.courierId);
-    const afterRow = after.rows[0];
-    // Строка сходится сама с собой: 20,0 км × 40 ₽ = 800 ₽.
-    expect(afterRow?.beyondMkadKmTenths).toBe(200);
-    expect(BigInt(after.totals.distanceFeesMinor)).toBe(80_000n);
-    expect(BigInt(afterRow!.distanceFeeMinor)).toBe(80_000n);
+    // День доставки не изменился ни в одном показателе.
+    const afterDelivery = await report(DAY, DAY, scenario.courierId);
+    expect(afterDelivery.totals).toEqual(stale.totals);
+
+    // Разница живёт в дне исправления: −500 ₽ снято, +800 ₽ начислено.
+    const correction = await report(NEXT_DAY, NEXT_DAY, scenario.courierId);
+    expect(BigInt(correction.totals.distanceFeesMinor)).toBe(30_000n);
+
+    // А строка доставки теперь сходится с оплаченным: 20,0 км × 40 ₽ = 800 ₽.
+    const both = await report(DAY, NEXT_DAY, scenario.courierId);
+    const row = both.rows.find((item) => item.attemptId !== undefined);
+    expect(row?.beyondMkadKmTenths).toBe(200);
+    expect(row?.currentKmTenths).toBeNull();
 
     // История цела: прежнее начисление снято обратной записью, а не стёрто.
     const entries = await ctx.db.courierLedgerEntry.findMany({
@@ -1445,10 +1519,103 @@ describe('исправленные километры и деньги за ни�
     expect(entries).toHaveLength(2);
     expect(entries.filter((entry) => entry.reversedBy !== null)).toHaveLength(1);
 
-    // И баланс курьера равен показанному итогу: деньги и подпись — одни.
-    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(
-      BigInt(after.totals.closingBalanceMinor),
+    expect(await balanceOf(ctx.db, scenario.courierId, NEXT_DAY)).toBe(
+      BigInt(both.totals.closingBalanceMinor),
     );
+  });
+
+  it('автоматический пересчёт уточняет километры, но денег не трогает', async () => {
+    /*
+     * Ручной путь — не единственный: снимок обновляют и обработчик смены
+     * координат, и пересчёт маршрута. Деньги меняет ТОЛЬКО решение человека,
+     * поэтому автоматический пересчёт оставляет оплаченное как есть, а
+     * расхождение строка называет прямо. Проверяется настоящий обработчик
+     * очереди, а не прямой вызов пересчёта.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    // Снимок автоматический и посчитан по нынешней точке заказа.
+    await seedDistance(scenario, 125, { lat: 55_200_000, lon: 37_200_000 });
+    await deliver(scenario);
+    expect(BigInt((await report(DAY, DAY, scenario.courierId)).totals.distanceFeesMinor)).toBe(
+      50_000n,
+    );
+
+    /*
+     * Точку заказа уточнили — координаты другие, значит прежний снимок
+     * обработчику не подходит и он считает заново.
+     */
+    await ctx.db.deliveryOrder.update({
+      where: { id: scenario.orderId },
+      data: { geoLatMicro: 55_400_000, geoLonMicro: 37_400_000 },
+    });
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+    // Заданий может быть и больше одного: важен их итог, а не число.
+    expect(
+      await runQueue(new Date(`${DAY}T19:00:00.000Z`), scenario, { meters: 20_000 }),
+    ).toBeGreaterThan(0);
+
+    const active = await ctx.db.routeOrderDistance.findFirstOrThrow({
+      where: { routeOrderId: scenario.routeOrderId, activeKey: { not: null } },
+      select: { roundedKmTenths: true, source: true },
+    });
+    expect(active.source).toBe('COMPUTED');
+    expect(active.roundedKmTenths).toBe(200);
+
+    const built = await report(DAY, DAY, scenario.courierId);
+    // Деньги прежние, строка сходится с ними, а новый расчёт назван отдельно.
+    expect(BigInt(built.totals.distanceFeesMinor)).toBe(50_000n);
+    expect(built.rows[0]?.beyondMkadKmTenths).toBe(125);
+    expect(built.rows[0]?.currentKmTenths).toBe(200);
+  });
+
+  it('обнуление километров не мешает начислить их заново', async () => {
+    /*
+     * Признаком «финансовый результат снят» служило то, что все системные
+     * начисления отменены. У полностью оплаченного заказа с нулевой ставкой за
+     * заказ единственное начисление — километры, и правка их в ноль делала это
+     * условие истинным. Дальше правка в 20 км уже не начисляла ничего: в
+     * отчёте стояли 20 км и 0 ₽ вместо 800 ₽.
+     */
+    const scenario = await seedScenario({
+      sum: 100_000,
+      payedSum: 100_000,
+      perOrderMinor: 0n,
+      perKmMinor: 4_000n,
+    });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+    const admin = await actorFor(['ADMIN']);
+
+    const restate = (operationDate: string): Promise<boolean> =>
+      ctx.db.$transaction((tx) =>
+        restateDistanceFee(tx, {
+          routeOrderId: scenario.routeOrderId,
+          actorUserId: admin.userId,
+          reason: 'Правка километров: уточнение маршрута',
+          operationDate,
+        }),
+      );
+
+    // Единственным начислением заказа остаются километры.
+    expect(BigInt((await report(DAY, DAY, scenario.courierId)).totals.distanceFeesMinor)).toBe(
+      50_000n,
+    );
+
+    await seedDistance(scenario, 0);
+    expect(await restate(NEXT_DAY)).toBe(true);
+    expect(await balanceOf(ctx.db, scenario.courierId, NEXT_DAY)).toBe(0n);
+
+    // И заново: обычное обнуление снятым результатом не является.
+    await seedDistance(scenario, 200);
+    expect(await restate(NEXT_DAY)).toBe(true);
+
+    const built = await report(DAY, NEXT_DAY, scenario.courierId);
+    // 20,0 км × 40 ₽ = 800 ₽, и строка сходится с оплаченным.
+    expect(BigInt(built.totals.distanceFeesMinor)).toBe(80_000n);
+    expect(built.rows[0]?.beyondMkadKmTenths).toBe(200);
+    expect(built.rows[0]?.currentKmTenths).toBeNull();
   });
 
   it('возврат к прежним километрам начисляет заново, а не оживляет снятую запись', async () => {
@@ -1470,6 +1637,7 @@ describe('исправленные километры и деньги за ни�
           routeOrderId: scenario.routeOrderId,
           actorUserId: admin.userId,
           reason: 'Правка километров: уточнение маршрута',
+          operationDate: NEXT_DAY,
         }),
       );
 
@@ -1478,11 +1646,13 @@ describe('исправленные километры и деньги за ни�
       expect(await restate()).toBe(true);
     }
 
-    const built = await report(DAY, DAY, scenario.courierId);
+    // Правки живут в дне исправления, поэтому период берётся целиком.
+    const built = await report(DAY, NEXT_DAY, scenario.courierId);
     // 20,0 км × 40 ₽ = 800 ₽ — и в деньгах, и в километрах строки.
     expect(built.rows[0]?.beyondMkadKmTenths).toBe(200);
+    expect(built.rows[0]?.currentKmTenths).toBeNull();
     expect(BigInt(built.totals.distanceFeesMinor)).toBe(80_000n);
-    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(
+    expect(await balanceOf(ctx.db, scenario.courierId, NEXT_DAY)).toBe(
       BigInt(built.totals.closingBalanceMinor),
     );
 
@@ -1529,6 +1699,8 @@ describe('исправленные километры и деньги за ни�
           routeOrderId: scenario.routeOrderId,
           actorUserId: admin.userId,
           reason: 'Правка километров: маршрутизатор не ответил',
+          // Правка в день доставки: расхождения между днями здесь не проверяем.
+          operationDate: DAY,
         }),
       ),
     ).toBe(true);
@@ -1583,6 +1755,7 @@ describe('исправленные километры и деньги за ни�
         routeOrderId: scenario.routeOrderId,
         actorUserId: admin.userId,
         reason: 'Правка километров после снятой отмены',
+        operationDate: NEXT_DAY,
       }),
     );
 
@@ -1603,6 +1776,7 @@ describe('исправленные километры и деньги за ни�
         routeOrderId: scenario.routeOrderId,
         actorUserId: admin.userId,
         reason: 'Правка километров: без изменений',
+        operationDate: NEXT_DAY,
       }),
     );
     // Километры те же — пересчитывать нечего, и обратной записи не появляется.
@@ -1637,6 +1811,7 @@ describe('исправленные километры и деньги за ни�
         routeOrderId: scenario.routeOrderId,
         actorUserId: admin.userId,
         reason: 'Правка километров после отмены',
+        operationDate: NEXT_DAY,
       }),
     );
 
@@ -1646,5 +1821,77 @@ describe('исправленные километры и деньги за ни�
         where: { courierUserId: scenario.courierId, kind: 'DISTANCE_FEE' },
       }),
     ).toBe(1);
+  });
+});
+
+// --- Сценарий: повторная оплата после новой доставки --------------------------
+
+describe('та же сумма оплаты после новой доставки', () => {
+  it('ставит НОВОЕ задание и снижает наличные новой попытки', async () => {
+    /*
+     * Ключ задания состоял из заказа и величины оплаты, а выполненные
+     * сообщения очереди не удаляются — значит ключ занимался навсегда.
+     * Последовательность «оплата 2000 → отмена результата → новая доставка →
+     * снова оплата 2000» второго задания не ставила: за новой доставкой
+     * оставались все 5000 наличных вместо 3000.
+     */
+    const scenario = await seedScenario({ sum: 500_000, payedSum: 0, perOrderMinor: 20_000n });
+    await deliver(scenario);
+    expect(await contribution(scenario.orderId)).toBe(500_000n - 20_000n);
+
+    // 1. Источник сообщает оплату 2000 ₽ — наличных остаётся 3000 ₽.
+    await syncSource(scenario, { sum: 500_000, payedSum: 200_000 });
+    expect(await runQueue(new Date(`${DAY}T12:00:00.000Z`), scenario)).toBe(1);
+    expect(await cashOf(scenario.orderId)).toBe(300_000n);
+
+    // 2. Результат доставки отменяют: системные проводки снимаются.
+    const attempt = await ctx.db.deliveryAttempt.findFirstOrThrow({
+      where: { routeOrderId: scenario.routeOrderId, activeKey: { not: null } },
+      select: { id: true },
+    });
+    const logist = await actorFor(['LOGISTICIAN']);
+    await cancelDeliveryResult(
+      deliveryDeps,
+      logist,
+      attempt.id,
+      { reason: 'ошибочная отметка' },
+      CONTEXT,
+    );
+    expect(await contribution(scenario.orderId)).toBe(0n);
+
+    // 3. Оплату в источнике убирают: само по себе это ничего не возвращает.
+    await syncSource(scenario, { sum: 500_000, payedSum: 0 });
+    await runQueue(new Date(`${DAY}T13:00:00.000Z`), scenario);
+
+    // 4. Заказ везут заново: новая попытка законно начисляет 5000 ₽ наличных.
+    await deliver(scenario);
+    expect(await cashOf(scenario.orderId)).toBe(500_000n);
+
+    // 5. Источник снова сообщает те же 2000 ₽.
+    await syncSource(scenario, { sum: 500_000, payedSum: 200_000 });
+    expect(await runQueue(new Date(`${DAY}T14:00:00.000Z`), scenario)).toBe(1);
+
+    // За новой доставкой остаётся 3000 ₽, а не 5000 ₽.
+    expect(await cashOf(scenario.orderId)).toBe(300_000n);
+  });
+
+  it('повторный импорт того же снимка задания не ставит и денег не создаёт', async () => {
+    /*
+     * Обратная сторона номера события: он растёт только на РОСТЕ оплаты.
+     * Иначе каждый проход импорта ставил бы новое задание, а чинили мы ровно
+     * противоположную ошибку.
+     */
+    const scenario = await seedScenario({ sum: 500_000, payedSum: 0, perOrderMinor: 20_000n });
+    await deliver(scenario);
+
+    await syncSource(scenario, { sum: 500_000, payedSum: 200_000 });
+    expect(await runQueue(new Date(`${DAY}T12:00:00.000Z`), scenario)).toBe(1);
+    const afterFirst = await cashOf(scenario.orderId);
+
+    // Тот же снимок ещё дважды: роста нет — заданий нет.
+    await syncSource(scenario, { sum: 500_000, payedSum: 200_000 });
+    await syncSource(scenario, { sum: 500_000, payedSum: 200_000 });
+    expect(await runQueue(new Date(`${DAY}T12:30:00.000Z`), scenario)).toBe(0);
+    expect(await cashOf(scenario.orderId)).toBe(afterFirst);
   });
 });

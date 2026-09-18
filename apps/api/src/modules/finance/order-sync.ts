@@ -38,11 +38,20 @@ export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
 /**
  * Ключ задания на корректировку наличных.
  *
- * В ключ входит оплаченная сумма: один и тот же приход из источника не
- * обрабатывается дважды, а новое изменение оплаты — это уже другое задание.
+ * В ключ входит НОМЕР события оплаты, а не её величина. Выполненные сообщения
+ * очереди не удаляются, поэтому ключ из величины занимался навсегда:
+ * «оплата 2000 → отмена результата → новая доставка → снова оплата 2000» не
+ * ставила второго задания, и за новой доставкой оставались все 5000 наличных
+ * вместо 3000.
+ *
+ * От двойного списания это не ослабляет защиту: её держат не ключ задания, а
+ * ключ самой записи (`cashCorrectionEntryKey`, «попытка + состояние оплаты») и
+ * формула, которая никогда не снимает больше начисленного. Номер же растёт
+ * только на РОСТЕ оплаты, поэтому повторный импорт одного снимка задания не
+ * ставит вовсе.
  */
-export function cashCorrectionJobKey(orderId: string, payedSumMinor: bigint): string {
-  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${payedSumMinor.toString()}`;
+export function cashCorrectionJobKey(orderId: string, generation: number): string {
+  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${generation}`;
 }
 
 /**
@@ -73,11 +82,11 @@ export function cashCorrectionEntryKey(attemptId: string, payedSumMinor: bigint)
 
 export async function enqueueCashPaymentCorrection(
   tx: TransactionClient,
-  input: { orderId: string; payedSumMinor: bigint },
+  input: { orderId: string; generation: number },
 ): Promise<void> {
   await enqueueOutbox(tx, {
     topic: ORDER_FINANCE_TOPIC,
-    idempotencyKey: cashCorrectionJobKey(input.orderId, input.payedSumMinor),
+    idempotencyKey: cashCorrectionJobKey(input.orderId, input.generation),
     payload: { reason: 'PAYMENT', orderId: input.orderId },
   });
 }

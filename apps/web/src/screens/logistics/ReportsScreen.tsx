@@ -70,6 +70,8 @@ interface SettlementRow {
   perOrderMinor: string | null;
   perKmMinor: string | null;
   beyondMkadKmTenths: number | null;
+  /** Текущий расчёт, если он расходится с оплаченным; иначе `null`. */
+  currentKmTenths: number | null;
   deliveryFeeMinor: string;
   distanceFeeMinor: string;
   attemptFeeMinor: string;
@@ -1127,6 +1129,18 @@ export function ReportsScreen(): React.JSX.Element {
                                   {row.beyondMkadKmTenths === null
                                     ? 'не рассчитано'
                                     : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
+                                  {/*
+                                    Текущий расчёт отличается от оплаченного.
+                                    Деньги меняет только решение человека,
+                                    поэтому расхождение не исправляется молча:
+                                    строка сходится сама с собой, а новый
+                                    расчёт назван рядом.
+                                  */}
+                                  {row.currentKmTenths !== null && (
+                                    <div className="muted text-sm" data-testid="reports-km-stale">
+                                      {`расчёт уточнён: ${(row.currentKmTenths / 10).toFixed(1)} км`}
+                                    </div>
+                                  )}
                                 </td>
                                 {/*
                                   «Доп.» строки: расход или доплату можно

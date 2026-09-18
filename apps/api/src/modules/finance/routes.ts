@@ -1781,6 +1781,8 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         routeOrderId: body.routeOrderId,
         actorUserId: actor.userId,
         reason: `Правка километров: ${body.reason}`,
+        // Днём исправления: закрытые дни задним числом не переписываются.
+        operationDate: moscowCalendarDate(new Date()),
       });
     });
 

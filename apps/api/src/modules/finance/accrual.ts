@@ -342,20 +342,21 @@ const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
  * записью, новое заводится по исправленным километрам. Исходная запись
  * остаётся — по ней видно, сколько было начислено и почему снято.
  *
- * День — ДЕНЬ ДОСТАВКИ, как и у самого начисления: догоняющее начисление
- * километров датируется им же (`mkad-auto`), и правка обязана попадать туда,
- * где лежит строка доставки. Иначе строка снова показывала бы километры без
- * своих денег.
+ * День — ДЕНЬ ИСПРАВЛЕНИЯ, а не день доставки. Правка, сделанная сегодня,
+ * не переписывает итоги закрытого (а то и прошлого месяца) дня: по этому же
+ * правилу живут все остальные отмены в модуле. Связь с доставкой сохраняется
+ * маршрутом, заказом и попыткой, а строка доставки показывает километры, по
+ * которым начислены деньги, — и называет расхождение с текущим расчётом.
  */
 export async function restateDistanceFee(
   tx: TransactionClient,
-  input: { routeOrderId: string; actorUserId: string; reason: string },
+  input: { routeOrderId: string; actorUserId: string; reason: string; operationDate: string },
 ): Promise<boolean> {
   const routeOrder = await tx.routeOrder.findUnique({
     where: { id: input.routeOrderId },
     select: {
       route: { select: { id: true, deliveryDate: true } },
-      order: { select: { id: true, cancelledInSource: true } },
+      order: { select: { id: true, cancelledInSource: true, cancellationCount: true } },
     },
   });
   if (routeOrder === null) {
@@ -408,14 +409,28 @@ export async function restateDistanceFee(
    * После отмены заказа в источнике все начисления сняты; снятие отмены денег
    * не возвращает. Правка километров в этом состоянии завела бы оплату одних
    * километров — заказ, за который заплачены только они, и ничего больше.
-   * Признак — отменённая оплата доставки при отсутствии действующей.
+   *
+   * Признак — ФАКТ СНЯТИЯ, а не «все начисления отменены». Второе бывает и
+   * при обычной работе: у полностью оплаченного заказа с нулевой ставкой за
+   * заказ единственным начислением остаются километры, и правка их в ноль
+   * делала «все отменены» истинным. Дальше правка в 20 км уже не начисляла
+   * ничего: в отчёте стояли 20 км и 0 ₽ вместо 800 ₽.
+   *
+   * Снятие выполняет только `stripCancelledOrderFinance`, и каждое такое
+   * событие отмечено номером отмены заказа. Без единой отмены снимать было
+   * нечему, что бы ни показывал журнал.
    */
-  const systemAccruals = await tx.courierLedgerEntry.findMany({
-    where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] } },
-    select: { id: true, reversedBy: { select: { id: true } } },
-  });
   const stripped =
-    systemAccruals.length > 0 && systemAccruals.every((entry) => entry.reversedBy !== null);
+    routeOrder.order.cancellationCount > 0 &&
+    (await (async () => {
+      const systemAccruals = await tx.courierLedgerEntry.findMany({
+        where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] } },
+        select: { id: true, reversedBy: { select: { id: true } } },
+      });
+      return (
+        systemAccruals.length > 0 && systemAccruals.every((entry) => entry.reversedBy !== null)
+      );
+    })());
   if (stripped) {
     return false;
   }
@@ -440,7 +455,7 @@ export async function restateDistanceFee(
     return false;
   }
 
-  const operationDate = fromDateColumn(routeOrder.route.deliveryDate);
+  const operationDate = input.operationDate;
   for (const entry of existing) {
     await reverseEntry(tx, {
       entryId: entry.id,

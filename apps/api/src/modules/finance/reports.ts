@@ -76,8 +76,22 @@ export interface SettlementRow {
   /** Ставки маршрута. `null` — маршрут подтверждён до включения учёта. */
   perOrderMinor: string | null;
   perKmMinor: string | null;
-  /** Расстояние за МКАД. `null` — не рассчитано. */
+  /**
+   * Расстояние за МКАД, ПО КОТОРОМУ начислены деньги. `null` — не рассчитано.
+   *
+   * Именно оплаченное, а не текущее: строка обязана сходиться сама с собой.
+   * Живой снимок меняется и после доставки — автоматическим пересчётом, сменой
+   * координат, правкой человека, — и строка показывала «20,0 км · 500,00 ₽»
+   * при ставке 40 ₽/км, то есть арифметику, которая не сходится ни с чем.
+   */
   beyondMkadKmTenths: number | null;
+  /**
+   * Текущий расчёт, если он РАСХОДИТСЯ с оплаченным. `null` — расхождения нет.
+   *
+   * Деньги меняет только решение человека, поэтому расхождение не исправляется
+   * молча: оно называется прямо, и по нему видно, что пересчитать.
+   */
+  currentKmTenths: number | null;
   distanceSource: 'COMPUTED' | 'MANUAL' | null;
   deliveryFeeMinor: string;
   distanceFeeMinor: string;
@@ -285,6 +299,52 @@ export async function buildSettlementReport(
   /** Всё, что не попало в строку доставки, показывается журналом своего дня. */
   const journalEntries = entries.filter((entry) => !takenByRows.has(entry.id));
 
+  /*
+   * Сколько километров ОПЛАЧЕНО этой попытке — по всем дням сразу.
+   *
+   * Деньги за километры живут в журнале и могут быть исправлены в другой день,
+   * чем день доставки: корректировка датируется днём исправления. Поэтому
+   * оплаченное считается по попытке целиком, а не по записям одного дня, —
+   * иначе строка снова разошлась бы со своими деньгами.
+   */
+  const paidDistance = await db.courierLedgerEntry.groupBy({
+    by: ['attemptId'],
+    where: {
+      attemptId: { in: facts.map((fact) => fact.attemptId) },
+      kind: 'DISTANCE_FEE',
+      reversedBy: { is: null },
+    },
+    _sum: { amountMinor: true },
+  });
+  const paidByAttempt = new Map(
+    paidDistance.map((row) => [row.attemptId as string, -(row._sum.amountMinor ?? 0n)]),
+  );
+
+  /**
+   * Километры строки: оплаченные и, если он другой, текущий расчёт.
+   *
+   * Оплаченные восстанавливаются из самих денег и ставки: сумма начислялась как
+   * `ставка × км / 10`, поэтому деление точно. Без ставки или без денег
+   * показывать нечего, кроме текущего снимка, — платить по нему ещё не за что.
+   */
+  const distanceOf = (
+    attemptId: string,
+    snapshot: { perKmMinor: bigint } | null,
+    current: { roundedKmTenths: number } | null,
+  ): { beyondMkadKmTenths: number | null; currentKmTenths: number | null } => {
+    const currentKm = current?.roundedKmTenths ?? null;
+    const paid = paidByAttempt.get(attemptId) ?? 0n;
+    const perKm = snapshot?.perKmMinor ?? 0n;
+    if (paid <= 0n || perKm <= 0n) {
+      return { beyondMkadKmTenths: currentKm, currentKmTenths: null };
+    }
+    const paidKm = Number((paid * 10n) / perKm);
+    return {
+      beyondMkadKmTenths: paidKm,
+      currentKmTenths: currentKm === paidKm ? null : currentKm,
+    };
+  };
+
   const rows: SettlementRow[] = facts.map((fact) => {
     const own = byAttempt.get(fact.attemptId) ?? [];
     /*
@@ -328,7 +388,7 @@ export async function buildSettlementReport(
       vehicleType: snapshot === null ? null : (snapshot.vehicleType as 'CAR' | 'FOOT'),
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),
-      beyondMkadKmTenths: distance?.roundedKmTenths ?? null,
+      ...distanceOf(fact.attemptId, snapshot, distance),
       distanceSource: (distance?.source ?? null) as 'COMPUTED' | 'MANUAL' | null,
       deliveryFeeMinor: changeOf(own, ['DELIVERY_FEE']).toString(),
       distanceFeeMinor: changeOf(own, ['DISTANCE_FEE']).toString(),

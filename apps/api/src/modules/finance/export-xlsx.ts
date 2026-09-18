@@ -101,7 +101,14 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Тип', key: 'vehicle', width: 12 },
     { header: 'Ставка/заказ, ₽', key: 'rate', width: 16, style: { numFmt: '#,##0.00' } },
     { header: 'За заказ, ₽', key: 'fee', width: 14, style: { numFmt: '#,##0.00' } },
+    /*
+     * Километры, ПО КОТОРЫМ начислены деньги, и рядом — текущий расчёт, если
+     * он другой. Одна колонка «километры» показывала бы живой снимок рядом с
+     * прежней суммой: арифметика строки не сходилась бы, и объяснить это в
+     * файле было бы нечем.
+     */
     { header: 'За МКАД, км', key: 'km', width: 12, style: { numFmt: '#,##0.0' } },
+    { header: 'Текущий расчёт, км', key: 'kmNow', width: 18, style: { numFmt: '#,##0.0' } },
     { header: 'За МКАД, ₽', key: 'distance', width: 14, style: { numFmt: '#,##0.00' } },
     /*
      * Оплачиваемая попытка своим столбцом.
@@ -141,6 +148,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
         cash: toRubles(group.cashMinor),
         fee: toRubles(group.deliveryFeesMinor),
         km: group.distanceKmTenths / 10,
+        kmNow: null,
         distance: toRubles(group.distanceFeesMinor),
         attempt: toRubles(group.attemptFeesMinor),
         extra: toRubles(group.extraExpensesMinor),
@@ -169,6 +177,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           cash: toRubles(row.cashMinor),
           fee: toRubles(row.deliveryFeeMinor),
           km: row.beyondMkadKmTenths === null ? null : row.beyondMkadKmTenths / 10,
+          kmNow: row.currentKmTenths === null ? null : row.currentKmTenths / 10,
           distance: toRubles(row.distanceFeeMinor),
           /*
            * «Доп.» строки: расход или доплата, привязанные к попытке.
@@ -205,6 +214,11 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
             // в день доставки первый истинен, а второй нет.
             row.sourceCancelled ? 'Отменён в МоемСкладе' : '',
             row.financeCancelled ? 'Начисления дня сняты' : '',
+            // Деньги меняет только решение человека, поэтому расхождение
+            // текущего расчёта с оплаченным называется прямо.
+            row.currentKmTenths === null
+              ? ''
+              : `Расчёт уточнён: ${(row.currentKmTenths / 10).toFixed(1).replace('.', ',')} км`,
           ]
             .filter((note) => note !== '')
             .join('; '),
