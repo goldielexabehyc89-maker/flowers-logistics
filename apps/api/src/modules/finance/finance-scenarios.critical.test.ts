@@ -44,7 +44,9 @@ import { createOrderFinanceHandler, ORDER_FINANCE_TOPIC } from './order-sync.js'
 import { createMkadDistanceHandler, MKAD_DISTANCE_TOPIC } from './mkad-auto.js';
 import { LEDGER_SETTING_KEY } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
-import { appendEntry, reverseEntry } from './ledger.js';
+import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
+import { restateDistanceFee } from './accrual.js';
+import { saveDistanceSnapshot } from './mkad.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf, settlementPdfTitle, settlementSummaryLines } from './export-pdf.js';
 import ExcelJS from 'exceljs';
@@ -536,18 +538,20 @@ async function seedDistance(scenario: Scenario, kmTenths: number): Promise<void>
       select: { id: true },
     }));
 
-  await ctx.db.routeOrderDistance.create({
-    data: {
-      routeOrderId: scenario.routeOrderId,
-      ringVersionId: ring.id,
-      meters: kmTenths * 100,
-      roundedKmTenths: kmTenths,
-      insideMkad: false,
-      source: 'MANUAL',
-      actorUserId: admin.userId,
-      reason: 'проверка позднего начисления',
-      activeKey: scenario.routeOrderId,
-    },
+  /*
+   * Снимок ставится ТОЙ ЖЕ функцией, что и боевой путь: она гасит прежний
+   * действующий снимок. Прямая вставка второй раз упиралась бы в уникальность
+   * `activeKey` — то есть проверка правки километров была бы невозможна.
+   */
+  await saveDistanceSnapshot(ctx.db, {
+    routeOrderId: scenario.routeOrderId,
+    ringVersionId: ring.id,
+    graphSha256: null,
+    meters: kmTenths * 100,
+    insideMkad: false,
+    source: 'MANUAL',
+    actorUserId: admin.userId,
+    reason: 'проверка позднего начисления',
   });
 }
 
@@ -1242,18 +1246,40 @@ describe('один набор данных: журнал → API → дни → 
     expect(named.get('Конечный баланс')).toBe(3050);
 
     const orders = workbook.getWorksheet('Заказы');
+    /*
+     * Столбцы берутся по ЗАГОЛОВКУ, а не по номеру: номер в проверке повторял
+     * бы число из кода, и вставка столбца уехала бы незамеченной обеими
+     * сторонами.
+     */
+    const columns = (orders?.getRow(1).values as unknown[]).map((name) => String(name ?? ''));
+    const at = (row: ExcelJS.Row | undefined, header: string): unknown =>
+      row?.getCell(columns.indexOf(header)).value;
+
     const dayRow = orders?.getRow(2);
     expect(dayRow?.getCell(1).value).toBe('Итог дня');
-    expect(dayRow?.getCell(2).value).toBe(DAY);
-    expect(dayRow?.getCell(11).value).toBe(5000); // Наличные
-    expect(dayRow?.getCell(14).value).toBe(300); // За заказ
-    expect(dayRow?.getCell(15).value).toBe(12.5); // За МКАД, км
-    expect(dayRow?.getCell(16).value).toBe(500); // За МКАД, ₽
-    expect(dayRow?.getCell(17).value).toBe(150); // Доп.
-    expect(dayRow?.getCell(18).value).toBe(950); // Начислено
-    expect(dayRow?.getCell(19).value).toBe(2000); // Курьер сдал
-    expect(dayRow?.getCell(21).value).toBe(1000); // Начальный долг
-    expect(dayRow?.getCell(22).value).toBe(3050); // Итог
+    expect(at(dayRow, 'Дата')).toBe(DAY);
+    expect(at(dayRow, 'Наличные, ₽')).toBe(5000);
+    expect(at(dayRow, 'За заказ, ₽')).toBe(300);
+    expect(at(dayRow, 'За МКАД, км')).toBe(12.5);
+    expect(at(dayRow, 'За МКАД, ₽')).toBe(500);
+    expect(at(dayRow, 'За попытку, ₽')).toBe(0);
+    expect(at(dayRow, 'Доп., ₽')).toBe(150);
+    expect(at(dayRow, 'Начислено, ₽')).toBe(950);
+    expect(at(dayRow, 'Курьер сдал, ₽')).toBe(2000);
+    expect(at(dayRow, 'Начальный долг, ₽')).toBe(1000);
+    expect(at(dayRow, 'Итог, ₽')).toBe(3050);
+    /*
+     * «Начислено» раскладывается на видимые столбцы файла.
+     *
+     * Пока столбца попытки не было, эта сумма не сходилась ни с чем, и
+     * объяснить разницу в файле было нечем.
+     */
+    expect(at(dayRow, 'Начислено, ₽')).toBe(
+      (at(dayRow, 'За заказ, ₽') as number) +
+        (at(dayRow, 'За МКАД, ₽') as number) +
+        (at(dayRow, 'За попытку, ₽') as number) +
+        (at(dayRow, 'Доп., ₽') as number),
+    );
 
     /*
      * Строка заказа: её «Доп.» и «Начислено» обязаны нести привязанный
@@ -1262,12 +1288,12 @@ describe('один набор данных: журнал → API → дни → 
      */
     const orderRow = orders?.getRow(3);
     expect(orderRow?.getCell(1).value).toBe('Заказ');
-    expect(orderRow?.getCell(11).value).toBe(5000); // Наличные
-    expect(orderRow?.getCell(14).value).toBe(300); // За заказ
-    expect(orderRow?.getCell(16).value).toBe(500); // За МКАД, ₽
-    expect(orderRow?.getCell(17).value).toBe(50); // Доп. строки: расход попытки
-    expect(orderRow?.getCell(18).value).toBe(850); // Начислено строки
-    expect(orderRow?.getCell(22).value).toBe(4150); // Итог строки
+    expect(at(orderRow, 'Наличные, ₽')).toBe(5000);
+    expect(at(orderRow, 'За заказ, ₽')).toBe(300);
+    expect(at(orderRow, 'За МКАД, ₽')).toBe(500);
+    expect(at(orderRow, 'Доп., ₽')).toBe(50); // расход, привязанный к попытке
+    expect(at(orderRow, 'Начислено, ₽')).toBe(850);
+    expect(at(orderRow, 'Итог, ₽')).toBe(4150);
 
     /*
      * 6. PDF. Проверяются те самые подписи и суммы, что уходят на бумагу.
@@ -1363,5 +1389,118 @@ describe('один набор данных: журнал → API → дни → 
     const first = await buildSettlementPdf(long);
     const second = await buildSettlementPdf(long);
     expect(Buffer.from(first).equals(Buffer.from(second))).toBe(true);
+  });
+});
+
+// --- Сценарий: правка километров после доставки --------------------------------
+
+describe('исправленные километры и деньги за них', () => {
+  it('правка километров после доставки пересчитывает оплату, а не только подпись', async () => {
+    /*
+     * Строка отчёта берёт километры ЖИВЬЁМ из действующего снимка, а деньги —
+     * из замороженной записи `DISTANCE_FEE`. После ручной правки строка
+     * показывала «20,0 км · 500,00 ₽» при ставке 40 ₽/км: арифметика строки
+     * не сходилась сама с собой, пометки об этом не было ни на экране, ни в
+     * файле, а начислить заново было нечем — ключ уже занят.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+
+    const before = await report(DAY, DAY, scenario.courierId);
+    const beforeRow = before.rows[0];
+    expect(beforeRow?.beyondMkadKmTenths).toBe(125);
+    // 12,5 км × 40 ₽ = 500 ₽.
+    expect(BigInt(before.totals.distanceFeesMinor)).toBe(50_000n);
+
+    // Логист исправляет километры: было 12,5, стало 20,0.
+    await seedDistance(scenario, 200);
+    const admin = await actorFor(['ADMIN']);
+    const changed = await ctx.db.$transaction((tx) =>
+      restateDistanceFee(tx, {
+        routeOrderId: scenario.routeOrderId,
+        actorUserId: admin.userId,
+        reason: 'Правка километров: маршрут построен по неверной точке',
+      }),
+    );
+    expect(changed).toBe(true);
+
+    const after = await report(DAY, DAY, scenario.courierId);
+    const afterRow = after.rows[0];
+    // Строка сходится сама с собой: 20,0 км × 40 ₽ = 800 ₽.
+    expect(afterRow?.beyondMkadKmTenths).toBe(200);
+    expect(BigInt(after.totals.distanceFeesMinor)).toBe(80_000n);
+    expect(BigInt(afterRow!.distanceFeeMinor)).toBe(80_000n);
+
+    // История цела: прежнее начисление снято обратной записью, а не стёрто.
+    const entries = await ctx.db.courierLedgerEntry.findMany({
+      where: { courierUserId: scenario.courierId, kind: 'DISTANCE_FEE' },
+      select: { amountMinor: true, reversedBy: { select: { id: true } } },
+    });
+    expect(entries).toHaveLength(2);
+    expect(entries.filter((entry) => entry.reversedBy !== null)).toHaveLength(1);
+
+    // И баланс курьера равен показанному итогу: деньги и подпись — одни.
+    expect(await balanceOf(ctx.db, scenario.courierId, DAY)).toBe(
+      BigInt(after.totals.closingBalanceMinor),
+    );
+  });
+
+  it('повторная правка тем же значением денег не трогает', async () => {
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+    const admin = await actorFor(['ADMIN']);
+
+    const first = await ctx.db.$transaction((tx) =>
+      restateDistanceFee(tx, {
+        routeOrderId: scenario.routeOrderId,
+        actorUserId: admin.userId,
+        reason: 'Правка километров: без изменений',
+      }),
+    );
+    // Километры те же — пересчитывать нечего, и обратной записи не появляется.
+    expect(first).toBe(false);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { courierUserId: scenario.courierId, kind: 'DISTANCE_FEE' },
+      }),
+    ).toBe(1);
+  });
+
+  it('отменённому в источнике заказу правка километров денег не возвращает', async () => {
+    /*
+     * Финансовый результат отменённого заказа уже снят. Правка километров —
+     * не повод вернуть его обратно: иначе деньги оживали бы у заказа, которого
+     * в расчётах нет.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+    await ctx.db.deliveryOrder.update({
+      where: { id: scenario.orderId },
+      // Инвариант базы: отмена — это пара «признак и время».
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date(`${DAY}T12:00:00.000Z`) },
+    });
+
+    await seedDistance(scenario, 200);
+    const admin = await actorFor(['ADMIN']);
+    const changed = await ctx.db.$transaction((tx) =>
+      restateDistanceFee(tx, {
+        routeOrderId: scenario.routeOrderId,
+        actorUserId: admin.userId,
+        reason: 'Правка километров после отмены',
+      }),
+    );
+
+    expect(changed).toBe(false);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { courierUserId: scenario.courierId, kind: 'DISTANCE_FEE' },
+      }),
+    ).toBe(1);
   });
 });

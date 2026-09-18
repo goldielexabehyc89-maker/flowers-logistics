@@ -1157,10 +1157,16 @@ describe('группировка отчёта', () => {
       >[0],
     );
     const sheet = workbook.getWorksheet('Заказы');
+    /*
+     * Столбец ищется по ЗАГОЛОВКУ, а не по номеру: номер в проверке просто
+     * повторяет число из кода и молча уезжает при вставке столбца.
+     */
+    const headers = (sheet?.getRow(1).values as unknown[]).map((name) => String(name ?? ''));
+    const noteColumn = headers.indexOf('Примечание');
     const notes: string[] = [];
     sheet?.eachRow((row) => {
       if (String(row.getCell(1).value ?? '') === 'Заказ') {
-        notes.push(String(row.getCell(23).value ?? ''));
+        notes.push(String(row.getCell(noteColumn).value ?? ''));
       }
     });
 

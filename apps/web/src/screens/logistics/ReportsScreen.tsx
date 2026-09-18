@@ -270,8 +270,18 @@ const JOURNAL_HEADERS: Record<string, string> = {
   CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
 };
 
+/**
+ * Первый столбец, в котором вообще может стоять сумма журнала.
+ *
+ * Слева от него — дата, название операции и автор на две ячейки. Заголовок из
+ * этой части дал бы отрицательный colSpan у ячейки основания и сломал бы
+ * строку целиком, а заметить это можно было бы только глазами.
+ */
+const FIRST_MONEY_COLUMN = 6;
+
 export function journalColumn(kind: string): number {
-  return SETTLEMENT_COLUMNS.indexOf(JOURNAL_HEADERS[kind] ?? 'Доп.') + 1;
+  const column = SETTLEMENT_COLUMNS.indexOf(JOURNAL_HEADERS[kind] ?? 'Доп.') + 1;
+  return column < FIRST_MONEY_COLUMN ? SETTLEMENT_COLUMNS.indexOf('Доп.') + 1 : column;
 }
 
 /**

@@ -96,6 +96,21 @@ describe('ширина строки журнала', () => {
     }
   });
 
+  it('заголовок из левой части таблицы не даёт отрицательной ячейки', () => {
+    /*
+     * Слева от денег — дата, название и автор. Сегодня туда не указывает ни
+     * один вид, но словарь заголовков — одна строка, и ошибка в ней сломала бы
+     * всю строку журнала, а не сдвинула бы число на столбец.
+     */
+    for (const name of SETTLEMENT_COLUMNS.slice(0, 5)) {
+      expect(SETTLEMENT_COLUMNS.indexOf(name) + 1).toBeLessThan(6);
+    }
+    // Любой вид встаёт не левее первого денежного столбца.
+    for (const kind of [...KINDS, 'ADJUSTMENT', 'OPENING_DEBT', '']) {
+      expect(journalColumn(kind), kind).toBeGreaterThanOrEqual(6);
+    }
+  });
+
   it('строка отдельной операции тоже во всю ширину шапки', () => {
     // Дата + название + автор(2) + основание + отмена + сумма.
     expect(1 + 1 + 2 + (SETTLEMENT_COLUMNS.length - 6) + 1 + 1).toBe(SETTLEMENT_COLUMNS.length);

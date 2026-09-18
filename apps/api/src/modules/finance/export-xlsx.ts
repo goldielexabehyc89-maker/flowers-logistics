@@ -103,6 +103,16 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'За заказ, ₽', key: 'fee', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'За МКАД, км', key: 'km', width: 12, style: { numFmt: '#,##0.0' } },
     { header: 'За МКАД, ₽', key: 'distance', width: 14, style: { numFmt: '#,##0.00' } },
+    /*
+     * Оплачиваемая попытка своим столбцом.
+     *
+     * Она входит в «Начислено», но в «Доп.» её нет намеренно (иначе удвоится).
+     * Без собственного столбца «Начислено» в файле не раскладывалось: «За
+     * заказ» + «За МКАД» + «Доп.» не давали его суммы, и объяснить разницу
+     * было нечем. На экране столбца нет по недостатку места, и там она стоит
+     * под «Начислено»; в файле место есть.
+     */
+    { header: 'За попытку, ₽', key: 'attempt', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Доп., ₽', key: 'extra', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Начислено, ₽', key: 'accrued', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Курьер сдал, ₽', key: 'handed', width: 16, style: { numFmt: '#,##0.00' } },
@@ -132,6 +142,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
         fee: toRubles(group.deliveryFeesMinor),
         km: group.distanceKmTenths / 10,
         distance: toRubles(group.distanceFeesMinor),
+        attempt: toRubles(group.attemptFeesMinor),
         extra: toRubles(group.extraExpensesMinor),
         accrued: toRubles(group.accruedMinor),
         handed: toRubles(group.handedMinor),
@@ -166,6 +177,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
            * и здесь — иначе сумма строк не сходится с итогом дня, и разницу
            * не объяснить. Правило то же, что на экране и в `grouping.ts`.
            */
+          attempt: toRubles(row.attemptFeeMinor),
           extra: toRubles((BigInt(row.expensesMinor) + BigInt(row.bonusesMinor)).toString()),
           accrued: toRubles(
             (

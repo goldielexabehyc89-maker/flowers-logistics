@@ -106,6 +106,49 @@ export function settlementSummaryLines(report: SettlementReport): [string, strin
   ];
 }
 
+/**
+ * Строки блока «Итоги по дням и курьерам» — то, что уходит на бумагу.
+ *
+ * Отдельной чистой функцией по той же причине, что и сводка: разбирать готовый
+ * PDF обратно значило бы проверять чужую библиотеку. Здесь же рождаются все
+ * числа и подписи блока, включая начальный долг, — и здесь их можно доказать.
+ * Пока блок собирался прямо в рисовании, его содержимое не проверяло ничто.
+ */
+export function settlementGroupLines(report: SettlementReport): [string, string][] {
+  const lines: [string, string][] = [];
+  for (const day of report.days) {
+    for (const group of day.couriers) {
+      const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
+      const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
+      const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
+      /*
+       * Начальный долг называется отдельно — как на экране и в книге.
+       *
+       * Он не попадает ни в один из показателей строки, но входит в итог:
+       * день из одного долга давал бы на бумаге нули по всем колонкам при
+       * ненулевом итоге, и объяснить его было бы нечем.
+       */
+      const debt =
+        BigInt(group.openingDebtMinor) === 0n
+          ? ''
+          : ` · нач. долг ${formatRubles(group.openingDebtMinor)}`;
+      lines.push([
+        left,
+        `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)}${debt} · итог ${formatRubles(group.totalMinor)}`,
+      ]);
+    }
+  }
+  return lines;
+}
+
+/** Подпись под итогом периода: у одного курьера баланс, у всех — изменение. */
+export function settlementClosingLine(report: SettlementReport): string {
+  const closing = formatRubles(report.totals.closingBalanceMinor);
+  return report.courierUserId === null
+    ? `Изменение за период: ${closing} (по всем курьерам; баланс считается по одному)`
+    : `Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`;
+}
+
 /** Заголовок документа: он же название файла у человека в загрузках. */
 export function settlementPdfTitle(report: SettlementReport): string {
   return `Расчёты с курьерами ${report.period.from} — ${report.period.to}`;
@@ -184,13 +227,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   }
 
   cursor -= 8;
-  const closing = formatRubles(report.totals.closingBalanceMinor);
-  write(
-    report.courierUserId === null
-      ? `Изменение за период: ${closing} (по всем курьерам; баланс считается по одному)`
-      : `Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`,
-    13,
-  );
+  write(settlementClosingLine(report), 13);
 
   /*
    * Групповые итоги на бумаге: день, курьер, заказы и итог.
@@ -201,40 +238,23 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   if (report.days.length > 0) {
     cursor -= 10;
     write('Итоги по дням и курьерам', 13);
-    for (const day of report.days) {
-      for (const group of day.couriers) {
-        ensureRoom();
-        const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
-        const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
-        const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
-        /*
-         * Начальный долг называется отдельно — как на экране и в книге.
-         *
-         * Он не попадает ни в один из показателей строки, но входит в итог:
-         * день из одного долга давал бы на бумаге нули по всем колонкам при
-         * ненулевом итоге, и объяснить его было бы нечем.
-         */
-        const debt =
-          BigInt(group.openingDebtMinor) === 0n
-            ? ''
-            : ` · нач. долг ${formatRubles(group.openingDebtMinor)}`;
-        const right = `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)}${debt} · итог ${formatRubles(group.totalMinor)}`;
-        page.drawText(left, {
-          x: MARGIN,
-          y: cursor,
-          size: BODY_SIZE,
-          font,
-          color: rgb(0.4, 0.45, 0.5),
-        });
-        page.drawText(right, {
-          x: PAGE_WIDTH - MARGIN - font.widthOfTextAtSize(right, BODY_SIZE),
-          y: cursor,
-          size: BODY_SIZE,
-          font,
-          color: rgb(0.12, 0.16, 0.23),
-        });
-        cursor -= LINE;
-      }
+    for (const [left, right] of settlementGroupLines(report)) {
+      ensureRoom();
+      page.drawText(left, {
+        x: MARGIN,
+        y: cursor,
+        size: BODY_SIZE,
+        font,
+        color: rgb(0.4, 0.45, 0.5),
+      });
+      page.drawText(right, {
+        x: PAGE_WIDTH - MARGIN - font.widthOfTextAtSize(right, BODY_SIZE),
+        y: cursor,
+        size: BODY_SIZE,
+        font,
+        color: rgb(0.12, 0.16, 0.23),
+      });
+      cursor -= LINE;
     }
   }
 

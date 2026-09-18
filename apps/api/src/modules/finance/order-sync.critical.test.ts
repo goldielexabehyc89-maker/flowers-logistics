@@ -1264,19 +1264,23 @@ describe('выгрузка показывает корректировки, а �
      * на листе» не доказывает ничего.
      */
     const rows = workbook.getWorksheet('Заказы');
+    // Столбцы по ЗАГОЛОВКУ: номер в проверке повторял бы число из кода.
+    const columns = (rows?.getRow(1).values as unknown[]).map((name) => String(name ?? ''));
+    const totalColumn = columns.indexOf('Итог, ₽');
+    const noteColumn = columns.indexOf('Примечание');
     const orderRows: { total: unknown; note: string; date: unknown }[] = [];
     const dayRows: { total: unknown; date: unknown }[] = [];
     rows?.eachRow((row) => {
       const level = String(row.getCell(1).value ?? '');
       if (level === 'Заказ') {
         orderRows.push({
-          total: row.getCell(22).value,
-          note: String(row.getCell(23).value ?? ''),
+          total: row.getCell(totalColumn).value,
+          note: String(row.getCell(noteColumn).value ?? ''),
           date: row.getCell(2).value,
         });
       }
       if (level === 'Итог дня') {
-        dayRows.push({ total: row.getCell(22).value, date: row.getCell(2).value });
+        dayRows.push({ total: row.getCell(totalColumn).value, date: row.getCell(2).value });
       }
     });
 

@@ -18,7 +18,7 @@
 import type { CourierLedgerKind } from '../../generated/prisma/client.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { appendEntry, accrualKey, reversalKey } from './ledger.js';
+import { appendEntry, accrualKey, reversalKey, reverseEntry } from './ledger.js';
 import {
   ledgerCoversDate,
   perOrderForVehicle,
@@ -295,6 +295,123 @@ export async function accrueDistanceFee(
     attemptId: input.attemptId,
     idempotencyKey: accrualKey(input.attemptId, 'DISTANCE_FEE'),
   });
+}
+
+/**
+ * Пересчёт километров после того, как деньги уже начислены.
+ *
+ * Ручная правка километров меняла ТОЛЬКО показанное. Строка отчёта берёт
+ * километры живьём из действующего снимка, а деньги — из замороженной записи
+ * `DISTANCE_FEE`, и после правки строка показывала «20,0 км · 500,00 ₽» при
+ * ставке 40 ₽/км: арифметика строки не сходилась сама с собой, а пометки об
+ * этом не было ни на экране, ни в файле. Повторно начислить было нечем —
+ * ключ `attempt:<id>:DISTANCE_FEE` уже занят.
+ *
+ * Поэтому правка пересчитывает деньги: прежнее начисление снимается обратной
+ * записью, новое заводится по исправленным километрам. Исходная запись
+ * остаётся — по ней видно, сколько было начислено и почему снято.
+ *
+ * День — ДЕНЬ ДОСТАВКИ, как и у самого начисления: догоняющее начисление
+ * километров датируется им же (`mkad-auto`), и правка обязана попадать туда,
+ * где лежит строка доставки. Иначе строка снова показывала бы километры без
+ * своих денег.
+ */
+export async function restateDistanceFee(
+  tx: TransactionClient,
+  input: { routeOrderId: string; actorUserId: string; reason: string },
+): Promise<boolean> {
+  const routeOrder = await tx.routeOrder.findUnique({
+    where: { id: input.routeOrderId },
+    select: {
+      route: { select: { id: true, deliveryDate: true } },
+      order: { select: { id: true, cancelledInSource: true } },
+    },
+  });
+  if (routeOrder === null) {
+    return false;
+  }
+
+  const attempt = await tx.deliveryAttempt.findFirst({
+    where: { routeOrderId: input.routeOrderId, activeKey: { not: null }, outcome: 'DELIVERED' },
+    select: { id: true, courierUserId: true },
+  });
+  // Доставки ещё нет — начислять будет обычный путь, по уже исправленному снимку.
+  if (attempt === null) {
+    return false;
+  }
+
+  /*
+   * Тот же порядок блокировок, что и у начисления: строка заказа первой.
+   * Отмена заказа не должна проскочить между проверкой и записью.
+   */
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${routeOrder.order.id}::uuid FOR UPDATE`;
+  const order = await tx.deliveryOrder.findUnique({
+    where: { id: routeOrder.order.id },
+    select: { cancelledInSource: true },
+  });
+  // У отменённого заказа финансовый результат снят: возвращать его правкой нельзя.
+  if (order === null || order.cancelledInSource) {
+    return false;
+  }
+
+  const snapshot = await tx.routeTariffSnapshot.findUnique({
+    where: { routeId: routeOrder.route.id },
+    select: { perKmMinor: true },
+  });
+  if (snapshot === null || snapshot.perKmMinor <= 0n) {
+    return false;
+  }
+
+  const distance = await tx.routeOrderDistance.findFirst({
+    where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
+    select: { roundedKmTenths: true },
+  });
+  const target =
+    distance === null || distance.roundedKmTenths <= 0
+      ? 0n
+      : (snapshot.perKmMinor * BigInt(distance.roundedKmTenths)) / 10n;
+
+  const existing = await tx.courierLedgerEntry.findMany({
+    where: { attemptId: attempt.id, kind: 'DISTANCE_FEE', reversedBy: { is: null } },
+    select: { id: true, amountMinor: true },
+  });
+  // В журнале заработок отрицателен: начисленная величина — со сменой знака.
+  const accrued = existing.reduce((total, entry) => total - entry.amountMinor, 0n);
+  if (accrued === target) {
+    return false;
+  }
+
+  const operationDate = fromDateColumn(routeOrder.route.deliveryDate);
+  for (const entry of existing) {
+    await reverseEntry(tx, {
+      entryId: entry.id,
+      actorUserId: input.actorUserId,
+      reason: input.reason,
+      operationDate,
+    });
+  }
+
+  if (target > 0n) {
+    await appendEntry(tx, {
+      courierUserId: attempt.courierUserId,
+      kind: 'DISTANCE_FEE',
+      amountMinor: target,
+      operationDate,
+      actorUserId: input.actorUserId,
+      reason: input.reason,
+      routeId: routeOrder.route.id,
+      orderId: routeOrder.order.id,
+      attemptId: attempt.id,
+      /*
+       * Ключ включает сами километры: прежний `attempt:<id>:DISTANCE_FEE`
+       * занят исходным начислением, а повтор той же правки обязан остаться
+       * одной записью.
+       */
+      idempotencyKey: `${accrualKey(attempt.id, 'DISTANCE_FEE')}:km:${distance?.roundedKmTenths ?? 0}`,
+    });
+  }
+
+  return true;
 }
 
 /**

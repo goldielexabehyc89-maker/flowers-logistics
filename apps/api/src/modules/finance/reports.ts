@@ -254,6 +254,17 @@ export async function buildSettlementReport(
   const deliveryDayOfAttempt = new Map(
     facts.map((fact) => [fact.attemptId, fromDateColumn(fact.attempt.route.deliveryDate)]),
   );
+  /*
+   * Чей это заказ. Попытка одна, а курьер у записи — свой.
+   *
+   * У `attemptId` записи журнала нет внешнего ключа, и маршрут операций
+   * принимает любой uuid. Запись курьера B с попыткой курьера A уходила в
+   * строку A: у A в «Доп.» появлялись чужие деньги, а у B они пропадали из
+   * отчёта, оставаясь в его балансе. Итог дня переставал быть вкладом дня в
+   * баланс, и один и тот же день показывался по-разному в общем отчёте и в
+   * отчёте по курьеру. Строку доставки наполняют только записи ЕЁ курьера.
+   */
+  const courierOfAttempt = new Map(facts.map((fact) => [fact.attemptId, fact.courierUserId]));
 
   const byAttempt = new Map<string, LedgerEntryView[]>();
   const takenByRows = new Set<string>();
@@ -262,6 +273,9 @@ export async function buildSettlementReport(
       continue;
     }
     if (deliveryDayOfAttempt.get(entry.attemptId) !== entry.operationDate) {
+      continue;
+    }
+    if (courierOfAttempt.get(entry.attemptId) !== entry.courierUserId) {
       continue;
     }
     byAttempt.set(entry.attemptId, [...(byAttempt.get(entry.attemptId) ?? []), entry]);
@@ -378,12 +392,39 @@ export async function buildSettlementReport(
   const grouped = groupSettlement(rows, journalEntries, profiles);
   const page = pageOfGroups(grouped, input.limit ?? Number.MAX_SAFE_INTEGER, input.offset ?? 0);
 
+  /*
+   * Плоские списки описывают СТРАНИЦУ, а не весь период.
+   *
+   * Постраничность идёт по группам «день + курьер», но рядом с двадцатью
+   * группами в ответе лежали все строки заказов и весь журнал периода — без
+   * какой-либо границы. Месяц по всем курьерам отдавал тысячи строк на каждое
+   * обновление журнала, и предел `limit` не значил ничего.
+   *
+   * Итоги при этом остаются периодными: они считаются по всему отбору, и
+   * сумма по видимым строкам итогом не является.
+   *
+   * Без `limit` (обе выгрузки) видно всё, и списки совпадают с прежними —
+   * включая записи, вошедшие в строки доставок.
+   */
+  const visibleRows = page.days.flatMap((day) => day.couriers.flatMap((group) => group.rows));
+  const visibleAttempts = new Set(visibleRows.map((row) => row.attemptId));
+  const visibleJournal = new Set(
+    page.days.flatMap((day) =>
+      day.couriers.flatMap((group) => group.operations.entries.map((entry) => entry.id)),
+    ),
+  );
+  const visibleEntries = entries.filter(
+    (entry) =>
+      visibleJournal.has(entry.id) ||
+      (entry.attemptId !== null && takenByRows.has(entry.id) && visibleAttempts.has(entry.attemptId)),
+  );
+
   return {
     period: { from: input.from, to: input.to },
     courierUserId: input.courierUserId ?? null,
     totals,
-    rows,
-    entries,
+    rows: visibleRows,
+    entries: visibleEntries,
     days: page.days,
     totalGroups: page.totalGroups,
     limit: input.limit ?? page.totalGroups,

@@ -558,3 +558,91 @@ describe.each(ATTEMPT_CASES)('категория $kind в строке дост�
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
   });
 });
+
+describe('строку доставки наполняют только записи её курьера', () => {
+  it('чужая запись с той же попыткой остаётся у своего курьера, а не в чужой строке', async () => {
+    /*
+     * У `attemptId` записи журнала нет внешнего ключа, а маршрут операций
+     * принимает любой uuid. Запись курьера B с попыткой курьера A уходила в
+     * строку A: у A появлялись чужие деньги в «Доп.» и «Начислено», а у B они
+     * исчезали из отчёта, оставаясь в его балансе. Итог дня переставал быть
+     * вкладом дня в баланс, и один и тот же день показывался по-разному в
+     * общем отчёте и в отчёте по курьеру.
+     */
+    const owner = (await actorFor(['COURIER'])).userId;
+    const stranger = (await actorFor(['COURIER'])).userId;
+    const delivery = await seedDeliveryRow(owner);
+
+    const foreignId = await appendOnAttempt(
+      stranger,
+      'EXPENSE_PARKING',
+      delivery,
+      unique('foreign-attempt'),
+      DAY,
+    );
+
+    // 1. В отчёте по владельцу попытки чужих денег нет ни в строке, ни в журнале.
+    const byOwner = await report(DAY, DAY, owner);
+    const ownerRow = byOwner.rows.find((row) => row.attemptId === delivery.attemptId);
+    expect(ownerRow?.expensesMinor).toBe('0');
+    expect(byOwner.entries.some((entry) => entry.id === foreignId)).toBe(false);
+    expect(BigInt(byOwner.totals.expensesMinor)).toBe(0n);
+
+    // 2. В отчёте по чужому курьеру деньги на месте — журналом его дня.
+    const byStranger = await report(DAY, DAY, stranger);
+    expect(byStranger.entries.some((entry) => entry.id === foreignId)).toBe(true);
+    expect(BigInt(byStranger.totals.expensesMinor)).toBe(AMOUNT);
+    expect(BigInt(byStranger.totals.closingBalanceMinor)).toBe(
+      await balanceOf(ctx.db, stranger, DAY),
+    );
+
+    // 3. Общий отчёт показывает ту же строку так же, как отчёт по курьеру.
+    const shared = await buildSettlementReport(ctx.db, {
+      from: DAY,
+      to: DAY,
+      ledgerActiveFrom: '2030-09-01',
+      limit: 200,
+      offset: 0,
+    });
+    const sharedRow = shared.rows.find((row) => row.attemptId === delivery.attemptId);
+    expect(sharedRow?.expensesMinor).toBe(ownerRow?.expensesMinor);
+    expect(sharedRow?.totalMinor).toBe(ownerRow?.totalMinor);
+  });
+});
+
+describe('плоские списки описывают страницу, а не весь период', () => {
+  it('при пределе в одну группу в ответ не уходят строки остальных', async () => {
+    /*
+     * Постраничность шла по группам, а рядом лежали все строки заказов и весь
+     * журнал периода — без границы. Экран их не читает, но отдавались они на
+     * каждое обновление журнала.
+     */
+    const first = (await actorFor(['COURIER'])).userId;
+    const second = (await actorFor(['COURIER'])).userId;
+    const firstDelivery = await seedDeliveryRow(first);
+    const secondDelivery = await seedDeliveryRow(second);
+    await appendOnAttempt(first, 'EXPENSE_PARKING', firstDelivery, unique('page-first'), DAY);
+    await appendOnAttempt(second, 'EXPENSE_PARKING', secondDelivery, unique('page-second'), DAY);
+
+    const page = await buildSettlementReport(ctx.db, {
+      from: DAY,
+      to: DAY,
+      ledgerActiveFrom: '2030-09-01',
+      limit: 1,
+      offset: 0,
+    });
+
+    const visible = page.days.flatMap((day) => day.couriers);
+    expect(visible).toHaveLength(1);
+    expect(page.hasMore).toBe(true);
+    // Строки и записи — ровно видимой группы, и ни одной чужой.
+    expect(page.rows.map((row) => row.courierUserId)).toEqual(
+      page.rows.map(() => visible[0]!.courierUserId),
+    );
+    expect(page.entries.every((entry) => entry.courierUserId === visible[0]!.courierUserId)).toBe(
+      true,
+    );
+    // А итоги остаются периодными: они считаются по всему отбору, не по странице.
+    expect(page.totalGroups).toBeGreaterThan(1);
+  });
+});

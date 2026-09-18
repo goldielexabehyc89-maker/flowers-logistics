@@ -30,7 +30,12 @@ import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
 import { buildSettlementReport, type SettlementReport } from './reports.js';
 import { changeOf } from './grouping.js';
 import { buildSettlementWorkbook, toRubles } from './export-xlsx.js';
-import { formatRubles, settlementSummaryLines } from './export-pdf.js';
+import {
+  formatRubles,
+  settlementClosingLine,
+  settlementGroupLines,
+  settlementSummaryLines,
+} from './export-pdf.js';
 import {
   formatMoney,
   journalColumn,
@@ -308,6 +313,22 @@ describe('одна фикстура на всём пути показа', () => 
     expect(cell('Курьер сдал, ₽')).toBe(toRubles(group.handedMinor));
     expect(cell('Начальный долг, ₽')).toBe(toRubles(group.openingDebtMinor));
     expect(cell('Итог, ₽')).toBe(toRubles(group.totalMinor));
+
+    /*
+     * Блок «Итоги по дням и курьерам» на бумаге. Он собирался прямо в
+     * рисовании, и его содержимое — включая начальный долг — не проверяло
+     * ничто: на бумагу могли уехать числа, которых нет ни на экране, ни в
+     * книге, и заметить это было бы некому.
+     */
+    const [left, right] = settlementGroupLines(built)[0]!;
+    expect(left).toContain(DAY);
+    expect(right).toContain(`итог ${formatRubles(group.totalMinor)}`);
+    expect(right).toContain(`нач. долг ${formatRubles(group.openingDebtMinor)}`);
+    expect(right).toContain(`сдал ${formatRubles(group.handedMinor)}`);
+    expect(right).toContain(`доп. ${formatRubles(group.extraExpensesMinor)}`);
+    expect(settlementClosingLine(built)).toBe(
+      `Конечный баланс: ${formatRubles(total.toString())} — курьер должен компании`,
+    );
 
     // PDF: те же подписи и те же суммы, только уже строками для бумаги.
     const pdf = new Map(settlementSummaryLines(built));

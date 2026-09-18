@@ -11,6 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import ExcelJS from 'exceljs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   closeTestContext,
@@ -23,7 +24,7 @@ import type { Role } from '@fl/shared';
 import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
 import { buildSettlementReport } from './reports.js';
 import { buildCashReport } from './cash-report.js';
-import { cashBalanceOf } from './cash.js';
+import { appendCash, cashBalanceOf } from './cash.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 
 let ctx: TestContext;
@@ -1046,6 +1047,40 @@ describe('ключ идемпотентности общих операций', 
       payload: body,
     }) as never;
 
+  it('тот же ключ с другой ПРИВЯЗКОЙ — тоже конфликт: это другая операция', async () => {
+    /*
+     * Привязка к доставке — не пометка. Ею отчёт решает, показать сумму
+     * строкой доставки или журналом дня: от неё зависят столбец и группа,
+     * в которых человек увидит деньги. Форма не закрывается при ошибке и
+     * оставляет прежний ключ; человек правит привязку и отправляет снова —
+     * и получал в ответ «сохранено» о записи с прежней привязкой.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('op-binding');
+    const body = {
+      courierUserId: courier,
+      kind: 'EXPENSE_PARKING',
+      amountMinor: '20000',
+      operationDate: DAY,
+      reason: 'парковка у адреса',
+      idempotencyKey: key,
+    };
+
+    const first = await postOperation(token, { ...body, attemptId: randomUUID() } as never);
+    expect(first.statusCode).toBe(201);
+
+    const other = await postOperation(token, { ...body, attemptId: randomUUID() } as never);
+    expect(other.statusCode).toBe(409);
+
+    // И снятая привязка — тоже другая операция, а не «та же без уточнения».
+    const without = await postOperation(token, body);
+    expect(without.statusCode).toBe(409);
+
+    // Запись осталась одна: конфликт не создаёт вторую.
+    expect(await ctx.db.courierLedgerEntry.count({ where: { idempotencyKey: key } })).toBe(1);
+  });
+
   it('тот же ключ с другой суммой — конфликт, а не тихий возврат прежней операции', async () => {
     const { token } = await tokenFor(['ADMIN']);
     const courier = await courierId();
@@ -1858,5 +1893,111 @@ describe('передача наличных и касса через маршр�
     expect((await ask(1000)).statusCode).toBe(200);
     // Выше предела — честный отказ, а не молчаливое усечение.
     expect((await ask(1001)).statusCode).toBe(400);
+  });
+});
+
+// --- Границы запроса ----------------------------------------------------------
+
+describe('предел длины периода', () => {
+  const settlements = (token: string, from: string, to: string): Promise<{ statusCode: number }> =>
+    ctx.app.inject({
+      method: 'GET',
+      url: `/api/logistics/reports/settlements?from=${from}&to=${to}&limit=25&offset=0`,
+      headers: { authorization: `Bearer ${token}` },
+    }) as never;
+
+  it('год запросить можно, а всю историю — нет', async () => {
+    /*
+     * Отчёт поднимает журнал, денежные факты, тарифные снимки и километры
+     * целиком за период, и ни одна из этих выборок не ограничена числом строк.
+     * `from=2000-01-01` вытянул бы всю историю в память одним запросом —
+     * причём на каждое обновление журнала у всех открытых вкладок.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+
+    expect((await settlements(token, '2030-07-01', '2031-06-30')).statusCode).toBe(200);
+    expect((await settlements(token, '2000-01-01', '2035-12-31')).statusCode).toBe(400);
+    // Ровно 366 дней — предел, а не «почти»: границу проверяем обе стороны.
+    expect((await settlements(token, '2030-01-01', '2030-12-31')).statusCode).toBe(200);
+    expect((await settlements(token, '2030-01-01', '2031-01-02')).statusCode).toBe(400);
+  });
+
+  it('перевёрнутый период отказывается по-прежнему', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    expect((await settlements(token, '2030-07-10', '2030-07-01')).statusCode).toBe(400);
+  });
+
+  it('предел действует и на выгрузки, а не только на экран', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    for (const path of ['settlements.xlsx', 'settlements.pdf', 'cash.xlsx', 'cash.pdf']) {
+      const response = await ctx.app.inject({
+        method: 'GET',
+        url: `/api/logistics/reports/${path}?from=2000-01-01&to=2035-12-31`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.statusCode, path).toBe(400);
+    }
+  });
+});
+
+// --- Выгрузки кассы и граница видимости ---------------------------------------
+
+describe('чужой кассы нет и в файлах', () => {
+  it('логист выгружает только свою кассу, администратор — все', async () => {
+    /*
+     * Правило видимости кассы жило тремя копиями, и обе выгрузки повторяли его
+     * выражением вместо вызова. Экран проверен, файлы — нет: а из файла деньги
+     * уходят из организации. Проверяется СОДЕРЖИМОЕ книги, а не код ответа.
+     */
+    const { token: mineToken, userId: mineId } = await tokenFor(['LOGISTICIAN']);
+    const foreign = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+
+    await ctx.db.$transaction(async (tx) => {
+      await appendCash(tx, {
+        logistUserId: mineId,
+        kind: 'TAKEN_FROM_COMPANY',
+        amountMinor: 111_100n,
+        operationDate: DAY,
+        actorUserId: mineId,
+        idempotencyKey: unique('export-mine'),
+      });
+      await appendCash(tx, {
+        logistUserId: foreign.id,
+        kind: 'TAKEN_FROM_COMPANY',
+        amountMinor: 222_200n,
+        operationDate: DAY,
+        actorUserId: foreign.id,
+        idempotencyKey: unique('export-foreign'),
+      });
+    });
+
+    const textOf = async (token: string): Promise<string> => {
+      const response = await ctx.app.inject({
+        method: 'GET',
+        url: `/api/logistics/reports/cash.xlsx?from=${DAY}&to=${DAY}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.statusCode).toBe(200);
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(response.rawPayload as unknown as ArrayBuffer);
+      const values: string[] = [];
+      workbook.eachSheet((sheet) => {
+        sheet.eachRow((row) => {
+          values.push((row.values as unknown[]).map((cell) => String(cell ?? '')).join('|'));
+        });
+      });
+      return values.join('\n');
+    };
+
+    const mine = await textOf(mineToken);
+    expect(mine).toContain('1111');
+    // Чужой кассы в файле нет ни одной суммой и ни одним именем.
+    expect(mine).not.toContain('2222');
+    expect(mine).not.toContain(foreign.fullName);
+
+    const all = await textOf(adminToken);
+    expect(all).toContain('1111');
+    expect(all).toContain('2222');
   });
 });

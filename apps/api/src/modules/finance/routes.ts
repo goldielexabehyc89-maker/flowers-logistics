@@ -57,6 +57,7 @@ import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
 import { computeBeyondMkad, saveDistanceSnapshot } from './mkad.js';
+import { restateDistanceFee } from './accrual.js';
 import { activeRing, bundle } from './mkad-bundle.js';
 import { ValhallaClient } from '../integrations/valhalla/client.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
@@ -204,11 +205,43 @@ function contextOf(request: { ip: string; headers: Record<string, unknown> }): {
   return { ip: request.ip, userAgent: typeof agent === 'string' ? agent.slice(0, 255) : null };
 }
 
+/**
+ * Наибольший срок одного отчёта — 366 дней.
+ *
+ * Год с запасом на високосный: «за год» — законный вопрос, «за всё время» —
+ * нет. Отчёты поднимают журнал, денежные факты, тарифные снимки и километры
+ * целиком за период, и ни одна из этих выборок не ограничена числом строк:
+ * `from=2000-01-01` вытянул бы всю историю в память одним запросом.
+ */
+const MAX_PERIOD_DAYS = 366;
+
 /** Период не может быть перевёрнутым и длиннее года: отчёт обязан считаться. */
 function assertPeriod(from: string, to: string): void {
   if (to < from) {
     throw new AppError('VALIDATION_FAILED', { publicMessage: 'Конец периода раньше его начала.' });
   }
+  /*
+   * Длина считается по календарю, а не вычитанием дат строками: у месяцев
+   * разное число дней, и «31-е минус 1-е» не является длиной ни в одном месяце.
+   */
+  const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  if (days > MAX_PERIOD_DAYS) {
+    throw new AppError('VALIDATION_FAILED', {
+      publicMessage: `Период длиннее года: выберите срок не больше ${MAX_PERIOD_DAYS} дней.`,
+    });
+  }
+}
+
+/**
+ * Какие кассы человек вправе видеть. `null` — все (администратор).
+ *
+ * ОДНА функция на все места, где это решается: экран кассы, обе её выгрузки
+ * и история. Правило жило тремя копиями, и выгрузки повторяли его выражением
+ * вместо вызова — то есть расхождение зависело бы от того, вспомнит ли о них
+ * тот, кто однажды изменит правило.
+ */
+function visibleDesks(actor: { userId: string; roles: readonly string[] }): string[] | null {
+  return actor.roles.includes('ADMIN') ? null : [actor.userId];
 }
 
 export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDeps): Promise<void> {
@@ -240,7 +273,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     assertPeriod(query.from, query.to);
 
     // Движения кассы видны по тем же правилам, что на экране кассы.
-    return listHistory(deps.db, { ...query, visibleLogistIds: await visibleDesks(actor) });
+    return listHistory(deps.db, { ...query, visibleLogistIds: visibleDesks(actor) });
   });
 
   app.get('/api/logistics/history/routes/:id', async (request) => {
@@ -398,7 +431,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       search: query.search,
       limit: Number.MAX_SAFE_INTEGER,
       offset: 0,
-      visibleLogistIds: actor.roles.includes('ADMIN') ? null : [actor.userId],
+      visibleLogistIds: visibleDesks(actor),
     });
 
     await writeAudit(deps.db, {
@@ -429,7 +462,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       search: query.search,
       limit: Number.MAX_SAFE_INTEGER,
       offset: 0,
-      visibleLogistIds: actor.roles.includes('ADMIN') ? null : [actor.userId],
+      visibleLogistIds: visibleDesks(actor),
     });
 
     await writeAudit(deps.db, {
@@ -496,11 +529,25 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       courierUserId: string;
       operationDate: string;
       amountMinor: string;
+      routeId: string | null;
+      orderId: string | null;
+      attemptId: string | null;
     }): boolean =>
       candidate.kind === body.kind &&
       candidate.courierUserId === body.courierUserId &&
       candidate.operationDate === body.operationDate &&
-      BigInt(candidate.amountMinor) === signedAmount(body.kind, body.amountMinor);
+      BigInt(candidate.amountMinor) === signedAmount(body.kind, body.amountMinor) &&
+      /*
+       * Привязка — часть операции, а не пометка.
+       *
+       * Ею отчёт решает, показать сумму строкой доставки или журналом дня:
+       * от неё зависят столбец и группа, в которых человек увидит деньги.
+       * Тот же ключ с другой привязкой — другая операция, и отвечать на неё
+       * «сохранено» нельзя ровно по той же причине, что и на другую сумму.
+       */
+      candidate.routeId === (body.routeId ?? null) &&
+      candidate.orderId === (body.orderId ?? null) &&
+      candidate.attemptId === (body.attemptId ?? null);
 
     /**
      * У передачи есть вторая сторона — касса, и она тоже часть операции.
@@ -1098,22 +1145,12 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
    * Логист видит только свою: наличные лежат у конкретного человека, и чужая
    * касса — это чужие деньги. Администратор видит все.
    */
-  const visibleDesks = async (actor: {
-    userId: string;
-    roles: readonly string[];
-  }): Promise<string[] | null> => {
-    if (actor.roles.includes('ADMIN')) {
-      return null;
-    }
-    return [actor.userId];
-  };
-
   app.get('/api/logistics/cash', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
     const query = cashQuerySchema.parse(request.query);
     assertPeriod(query.from, query.to);
 
-    const visible = await visibleDesks(actor);
+    const visible = visibleDesks(actor);
     return buildCashReport(deps.db, {
       from: query.from,
       to: query.to,
@@ -1695,13 +1732,28 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       reason: body.reason,
     });
 
+    /*
+     * Правка километров — это правка ДЕНЕГ, а не подписи под ними.
+     *
+     * Строка отчёта показывает километры живьём, а оплату — замороженной
+     * записью. Без пересчёта правка расходилась с деньгами молча: в отчёте
+     * и в выгрузке стояли исправленные километры и прежняя сумма.
+     */
+    const restated = await deps.db.$transaction((tx) =>
+      restateDistanceFee(tx, {
+        routeOrderId: body.routeOrderId,
+        actorUserId: actor.userId,
+        reason: `Правка километров: ${body.reason}`,
+      }),
+    );
+
     await writeAudit(deps.db, {
       action: 'FINANCE_DISTANCE_CORRECTED',
       entityType: 'RouteOrder',
       entityId: body.routeOrderId,
       actorUserId: actor.userId,
       actorRoles: actor.roles,
-      newValue: { kmTenths: body.kmTenths },
+      newValue: { kmTenths: body.kmTenths, restated },
       ...contextOf(request),
     });
 
