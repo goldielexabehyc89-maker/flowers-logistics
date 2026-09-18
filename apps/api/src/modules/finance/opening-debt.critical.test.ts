@@ -65,6 +65,36 @@ async function courierId(): Promise<string> {
   return user.id;
 }
 
+/**
+ * Сколько соединений СЕЙЧАС заблокированы чужой транзакцией.
+ *
+ * `pg_blocking_pids` отвечает именно на этот вопрос, в отличие от «прошло
+ * столько-то миллисекунд» или «кто-то чего-то ждёт»: запрос, который всё ещё
+ * проверяет права, здесь не считается.
+ */
+async function blockedBackends(): Promise<number> {
+  const rows = await ctx.db.$queryRaw<{ count: bigint }[]>`
+    SELECT count(*)::bigint AS count
+    FROM pg_stat_activity
+    WHERE cardinality(pg_blocking_pids(pid)) > 0
+  `;
+  return Number(rows[0]?.count ?? 0n);
+}
+
+/** Ждёт, пока нужное число соединений встанет на блокировку. Ограничено по времени. */
+async function waitForBlocked(expected: number, timeoutMs = 10_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let seen = 0;
+  while (Date.now() < deadline) {
+    seen = await blockedBackends();
+    if (seen >= expected) {
+      return seen;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return seen;
+}
+
 interface DebtBody {
   courierUserId: string;
   amountMinor: string;
@@ -590,8 +620,12 @@ describe('права и идемпотентность на уровне API', (
       return response;
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    // Ни один не проскочил мимо блокировки: чередование действительно наше.
+    /*
+     * Оба запроса действительно СТОЯТ на блокировке ключа — это проверяется
+     * через `pg_blocking_pids`, а не по времени: иначе «ещё не ответили» могло
+     * бы означать «ещё проверяют права».
+     */
+    expect(await waitForBlocked(2)).toBeGreaterThanOrEqual(2);
     expect(settled).toBe(0);
 
     release();
@@ -665,7 +699,7 @@ describe('права и идемпотентность на уровне API', (
       return response;
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await waitForBlocked(2)).toBeGreaterThanOrEqual(2);
     expect(settled).toBe(0);
 
     release();

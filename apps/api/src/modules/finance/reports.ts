@@ -12,7 +12,15 @@
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { balanceOf, entriesOf, type LedgerEntryView } from './ledger.js';
-import { groupSettlement, pageOfGroups, type CourierProfile, type DayGroup } from './grouping.js';
+import {
+  CASH_KINDS,
+  changeOf,
+  groupSettlement,
+  pageOfGroups,
+  rawOf,
+  type CourierProfile,
+  type DayGroup,
+} from './grouping.js';
 
 export interface Period {
   from: string;
@@ -107,54 +115,6 @@ export interface SettlementReport {
   ledgerActiveFrom: string | null;
 }
 
-function sumOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): bigint {
-  return entries
-    .filter((entry) => kinds.includes(entry.kind))
-    .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
-}
-
-/**
- * Записи, погашенные внутри периода: сама операция и её обратная запись.
- *
- * Пара «начисление + его отмена» даёт в сумме ноль, поэтому в ДЕЙСТВУЮЩЕМ
- * результате её не показывают вовсе: иначе отменённый заказ продолжал бы
- * увеличивать зарплату и километры в колонках, хотя денег по нему нет.
- *
- * Гасится именно ПАРА и только когда обе записи попали в период. Если отмена
- * пришла позже выбранного периода, исходное начисление в нём действительно
- * было — и остаётся видимым; если раньше периода лежит начисление, а в периоде
- * только отмена, видимой остаётся отмена. Так сумма показанных движений всегда
- * объясняет изменение баланса, а даты не переписываются задним числом.
- */
-function settledWithinPeriod(entries: readonly LedgerEntryView[]): ReadonlySet<string> {
-  const byId = new Map(entries.map((entry) => [entry.id, entry]));
-  const settled = new Set<string>();
-  for (const entry of entries) {
-    if (entry.reversesEntryId === null) {
-      continue;
-    }
-    const source = byId.get(entry.reversesEntryId);
-    /*
-     * Гасится пара ОДНОГО дня.
-     *
-     * Отмена, пришедшая в другой день, — это движение того, другого дня: в свой
-     * день начисление действительно было. Спрятать обе записи значило бы
-     * показать разные итоги одного и того же дня в зависимости от границ
-     * отчёта — ровно то, чего быть не должно.
-     */
-    if (source !== undefined && source.operationDate === entry.operationDate) {
-      settled.add(source.id);
-      settled.add(entry.id);
-    }
-  }
-  return settled;
-}
-
-/** Модуль суммы: в отчёте расходы показываются положительными числами. */
-function abs(value: bigint): bigint {
-  return value < 0n ? -value : value;
-}
-
 /** День, предшествующий первому дню периода: по нему считается входящий баланс. */
 export function dayBefore(date: string): string {
   const instant = new Date(`${date}T00:00:00.000Z`);
@@ -187,41 +147,43 @@ export async function buildSettlementReport(
 
   const periodSum = entries.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
 
-  /*
-   * Действующий результат периода считается по непогашенным записям, а баланс —
-   * по всем. Расхождения между ними нет: погашенная пара в сумме даёт ноль.
-   */
-  const settled = settledWithinPeriod(entries);
-  const active = entries.filter((entry) => !settled.has(entry.id));
-
   const totals: SettlementTotals = {
     openingBalanceMinor: opening.toString(),
-    cashReceivedMinor: abs(sumOf(active, ['CASH_RECEIVED'])).toString(),
     /*
-     * Корректировки наличных — ОТДЕЛЬНАЯ строка и со своим знаком.
-     *
-     * Складывать их с наличными и брать модуль нельзя: в периоде, где есть
-     * только корректировка, −5 000 ₽ превратились бы в приход +5 000 ₽.
+     * Каждый показатель — ИЗМЕНЕНИЕ за период, а обратная запись считается
+     * в категории той операции, которую отменяет. Поэтому день начисления даёт
+     * плюс, день отмены — минус, а за оба дня выходит ноль: отменённая зарплата
+     * не остаётся в зарплате, и при этом движения обоих дней сохраняются.
      */
-    cashCorrectionsMinor: sumOf(active, ['CASH_PAYMENT_CORRECTION']).toString(),
-    handedToLogistMinor: abs(sumOf(active, ['CASH_HANDED_TO_LOGIST'])).toString(),
-    issuedToCourierMinor: abs(sumOf(active, ['CASH_ISSUED_TO_COURIER'])).toString(),
-    deliveryFeesMinor: abs(sumOf(active, ['DELIVERY_FEE'])).toString(),
-    attemptFeesMinor: abs(sumOf(active, ['ATTEMPT_FEE'])).toString(),
-    distanceFeesMinor: abs(sumOf(active, ['DISTANCE_FEE'])).toString(),
-    expensesMinor: abs(
-      sumOf(active, [
-        'EXPENSE_PARKING',
-        'EXPENSE_TOLL',
-        'EXPENSE_TRANSIT',
-        'EXPENSE_REPAIR',
-        'EXPENSE_LOADING',
-        'EXPENSE_OTHER',
-      ]),
-    ).toString(),
-    bonusesMinor: abs(sumOf(active, ['BONUS'])).toString(),
-    adjustmentsMinor: sumOf(active, ['ADJUSTMENT']).toString(),
-    openingDebtMinor: sumOf(active, ['OPENING_DEBT']).toString(),
+    cashReceivedMinor: changeOf(entries, ['CASH_RECEIVED']).toString(),
+    /*
+     * Корректировки наличных показываются со знаком журнала: это уменьшение,
+     * и минус здесь — часть смысла показателя.
+     */
+    cashCorrectionsMinor: rawOf(entries, ['CASH_PAYMENT_CORRECTION']).toString(),
+    handedToLogistMinor: changeOf(entries, ['CASH_HANDED_TO_LOGIST']).toString(),
+    issuedToCourierMinor: changeOf(entries, ['CASH_ISSUED_TO_COURIER']).toString(),
+    deliveryFeesMinor: changeOf(entries, ['DELIVERY_FEE']).toString(),
+    attemptFeesMinor: changeOf(entries, ['ATTEMPT_FEE']).toString(),
+    distanceFeesMinor: changeOf(entries, ['DISTANCE_FEE']).toString(),
+    expensesMinor: changeOf(entries, [
+      'EXPENSE_PARKING',
+      'EXPENSE_TOLL',
+      'EXPENSE_TRANSIT',
+      'EXPENSE_REPAIR',
+      'EXPENSE_LOADING',
+      'EXPENSE_OTHER',
+    ]).toString(),
+    bonusesMinor: changeOf(entries, ['BONUS']).toString(),
+    /*
+     * Здесь остаются только обратные записи, чью исходную операцию определить
+     * не удалось. В норме их нет: каждая отмена учтена в своей категории.
+     */
+    adjustmentsMinor: entries
+      .filter((entry) => entry.kind === 'ADJUSTMENT' && entry.reversesKind === null)
+      .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
+      .toString(),
+    openingDebtMinor: changeOf(entries, ['OPENING_DEBT']).toString(),
     closingBalanceMinor: (opening + periodSum).toString(),
   };
 
@@ -301,11 +263,11 @@ export async function buildSettlementReport(
   const rows: SettlementRow[] = facts.map((fact) => {
     const own = byAttempt.get(fact.attemptId) ?? [];
     /*
-     * Колонки показывают ДЕЙСТВУЮЩИЙ результат доставки, а `totalMinor` — её
-     * вклад в баланс. Погашенные внутри периода пары исключаются из колонок и
-     * в сумме дают ноль, поэтому итог строки от этого не меняется.
+     * Колонки строки — изменения её дня, `totalMinor` — вклад в баланс.
+     * Отмена того же дня попадает в те же категории с обратным знаком и
+     * обнуляет их; отмена другого дня живёт в журнале своего дня.
      */
-    const activeOwn = own.filter((entry) => !settled.has(entry.id));
+
     const snapshot = snapshotByRoute.get(fact.routeId) ?? null;
     const distance = distanceByRouteOrder.get(fact.attempt.routeOrderId) ?? null;
 
@@ -336,27 +298,25 @@ export async function buildSettlementReport(
        * покупатель доплатил в МойСклад, и сдавать столько он не должен.
        * Суммы корректировок отрицательные, поэтому просто складываются.
        */
-      cashMinor: sumOf(activeOwn, ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION']).toString(),
+      cashMinor: rawOf(own, CASH_KINDS).toString(),
       paymentTypeName: fact.paymentTypeName,
       vehicleType: snapshot === null ? null : (snapshot.vehicleType as 'CAR' | 'FOOT'),
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),
       beyondMkadKmTenths: distance?.roundedKmTenths ?? null,
       distanceSource: (distance?.source ?? null) as 'COMPUTED' | 'MANUAL' | null,
-      deliveryFeeMinor: abs(sumOf(activeOwn, ['DELIVERY_FEE'])).toString(),
-      distanceFeeMinor: abs(sumOf(activeOwn, ['DISTANCE_FEE'])).toString(),
-      attemptFeeMinor: abs(sumOf(activeOwn, ['ATTEMPT_FEE'])).toString(),
-      expensesMinor: abs(
-        sumOf(activeOwn, [
-          'EXPENSE_PARKING',
-          'EXPENSE_TOLL',
-          'EXPENSE_TRANSIT',
-          'EXPENSE_REPAIR',
-          'EXPENSE_LOADING',
-          'EXPENSE_OTHER',
-        ]),
-      ).toString(),
-      bonusesMinor: abs(sumOf(activeOwn, ['BONUS'])).toString(),
+      deliveryFeeMinor: changeOf(own, ['DELIVERY_FEE']).toString(),
+      distanceFeeMinor: changeOf(own, ['DISTANCE_FEE']).toString(),
+      attemptFeeMinor: changeOf(own, ['ATTEMPT_FEE']).toString(),
+      expensesMinor: changeOf(own, [
+        'EXPENSE_PARKING',
+        'EXPENSE_TOLL',
+        'EXPENSE_TRANSIT',
+        'EXPENSE_REPAIR',
+        'EXPENSE_LOADING',
+        'EXPENSE_OTHER',
+      ]).toString(),
+      bonusesMinor: changeOf(own, ['BONUS']).toString(),
       /*
        * Финансовый результат доставки снят.
        *

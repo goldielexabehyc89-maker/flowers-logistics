@@ -15,6 +15,73 @@
 import type { LedgerEntryView } from './ledger.js';
 import type { SettlementRow } from './reports.js';
 
+/**
+ * Виды, увеличивающие долг курьера компании.
+ *
+ * У них показатель отчёта равен самой сумме журнала; у остальных — сумме с
+ * обратным знаком, потому что в журнале заработок и расходы отрицательны, а
+ * в отчёте их показывают как положительный заработок.
+ */
+const DEBT_INCREASING: readonly string[] = [
+  'CASH_RECEIVED',
+  'CASH_ISSUED_TO_COURIER',
+  'OPENING_DEBT',
+];
+
+/**
+ * Категория записи: у обратной — категория ОТМЕНЯЕМОЙ операции.
+ *
+ * Иначе снятая зарплата оставалась бы в зарплате, а её отмена пряталась в общей
+ * строке «обратные корректировки», где смешаны наличные, заработок и долги.
+ * Отмена оплаты доставки — это изменение оплаты доставки, и считаться должна там.
+ */
+export function categoryKind(entry: Pick<LedgerEntryView, 'kind' | 'reversesKind'>): string {
+  return entry.kind === 'ADJUSTMENT' && entry.reversesKind !== null
+    ? entry.reversesKind
+    : entry.kind;
+}
+
+/**
+ * ИЗМЕНЕНИЕ показателя по категории, со знаком.
+ *
+ * День начисления даёт плюс, день отмены — минус, а за оба дня получается ноль.
+ * Модуль здесь применять нельзя: он превратил бы снятие в начисление.
+ */
+export function changeOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): bigint {
+  let total = 0n;
+  for (const entry of entries) {
+    const kind = categoryKind(entry);
+    if (!kinds.includes(kind)) {
+      continue;
+    }
+    const amount = BigInt(entry.amountMinor);
+    total += DEBT_INCREASING.includes(kind) ? amount : -amount;
+  }
+  return total;
+}
+
+/** Сумма журнала как есть: нужна там, где знак записи и есть смысл показателя. */
+export function rawOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): bigint {
+  return entries
+    .filter((entry) => kinds.includes(categoryKind(entry)))
+    .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+}
+
+/** Наличные строки и дня: приход минус корректировки после оплаты в источнике. */
+export const CASH_KINDS: readonly string[] = ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'];
+
+/** Виды, попадающие в столбец «Доп.». */
+export const EXTRA_KINDS: readonly string[] = [
+  'EXPENSE_PARKING',
+  'EXPENSE_TOLL',
+  'EXPENSE_TRANSIT',
+  'EXPENSE_REPAIR',
+  'EXPENSE_LOADING',
+  'EXPENSE_OTHER',
+  'BONUS',
+  'ATTEMPT_FEE',
+];
+
 /** Расходные и прочие операции, не привязанные к конкретной доставке. */
 export interface CourierOperationsGroup {
   count: number;
@@ -138,10 +205,21 @@ export function groupSettlement(
       const sheets = new Set(group.rows.map((row) => row.routeNumber));
       group.sheets = sheets.size;
       group.orders = group.rows.length;
-      group.cashMinor = sum(group.rows.map((row) => row.cashMinor)).toString();
-      group.deliveryFeesMinor = sum(group.rows.map((row) => row.deliveryFeeMinor)).toString();
-      group.distanceFeesMinor = sum(group.rows.map((row) => row.distanceFeeMinor)).toString();
-      group.attemptFeesMinor = sum(group.rows.map((row) => row.attemptFeeMinor)).toString();
+      group.cashMinor = (
+        sum(group.rows.map((row) => row.cashMinor)) + rawOf(group.operations.entries, CASH_KINDS)
+      ).toString();
+      group.deliveryFeesMinor = (
+        sum(group.rows.map((row) => row.deliveryFeeMinor)) +
+        changeOf(group.operations.entries, ['DELIVERY_FEE'])
+      ).toString();
+      group.distanceFeesMinor = (
+        sum(group.rows.map((row) => row.distanceFeeMinor)) +
+        changeOf(group.operations.entries, ['DISTANCE_FEE'])
+      ).toString();
+      group.attemptFeesMinor = (
+        sum(group.rows.map((row) => row.attemptFeeMinor)) +
+        changeOf(group.operations.entries, ['ATTEMPT_FEE'])
+      ).toString();
       group.distanceKmTenths = group.rows.reduce(
         (total, row) => total + (row.beyondMkadKmTenths ?? 0),
         0,
@@ -152,26 +230,18 @@ export function groupSettlement(
        * Показываются положительными числами: направление задаёт столбец,
        * а знак живёт в самой записи учёта и в итоге.
        */
-      const abs = (value: bigint): bigint => (value < 0n ? -value : value);
-      const ofKinds = (kinds: readonly string[]): bigint =>
-        group.operations.entries
-          .filter((entry) => kinds.includes(entry.kind))
-          .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+      /*
+       * Журнал дня участвует в тех же категориях, что и строки доставок.
+       *
+       * Отмена, пришедшая на следующий день, строки не имеет — она лежит в
+       * журнале. Если её не учесть здесь, снятая зарплата так и останется
+       * в «Оплате доставок» и «Начислено» за период.
+       */
+      const journal = group.operations.entries;
 
-      group.extraExpensesMinor = abs(
-        ofKinds([
-          'EXPENSE_PARKING',
-          'EXPENSE_TOLL',
-          'EXPENSE_TRANSIT',
-          'EXPENSE_REPAIR',
-          'EXPENSE_LOADING',
-          'EXPENSE_OTHER',
-          'BONUS',
-          'ATTEMPT_FEE',
-        ]),
-      ).toString();
-      group.handedMinor = abs(ofKinds(['CASH_HANDED_TO_LOGIST'])).toString();
-      group.issuedMinor = abs(ofKinds(['CASH_ISSUED_TO_COURIER'])).toString();
+      group.extraExpensesMinor = changeOf(journal, EXTRA_KINDS).toString();
+      group.handedMinor = changeOf(journal, ['CASH_HANDED_TO_LOGIST']).toString();
+      group.issuedMinor = changeOf(journal, ['CASH_ISSUED_TO_COURIER']).toString();
 
       group.accruedMinor = (
         BigInt(group.deliveryFeesMinor) +

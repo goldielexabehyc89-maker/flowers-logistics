@@ -30,7 +30,7 @@ import type { Role } from '@fl/shared';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import ExcelJS from 'exceljs';
 import { accrueDeliveryResult, accrueDistanceFee } from './accrual.js';
-import { appendEntry, balanceOf } from './ledger.js';
+import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
 import { LEDGER_SETTING_KEY, readLedgerActivation } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
@@ -483,6 +483,144 @@ describe('оплата в источнике уменьшает наличные
    * Это главный признак дефекта: один и тот же день показывал разные суммы,
    * когда его запрашивали отдельно и вместе с соседним.
    */
+
+  /*
+   * Обязательная регрессия из ревью: доставка с наличными, оплатой и МКАД,
+   * отмена на следующий день. История дней сохраняется, но за весь период
+   * отменённый заработок не остаётся в зарплатных показателях.
+   */
+  it('отмена следующего дня: движения дней сохранены, заработок за период нулевой', async () => {
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      distanceFee: 10_000n,
+    });
+
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    const onDelivery = await report(DAY, DAY, delivery.courierId);
+    const onCancel = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
+    const both = await report(DAY, NEXT_DAY, delivery.courierId);
+
+    // День доставки: заработок начислен и виден как было.
+    expect(onDelivery.totals.deliveryFeesMinor).toBe('20000');
+    expect(onDelivery.totals.distanceFeesMinor).toBe('10000');
+    expect(onDelivery.totals.cashReceivedMinor).toBe('500000');
+    expect(onDelivery.totals.closingBalanceMinor).toBe('470000');
+
+    // День отмены: те же категории с МИНУСОМ, а не общей «корректировкой».
+    expect(onCancel.totals.deliveryFeesMinor).toBe('-20000');
+    expect(onCancel.totals.distanceFeesMinor).toBe('-10000');
+    expect(onCancel.totals.cashReceivedMinor).toBe('-500000');
+    expect(onCancel.totals.closingBalanceMinor).toBe('0');
+
+    // Весь период: заработка нет, баланс ноль.
+    expect(both.totals.deliveryFeesMinor).toBe('0');
+    expect(both.totals.distanceFeesMinor).toBe('0');
+    expect(both.totals.cashReceivedMinor).toBe('0');
+    expect(both.totals.closingBalanceMinor).toBe('0');
+
+    // Дневные категории согласованы с итогами периода и между отчётами.
+    const dayGroup = (built: typeof both, date: string) =>
+      built.days.find((day) => day.date === date)?.couriers[0];
+
+    expect(dayGroup(both, DAY)?.deliveryFeesMinor).toBe(
+      dayGroup(onDelivery, DAY)?.deliveryFeesMinor,
+    );
+    expect(dayGroup(both, NEXT_DAY)?.deliveryFeesMinor).toBe(
+      dayGroup(onCancel, NEXT_DAY)?.deliveryFeesMinor,
+    );
+    expect(dayGroup(both, DAY)?.accruedMinor).toBe('30000');
+    expect(dayGroup(both, NEXT_DAY)?.accruedMinor).toBe('-30000');
+
+    // Сумма дневных категорий равна итогу периода.
+    const sumDays = (field: 'deliveryFeesMinor' | 'distanceFeesMinor' | 'accruedMinor'): bigint =>
+      both.days
+        .flatMap((day) => day.couriers)
+        .reduce((total, courier) => total + BigInt(courier[field]), 0n);
+    expect(sumDays('deliveryFeesMinor')).toBe(BigInt(both.totals.deliveryFeesMinor));
+    expect(sumDays('distanceFeesMinor')).toBe(BigInt(both.totals.distanceFeesMinor));
+    expect(sumDays('accruedMinor')).toBe(0n);
+
+    // Строка доставки осталась на своём дне и помечена.
+    const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
+    expect(row?.deliveryDate).toBe(DAY);
+    expect(row?.financeCancelled).toBe(true);
+    expect(row?.outcome).toBe('DELIVERED');
+  });
+
+  it('частичная → полная оплата → отмена не снимает дважды', async () => {
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n, perOrder: 20_000n });
+
+    await payInSource(delivery, 300_000n);
+    await payInSource(delivery, 500_000n);
+    // Наличные сняты ровно на начисленные 4 000 ₽.
+    expect(await sumKind(delivery.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(-400_000n);
+
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    const both = await report(DAY, NEXT_DAY, delivery.courierId);
+    expect(both.totals.cashReceivedMinor).toBe('0');
+    expect(both.totals.cashCorrectionsMinor).toBe('0');
+    expect(both.totals.deliveryFeesMinor).toBe('0');
+    expect(both.totals.closingBalanceMinor).toBe('0');
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+  });
+
+  it('начальный долг и его отмена не попадают в заработок', async () => {
+    const delivery = await seedDelivered({ sum: 0n, payed: 0n, perOrder: 20_000n });
+    const admin = await actorFor(['ADMIN']);
+
+    const debt = await ctx.db.$transaction((tx) =>
+      appendEntry(tx, {
+        courierUserId: delivery.courierId,
+        kind: 'OPENING_DEBT',
+        amountMinor: 700_00n,
+        operationDate: DAY,
+        actorUserId: admin.userId,
+        reason: 'долг до перехода на ERP',
+        idempotencyKey: unique('debt'),
+      }),
+    );
+    await ctx.db.$transaction((tx) =>
+      reverseEntry(tx, {
+        entryId: debt.id,
+        actorUserId: admin.userId,
+        reason: 'внесено по ошибке',
+        operationDate: NEXT_DAY,
+      }),
+    );
+
+    const both = await report(DAY, NEXT_DAY, delivery.courierId);
+    // Долг и его отмена гасят друг друга в СВОЕЙ категории.
+    expect(both.totals.openingDebtMinor).toBe('0');
+    // И ни копейки из них не попало в зарплатные показатели.
+    expect(both.totals.deliveryFeesMinor).toBe('20000');
+    expect(both.totals.distanceFeesMinor).toBe('0');
+    expect(both.totals.attemptFeesMinor).toBe('0');
+    expect(both.totals.bonusesMinor).toBe('0');
+    expect(both.totals.expensesMinor).toBe('0');
+  });
+
   it('дневные итоги совпадают в отдельных отчётах и в общем', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
     await payInSource(delivery, 300_000n);
@@ -921,20 +1059,26 @@ describe('порядок доставки и синхронизации не о�
       importDone = true;
     })();
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
     /*
-     * Проверяется не «прошло время», а ФАКТ ожидания: импорт и задание стоят
-     * на блокировке строки заказа, пока доставка держит транзакцию. Без общей
-     * блокировки они прошли бы мимо и увидели пустой журнал.
+     * Проверяется не «прошло время», а ФАКТ ожидания: импорт стоит на
+     * блокировке строки заказа, пока доставка держит транзакцию. Вопрос
+     * «кем заблокирован» задаётся напрямую, а не угадывается по wait_event.
      */
+    const deadline = Date.now() + 10_000;
+    let blocked = 0;
+    while (Date.now() < deadline && blocked < 1) {
+      const rows = await ctx.db.$queryRaw<{ count: bigint }[]>`
+        SELECT count(*)::bigint AS count
+        FROM pg_stat_activity
+        WHERE cardinality(pg_blocking_pids(pid)) > 0
+      `;
+      blocked = Number(rows[0]?.count ?? 0n);
+      if (blocked < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    expect(blocked).toBeGreaterThanOrEqual(1);
     expect(importDone).toBe(false);
-    const waiting = await ctx.db.$queryRaw<{ count: bigint }[]>`
-      SELECT count(*)::bigint AS count
-      FROM pg_stat_activity
-      WHERE wait_event_type = 'Lock' AND state = 'active' AND pid <> pg_backend_pid()
-    `;
-    expect(waiting[0]?.count ?? 0n).toBeGreaterThan(0n);
 
     release();
     await deliveryTx;
@@ -1007,6 +1151,45 @@ describe('отменённый заказ не остаётся в действ�
 // --- Содержимое выгрузки -------------------------------------------------------
 
 describe('выгрузка показывает корректировки, а не только непустой файл', () => {
+  it('XLSX отменённого периода: заработок обнулён, движения дней сохранены', async () => {
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      distanceFee: 10_000n,
+    });
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+    });
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    const built = await report(DAY, NEXT_DAY, delivery.courierId);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(await buildSettlementWorkbook(built));
+
+    const summary = workbook.getWorksheet('Итоги');
+    const named = new Map<string, unknown>();
+    summary?.eachRow((row) => named.set(String(row.getCell(1).value ?? ''), row.getCell(2).value));
+
+    // За период заработка по отменённому заказу нет.
+    expect(named.get('Базовая оплата доставок')).toBe(0);
+    expect(named.get('Километры за МКАД')).toBe(0);
+    expect(named.get('Наличные, полученные курьером')).toBe(0);
+    expect(named.get('Конечный баланс')).toBe(0);
+
+    // Но дневные движения в листе «Заказы» сохранены и помечены.
+    const rows = workbook.getWorksheet('Заказы');
+    const notes: string[] = [];
+    rows?.eachRow((row) => notes.push(String(row.getCell(22).value ?? '')));
+    expect(notes).toContain('Финансовый результат отменён');
+  });
+
   it('XLSX: подписи, знаки и суммы итогов и журнала', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n });
     await payInSource(delivery, 300_000n);
