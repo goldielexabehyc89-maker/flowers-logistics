@@ -72,6 +72,8 @@ interface SettlementRow {
   beyondMkadKmTenths: number | null;
   /** Текущий расчёт, если он расходится с оплаченным; иначе `null`. */
   currentKmTenths: number | null;
+  /** Деньги за километры есть, а сами километры не сохранены (прежние записи). */
+  distanceBasisUnknown: boolean;
   deliveryFeeMinor: string;
   distanceFeeMinor: string;
   attemptFeeMinor: string;
@@ -1126,9 +1128,19 @@ export function ReportsScreen(): React.JSX.Element {
                                     : formatMoney(row.deliveryFeeMinor)}
                                 </td>
                                 <td>
-                                  {row.beyondMkadKmTenths === null
-                                    ? 'не рассчитано'
-                                    : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
+                                  {/*
+                                    Три разных случая, которые нельзя смешивать:
+                                    расстояние не рассчитано; рассчитано и
+                                    оплачено; деньги есть, а километры прежних
+                                    записей не сохранены. В последнем случае
+                                    подставлять текущий снимок нельзя — это
+                                    чужие километры рядом с прежней суммой.
+                                  */}
+                                  {row.distanceBasisUnknown
+                                    ? `км неизвестны · ${formatMoney(row.distanceFeeMinor)}`
+                                    : row.beyondMkadKmTenths === null
+                                      ? 'не рассчитано'
+                                      : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
                                   {/*
                                     Текущий расчёт отличается от оплаченного.
                                     Деньги меняет только решение человека,

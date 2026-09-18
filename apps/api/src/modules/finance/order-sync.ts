@@ -281,6 +281,26 @@ export async function stripCancelledOrderFinance(
     return false;
   }
 
+  /*
+   * Отмена закрывает финансовый результат КАЖДОЙ доставки заказа — независимо
+   * от того, осталось ли что сторнировать.
+   *
+   * Попытку могли обнулить раньше (например, километры исправили в ноль). Тогда
+   * непогашенных записей нет, сторно не создаётся — и признак снятия, выведенный
+   * из обратных записей, не появлялся вовсе. После снятия отмены правка
+   * километров возвращала такой попытке деньги.
+   */
+  const delivered = await tx.deliveryAttempt.findMany({
+    where: { orderId: input.orderId, activeKey: { not: null }, outcome: 'DELIVERED' },
+    select: { id: true },
+  });
+  if (delivered.length > 0) {
+    await tx.deliveryAttempt.updateMany({
+      where: { id: { in: delivered.map((attempt) => attempt.id) } },
+      data: { financeStrippedAt: input.now },
+    });
+  }
+
   const entries = await tx.courierLedgerEntry.findMany({
     where: {
       orderId: input.orderId,

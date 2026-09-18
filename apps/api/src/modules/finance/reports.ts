@@ -92,6 +92,14 @@ export interface SettlementRow {
    * молча: оно называется прямо, и по нему видно, что пересчитать.
    */
   currentKmTenths: number | null;
+  /**
+   * Деньги за километры есть, а сами километры не сохранены.
+   *
+   * Так выглядят начисления, сделанные до появления поля: восстановить их
+   * основание нечем, и подставлять вместо него текущий снимок значило бы
+   * показать чужие километры рядом с прежней суммой.
+   */
+  distanceBasisUnknown: boolean;
   distanceSource: 'COMPUTED' | 'MANUAL' | null;
   deliveryFeeMinor: string;
   distanceFeeMinor: string;
@@ -310,14 +318,45 @@ export async function buildSettlementReport(
    * Восстанавливать километры делением суммы на ставку нельзя: сумма уже
    * округлена, и при ставке 40,01 ₽/км 12,5 км превращались в 12,4.
    */
-  const kmOfDay = (own: readonly LedgerEntryView[]): number | null => {
-    const withKm = own.filter(
-      (entry) => entry.kind === 'DISTANCE_FEE' && entry.distanceKmTenths !== null,
-    );
-    if (withKm.length === 0) {
-      return null;
+  /**
+   * Километры ДНЯ: начисления минус их отмены — тем же правилом, что и деньги.
+   *
+   * Складывать одни начисления нельзя: правка в день доставки оставляла
+   * исходные километры рядом с новыми, и 12,5 → 20 давали «32,5 км · 800 ₽»,
+   * а несколько правок — 65 км. Деньги при этом были верны, то есть строка
+   * противоречила сама себе.
+   *
+   * `unknown` — деньги за километры есть, а сами километры не сохранены: так
+   * выглядят записи, начисленные до появления поля. Подставлять им текущий
+   * снимок нельзя, это чужие километры рядом с прежней суммой.
+   */
+  const kmOfDay = (own: readonly LedgerEntryView[]): { km: number | null; unknown: boolean } => {
+    let km = 0;
+    let seen = false;
+    let unknown = false;
+    for (const entry of own) {
+      if (entry.kind === 'DISTANCE_FEE') {
+        seen = true;
+        if (entry.distanceKmTenths === null) {
+          unknown = true;
+        } else {
+          km += entry.distanceKmTenths;
+        }
+        continue;
+      }
+      if (entry.kind === 'ADJUSTMENT' && entry.reversesKind === 'DISTANCE_FEE') {
+        seen = true;
+        if (entry.reversesDistanceKmTenths === null) {
+          unknown = true;
+        } else {
+          km -= entry.reversesDistanceKmTenths;
+        }
+      }
     }
-    return withKm.reduce((total, entry) => total + (entry.distanceKmTenths ?? 0), 0);
+    if (!seen) {
+      return { km: null, unknown: false };
+    }
+    return unknown ? { km: null, unknown: true } : { km, unknown: false };
   };
 
   /*
@@ -340,21 +379,30 @@ export async function buildSettlementReport(
   const paidKmByAttempt = new Map(
     paidDistance.map((row) => [row.attemptId as string, row._sum.distanceKmTenths ?? 0]),
   );
-  /** У прежних записей километров нет: сверять нечего, пометка не ставится. */
-  const knownPaid = new Set(paidDistance.map((row) => row.attemptId as string));
 
   const distanceOf = (
     attemptId: string,
     own: readonly LedgerEntryView[],
     current: { roundedKmTenths: number } | null,
-  ): { beyondMkadKmTenths: number | null; currentKmTenths: number | null } => {
+  ): {
+    beyondMkadKmTenths: number | null;
+    currentKmTenths: number | null;
+    distanceBasisUnknown: boolean;
+  } => {
     const currentKm = current?.roundedKmTenths ?? null;
-    const dayKm = kmOfDay(own);
-    const paidKm = knownPaid.has(attemptId) ? (paidKmByAttempt.get(attemptId) ?? 0) : null;
+    const day = kmOfDay(own);
+    /*
+     * Ничего не начислено — оплачено ноль километров, а не «столько, сколько
+     * показывает снимок». Разница видна сразу: расчёт есть, денег по нему нет.
+     * Если расчёта нет вовсе, так и написано — «не рассчитано».
+     */
+    const paidKm = day.unknown ? null : (paidKmByAttempt.get(attemptId) ?? 0);
+    const shown = day.unknown ? null : (day.km ?? (currentKm === null ? null : 0));
     return {
-      // Нет своих километров у дня — показываем действующий снимок, как прежде.
-      beyondMkadKmTenths: dayKm ?? currentKm,
-      currentKmTenths: paidKm === null || currentKm === paidKm ? null : currentKm,
+      beyondMkadKmTenths: shown,
+      // Текущий расчёт называется отдельно, пока он не совпал с оплаченным.
+      currentKmTenths: paidKm !== null && currentKm === paidKm ? null : currentKm,
+      distanceBasisUnknown: day.unknown,
     };
   };
 

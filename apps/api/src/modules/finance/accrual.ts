@@ -404,7 +404,7 @@ export async function restateDistanceFee(
 
   const attempt = await tx.deliveryAttempt.findFirst({
     where: { routeOrderId: input.routeOrderId, activeKey: { not: null }, outcome: 'DELIVERED' },
-    select: { id: true, courierUserId: true },
+    select: { id: true, courierUserId: true, financeStrippedAt: true },
   });
   // Доставки ещё нет — начислять будет обычный путь, по уже исправленному снимку.
   if (attempt === null) {
@@ -455,13 +455,26 @@ export async function restateDistanceFee(
    * относится ко всей истории заказа — из-за него старая отмена блокировала
    * километры НОВОЙ, законной доставки того же заказа.
    */
-  const stripped =
-    (await tx.courierLedgerEntry.count({
-      where: { attemptId: attempt.id, reversalCause: 'ORDER_CANCELLED' },
-    })) > 0 &&
-    (await tx.courierLedgerEntry.count({
-      where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] }, reversedBy: { is: null } },
-    })) === 0;
+  const active = await tx.courierLedgerEntry.count({
+    where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] }, reversedBy: { is: null } },
+  });
+  /*
+   * Неизвестная причина — это «возможно, снятие», а не «снятия не было».
+   *
+   * У отмен, созданных прежней версией, причины нет вовсе: колонка появилась
+   * позже и осталась пустой. Считая пустоту доказательством обычной правки,
+   * обновление возвращало 800 ₽ попытке, деньги которой сняла отмена заказа.
+   * Молча восстанавливать снятое нельзя — при неоднозначности отказ.
+   */
+  const stripMarks = await tx.courierLedgerEntry.count({
+    where: {
+      attemptId: attempt.id,
+      reversesEntryId: { not: null },
+      reversesEntry: { kind: { in: [...ACCRUED_KINDS] } },
+      OR: [{ reversalCause: 'ORDER_CANCELLED' }, { reversalCause: null }],
+    },
+  });
+  const stripped = active === 0 && (attempt.financeStrippedAt !== null || stripMarks > 0);
   if (stripped) {
     return false;
   }

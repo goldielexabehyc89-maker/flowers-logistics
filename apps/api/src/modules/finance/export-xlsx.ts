@@ -219,6 +219,9 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
             row.currentKmTenths === null
               ? ''
               : `Расчёт уточнён: ${(row.currentKmTenths / 10).toFixed(1).replace('.', ',')} км`,
+            // Прежние начисления: километры не сохранены, и восстановить их
+            // нечем. Молчание здесь читалось бы как «километров не было».
+            row.distanceBasisUnknown ? 'Километры начисления неизвестны' : '',
           ]
             .filter((note) => note !== '')
             .join('; '),

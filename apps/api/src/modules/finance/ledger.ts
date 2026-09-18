@@ -85,6 +85,8 @@ export interface LedgerEntryView {
   attemptId: string | null;
   /** Километры, по которым начислена оплата за МКАД. `null` у прежних записей. */
   distanceKmTenths: number | null;
+  /** Километры ОТМЕНЯЕМОЙ записи — у обратной. Нужны, чтобы отмена вычитала их. */
+  reversesDistanceKmTenths: number | null;
   reversesEntryId: string | null;
   /**
    * Вид отменяемой записи: по нему журнал называет обратную операцию своими
@@ -133,7 +135,7 @@ export function toLedgerView(row: {
   attemptId: string | null;
   distanceKmTenths?: number | null;
   reversesEntryId: string | null;
-  reversesEntry?: { kind: CourierLedgerKind } | null;
+  reversesEntry?: { kind: CourierLedgerKind; distanceKmTenths?: number | null } | null;
   transferId?: string | null;
   reversedBy?: { id: string } | null;
   actor?: { fullName: string } | null;
@@ -155,6 +157,7 @@ export function toLedgerView(row: {
     distanceKmTenths: row.distanceKmTenths ?? null,
     reversesEntryId: row.reversesEntryId,
     reversesKind: row.reversesEntry?.kind ?? null,
+    reversesDistanceKmTenths: row.reversesEntry?.distanceKmTenths ?? null,
     transferId: row.transferId ?? null,
     reversed: (row.reversedBy ?? null) !== null,
   };
@@ -170,7 +173,7 @@ export function toLedgerView(row: {
  */
 const REVERSAL_VIEW = {
   reversedBy: { select: { id: true } },
-  reversesEntry: { select: { kind: true } },
+  reversesEntry: { select: { kind: true, distanceKmTenths: true } },
   actor: { select: { fullName: true } },
 } as const;
 
@@ -394,7 +397,7 @@ export async function openingDebtsOf(
     orderBy: [{ operationDate: 'asc' }, { occurredAt: 'asc' }],
     include: {
       reversedBy: { select: { id: true } },
-      reversesEntry: { select: { kind: true } },
+      reversesEntry: { select: { kind: true, distanceKmTenths: true } },
       actor: { select: { fullName: true } },
     },
   });
@@ -414,7 +417,7 @@ export async function entriesOf(
     orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
     include: {
       reversedBy: { select: { id: true } },
-      reversesEntry: { select: { kind: true } },
+      reversesEntry: { select: { kind: true, distanceKmTenths: true } },
       actor: { select: { fullName: true } },
     },
   });
