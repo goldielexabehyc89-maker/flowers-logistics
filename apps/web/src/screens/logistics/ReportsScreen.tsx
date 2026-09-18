@@ -26,7 +26,13 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
-import { formatMoscowDateTime, shiftCalendarDate, VEHICLE_TYPE_LABELS } from '@fl/shared';
+import {
+  formatMoscowDateTime,
+  ledgerEntryTitle,
+  ledgerKindLabel,
+  shiftCalendarDate,
+  VEHICLE_TYPE_LABELS,
+} from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
@@ -152,25 +158,6 @@ interface OperationalReport {
   failureReasons: { name: string; count: number }[];
 }
 
-const OPERATION_LABELS: Record<string, string> = {
-  CASH_RECEIVED: 'Наличные получены курьером',
-  DELIVERY_FEE: 'Оплата за доставку',
-  DISTANCE_FEE: 'Оплата километров за МКАД',
-  ATTEMPT_FEE: 'Оплачиваемая попытка',
-  CASH_HANDED_TO_LOGIST: 'Курьер сдал логисту',
-  CASH_ISSUED_TO_COURIER: 'Логист выдал курьеру',
-  EXPENSE_PARKING: 'Расход: парковка',
-  EXPENSE_TOLL: 'Расход: платная дорога',
-  EXPENSE_TRANSIT: 'Расход: общественный транспорт',
-  EXPENSE_REPAIR: 'Расход: ремонт',
-  EXPENSE_LOADING: 'Расход: погрузка',
-  EXPENSE_OTHER: 'Дополнительный расход',
-  BONUS: 'Доплата курьеру',
-  ADJUSTMENT: 'Обратная корректировка',
-  OPENING_DEBT: 'Начальный долг',
-  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
-};
-
 /** Сколько групп «день + курьер» показывать за раз. */
 const GROUPS_PER_PAGE = 25;
 
@@ -262,18 +249,23 @@ export function correctiveOperation(
   entry: Pick<LedgerEntry, 'kind' | 'amountMinor' | 'reversesKind'>,
 ): { title: string; direction: string } | null {
   if (entry.kind === 'OPENING_DEBT') {
-    return { title: 'Начальный долг', direction: 'увеличивает долг' };
+    return { title: ledgerKindLabel(entry.kind), direction: 'увеличивает долг' };
   }
   if (entry.kind === 'CASH_PAYMENT_CORRECTION') {
     return {
-      title: 'Корректировка наличных: оплата в МойСклад',
+      title: ledgerKindLabel(entry.kind),
       direction: 'уменьшает наличные за курьером',
     };
   }
   if (entry.kind === 'ADJUSTMENT') {
     const negative = BigInt(entry.amountMinor) < 0n;
     return {
-      title: entry.reversesKind === 'OPENING_DEBT' ? 'Отмена начального долга' : 'Отмена операции',
+      /*
+       * Название берётся из ОБЩЕГО словаря — того же, что у выгрузки.
+       * Пока названия жили в двух местах, одна и та же строка называлась на
+       * экране и в файле по-разному, и найти её в выгрузке было нельзя.
+       */
+      title: ledgerEntryTitle(entry),
       direction: negative ? 'уменьшает долг' : 'увеличивает долг',
     };
   }
@@ -1161,7 +1153,7 @@ export function ReportsScreen(): React.JSX.Element {
                                 */}
                                 <td>{formatMoscowDateTime(entry.occurredAt)}</td>
                                 <td className="reports__detail-order">
-                                  {OPERATION_LABELS[entry.kind] ?? entry.kind}
+                                  {ledgerKindLabel(entry.kind)}
                                 </td>
                                 <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                 <td

@@ -12,7 +12,11 @@
  */
 
 import ExcelJS from 'exceljs';
-import { VEHICLE_TYPE_LABELS } from '@fl/shared';
+import {
+  VEHICLE_TYPE_LABELS,
+  ledgerEntryTitle,
+  ledgerKindLabel as sharedKindLabel,
+} from '@fl/shared';
 import type { SettlementReport } from './reports.js';
 
 /** Минорные единицы в рубли. Делится ровно один раз и в одном месте. */
@@ -25,43 +29,12 @@ const OUTCOME_LABELS: Record<string, string> = {
   NOT_DELIVERED: 'Не доставлен',
 };
 
-const KIND_LABELS: Record<string, string> = {
-  CASH_RECEIVED: 'Наличные получены курьером',
-  DELIVERY_FEE: 'Оплата за доставку',
-  DISTANCE_FEE: 'Оплата километров за МКАД',
-  ATTEMPT_FEE: 'Оплачиваемая попытка',
-  CASH_HANDED_TO_LOGIST: 'Курьер сдал логисту',
-  CASH_ISSUED_TO_COURIER: 'Логист выдал курьеру',
-  EXPENSE_PARKING: 'Расход: парковка',
-  EXPENSE_TOLL: 'Расход: платная дорога',
-  EXPENSE_TRANSIT: 'Расход: общественный транспорт',
-  EXPENSE_REPAIR: 'Расход: ремонт',
-  EXPENSE_LOADING: 'Расход: погрузка',
-  EXPENSE_OTHER: 'Дополнительный расход',
-  BONUS: 'Доплата курьеру',
-  ADJUSTMENT: 'Обратная корректировка',
-  OPENING_DEBT: 'Начальный долг',
-  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
-};
-
-export function ledgerKindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind;
-}
-
-/**
- * Название операции журнала — то же, что на экране.
- *
- * У обратной записи вид всегда `ADJUSTMENT`, и без вида ОТМЕНЯЕМОЙ операции
- * файл называл любую отмену «обратной корректировкой», тогда как экран писал
- * «Отмена начального долга». Одна и та же строка не может называться в файле
- * иначе, чем на экране.
+/*
+ * Названия операций живут в общем пакете: экран и файл обязаны называть одну
+ * строку одинаково, иначе найти её в выгрузке по увиденному на экране нельзя.
  */
-export function ledgerEntryLabel(entry: { kind: string; reversesKind: string | null }): string {
-  if (entry.kind !== 'ADJUSTMENT' || entry.reversesKind === null) {
-    return ledgerKindLabel(entry.kind);
-  }
-  return `Отмена: ${ledgerKindLabel(entry.reversesKind).toLowerCase()}`;
-}
+export const ledgerKindLabel = sharedKindLabel;
+export const ledgerEntryLabel = ledgerEntryTitle;
 
 export async function buildSettlementWorkbook(report: SettlementReport): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();

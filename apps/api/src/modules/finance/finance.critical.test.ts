@@ -36,7 +36,13 @@ import { groupSettlement, pageOfGroups } from './grouping.js';
 import { assertPayloadIsSafe, publishRealtimeEvent } from '../realtime/events.js';
 import { isInsideRing, nearestRingPoint, parseRing, ringSha256, toKmTenths } from './mkad.js';
 import ExcelJS from 'exceljs';
-import { buildSettlementWorkbook, ledgerEntryLabel, toRubles } from './export-xlsx.js';
+import {
+  buildSettlementWorkbook,
+  ledgerEntryLabel,
+  ledgerKindLabel,
+  toRubles,
+} from './export-xlsx.js';
+import { ledgerEntryTitle, ledgerKindLabel as sharedKindLabel } from '@fl/shared';
 import { buildSettlementPdf, debtDirection, formatRubles } from './export-pdf.js';
 
 let ctx: TestContext;
@@ -934,23 +940,15 @@ describe('группировка отчёта', () => {
     expect(days[0]?.couriers[0]?.fullName).toBe('Курьер удалён из справочника');
   });
 
-  it('обратная запись называется в файле так же, как на экране', () => {
+  it('названия операций выгрузка берёт из ОБЩЕГО словаря, а не из своего', () => {
     /*
-     * У отмены вид всегда `ADJUSTMENT`, и без вида ОТМЕНЯЕМОЙ операции файл
-     * называл любую отмену «обратной корректировкой», тогда как экран писал
-     * «Отмена начального долга». Одна строка не может называться по-разному.
+     * Пока словарь был свой, файл называл отмену «обратной корректировкой»,
+     * а экран — «Отмена начального долга»: найти в выгрузке строку, увиденную
+     * на экране, было нельзя. Проверяется именно тождество функций: два
+     * одинаковых на вид словаря однажды разъедутся снова.
      */
-    expect(ledgerEntryLabel({ kind: 'OPENING_DEBT', reversesKind: null })).toBe('Начальный долг');
-    expect(ledgerEntryLabel({ kind: 'ADJUSTMENT', reversesKind: 'OPENING_DEBT' })).toBe(
-      'Отмена: начальный долг',
-    );
-    expect(ledgerEntryLabel({ kind: 'ADJUSTMENT', reversesKind: 'CASH_HANDED_TO_LOGIST' })).toBe(
-      'Отмена: курьер сдал логисту',
-    );
-    // Вид отменяемой операции неизвестен — остаётся прежнее общее название.
-    expect(ledgerEntryLabel({ kind: 'ADJUSTMENT', reversesKind: null })).toBe(
-      'Обратная корректировка',
-    );
+    expect(ledgerEntryLabel).toBe(ledgerEntryTitle);
+    expect(ledgerKindLabel).toBe(sharedKindLabel);
   });
 
   it('пометки строки складываются, а отсутствие расчёта их не вытесняет', async () => {

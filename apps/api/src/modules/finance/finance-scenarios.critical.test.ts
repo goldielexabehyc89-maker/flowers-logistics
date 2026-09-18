@@ -1297,10 +1297,32 @@ describe('один набор данных: журнал → API → дни → 
       ],
     }));
 
-    const long = { ...(await report(DAY, DAY, (await actorFor(['COURIER'])).userId)), days: many };
+    const base = await report(DAY, DAY, (await actorFor(['COURIER'])).userId);
+    const long = { ...base, days: many };
     const document = await PDFDocument.load(await buildSettlementPdf(long));
 
     // Шестьдесят групп на одну страницу не помещаются — значит их больше одной.
     expect(document.getPageCount()).toBeGreaterThan(1);
+
+    // Короткий отчёт по-прежнему помещается на одну: лишних страниц не завелось.
+    const short = await PDFDocument.load(
+      await buildSettlementPdf({ ...base, days: many.slice(0, 3) }),
+    );
+    expect(short.getPageCount()).toBe(1);
+
+    // Больше групп — больше страниц: разбивка растёт вместе с содержимым.
+    const huge = await PDFDocument.load(
+      await buildSettlementPdf({ ...base, days: [...many, ...many] }),
+    );
+    expect(huge.getPageCount()).toBeGreaterThan(document.getPageCount());
+
+    /*
+     * Повторная выгрузка того же периода обязана давать тот же файл: иначе
+     * «файл изменился» перестаёт что-либо значить. Разбивка на страницы этого
+     * свойства лишить не должна.
+     */
+    const first = await buildSettlementPdf(long);
+    const second = await buildSettlementPdf(long);
+    expect(Buffer.from(first).equals(Buffer.from(second))).toBe(true);
   });
 });

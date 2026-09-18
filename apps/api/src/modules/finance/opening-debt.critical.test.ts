@@ -10,6 +10,7 @@
  * ВЛАДЕНИЕ ДАТАМИ: июль 2030 (см. RESERVED_MONTHS).
  */
 
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   closeTestContext,
@@ -1435,16 +1436,28 @@ describe('передача наличных и касса через маршр�
         payload: { reason: 'ошибочная запись' },
       }) as never;
 
+    const cursor = await lastEventId();
     const [a, b] = await Promise.all([reverseOnce(), reverseOnce()]);
     /*
-     * Один успех, один понятный отказ «уже отменена» — но НЕ 500. Невнятный
-     * отказ сервера человек повторяет новым ключом, и в кассе появляется
-     * лишняя запись.
+     * ОБА успешны и отдают одну и ту же обратную запись.
+     *
+     * Отмена бывает один раз, и повтор возвращает её же — независимо от того,
+     * передача это или обычное движение кассы. Прежде одна и та же кнопка
+     * давала то тост «записано», то красную ошибку, в зависимости от вида
+     * записи; невнятный отказ человек повторяет новым ключом, и в кассе
+     * появляется лишняя запись.
      */
-    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
 
     expect(await ctx.db.logistCashEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
     expect(await cashBalanceOf(ctx.db, userId, null)).toBe(0n);
+    // История и событие — только у того, кто действительно отменил.
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_CASH_REVERSED', entityId: entryId },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
   });
   it('одну передачу отменяют с ДВУХ маршрутов сразу: без взаимной блокировки', async () => {
     /*
@@ -1676,5 +1689,40 @@ describe('передача наличных и касса через маршр�
     expect(reversed.statusCode).toBe(200);
     expect(await cashBalanceOf(ctx.db, ownerId, null)).toBe(0n);
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+  });
+  it('передача без кассовой стороны не отменяется никем: отказ, а не пропуск права', async () => {
+    /*
+     * Проверка права была fail-open: нет кассовой стороны — нет и проверки,
+     * отменить мог кто угодно из финансового контура. В правах на деньги
+     * «данных не нашли, поэтому разрешаем» работает наоборот.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const admin = await seedUser(ctx.db, { roles: ['ADMIN'] });
+
+    // Запись с признаком передачи, у которой кассовой стороны нет вовсе.
+    const orphan = await ctx.db.courierLedgerEntry.create({
+      data: {
+        courierUserId: courier,
+        kind: 'CASH_HANDED_TO_LOGIST',
+        amountMinor: -50_000n,
+        operationDate: new Date(`${DAY}T00:00:00.000Z`),
+        actorUserId: admin.id,
+        transferId: randomUUID(),
+        idempotencyKey: unique('orphan-transfer'),
+      },
+      select: { id: true },
+    });
+
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/logistics/ledger/operations/${orphan.id}/reverse`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { reason: 'попытка отмены' },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: orphan.id } })).toBe(
+      0,
+    );
   });
 });
