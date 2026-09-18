@@ -1662,6 +1662,78 @@ describe('передача наличных и касса через маршр�
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
   });
 
+  it('посторонний получает ОДИН ответ и о корректировке, и об обычной записи', async () => {
+    /*
+     * Порядок «сначала вид записи, потом право» был оракулом: подставляя чужие
+     * идентификаторы, посторонний по коду ответа отличал уже отменённую запись
+     * (CONFLICT о корректировке) от обычной (FORBIDDEN) — то есть выяснял
+     * состав чужой кассы, ничего в ней не имея. Оба ответа обязаны совпадать
+     * до последнего слова.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const { token: outsiderToken } = await tokenFor(['LOGISTICIAN']);
+    const desk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const courier = await courierId();
+
+    const cashEntryOf = async (key: string, amount: string): Promise<string> => {
+      const created = await postOperation(adminToken, {
+        courierUserId: courier,
+        kind: 'CASH_HANDED_TO_LOGIST',
+        amountMinor: amount,
+        operationDate: DAY,
+        logistUserId: desk.id,
+        idempotencyKey: unique(key),
+      });
+      expect(created.statusCode).toBe(201);
+      const entry = await ctx.db.logistCashEntry.findFirstOrThrow({
+        where: { logistUserId: desk.id, kind: 'RECEIVED_FROM_COURIER', reversedBy: { is: null } },
+        orderBy: { occurredAt: 'desc' },
+        select: { id: true },
+      });
+      return entry.id;
+    };
+
+    // Обычная запись чужой кассы.
+    const plain = await cashEntryOf('oracle-plain', '40000');
+    // И корректировка в ней же: она рождается отменой другой записи.
+    const reversedSource = await cashEntryOf('oracle-source', '60000');
+    const byOwner = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/logistics/cash/${reversedSource}/reverse`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { reason: 'ошибочная передача' },
+    });
+    expect(byOwner.statusCode).toBe(200);
+    const correction = await ctx.db.logistCashEntry.findFirstOrThrow({
+      where: { reversesEntryId: reversedSource },
+      select: { id: true, kind: true },
+    });
+    expect(correction.kind).toBe('ADJUSTMENT');
+
+    const answers = [];
+    for (const id of [plain, correction.id]) {
+      const response = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/cash/${id}/reverse`,
+        headers: { authorization: `Bearer ${outsiderToken}` },
+        payload: { reason: 'попытка постороннего' },
+      });
+      const error = response.json().error as { code: string; message: string };
+      // Номер запроса у каждого ответа свой — он и должен различаться.
+      answers.push({ status: response.statusCode, code: error.code, message: error.message });
+    }
+    expect(answers[0]).toEqual({
+      status: 403,
+      code: 'FORBIDDEN',
+      message: 'Логист работает только со своей кассой.',
+    });
+    // Ответы совпадают слово в слово: по ним о чужой кассе не узнать ничего.
+    expect(answers[1]).toEqual(answers[0]);
+
+    // И деньги чужой кассы не тронуты: 400 ₽ обычной записи на месте.
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(40_000n);
+  });
+
   it('владелец кассы отменяет СВОЮ передачу из журнала', async () => {
     /*
      * Законный путь: новая проверка права не должна была его закрыть.

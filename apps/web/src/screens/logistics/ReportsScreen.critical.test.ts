@@ -20,16 +20,29 @@ import {
   formatMoney,
   journalColumn,
   rowExtra,
+  SETTLEMENT_COLUMNS,
   signOf,
 } from './ReportsScreen';
 
+/** Столбец по ИМЕНИ заголовка: номера в проверке повторяли бы ошибку кода. */
+const header = (kind: string): string =>
+  SETTLEMENT_COLUMNS[journalColumn(kind) - 1] ?? 'нет такого';
+
 describe('столбец суммы в журнале', () => {
-  it('сумма встаёт под тот столбец, в который вошла итогом дня', () => {
-    // 11 — «Курьер сдал», 12 — «Выдано курьеру», 9 — «Доп.», 10 — «Начислено».
-    expect(journalColumn('CASH_HANDED_TO_LOGIST')).toBe(11);
-    expect(journalColumn('CASH_ISSUED_TO_COURIER')).toBe(12);
-    expect(journalColumn('EXPENSE_PARKING')).toBe(9);
-    expect(journalColumn('BONUS')).toBe(9);
+  it('сумма встаёт под тот заголовок, в чей итог дня она вошла', () => {
+    /*
+     * Проверяется ИМЯ заголовка, а не номер: номер в проверке просто повторил
+     * бы число из кода, и перестановка столбца осталась бы незамеченной обеими
+     * сторонами. Распределение по категориям — то же, что на сервере
+     * (`grouping.ts`): у наличных, оплаты заказа и километров свои столбцы.
+     */
+    expect(header('CASH_RECEIVED')).toBe('Наличные');
+    expect(header('DELIVERY_FEE')).toBe('За заказ');
+    expect(header('DISTANCE_FEE')).toBe('За МКАД');
+    expect(header('EXPENSE_PARKING')).toBe('Доп.');
+    expect(header('BONUS')).toBe('Доп.');
+    expect(header('CASH_HANDED_TO_LOGIST')).toBe('Курьер сдал');
+    expect(header('CASH_ISSUED_TO_COURIER')).toBe('Выдано курьеру');
   });
 
   it('оплачиваемая попытка не встаёт под «Доп.»: там её нет и в расчёте', () => {
@@ -38,8 +51,18 @@ describe('столбец суммы в журнале', () => {
      * иначе удвоилась бы в «Начислено». Стоя под «Доп.», строка журнала не
      * сходилась бы со свёрнутой строкой дня.
      */
-    expect(journalColumn('ATTEMPT_FEE')).toBe(10);
-    expect(journalColumn('ATTEMPT_FEE')).not.toBe(journalColumn('EXPENSE_PARKING'));
+    expect(header('ATTEMPT_FEE')).toBe('Начислено');
+  });
+
+  it('неизвестный вид не выходит за таблицу и не садится на «Итог»', () => {
+    /*
+     * Вид операции приходит с сервера и может быть новее экрана. Номер вне
+     * таблицы дал бы отрицательный colSpan и сломал бы вёрстку всей строки.
+     */
+    const column = journalColumn('ВИД_КОТОРОГО_ЕЩЁ_НЕТ');
+    expect(column).toBeGreaterThan(0);
+    expect(column).toBeLessThan(SETTLEMENT_COLUMNS.length);
+    expect(header('ВИД_КОТОРОГО_ЕЩЁ_НЕТ')).toBe('Доп.');
   });
 });
 

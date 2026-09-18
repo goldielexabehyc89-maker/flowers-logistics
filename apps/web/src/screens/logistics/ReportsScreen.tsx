@@ -227,27 +227,51 @@ export function formatMoney(minor: string): string {
 }
 
 /**
- * В каком столбце показывать сумму операции журнала.
+ * Столбцы таблицы расчётов — ОДИН список на шапку и на журнал.
  *
- * Число встаёт ровно под тот столбец, в который оно вошло итогом дня: расход
- * под «Доп.», сдача под «Курьер сдал», выдача под «Выдано курьеру». Так строку
- * журнала можно сверить со свёрнутой строкой глазами, не считая в уме.
- *
- * Оплачиваемая попытка идёт под «Начислено», а не под «Доп.»: своего столбца
- * у неё в таблице нет, а в «Доп.» её нет и в расчёте — там только расходы и
- * доплаты. Стоя под «Доп.», она не сходилась бы со свёрнутой строкой.
+ * Шапка рисуется отсюда, и номер столбца для суммы журнала считается отсюда же.
+ * Пока номера были вписаны в код числами, они могли разойтись с шапкой при
+ * первой же вставке столбца: суммы уехали бы под соседние заголовки молча.
  */
+export const SETTLEMENT_COLUMNS: readonly string[] = [
+  'Дата',
+  'Курьер',
+  'Листы',
+  'Заказы',
+  'Статус',
+  'Наличные',
+  'За заказ',
+  'За МКАД',
+  'Доп.',
+  'Начислено',
+  'Курьер сдал',
+  'Выдано курьеру',
+  'Итог',
+];
+
+/**
+ * Под каким ЗАГОЛОВКОМ стоит сумма операции журнала.
+ *
+ * Именно заголовком, а не числом: столбцы задаются одним списком, шапка
+ * рисуется из него же, и номер считается по имени. Номера в коде расходились
+ * бы с шапкой при первой же вставке столбца — молча и незаметно.
+ *
+ * Правило одно: операция встаёт под тем столбцом, в чей итог дня она вошла
+ * на сервере (`grouping.ts`). Наличные, оплата заказа и километры имеют свои
+ * столбцы; расходы и доплаты — «Доп.»; у оплачиваемой попытки своего столбца
+ * нет, и она показывается под «Начислено», куда и входит.
+ */
+const JOURNAL_HEADERS: Record<string, string> = {
+  CASH_RECEIVED: 'Наличные',
+  DELIVERY_FEE: 'За заказ',
+  DISTANCE_FEE: 'За МКАД',
+  ATTEMPT_FEE: 'Начислено',
+  CASH_HANDED_TO_LOGIST: 'Курьер сдал',
+  CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
+};
+
 export function journalColumn(kind: string): number {
-  if (kind === 'CASH_HANDED_TO_LOGIST') {
-    return 11;
-  }
-  if (kind === 'CASH_ISSUED_TO_COURIER') {
-    return 12;
-  }
-  if (kind === 'ADJUSTMENT' || kind === 'ATTEMPT_FEE') {
-    return 10;
-  }
-  return 9;
+  return SETTLEMENT_COLUMNS.indexOf(JOURNAL_HEADERS[kind] ?? 'Доп.') + 1;
 }
 
 /**
@@ -916,19 +940,13 @@ export function ReportsScreen(): React.JSX.Element {
                   <table className="reports__table" data-testid="reports-rows">
                     <thead>
                       <tr>
-                        <th>Дата</th>
-                        <th>Курьер</th>
-                        <th>Листы</th>
-                        <th>Заказы</th>
-                        <th>Статус</th>
-                        <th>Наличные</th>
-                        <th>За заказ</th>
-                        <th>За МКАД</th>
-                        <th>Доп.</th>
-                        <th>Начислено</th>
-                        <th>Курьер сдал</th>
-                        <th>Выдано курьеру</th>
-                        <th>Итог</th>
+                        {/*
+                          Шапка рисуется из того же списка, по которому журнал
+                          вычисляет свой столбец: два места разошлись бы.
+                        */}
+                        {SETTLEMENT_COLUMNS.map((name) => (
+                          <th key={name}>{name}</th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -1187,7 +1205,7 @@ export function ReportsScreen(): React.JSX.Element {
                                   <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                   <td
                                     className="reports__detail-reason"
-                                    colSpan={7}
+                                    colSpan={SETTLEMENT_COLUMNS.length - 6}
                                     title={entry.reason ?? undefined}
                                   >
                                     {entry.reason ?? ''}
@@ -1261,7 +1279,7 @@ export function ReportsScreen(): React.JSX.Element {
                                   ошибка ввода.
                                 */}
                                 <td>{formatMoney(absMoney(entry.amountMinor))}</td>
-                                <td colSpan={13 - journalColumn(entry.kind)}>
+                                <td colSpan={SETTLEMENT_COLUMNS.length - journalColumn(entry.kind)}>
                                   {entry.reversed ? (
                                     <span className="muted text-sm">отменена</span>
                                   ) : (

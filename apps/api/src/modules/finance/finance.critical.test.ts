@@ -626,7 +626,7 @@ describe('деньги доставки', () => {
       actorUserId: logist.userId,
       reason: 'ошибочная доставка',
       operationDate: day,
-      scope: 'ALL',
+      scope: 'ATTEMPT',
     });
 
     expect(await balanceOf(ctx.db, courier.userId, null)).toBe(0n);
@@ -666,7 +666,48 @@ describe('деньги доставки', () => {
           idempotencyKey: unique('attempt-fee'),
         }),
       );
+      /*
+       * Живые деньги курьера на той же попытке: парковка, которую он оплатил
+       * из своего кармана, и доплата за сложный адрес. К начислению системы
+       * они отношения не имеют, и ни один повод отмены их не возвращает.
+       */
+      await ctx.db.$transaction(async (tx) => {
+        await appendEntry(tx, {
+          courierUserId: courier.userId,
+          kind: 'EXPENSE_PARKING',
+          amountMinor: 30_000n,
+          operationDate: day,
+          actorUserId: logist.userId,
+          reason: 'парковка у дома клиента',
+          routeId: seeded.routeId,
+          orderId: seeded.orderId,
+          attemptId,
+          idempotencyKey: unique('parking'),
+        });
+        await appendEntry(tx, {
+          courierUserId: courier.userId,
+          kind: 'BONUS',
+          amountMinor: 10_000n,
+          operationDate: day,
+          actorUserId: logist.userId,
+          reason: 'сложный адрес',
+          routeId: seeded.routeId,
+          orderId: seeded.orderId,
+          attemptId,
+          idempotencyKey: unique('bonus'),
+        });
+      });
     };
+
+    /** Непогашенные расходы и доплаты курьера на попытке. */
+    const ownMoneyLeft = (attemptId: string): Promise<number> =>
+      ctx.db.courierLedgerEntry.count({
+        where: {
+          attemptId,
+          kind: { in: ['EXPENSE_PARKING', 'BONUS'] },
+          reversedBy: { is: null },
+        },
+      });
 
     const prepare = async (): Promise<{ attemptId: string }> => {
       const seeded = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 50_000n });
@@ -697,12 +738,14 @@ describe('деньги доставки', () => {
       actorUserId: logist.userId,
       reason: 'результат отменён',
       operationDate: day,
-      scope: 'ALL',
+      scope: 'ATTEMPT',
     });
     const leftAfterResult = await ctx.db.courierLedgerEntry.count({
       where: { attemptId: byResult.attemptId, kind: 'ATTEMPT_FEE', reversedBy: { is: null } },
     });
     expect(leftAfterResult).toBe(0);
+    // Свои деньги курьера отмена результата не забирает: расход он уже понёс.
+    expect(await ownMoneyLeft(byResult.attemptId)).toBe(2);
 
     const byOrder = await prepare();
     await reverseDeliveryAccruals(ctx.db, {
@@ -716,6 +759,7 @@ describe('деньги доставки', () => {
       where: { attemptId: byOrder.attemptId, kind: 'ATTEMPT_FEE', reversedBy: { is: null } },
     });
     expect(leftAfterOrder).toBe(1);
+    expect(await ownMoneyLeft(byOrder.attemptId)).toBe(2);
     // А начисленное системой снято в обоих случаях.
     expect(
       await ctx.db.courierLedgerEntry.count({
@@ -1248,7 +1292,7 @@ describe('наличные в строке отчёта', () => {
       actorUserId: logist.userId,
       reason: 'результат отменён логистом',
       operationDate: day,
-      scope: 'ALL',
+      scope: 'ATTEMPT',
     });
 
     const report = await buildSettlementReport(ctx.db, {

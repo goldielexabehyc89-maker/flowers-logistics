@@ -63,7 +63,19 @@ export interface CashReport {
   offset: number;
   hasMore: boolean;
   /** Кассы, доступные текущему пользователю: список для фильтра. */
-  desks: { id: string; fullName: string; phone: string | null; balanceMinor: string }[];
+  /**
+   * Кассы, доступные текущему пользователю: список для фильтра.
+   *
+   * `balanceMinor` — наличные СЕЙЧАС, `closingMinor` — остаток на конец
+   * выбранного периода. Это разные числа, и подписи у них разные.
+   */
+  desks: {
+    id: string;
+    fullName: string;
+    phone: string | null;
+    balanceMinor: string;
+    closingMinor: string;
+  }[];
 }
 
 function abs(value: bigint): bigint {
@@ -180,12 +192,26 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
     const groups: CashGroup[] = [];
 
     for (const [logistUserId, own] of logists) {
-      const opening = await db.logistCashEntry.aggregate({
-        where: { logistUserId, operationDate: { lt: toDateColumn(date) } },
-        _sum: { amountMinor: true },
-      });
+      /*
+       * Остаток дня считается по ВСЕМ записям кассы, а не по показанным.
+       *
+       * Прежде конец дня складывался из отобранных операций: стоило выбрать
+       * вид или строку поиска — и «конец» показывал остаток, которого никогда
+       * не существовало. Отбор решает, ЧТО показать, а не сколько денег
+       * в кассе.
+       */
+      const [opening, closing] = await Promise.all([
+        db.logistCashEntry.aggregate({
+          where: { logistUserId, operationDate: { lt: toDateColumn(date) } },
+          _sum: { amountMinor: true },
+        }),
+        db.logistCashEntry.aggregate({
+          where: { logistUserId, operationDate: { lte: toDateColumn(date) } },
+          _sum: { amountMinor: true },
+        }),
+      ]);
       const openingMinor = opening._sum.amountMinor ?? 0n;
-      const dayTotal = own.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+      const closingMinor = closing._sum.amountMinor ?? 0n;
       const profile = profiles.get(logistUserId);
 
       groups.push({
@@ -197,7 +223,7 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
         takenMinor: abs(sumOf(own, ['TAKEN_FROM_COMPANY'])).toString(),
         issuedMinor: abs(sumOf(own, ['ISSUED_TO_COURIER'])).toString(),
         handedMinor: abs(sumOf(own, ['HANDED_TO_COMPANY'])).toString(),
-        closingMinor: (openingMinor + dayTotal).toString(),
+        closingMinor: closingMinor.toString(),
         entries: own,
       });
     }
@@ -222,36 +248,54 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
    * Наличные во всех доступных кассах: не сумма периода, а остаток НА СЕЙЧАС.
    * Период фильтрует движения, но деньги в кассе от этого не исчезают.
    */
-  const deskIds = filters.visibleLogistIds ?? (await visibleDeskIds(db));
-  const desks = await Promise.all(
-    deskIds.map(async (id) => {
-      const profile = await db.user.findUnique({
-        where: { id },
-        select: { fullName: true, phone: true },
-      });
-      const balance = await db.logistCashEntry.aggregate({
-        where: { logistUserId: id },
-        _sum: { amountMinor: true },
-      });
-      /*
-       * Остаток НА КОНЕЦ ПЕРИОДА — отдельно от «сейчас».
-       *
-       * Прежде оба показателя считались по всем записям, и отчёт за прошлый
-       * период показывал сегодняшний остаток под подписью «остаток на конец».
-       */
-      const closing = await db.logistCashEntry.aggregate({
-        where: { logistUserId: id, operationDate: { lte: toDateColumn(filters.to) } },
-        _sum: { amountMinor: true },
-      });
-      return {
-        id,
-        fullName: profile?.fullName ?? 'Логист удалён из справочника',
-        phone: profile?.phone ?? null,
-        balanceMinor: (balance._sum.amountMinor ?? 0n).toString(),
-        closingMinor: (closing._sum.amountMinor ?? 0n).toString(),
-      };
+  /*
+   * Кассы итога — те же, что в таблице.
+   *
+   * Выбранная касса сужает и итог: администратор, выбравший логиста, видел над
+   * его таблицей сумму по всем кассам сразу. Граница видимости при этом
+   * остаётся: чужую кассу выбрать нельзя.
+   */
+  const visibleIds = filters.visibleLogistIds ?? (await visibleDeskIds(db));
+  const deskIds =
+    filters.logistUserId === undefined
+      ? visibleIds
+      : visibleIds.filter((id) => id === filters.logistUserId);
+
+  const [deskProfiles, balances, closings] = await Promise.all([
+    db.user.findMany({
+      where: { id: { in: deskIds } },
+      select: { id: true, fullName: true, phone: true },
     }),
-  );
+    /*
+     * Итоги считаются ОДНИМ запросом на все кассы, а не тремя на каждую.
+     * Выгрузки строят отчёт без постраничности, и при двух сотнях касс это
+     * были сотни запросов ради одного числа.
+     */
+    db.logistCashEntry.groupBy({
+      by: ['logistUserId'],
+      where: { logistUserId: { in: deskIds } },
+      _sum: { amountMinor: true },
+    }),
+    // Остаток НА КОНЕЦ ПЕРИОДА — отдельно от «сейчас»: отчёт за прошлый период
+    // показывал бы сегодняшнее число под подписью «остаток на конец».
+    db.logistCashEntry.groupBy({
+      by: ['logistUserId'],
+      where: { logistUserId: { in: deskIds }, operationDate: { lte: toDateColumn(filters.to) } },
+      _sum: { amountMinor: true },
+    }),
+  ]);
+
+  const profileById = new Map(deskProfiles.map((row) => [row.id, row]));
+  const balanceById = new Map(balances.map((row) => [row.logistUserId, row._sum.amountMinor ?? 0n]));
+  const closingById = new Map(closings.map((row) => [row.logistUserId, row._sum.amountMinor ?? 0n]));
+
+  const desks = deskIds.map((id) => ({
+    id,
+    fullName: profileById.get(id)?.fullName ?? 'Логист удалён из справочника',
+    phone: profileById.get(id)?.phone ?? null,
+    balanceMinor: (balanceById.get(id) ?? 0n).toString(),
+    closingMinor: (closingById.get(id) ?? 0n).toString(),
+  }));
 
   /*
    * Ожидается к сдаче: сколько наличных сейчас числится за курьерами.
@@ -267,7 +311,8 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
    * показатель, он навсегда разводил ожидаемую сдачу с тем, что логист
    * действительно может получить, — сверка не сошлась бы никогда.
    */
-  const expected = await db.courierLedgerEntry.aggregate({
+  const expected = await db.courierLedgerEntry.groupBy({
+    by: ['courierUserId'],
     where: {
       operationDate: { lte: toDateColumn(filters.to) },
       /*
@@ -289,10 +334,20 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
     cashOnHandMinor: desks
       .reduce((total, desk) => total + BigInt(desk.balanceMinor), 0n)
       .toString(),
-    expectedFromCouriersMinor: (() => {
-      const value = expected._sum.amountMinor ?? 0n;
-      return (value > 0n ? value : 0n).toString();
-    })(),
+    /*
+     * Считается ПО КАЖДОМУ курьеру и складывается только положительное.
+     *
+     * Одной суммой отрицательный баланс одного курьера гасил наличные другого:
+     * доплата, которую компания должна одному, обнуляла деньги, лежащие в
+     * кармане у второго, — и показатель, ради которого логист открывает кассу,
+     * занижался ровно на эту величину.
+     */
+    expectedFromCouriersMinor: expected
+      .reduce((total, row) => {
+        const value = row._sum.amountMinor ?? 0n;
+        return value > 0n ? total + value : total;
+      }, 0n)
+      .toString(),
     receivedMinor: abs(sumOf(entries, ['RECEIVED_FROM_COURIER'])).toString(),
     takenMinor: abs(sumOf(entries, ['TAKEN_FROM_COMPANY'])).toString(),
     issuedMinor: abs(sumOf(entries, ['ISSUED_TO_COURIER'])).toString(),
@@ -320,5 +375,22 @@ export async function visibleDeskIds(db: Database): Promise<string[]> {
     select: { id: true },
     take: 200,
   });
-  return users.map((user) => user.id);
+
+  /*
+   * Кассы с деньгами не исчезают вместе с кадровым решением.
+   *
+   * Список действующих логистов отвечает на вопрос «кому можно провести
+   * операцию». Но деньги в кассе замороженного или снятого с роли человека
+   * физически существуют, и итог, который их не считает, расходится с
+   * таблицей на том же экране: движения видны, а суммы в них нет.
+   */
+  const withMoney = await db.logistCashEntry.groupBy({
+    by: ['logistUserId'],
+    _sum: { amountMinor: true },
+  });
+  const nonEmpty = withMoney
+    .filter((row) => (row._sum.amountMinor ?? 0n) !== 0n)
+    .map((row) => row.logistUserId);
+
+  return [...new Set([...users.map((user) => user.id), ...nonEmpty])];
 }

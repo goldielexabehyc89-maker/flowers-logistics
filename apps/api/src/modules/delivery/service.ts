@@ -946,9 +946,12 @@ export async function cancelDeliveryResult(
       actorUserId: actor.userId,
       reason: reason ?? 'Отмена результата доставки',
       operationDate: moscowCalendarDate(now),
-      // Попытки больше нет: снимается всё, что на ней висело, включая
-      // оплачиваемую попытку и привязанный к ней расход.
-      scope: 'ALL',
+      /*
+       * Попытки больше нет — снимается оплата ЗА НЕЁ вместе с начисленным
+       * системой. Расход курьера остаётся: парковку он оплатил, и решение
+       * логиста об исправлении результата этих денег не возвращает.
+       */
+      scope: 'ATTEMPT',
     });
 
     const route = await tx.deliveryRoute.findUnique({
