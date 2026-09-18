@@ -15,6 +15,7 @@
  * доставки остаются без начислений, и отчёт помечает их «Расчёт отсутствует».
  */
 
+import type { CourierLedgerKind } from '../../generated/prisma/client.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { appendEntry, accrualKey, reversalKey } from './ledger.js';
@@ -303,12 +304,33 @@ export async function accrueDistanceFee(
  * Исходные записи остаются: по ним видно, что деньги начислялись и почему были
  * сняты. Денежный факт не удаляется — он остаётся историей.
  */
+/**
+ * Виды, которые начисляет САМА система по результату доставки.
+ *
+ * Снимается только это. Расход, доплату или оплачиваемую попытку логист
+ * заводит руками и привязывает к попытке — такую запись отменяет человек, а не
+ * автоматическая отмена заказа: курьер эти деньги уже потратил или заработал,
+ * и отмена заказа в источнике их не возвращает. Молча снимать чужое решение
+ * нельзя — по тому же правилу, по которому не возвращается снятая
+ * корректировка наличных.
+ */
+const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
+  'CASH_RECEIVED',
+  'DELIVERY_FEE',
+  'DISTANCE_FEE',
+  'CASH_PAYMENT_CORRECTION',
+];
+
 export async function reverseDeliveryAccruals(
   tx: TransactionClient,
   input: { attemptId: string; actorUserId: string; reason: string; operationDate: string },
 ): Promise<void> {
   const entries = await tx.courierLedgerEntry.findMany({
-    where: { attemptId: input.attemptId, kind: { not: 'ADJUSTMENT' }, reversedBy: { is: null } },
+    where: {
+      attemptId: input.attemptId,
+      kind: { in: [...ACCRUED_KINDS] },
+      reversedBy: { is: null },
+    },
     select: {
       id: true,
       courierUserId: true,

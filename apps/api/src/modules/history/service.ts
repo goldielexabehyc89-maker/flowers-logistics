@@ -91,6 +91,8 @@ export interface HistoryPayment {
   id: string;
   occurredAt: string;
   kind: string;
+  /** Вид отменяемой операции: по нему история называет отмену своими словами. */
+  reversesKind: string | null;
   amountMinor: string;
   courierName: string;
   actorName: string | null;
@@ -212,6 +214,12 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
       courier: { select: { fullName: true } },
       actor: { select: { fullName: true } },
       reversedBy: { select: { id: true } },
+      /*
+       * Вид отменяемой операции: по нему история называет отмену своими
+       * словами — тем же названием, что отчёт и выгрузка. Без него любая
+       * отмена читалась бы как безымянная «обратная корректировка».
+       */
+      reversesEntry: { select: { kind: true } },
     },
   });
 
@@ -250,6 +258,7 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
         occurredAt: move.occurredAt.toISOString(),
         // Префикс отличает движение кассы от одноимённой записи у курьера.
         kind: `DESK_${move.kind}`,
+        reversesKind: null,
         amountMinor: move.amountMinor.toString(),
         courierName: move.courier?.fullName ?? move.logist.fullName,
         actorName: move.actor.fullName,
@@ -266,6 +275,7 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
         id: payment.id,
         occurredAt: payment.occurredAt.toISOString(),
         kind: payment.kind,
+        reversesKind: payment.reversesEntry?.kind ?? null,
         amountMinor: payment.amountMinor.toString(),
         courierName: payment.courier.fullName,
         actorName: payment.actor.fullName,

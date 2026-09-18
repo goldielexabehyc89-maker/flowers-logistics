@@ -105,13 +105,24 @@ async function idsBySearch(db: Database, search: string): Promise<string[]> {
 export async function buildCashReport(db: Database, filters: CashFilters): Promise<CashReport> {
   const matched = filters.search === undefined ? null : await idsBySearch(db, filters.search);
 
+  /*
+   * Выбранная касса И граница видимости — ОБА условия, а не одно поверх другого.
+   *
+   * Прежде ключ `logistUserId` задавался в литерале дважды, и второй молча
+   * затирал первый: у не-администратора выбор кассы не работал вовсе, а любое
+   * расширение видимости показало бы вместо выбранной кассы все доступные.
+   */
+  const deskFilters = [
+    ...(filters.logistUserId === undefined ? [] : [{ logistUserId: filters.logistUserId }]),
+    ...(filters.visibleLogistIds === null
+      ? []
+      : [{ logistUserId: { in: filters.visibleLogistIds } }]),
+  ];
+
   const where = {
     operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) },
-    ...(filters.logistUserId === undefined ? {} : { logistUserId: filters.logistUserId }),
     ...(filters.kind === undefined ? {} : { kind: filters.kind as 'RECEIVED_FROM_COURIER' }),
-    ...(filters.visibleLogistIds === null
-      ? {}
-      : { logistUserId: { in: filters.visibleLogistIds } }),
+    ...(deskFilters.length === 0 ? {} : { AND: deskFilters }),
     // Поиск ищет и по логисту, и по курьеру: человек помнит любого из двоих.
     ...(matched === null
       ? {}
@@ -237,8 +248,19 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
    * Это остаток по учёту курьеров, а не движение кассы: пока деньги не
    * переданы, ни в одной кассе их нет.
    */
+  /*
+   * Сколько НАЛИЧНЫХ ещё числится за курьерами.
+   *
+   * Начальный долг сюда не входит: это долг до перехода на ERP, за которым
+   * наличных не стоит вовсе, и его нельзя «сдать в кассу». Попав в этот
+   * показатель, он навсегда разводил ожидаемую сдачу с тем, что логист
+   * действительно может получить, — сверка не сошлась бы никогда.
+   */
   const expected = await db.courierLedgerEntry.aggregate({
-    where: { operationDate: { lte: toDateColumn(filters.to) } },
+    where: {
+      operationDate: { lte: toDateColumn(filters.to) },
+      kind: { not: 'OPENING_DEBT' },
+    },
     _sum: { amountMinor: true },
   });
 
@@ -254,6 +276,14 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
     takenMinor: abs(sumOf(entries, ['TAKEN_FROM_COMPANY'])).toString(),
     issuedMinor: abs(sumOf(entries, ['ISSUED_TO_COURIER'])).toString(),
     handedMinor: abs(sumOf(entries, ['HANDED_TO_COMPANY'])).toString(),
+    /*
+     * Остаток на конец периода — он же наличные в кассах сейчас.
+     *
+     * Это одно и то же число под двумя подписями: остаток кассы накопительный
+     * и считается по всем её записям. Разными они станут, только если начать
+     * считать остаток на дату; пока этого нет, честнее называть их вместе,
+     * чем делать вид, что показателя два.
+     */
     closingMinor: desks.reduce((total, desk) => total + BigInt(desk.balanceMinor), 0n).toString(),
   };
 

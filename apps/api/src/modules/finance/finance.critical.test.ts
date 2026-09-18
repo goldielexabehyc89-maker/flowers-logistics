@@ -1027,7 +1027,7 @@ describe('группировка отчёта', () => {
     const notes: string[] = [];
     sheet?.eachRow((row) => {
       if (String(row.getCell(1).value ?? '') === 'Заказ') {
-        notes.push(String(row.getCell(22).value ?? ''));
+        notes.push(String(row.getCell(23).value ?? ''));
       }
     });
 

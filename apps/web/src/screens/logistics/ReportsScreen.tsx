@@ -110,6 +110,7 @@ interface CourierGroup {
   extraExpensesMinor: string;
   handedMinor: string;
   issuedMinor: string;
+  openingDebtMinor: string;
   accruedMinor: string;
   totalMinor: string;
   settlementMissing: boolean;
@@ -160,6 +161,15 @@ interface OperationalReport {
 
 /** Сколько групп «день + курьер» показывать за раз. */
 const GROUPS_PER_PAGE = 25;
+
+/**
+ * Предел, согласованный с сервером (`SETTLEMENT_GROUPS_LIMIT`).
+ *
+ * Страница наращивает `limit`, не двигая `offset`, поэтому дальше этого числа
+ * групп показать нечем. Упереться молча нельзя: человек должен понимать, что
+ * видит не весь период, и сузить срок.
+ */
+const GROUPS_LIMIT = 1000;
 
 /**
  * Что заводится прямо из ячейки таблицы.
@@ -447,7 +457,7 @@ export function ReportsScreen(): React.JSX.Element {
     }
     if (withPaging) {
       // Страница считается ГРУППАМИ: группа курьера не делится между страницами.
-      search.set('limit', String(GROUPS_PER_PAGE * pages));
+      search.set('limit', String(Math.min(GROUPS_PER_PAGE * pages, GROUPS_LIMIT)));
       search.set('offset', '0');
     }
     return search.toString();
@@ -747,20 +757,34 @@ export function ReportsScreen(): React.JSX.Element {
               периода лежат рядом в своём лотке.
             */}
             <div className="reports__totals">
+              {/*
+                Баланс существует только у КОНКРЕТНОГО курьера.
+
+                Без отбора начальный баланс сервер отдаёт нулём, и «конечный
+                баланс» превращался в изменение за период, подписанное словами
+                «курьер должен компании». При ненулевых входящих сальдо это
+                прямая дезинформация о направлении долга — поэтому без курьера
+                показывается изменение и называется изменением.
+              */}
               <div className="reports__balance" data-testid="reports-balance">
                 <span className="reports__balance-title">
-                  Конечный баланс
-                  {courierName === null ? '' : ` · ${courierName}`}
+                  {courierName === null
+                    ? 'Изменение за период · все курьеры'
+                    : `Конечный баланс · ${courierName}`}
                 </span>
                 <span className="reports__balance-value" data-testid="reports-closing">
                   {formatMoney(settlements.data.totals.closingBalanceMinor)}
                 </span>
                 <span className="reports__balance-words">
-                  {debtWords(settlements.data.totals.closingBalanceMinor)}
+                  {courierName === null
+                    ? 'выберите курьера, чтобы увидеть его баланс'
+                    : debtWords(settlements.data.totals.closingBalanceMinor)}
                 </span>
-                <span className="reports__balance-opening">
-                  Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
-                </span>
+                {courierName === null ? null : (
+                  <span className="reports__balance-opening">
+                    Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
+                  </span>
+                )}
               </div>
 
               <div className="reports__metrics">
@@ -950,6 +974,19 @@ export function ReportsScreen(): React.JSX.Element {
                                   периода, а в выгрузке число сохраняется.
                                 */}
                                 {formatMoney(group.totalMinor)}
+                                {/*
+                                  Начальный долг не попадает ни в один столбец:
+                                  он не заработок и не движение наличных. Но в
+                                  итог дня входит, и без пояснения строка
+                                  показывала бы нули во всех столбцах при
+                                  ненулевом итоге.
+                                */}
+                                {BigInt(group.openingDebtMinor) !== 0n ? (
+                                  <span className="muted text-sm">
+                                    {' '}
+                                    в т. ч. начальный долг {formatMoney(group.openingDebtMinor)}
+                                  </span>
+                                ) : null}
                                 {group.settlementMissing ? (
                                   <span className="reports__missing"> Расчёт отсутствует</span>
                                 ) : null}
@@ -1205,14 +1242,20 @@ export function ReportsScreen(): React.JSX.Element {
                   </table>
                 </div>
 
-                {settlements.data.hasMore && (
-                  <Button
-                    data-testid="reports-more"
-                    onClick={() => setPages((current) => current + 1)}
-                  >
-                    Показать ещё
-                  </Button>
-                )}
+                {settlements.data.hasMore &&
+                  (GROUPS_PER_PAGE * pages < GROUPS_LIMIT ? (
+                    <Button
+                      data-testid="reports-more"
+                      onClick={() => setPages((current) => current + 1)}
+                    >
+                      Показать ещё
+                    </Button>
+                  ) : (
+                    <p className="reports__notice" role="status" data-testid="reports-limit">
+                      Показаны первые {GROUPS_LIMIT} групп «день + курьер». Дальше отчёт не
+                      листается — выберите более короткий срок или отдельного курьера.
+                    </p>
+                  ))}
               </>
             )}
           </>

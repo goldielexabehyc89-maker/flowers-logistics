@@ -114,6 +114,14 @@ export interface CourierGroup {
   /** Деньги, выданные курьеру логистом за день. */
   issuedMinor: string;
   /**
+   * Начальный долг, заведённый в этот день.
+   *
+   * Отдельным показателем, а не столбцом: это не заработок и не движение
+   * наличных. Но в итог дня он входит, и без него строка группы показывала бы
+   * нули во всех столбцах при ненулевом итоге — объяснить его было бы нечем.
+   */
+  openingDebtMinor: string;
+  /**
    * Всё, что начислено курьеру за день: доставки, километры, попытки и
    * дополнительные расходы. Именно эта величина стоит в столбце «Начислено».
    */
@@ -178,6 +186,7 @@ export function groupSettlement(
       extraExpensesMinor: '0',
       handedMinor: '0',
       issuedMinor: '0',
+      openingDebtMinor: '0',
       accruedMinor: '0',
       totalMinor: '0',
       settlementMissing: false,
@@ -260,6 +269,7 @@ export function groupSettlement(
       ).toString();
       group.handedMinor = changeOf(journal, ['CASH_HANDED_TO_LOGIST']).toString();
       group.issuedMinor = changeOf(journal, ['CASH_ISSUED_TO_COURIER']).toString();
+      group.openingDebtMinor = changeOf(journal, ['OPENING_DEBT']).toString();
 
       group.accruedMinor = (
         BigInt(group.deliveryFeesMinor) +

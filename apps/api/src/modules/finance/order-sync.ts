@@ -239,6 +239,23 @@ export async function stripCancelledOrderFinance(
   // параллельная доставка зафиксировала свои начисления, иначе снимать нечего.
   await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
 
+  /*
+   * Заказ обязан быть отменён ПРЯМО СЕЙЧАС, а не в момент постановки задания.
+   *
+   * Задание выполняется отдельно и при неудачах откладывается с отсрочкой до
+   * пятнадцати минут. За это время отмену в источнике успевают снять: заказ
+   * возвращается в работу, и снимать его деньги уже не за что. Соседние
+   * обработчики эту проверку делают (`applyCashPaymentCorrection`,
+   * `accrueDeliveryResult`), а снятие — не делало.
+   */
+  const order = await tx.deliveryOrder.findUnique({
+    where: { id: input.orderId },
+    select: { cancelledInSource: true },
+  });
+  if (order === null || !order.cancelledInSource) {
+    return false;
+  }
+
   const entries = await tx.courierLedgerEntry.findMany({
     where: {
       orderId: input.orderId,

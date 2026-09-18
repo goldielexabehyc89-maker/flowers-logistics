@@ -77,9 +77,19 @@ const periodSchema = z.object({
   courierUserId: z.string().uuid().optional(),
 });
 
-/** Постраничность отчёта считается ГРУППАМИ «день + курьер», а не строками. */
+/**
+ * Постраничность отчёта считается ГРУППАМИ «день + курьер», а не строками.
+ *
+ * Предел согласован с экраном: он просит по 25 групп за нажатие и наращивает
+ * `limit`, не двигая `offset`. При потолке 200 девятое нажатие «Показать ещё»
+ * получало отказ проверки, и период с бо́льшим числом групп досмотреть до конца
+ * было нельзя вовсе. Потолок остаётся — он защищает ответ от неограниченного
+ * роста, — но экран о него не спотыкается и честно говорит, когда упёрся.
+ */
+const SETTLEMENT_GROUPS_LIMIT = 1000;
+
 const settlementQuerySchema = periodSchema.extend({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: z.coerce.number().int().min(1).max(SETTLEMENT_GROUPS_LIMIT).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
 
@@ -1274,21 +1284,22 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         if (source === null) {
           throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
         }
-        // Логист отменяет только в своей кассе.
-        resolveDeskOwner(actor, source.logistUserId);
-
         /*
          * Обратную запись отменить нельзя — и у передачи тоже.
          *
-         * У обратной записи передачи есть `transferId`, и маршрут уходил в
-         * отмену передачи мимо собственного запрета: человек отменял
-         * корректировку, а получал сообщение про уже отменённую операцию.
+         * Стоит ДО проверки права на кассу: иначе человек отменял
+         * корректировку, а слышал, что у его роли нет своей кассы. Отвечать
+         * нужно на то, что он сделал. Тот же порядок — в отмене операции
+         * журнала.
          */
         if (source.kind === 'ADJUSTMENT') {
           throw new AppError('CONFLICT', {
             publicMessage: 'Корректировку нельзя отменить: заведите новую операцию с причиной.',
           });
         }
+
+        // Логист отменяет только в своей кассе.
+        resolveDeskOwner(actor, source.logistUserId);
 
         /*
          * Общая очередь обеих сторон передачи — тот же ключ и тот же порядок
@@ -1318,10 +1329,17 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
          * `reverseCash` отвечал отказом: одна и та же кнопка давала то тост
          * «записано», то красную ошибку — в зависимости от вида записи.
          * Отмена бывает один раз, и повтор возвращает её же.
+         *
+         * Ранний выход — только для записи БЕЗ передачи. У передачи сначала
+         * отрабатывает `reverseTransfer`: он идемпотентен и дочиняет половину,
+         * если вторая сторона почему-то осталась неотменённой. Выйти раньше
+         * него значило бы ответить «успех» о неполной отмене.
          */
-        const already = await cashEntryByIdempotencyKey(tx, `cash-reversal:${id}`);
-        if (already !== null) {
-          return already;
+        if (source.transferId === null) {
+          const already = await cashEntryByIdempotencyKey(tx, `cash-reversal:${id}`);
+          if (already !== null) {
+            return already;
+          }
         }
 
         const reversedNow =
@@ -1383,13 +1401,15 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
        * этой очереди он не защищает. Человеку отвечаем тем же, что и на
        * обычный повтор, а не невнятным отказом сервера.
        */
-      if (
-        !isUniqueViolation(error) ||
-        (await cashEntryByIdempotencyKey(deps.db, `cash-reversal:${id}`)) === null
-      ) {
+      if (!isUniqueViolation(error)) {
         throw error;
       }
-      throw new AppError('CONFLICT', { publicMessage: 'Эта операция кассы уже отменена.' });
+      const winner = await cashEntryByIdempotencyKey(deps.db, `cash-reversal:${id}`);
+      if (winner === null) {
+        throw error;
+      }
+      // Тот же ответ, что и у обычного повтора: отмена одна, и она вот эта.
+      entry = winner;
     }
 
     return { entry };

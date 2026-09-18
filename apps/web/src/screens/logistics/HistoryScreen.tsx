@@ -12,7 +12,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { formatMoscowDateTime, formatMoscowTime } from '@fl/shared';
+import { formatMoscowDateTime, formatMoscowTime, ledgerEntryTitle } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
 import {
   Button,
@@ -43,6 +43,8 @@ interface HistoryPayment {
   id: string;
   occurredAt: string;
   kind: string;
+  /** Вид отменяемой операции: по нему отмена называется своими словами. */
+  reversesKind: string | null;
   amountMinor: string;
   courierName: string;
   actorName: string | null;
@@ -83,28 +85,6 @@ interface HistoryDetails {
 }
 
 const PAGE_SIZE = 20;
-
-/** Названия денежных операций в истории. */
-const PAYMENT_LABELS: Record<string, string> = {
-  EXPENSE_PARKING: 'Дополнительный расход',
-  EXPENSE_TOLL: 'Дополнительный расход',
-  EXPENSE_TRANSIT: 'Дополнительный расход',
-  EXPENSE_REPAIR: 'Дополнительный расход',
-  EXPENSE_LOADING: 'Дополнительный расход',
-  EXPENSE_OTHER: 'Дополнительный расход',
-  BONUS: 'Дополнительный расход',
-  ATTEMPT_FEE: 'Дополнительный расход',
-  CASH_HANDED_TO_LOGIST: 'Курьер сдал',
-  CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
-  ADJUSTMENT: 'Обратная корректировка',
-  OPENING_DEBT: 'Начальный долг',
-  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
-  DESK_RECEIVED_FROM_COURIER: 'Касса: получено от курьера',
-  DESK_ISSUED_TO_COURIER: 'Касса: выдано курьеру',
-  DESK_TAKEN_FROM_COMPANY: 'Касса: взято из компании',
-  DESK_HANDED_TO_COMPANY: 'Касса: сдано в компанию',
-  DESK_ADJUSTMENT: 'Касса: обратная корректировка',
-};
 
 /** Готовые периоды отбора: день, неделя, месяц назад от сегодняшнего дня. */
 const HISTORY_PERIODS = [
@@ -435,9 +415,7 @@ export function HistoryScreen(): React.JSX.Element {
                         <span className="history__event-time">
                           {formatMoscowTime(payment.occurredAt)}
                         </span>
-                        <span className="history__event-label">
-                          {PAYMENT_LABELS[payment.kind] ?? payment.kind}
-                        </span>
+                        <span className="history__event-label">{ledgerEntryTitle(payment)}</span>
                         <span className="history__payment-amount">
                           {money(payment.amountMinor)}
                         </span>

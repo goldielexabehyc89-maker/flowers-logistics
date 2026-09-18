@@ -96,6 +96,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Начислено, ₽', key: 'accrued', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Курьер сдал, ₽', key: 'handed', width: 16, style: { numFmt: '#,##0.00' } },
     { header: 'Выдано курьеру, ₽', key: 'issued', width: 18, style: { numFmt: '#,##0.00' } },
+    { header: 'Начальный долг, ₽', key: 'debt', width: 18, style: { numFmt: '#,##0.00' } },
     { header: 'Итог, ₽', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Примечание', key: 'note', width: 24 },
   ];
@@ -124,6 +125,9 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
         accrued: toRubles(group.accruedMinor),
         handed: toRubles(group.handedMinor),
         issued: toRubles(group.issuedMinor),
+        // Начальный долг не попадает ни в один столбец заработка и наличных,
+        // но входит в итог дня: без него итог нечем объяснить.
+        debt: toRubles(group.openingDebtMinor),
         total: toRubles(group.totalMinor),
         note: group.settlementMissing ? 'Расчёт отсутствует' : '',
       }).font = { bold: true };

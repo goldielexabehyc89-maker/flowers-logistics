@@ -780,23 +780,22 @@ describe('отмена до доставки', () => {
     expect(restored.cancelledInSource).toBe(false);
 
     /*
-     * У вернувшегося в работу заказа появляются новые деньги: логист оплатил
-     * курьеру попытку. Это обычная ручная операция, привязанная к доставке.
+     * У вернувшегося в работу заказа появляются новые деньги: Valhalla
+     * ответила позже доставки, и система начислила километры за МКАД.
      */
-    const logist = await actorFor(['LOGISTICIAN']);
     const attemptId = await activeAttemptOf(scenario);
     await ctx.db.$transaction((tx) =>
       appendEntry(tx, {
         courierUserId: scenario.courierId,
-        kind: 'ATTEMPT_FEE',
+        kind: 'DISTANCE_FEE',
         amountMinor: 20_000n,
         operationDate: DAY,
-        actorUserId: logist.userId,
-        reason: 'оплачиваемая попытка после возврата заказа в работу',
+        actorUserId: scenario.courierId,
+        reason: 'километры за МКАД после возврата заказа в работу',
         routeId: scenario.routeId,
         orderId: scenario.orderId,
         attemptId,
-        idempotencyKey: unique('attempt-fee'),
+        idempotencyKey: unique('distance-late'),
       }),
     );
     expect(await contribution(scenario.orderId)).toBe(-20_000n);
@@ -847,8 +846,46 @@ describe('отмена до доставки', () => {
     // Исходные записи целы, снятие сделано обратными: 3 начисления — 3 отмены.
     expect(await entryCount(scenario.orderId, 'CASH_RECEIVED')).toBe(1);
     expect(await entryCount(scenario.orderId, 'DELIVERY_FEE')).toBe(1);
-    expect(await entryCount(scenario.orderId, 'ATTEMPT_FEE')).toBe(1);
+    expect(await entryCount(scenario.orderId, 'DISTANCE_FEE')).toBe(1);
     expect(await entryCount(scenario.orderId, 'ADJUSTMENT')).toBe(3);
+  });
+
+  it('отмена заказа не снимает ручную операцию логиста', async () => {
+    /*
+     * Снимается только то, что система начислила сама по результату доставки.
+     * Расход курьера логист одобрил руками — эти деньги уже потрачены, и
+     * отмена заказа в источнике их не возвращает. Снимать чужое решение молча
+     * нельзя: отменить его вправе тот же человек, отдельным действием.
+     */
+    const scenario = await seedScenario({ sum: 300_000, payedSum: 0, perOrderMinor: 20_000n });
+    await deliver(scenario);
+
+    const logist = await actorFor(['LOGISTICIAN']);
+    const attemptId = await activeAttemptOf(scenario);
+    await ctx.db.$transaction((tx) =>
+      appendEntry(tx, {
+        courierUserId: scenario.courierId,
+        kind: 'EXPENSE_PARKING',
+        amountMinor: 15_000n,
+        operationDate: DAY,
+        actorUserId: logist.userId,
+        reason: 'парковка у адреса, одобрено логистом',
+        routeId: scenario.routeId,
+        orderId: scenario.orderId,
+        attemptId,
+        idempotencyKey: unique('manual-expense'),
+      }),
+    );
+
+    await syncSource(scenario, { sum: 300_000, payedSum: 0, cancelled: true });
+    expect(await runQueue(new Date(`${DAY}T13:00:00.000Z`), scenario)).toBe(1);
+
+    // Начисления доставки сняты, а одобренный расход остался действующим.
+    expect(await sumKind(scenario.orderId, 'CASH_RECEIVED')).toBe(0n);
+    expect(await sumKind(scenario.orderId, 'DELIVERY_FEE')).toBe(0n);
+    expect(await sumKind(scenario.orderId, 'EXPENSE_PARKING')).toBe(-15_000n);
+    // Вклад заказа — ровно этот расход, и ничего больше.
+    expect(await contribution(scenario.orderId)).toBe(-15_000n);
   });
 });
 
@@ -1215,7 +1252,8 @@ describe('один набор данных: журнал → API → дни → 
     expect(dayRow?.getCell(17).value).toBe(150); // Доп.
     expect(dayRow?.getCell(18).value).toBe(950); // Начислено
     expect(dayRow?.getCell(19).value).toBe(2000); // Курьер сдал
-    expect(dayRow?.getCell(21).value).toBe(3050); // Итог
+    expect(dayRow?.getCell(21).value).toBe(1000); // Начальный долг
+    expect(dayRow?.getCell(22).value).toBe(3050); // Итог
 
     /*
      * Строка заказа: её «Доп.» и «Начислено» обязаны нести привязанный
@@ -1229,7 +1267,7 @@ describe('один набор данных: журнал → API → дни → 
     expect(orderRow?.getCell(16).value).toBe(500); // За МКАД, ₽
     expect(orderRow?.getCell(17).value).toBe(50); // Доп. строки: расход попытки
     expect(orderRow?.getCell(18).value).toBe(850); // Начислено строки
-    expect(orderRow?.getCell(21).value).toBe(4150); // Итог строки
+    expect(orderRow?.getCell(22).value).toBe(4150); // Итог строки
 
     /*
      * 6. PDF. Проверяются те самые подписи и суммы, что уходят на бумагу.

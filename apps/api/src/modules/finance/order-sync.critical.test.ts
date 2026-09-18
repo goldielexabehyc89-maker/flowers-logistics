@@ -304,6 +304,20 @@ async function seedAttemptFor(delivery: Delivery): Promise<string> {
   return attempt.id;
 }
 
+/**
+ * Источник отменил заказ.
+ *
+ * Отметку ставит тот же импорт, что и в проде: снятие денег выполняется
+ * заданием и перепроверяет признак — состояния «задание есть, а заказ не
+ * отменён» в продукте не бывает, и проверять функцию в нём бессмысленно.
+ */
+async function cancelInSource(delivery: Delivery): Promise<void> {
+  await ctx.db.deliveryOrder.update({
+    where: { id: delivery.orderId },
+    data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
+  });
+}
+
 async function payInSource(delivery: Delivery, payed: bigint): Promise<void> {
   const order = await ctx.db.deliveryOrder.findUniqueOrThrow({
     where: { id: delivery.orderId },
@@ -788,6 +802,7 @@ describe('отмена в источнике исключает заказ из 
     const balanceBefore = await balanceOf(ctx.db, delivery.courierId, null);
     expect(balanceBefore).toBe(500_000n - 20_000n - 10_000n);
 
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -818,6 +833,8 @@ describe('отмена в источнике исключает заказ из 
     // Осталось 2 000 ₽ наличных.
     expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(200_000n);
 
+    await cancelInSource(delivery);
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -832,6 +849,7 @@ describe('отмена в источнике исключает заказ из 
 
   it('повторная отмена ничего не меняет', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
+    await cancelInSource(delivery);
     const strip = (): Promise<boolean> =>
       ctx.db.$transaction((tx) =>
         stripCancelledOrderFinance(tx, {
@@ -849,8 +867,42 @@ describe('отмена в источнике исключает заказ из 
     expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(0n);
   });
 
+  it('отмену успели снять до выполнения задания — деньги остаются на месте', async () => {
+    /*
+     * Задание выполняется отдельно и при неудачах откладывается с отсрочкой до
+     * пятнадцати минут. За это время отмену в источнике успевают снять: заказ
+     * возвращается в работу, и снимать его деньги уже не за что. Соседние
+     * обработчики признак перепроверяют, а снятие — не перепроверяло.
+     */
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
+    const before = await balanceOf(ctx.db, delivery.courierId, null);
+
+    await cancelInSource(delivery);
+    // Отмену сняли ДО того, как задание дошло до очереди.
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: false, cancelledInSourceAt: null },
+    });
+
+    const changed = await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${NEXT_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    expect(changed).toBe(false);
+    expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(before);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: delivery.orderId, kind: 'ADJUSTMENT' },
+      }),
+    ).toBe(0);
+  });
+
   it('оплата, пришедшая после отмены, оставляет результат нулевым', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 0n });
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -902,6 +954,7 @@ describe('отмена в источнике исключает заказ из 
 
     const untouched = 700_00n - 100_00n;
 
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -1218,13 +1271,13 @@ describe('выгрузка показывает корректировки, а �
       const level = String(row.getCell(1).value ?? '');
       if (level === 'Заказ') {
         orderRows.push({
-          total: row.getCell(21).value,
-          note: String(row.getCell(22).value ?? ''),
+          total: row.getCell(22).value,
+          note: String(row.getCell(23).value ?? ''),
           date: row.getCell(2).value,
         });
       }
       if (level === 'Итог дня') {
-        dayRows.push({ total: row.getCell(21).value, date: row.getCell(2).value });
+        dayRows.push({ total: row.getCell(22).value, date: row.getCell(2).value });
       }
     });
 
