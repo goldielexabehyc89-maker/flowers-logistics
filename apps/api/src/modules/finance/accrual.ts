@@ -222,6 +222,14 @@ export async function accrueDeliveryResult(
 }
 
 export interface DistanceFeeInput {
+  /**
+   * Догоняющее начисление: расстояние пришло ПОСЛЕ доставки.
+   *
+   * Отличает поздний ответ маршрутизатора от уточнения уже готового расчёта.
+   * Первое начисляет, второе — нет: уточнение меняет деньги только решением
+   * человека.
+   */
+  catchUp?: boolean;
   attemptId: string;
   routeOrderId: string;
   routeId: string;
@@ -286,6 +294,34 @@ export async function accrueDistanceFee(
     return;
   }
 
+  /*
+   * Догоняющее начисление существует ровно для одного случая: расстояния на
+   * момент доставки НЕ БЫЛО (маршрутизатор не ответил), и оно пришло позже.
+   *
+   * Рассчитанный ноль — это завершённый расчёт, а не его отсутствие: адрес
+   * внутри МКАД. Позднее уточнение такого расчёта — то же самое уточнение, что
+   * и у ненулевых километров, а деньги по нему меняет только решение человека.
+   * Иначе одно правило действовало при ненулевых километрах, а другое — при
+   * нулевых: автоматика начисляла 800 ₽ днём доставки, никого не спросив.
+   *
+   * Признак — история снимков: они не удаляются, а гасятся, поэтому «был ли
+   * расчёт к моменту доставки» читается прямо.
+   */
+  if (input.catchUp === true) {
+    const attempt = await tx.deliveryAttempt.findUnique({
+      where: { id: input.attemptId },
+      select: { occurredAt: true },
+    });
+    const settledAtDelivery =
+      attempt !== null &&
+      (await tx.routeOrderDistance.count({
+        where: { routeOrderId: input.routeOrderId, capturedAt: { lte: attempt.occurredAt } },
+      })) > 0;
+    if (settledAtDelivery) {
+      return;
+    }
+  }
+
   const distance = await tx.routeOrderDistance.findFirst({
     where: { routeOrderId: input.routeOrderId, activeKey: { not: null } },
     select: { roundedKmTenths: true },
@@ -311,6 +347,9 @@ export async function accrueDistanceFee(
     routeId: input.routeId,
     orderId: input.orderId,
     attemptId: input.attemptId,
+    // Километры сохраняются вместе с суммой: восстановить их делением нельзя —
+    // сумма округлена, и при дробной ставке обратная формула ошибается.
+    distanceKmTenths: distance.roundedKmTenths,
     idempotencyKey: accrualKey(input.attemptId, 'DISTANCE_FEE'),
   });
 }
@@ -410,27 +449,19 @@ export async function restateDistanceFee(
    * не возвращает. Правка километров в этом состоянии завела бы оплату одних
    * километров — заказ, за который заплачены только они, и ничего больше.
    *
-   * Признак — ФАКТ СНЯТИЯ, а не «все начисления отменены». Второе бывает и
-   * при обычной работе: у полностью оплаченного заказа с нулевой ставкой за
-   * заказ единственным начислением остаются километры, и правка их в ноль
-   * делала «все отменены» истинным. Дальше правка в 20 км уже не начисляла
-   * ничего: в отчёте стояли 20 км и 0 ₽ вместо 800 ₽.
-   *
-   * Снятие выполняет только `stripCancelledOrderFinance`, и каждое такое
-   * событие отмечено номером отмены заказа. Без единой отмены снимать было
-   * нечему, что бы ни показывал журнал.
+   * Признак — ПРИЧИНА отмены записей ЭТОЙ попытки, а не состояние журнала и не
+   * счётчик отмен заказа. Оба предыдущих признака были ложными: «все начисления
+   * погашены» истинно и при обычной правке километров в ноль, а счётчик отмен
+   * относится ко всей истории заказа — из-за него старая отмена блокировала
+   * километры НОВОЙ, законной доставки того же заказа.
    */
   const stripped =
-    routeOrder.order.cancellationCount > 0 &&
-    (await (async () => {
-      const systemAccruals = await tx.courierLedgerEntry.findMany({
-        where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] } },
-        select: { id: true, reversedBy: { select: { id: true } } },
-      });
-      return (
-        systemAccruals.length > 0 && systemAccruals.every((entry) => entry.reversedBy !== null)
-      );
-    })());
+    (await tx.courierLedgerEntry.count({
+      where: { attemptId: attempt.id, reversalCause: 'ORDER_CANCELLED' },
+    })) > 0 &&
+    (await tx.courierLedgerEntry.count({
+      where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] }, reversedBy: { is: null } },
+    })) === 0;
   if (stripped) {
     return false;
   }
@@ -462,6 +493,7 @@ export async function restateDistanceFee(
       actorUserId: input.actorUserId,
       reason: input.reason,
       operationDate,
+      cause: 'DISTANCE_RESTATED',
     });
   }
 
@@ -476,6 +508,7 @@ export async function restateDistanceFee(
       routeId: routeOrder.route.id,
       orderId: routeOrder.order.id,
       attemptId: attempt.id,
+      distanceKmTenths: distance?.roundedKmTenths ?? 0,
       /*
        * Ключ: базовый, пока он свободен, дальше — по СНИМКУ расстояния.
        *
@@ -573,6 +606,11 @@ export async function reverseDeliveryAccruals(
         orderId: entry.orderId,
         attemptId: entry.attemptId,
         reversesEntryId: entry.id,
+        /*
+         * Повод называется прямо: по нему потом видно, что финансовый результат
+         * этой попытки СНЯТ, а не просто исправлен человеком.
+         */
+        reversalCause: input.scope === 'SYSTEM' ? 'ORDER_CANCELLED' : 'RESULT_CANCELLED',
         idempotencyKey: reversalKey(entry.id),
       },
     });

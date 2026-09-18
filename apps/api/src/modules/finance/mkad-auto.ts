@@ -301,6 +301,8 @@ export function createMkadDistanceHandler(deps: MkadDistanceHandlerDeps): Outbox
       });
       if (snapshot !== null) {
         await accrueDistanceFee(tx, {
+          // Этот путь — именно догоняющий: он идёт уже после доставки.
+          catchUp: true,
           attemptId: attempt.id,
           routeOrderId,
           routeId: ro.route.id,

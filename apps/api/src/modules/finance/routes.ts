@@ -865,6 +865,8 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${id}`})::bigint)`;
 
         const { entry: created, created: isNewReversal } = await reverseLedgerEntry(tx, {
+          // Отмена из журнала — всегда решение человека, с его причиной.
+          cause: 'MANUAL',
           entryId: id,
           actorUserId: actor.userId,
           reason: body.reason,
@@ -1119,6 +1121,8 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${id}`})::bigint)`;
 
         const { entry: created, created: isNewReversal } = await reverseLedgerEntry(tx, {
+          // Отмена из журнала — всегда решение человека, с его причиной.
+          cause: 'MANUAL',
           entryId: id,
           actorUserId: actor.userId,
           reason: body.reason,

@@ -300,12 +300,32 @@ export async function buildSettlementReport(
   const journalEntries = entries.filter((entry) => !takenByRows.has(entry.id));
 
   /*
-   * Сколько километров ОПЛАЧЕНО этой попытке — по всем дням сразу.
+   * Километры и деньги строки — ОДНОГО временного среза.
    *
-   * Деньги за километры живут в журнале и могут быть исправлены в другой день,
-   * чем день доставки: корректировка датируется днём исправления. Поэтому
-   * оплаченное считается по попытке целиком, а не по записям одного дня, —
-   * иначе строка снова разошлась бы со своими деньгами.
+   * Деньги строки берутся из проводок её дня, поэтому и километры обязаны
+   * браться оттуда же: они хранятся в самой записи начисления. Прежде строка
+   * считала их по всем дням сразу — и день доставки после вчерашней правки
+   * показывал «20 км · 500 ₽», арифметику, не сходящуюся ни с чем.
+   *
+   * Восстанавливать километры делением суммы на ставку нельзя: сумма уже
+   * округлена, и при ставке 40,01 ₽/км 12,5 км превращались в 12,4.
+   */
+  const kmOfDay = (own: readonly LedgerEntryView[]): number | null => {
+    const withKm = own.filter(
+      (entry) => entry.kind === 'DISTANCE_FEE' && entry.distanceKmTenths !== null,
+    );
+    if (withKm.length === 0) {
+      return null;
+    }
+    return withKm.reduce((total, entry) => total + (entry.distanceKmTenths ?? 0), 0);
+  };
+
+  /*
+   * Сколько километров ОПЛАЧЕНО этой попытке сейчас — по всем дням.
+   *
+   * Нужно не строке, а пометке: расхождение текущего расчёта с оплаченным
+   * означает, что деньги не соответствуют нынешнему измерению. Как только
+   * человек пересчитает, расхождение исчезнет само.
    */
   const paidDistance = await db.courierLedgerEntry.groupBy({
     by: ['attemptId'],
@@ -313,35 +333,28 @@ export async function buildSettlementReport(
       attemptId: { in: facts.map((fact) => fact.attemptId) },
       kind: 'DISTANCE_FEE',
       reversedBy: { is: null },
+      distanceKmTenths: { not: null },
     },
-    _sum: { amountMinor: true },
+    _sum: { distanceKmTenths: true },
   });
-  const paidByAttempt = new Map(
-    paidDistance.map((row) => [row.attemptId as string, -(row._sum.amountMinor ?? 0n)]),
+  const paidKmByAttempt = new Map(
+    paidDistance.map((row) => [row.attemptId as string, row._sum.distanceKmTenths ?? 0]),
   );
+  /** У прежних записей километров нет: сверять нечего, пометка не ставится. */
+  const knownPaid = new Set(paidDistance.map((row) => row.attemptId as string));
 
-  /**
-   * Километры строки: оплаченные и, если он другой, текущий расчёт.
-   *
-   * Оплаченные восстанавливаются из самих денег и ставки: сумма начислялась как
-   * `ставка × км / 10`, поэтому деление точно. Без ставки или без денег
-   * показывать нечего, кроме текущего снимка, — платить по нему ещё не за что.
-   */
   const distanceOf = (
     attemptId: string,
-    snapshot: { perKmMinor: bigint } | null,
+    own: readonly LedgerEntryView[],
     current: { roundedKmTenths: number } | null,
   ): { beyondMkadKmTenths: number | null; currentKmTenths: number | null } => {
     const currentKm = current?.roundedKmTenths ?? null;
-    const paid = paidByAttempt.get(attemptId) ?? 0n;
-    const perKm = snapshot?.perKmMinor ?? 0n;
-    if (paid <= 0n || perKm <= 0n) {
-      return { beyondMkadKmTenths: currentKm, currentKmTenths: null };
-    }
-    const paidKm = Number((paid * 10n) / perKm);
+    const dayKm = kmOfDay(own);
+    const paidKm = knownPaid.has(attemptId) ? (paidKmByAttempt.get(attemptId) ?? 0) : null;
     return {
-      beyondMkadKmTenths: paidKm,
-      currentKmTenths: currentKm === paidKm ? null : currentKm,
+      // Нет своих километров у дня — показываем действующий снимок, как прежде.
+      beyondMkadKmTenths: dayKm ?? currentKm,
+      currentKmTenths: paidKm === null || currentKm === paidKm ? null : currentKm,
     };
   };
 
@@ -388,7 +401,7 @@ export async function buildSettlementReport(
       vehicleType: snapshot === null ? null : (snapshot.vehicleType as 'CAR' | 'FOOT'),
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),
-      ...distanceOf(fact.attemptId, snapshot, distance),
+      ...distanceOf(fact.attemptId, own, distance),
       distanceSource: (distance?.source ?? null) as 'COMPUTED' | 'MANUAL' | null,
       deliveryFeeMinor: changeOf(own, ['DELIVERY_FEE']).toString(),
       distanceFeeMinor: changeOf(own, ['DISTANCE_FEE']).toString(),

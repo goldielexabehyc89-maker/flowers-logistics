@@ -51,7 +51,16 @@ export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
  * ставит вовсе.
  */
 export function cashCorrectionJobKey(orderId: string, generation: number): string {
-  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${generation}`;
+  /*
+   * Отдельное слово `event` в ключе — это ПРОСТРАНСТВО ИМЁН, а не украшение.
+   *
+   * Прежний формат `…:payment:<заказ>:<сумма в копейках>` отличался от нового
+   * только смыслом последнего числа. Оплата в одну копейку давала ровно тот же
+   * ключ, что событие номер один, — и на обновлении существующей очереди первое
+   * же новое задание считалось бы уже выполненным. Сообщения не удаляются,
+   * поэтому прежние ключи живут вечно и обязаны не пересекаться с новыми.
+   */
+  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:event:${generation}`;
 }
 
 /**

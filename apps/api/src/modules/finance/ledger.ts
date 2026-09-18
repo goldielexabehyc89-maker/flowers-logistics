@@ -15,7 +15,7 @@
  * получает ту же запись в ответ.
  */
 
-import type { CourierLedgerKind } from '../../generated/prisma/client.js';
+import type { LedgerReversalCause, CourierLedgerKind } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
@@ -61,6 +61,8 @@ export interface LedgerEntryInput {
   routeId?: string | null;
   orderId?: string | null;
   attemptId?: string | null;
+  /** Километры, по которым начислена оплата за МКАД. Только у `DISTANCE_FEE`. */
+  distanceKmTenths?: number | null;
   /** Общая передача: та же операция на стороне кассы логиста. */
   transferId?: string | null;
   idempotencyKey: string;
@@ -81,6 +83,8 @@ export interface LedgerEntryView {
   routeId: string | null;
   orderId: string | null;
   attemptId: string | null;
+  /** Километры, по которым начислена оплата за МКАД. `null` у прежних записей. */
+  distanceKmTenths: number | null;
   reversesEntryId: string | null;
   /**
    * Вид отменяемой записи: по нему журнал называет обратную операцию своими
@@ -127,6 +131,7 @@ export function toLedgerView(row: {
   routeId: string | null;
   orderId: string | null;
   attemptId: string | null;
+  distanceKmTenths?: number | null;
   reversesEntryId: string | null;
   reversesEntry?: { kind: CourierLedgerKind } | null;
   transferId?: string | null;
@@ -147,6 +152,7 @@ export function toLedgerView(row: {
     routeId: row.routeId,
     orderId: row.orderId,
     attemptId: row.attemptId,
+    distanceKmTenths: row.distanceKmTenths ?? null,
     reversesEntryId: row.reversesEntryId,
     reversesKind: row.reversesEntry?.kind ?? null,
     transferId: row.transferId ?? null,
@@ -227,6 +233,7 @@ export async function appendLedgerEntry(
       routeId: input.routeId ?? null,
       orderId: input.orderId ?? null,
       attemptId: input.attemptId ?? null,
+      distanceKmTenths: input.distanceKmTenths ?? null,
       transferId: input.transferId ?? null,
       idempotencyKey: input.idempotencyKey,
     },
@@ -252,7 +259,21 @@ export async function appendEntry(
  */
 export async function reverseLedgerEntry(
   tx: TransactionClient,
-  input: { entryId: string; actorUserId: string; reason: string; operationDate: string },
+  input: {
+    entryId: string;
+    actorUserId: string;
+    reason: string;
+    operationDate: string;
+    /**
+     * ПОЧЕМУ отменяем. Обязателен: повод решает, как запись читают потом.
+     *
+     * Снятие финансового результата отменённого заказа внешне неотличимо от
+     * обычной правки — у обоих все начисления попытки погашены. Пока повод
+     * приходилось угадывать по журналу, правка километров новой доставки
+     * молча блокировалась отменой, случившейся когда-то по тому же заказу.
+     */
+    cause: LedgerReversalCause;
+  },
 ): Promise<AppendedEntry> {
   const source = await tx.courierLedgerEntry.findUnique({
     where: { id: input.entryId },
@@ -301,6 +322,7 @@ export async function reverseLedgerEntry(
       attemptId: source.attemptId,
       transferId: source.transferId,
       reversesEntryId: source.id,
+      reversalCause: input.cause,
       idempotencyKey: reversalKey(source.id),
     },
     include: REVERSAL_VIEW,
@@ -312,7 +334,13 @@ export async function reverseLedgerEntry(
 /** Прежний контракт для вызывающих, которым признак создания не нужен. */
 export async function reverseEntry(
   tx: TransactionClient,
-  input: { entryId: string; actorUserId: string; reason: string; operationDate: string },
+  input: {
+    entryId: string;
+    actorUserId: string;
+    reason: string;
+    operationDate: string;
+    cause: LedgerReversalCause;
+  },
 ): Promise<LedgerEntryView> {
   return (await reverseLedgerEntry(tx, input)).entry;
 }
