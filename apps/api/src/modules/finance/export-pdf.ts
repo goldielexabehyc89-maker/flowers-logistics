@@ -67,12 +67,42 @@ export function debtDirection(balanceMinor: string): string {
   return value > 0n ? 'курьер должен компании' : 'компания должна курьеру';
 }
 
+/**
+ * Сводка периода так, как она попадёт на бумагу: подпись и значение.
+ *
+ * Отдельной чистой функцией, потому что содержимое выгрузки обязано быть
+ * проверяемым. Разбирать готовый PDF обратно означало бы проверять чужую
+ * библиотеку: подписи, знаки и суммы рождаются здесь, и здесь же их можно
+ * доказать. Порядок строк — тот же, что и на странице.
+ */
+export function settlementSummaryLines(report: SettlementReport): [string, string][] {
+  return [
+    ['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)],
+    ['Наличные, полученные курьером', formatRubles(report.totals.cashReceivedMinor)],
+    ['Корректировки наличных', formatRubles(report.totals.cashCorrectionsMinor)],
+    ['Сдано логисту', formatRubles(report.totals.handedToLogistMinor)],
+    ['Выдано курьеру', formatRubles(report.totals.issuedToCourierMinor)],
+    ['Базовая оплата доставок', formatRubles(report.totals.deliveryFeesMinor)],
+    ['Оплачиваемые попытки', formatRubles(report.totals.attemptFeesMinor)],
+    ['Километры за МКАД', formatRubles(report.totals.distanceFeesMinor)],
+    ['Расходы', formatRubles(report.totals.expensesMinor)],
+    ['Доплаты', formatRubles(report.totals.bonusesMinor)],
+    ['Обратные корректировки', formatRubles(report.totals.adjustmentsMinor)],
+    ['Начальный долг', formatRubles(report.totals.openingDebtMinor)],
+  ];
+}
+
+/** Заголовок документа: он же название файла у человека в загрузках. */
+export function settlementPdfTitle(report: SettlementReport): string {
+  return `Расчёты с курьерами ${report.period.from} — ${report.period.to}`;
+}
+
 export async function buildSettlementPdfAsync(report: SettlementReport): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   document.registerFontkit(fontkit);
   document.setCreationDate(FIXED_DATE);
   document.setModificationDate(FIXED_DATE);
-  document.setTitle(`Расчёты с курьерами ${report.period.from} — ${report.period.to}`);
+  document.setTitle(settlementPdfTitle(report));
 
   const font = await document.embedFont(fontBytes(), { subset: true });
   const page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
@@ -99,22 +129,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   );
   cursor -= 6;
 
-  const lines: [string, string][] = [
-    ['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)],
-    ['Наличные, полученные курьером', formatRubles(report.totals.cashReceivedMinor)],
-    ['Корректировки наличных', formatRubles(report.totals.cashCorrectionsMinor)],
-    ['Сдано логисту', formatRubles(report.totals.handedToLogistMinor)],
-    ['Выдано курьеру', formatRubles(report.totals.issuedToCourierMinor)],
-    ['Базовая оплата доставок', formatRubles(report.totals.deliveryFeesMinor)],
-    ['Оплачиваемые попытки', formatRubles(report.totals.attemptFeesMinor)],
-    ['Километры за МКАД', formatRubles(report.totals.distanceFeesMinor)],
-    ['Расходы', formatRubles(report.totals.expensesMinor)],
-    ['Доплаты', formatRubles(report.totals.bonusesMinor)],
-    ['Обратные корректировки', formatRubles(report.totals.adjustmentsMinor)],
-    ['Начальный долг', formatRubles(report.totals.openingDebtMinor)],
-  ];
-
-  for (const [name, value] of lines) {
+  for (const [name, value] of settlementSummaryLines(report)) {
     page.drawText(name, {
       x: MARGIN,
       y: cursor,

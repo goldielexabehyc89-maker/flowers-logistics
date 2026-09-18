@@ -54,6 +54,17 @@ const sourceAddressSchema = z.object({
   address: z.string().trim().max(500).optional(),
 });
 
+/**
+ * Новая оплаченная сумма источника, в копейках.
+ *
+ * Сумма самого заказа не передаётся: её меняет не оплата, а состав заказа,
+ * и подменять её здесь значило бы проверять не тот сигнал.
+ */
+const sourcePaymentSchema = z.object({
+  orderNumber: z.string().trim().min(1).max(120),
+  payedSumMinor: z.number().int().min(0).max(1_000_000_000),
+});
+
 export interface TestingDeps {
   db: Database;
   config: AppConfig;
@@ -168,6 +179,113 @@ export function registerTestingRoutes(app: AppServer, deps: TestingDeps): void {
       const result = await applyOrderSnapshot(tx, snapshot, new Date(), {
         structuredAddressV2: false,
         geocoding: true,
+      });
+      return { orderId: existing.id, outcome: result.outcome, changedFields: result.changedFields };
+    });
+  });
+
+  /**
+   * Источник изменил оплаченную сумму заказа.
+   *
+   * Нужен по той же причине, что и два входа выше: оплата приходит ИЗВНЕ, и в
+   * интерфейсе вызвать её нечем. Без этого нельзя показать, что открытый отчёт
+   * расчётов сам уменьшает наличные за курьером, когда покупатель доплатил.
+   *
+   * Колонки здесь не пишутся: собирается такой же ответ МоегоСклада, какой
+   * пришёл бы по сети, и прогоняется тем же `mapOrder` → `applyOrderSnapshot`.
+   * Денежное задание ставит сам импорт, выполняет — обычный воркер очереди.
+   */
+  app.post('/api/testing/source-payment', async (request) => {
+    await authenticateWithRoles(request, deps, ['ADMIN'] as const);
+    const body = sourcePaymentSchema.parse(request.body);
+
+    const existing = await deps.db.deliveryOrder.findFirst({
+      where: { externalName: body.orderNumber },
+      select: {
+        id: true,
+        externalId: true,
+        externalName: true,
+        address: true,
+        sumMinor: true,
+        cancelledInSource: true,
+        deliveryDateRaw: true,
+        intervalRaw: true,
+        recipient: true,
+        comment: true,
+      },
+    });
+    if (existing === null) {
+      throw new AppError('NOT_FOUND', { publicMessage: 'Заказ с таким номером не найден.' });
+    }
+
+    const ids = MOYSKLAD_IDS;
+    const href = (kind: string, id: string): string =>
+      `https://api.moysklad.ru/api/remap/1.2/entity/${kind}/${id}`;
+    const stamp = new Date().toISOString().replace('T', ' ').replace('Z', '');
+
+    const order = {
+      id: existing.externalId,
+      name: existing.externalName,
+      updated: stamp,
+      shipmentAddress: existing.address ?? '',
+      ...(existing.deliveryDateRaw === null
+        ? {}
+        : { deliveryPlannedMoment: existing.deliveryDateRaw }),
+      // Сумма заказа остаётся прежней: меняется ровно оплаченная часть.
+      sum: Number(existing.sumMinor),
+      payedSum: body.payedSumMinor,
+      store: { meta: { href: href('store', ids.store) } },
+      /*
+       * Статус повторяет нынешний признак отмены.
+       *
+       * Снимок без статуса означал бы «заказ больше не отменён»: импорт снял
+       * бы отмену и вернул заказ в работу. Оплата про статус ничего не знает
+       * и менять его не вправе.
+       */
+      state: {
+        meta: {
+          href: href(
+            'state',
+            existing.cancelledInSource ? ids.states.cancelled : ids.states.delivering,
+          ),
+        },
+        id: existing.cancelledInSource ? ids.states.cancelled : ids.states.delivering,
+        name: existing.cancelledInSource ? 'Отменен' : 'Доставляется',
+        stateType: existing.cancelledInSource ? 'Unsuccessful' : 'Regular',
+      },
+      attributes: [
+        {
+          id: ids.deliveryMethodAttribute,
+          value: {
+            name: 'Доставка',
+            meta: { href: href('customentity', ids.deliveryMethodDelivery) },
+          },
+        },
+        {
+          id: ids.paymentTypeAttribute,
+          value: {
+            name: 'Наличные/карта на ТТ',
+            meta: { href: href('customentity', ids.paymentTypeCash) },
+          },
+        },
+        ...(existing.intervalRaw === null
+          ? []
+          : [{ id: ids.intervalAttribute, value: existing.intervalRaw }]),
+        ...(existing.recipient === null
+          ? []
+          : [{ id: ids.recipientAttribute, value: existing.recipient }]),
+        ...(existing.comment === null
+          ? []
+          : [{ id: ids.commentAttribute, value: existing.comment }]),
+      ],
+    } as MoyskladOrderDto;
+
+    const { snapshot } = mapOrder(order, ids, 'shipmentAddress', NO_REGIONS);
+
+    return deps.db.$transaction(async (tx) => {
+      const result = await applyOrderSnapshot(tx, snapshot, new Date(), {
+        cancelledStateId: ids.states.cancelled,
+        geocoding: false,
       });
       return { orderId: existing.id, outcome: result.outcome, changedFields: result.changedFields };
     });

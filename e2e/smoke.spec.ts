@@ -6607,7 +6607,7 @@ test('начальный долг: администратор вносит ег�
   await page.getByTestId('reports-courier-combobox-field').fill(courier.phone);
   await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
   await page.getByTestId('reports-courier-combobox-option').first().click();
-  await expect(page.getByTestId('reports-closing')).toContainText('0,00 ₽', { timeout: 15_000 });
+  await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽', { timeout: 15_000 });
 
   // --- Внесение -------------------------------------------------------------
 
@@ -6633,10 +6633,11 @@ test('начальный долг: администратор вносит ег�
    * Долг виден отдельным итогом и отдельной строкой журнала — и НЕ как
    * заработок: у него собственная строка, а не колонка «Доп.».
    */
+  // Это пояснительная строка целиком, а не одно число: здесь нужна подстрока.
   await expect(page.getByTestId('reports-opening-debt-total')).toContainText('5000,00 ₽', {
     timeout: 15_000,
   });
-  await expect(page.getByTestId('reports-closing')).toContainText('5000,00 ₽');
+  await expect(page.getByTestId('reports-closing')).toHaveText('5000,00 ₽');
 
   const group = page
     .getByTestId('reports-rows')
@@ -6663,7 +6664,7 @@ test('начальный долг: администратор вносит ег�
   await debtRow.getByTestId('reports-opening-debt-reverse').click();
 
   // Отмена — обратной записью: баланс вернулся, исходная строка осталась.
-  await expect(page.getByTestId('reports-closing')).toContainText('0,00 ₽', { timeout: 15_000 });
+  await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽', { timeout: 15_000 });
   await expect(debtRow).toHaveCount(1);
 
   await context.close();
@@ -6728,7 +6729,7 @@ test('расчёты: внесённый долг виден логисту и �
     await page.getByTestId('reports-courier-combobox-field').fill(courier.phone);
     await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
     await page.getByTestId('reports-courier-combobox-option').first().click();
-    await expect(page.getByTestId('reports-closing')).toContainText('0,00 ₽', { timeout: 20_000 });
+    await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽', { timeout: 20_000 });
     return page;
   };
 
@@ -6764,14 +6765,213 @@ test('расчёты: внесённый долг виден логисту и �
    * финансовому событию. Событие заказа для этого не годится — оно не
    * инвалидирует расчёты.
    */
-  await expect(logistPage.getByTestId('reports-closing')).toContainText('5000,00 ₽', {
+  await expect(logistPage.getByTestId('reports-closing')).toHaveText('5000,00 ₽', {
     timeout: 20_000,
   });
-  await expect(supervisorPage.getByTestId('reports-closing')).toContainText('5000,00 ₽', {
+  await expect(supervisorPage.getByTestId('reports-closing')).toHaveText('5000,00 ₽', {
     timeout: 20_000,
   });
 
   await adminContext.close();
+  await logistPage.context().close();
+  await supervisorPage.context().close();
+});
+
+/**
+ * Оплата и отмена в МоемСкладе доходят до открытого отчёта сами.
+ *
+ * Оба события приходят ИЗВНЕ: покупатель доплатил, заказ отменили. В интерфейсе
+ * вызвать их нечем, поэтому сигнал подаётся тестовым входом — тем самым, что
+ * прогоняет ответ источника через настоящий импорт. Дальше всё настоящее:
+ * импорт ставит денежное задание, обычный воркер очереди его выполняет, событие
+ * учёта доходит до открытых вкладок.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Заказ, курьер и наблюдатели заводятся специально для
+ * проверки. В настоящий МойСклад не уходит ничего: подделывается только сигнал,
+ * а не его последствие. Реальные курьеры и их расчёты не затрагиваются.
+ */
+test('расчёты: оплата и отмена в источнике сами обновляют отчёт логиста и управляющего', async ({
+  page,
+  browser,
+}: {
+  page: Page;
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const [own] = seedOrders(1, { withPoint: true });
+  expect(own).toBeTruthy();
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  const courier = await seedOwnCourier(page, token);
+
+  /*
+   * Тариф и включение учёта заводятся через API: их экран проверяется
+   * соседним сценарием, а здесь они лишь условие задачи. Без включённого
+   * учёта доставка не создаёт ни одной записи, и проверять было бы нечего.
+   */
+  const tariff = await page.request.post('/api/logistics/tariffs', {
+    headers: authorized,
+    data: {
+      kind: 'REGULAR',
+      effectiveFrom: today,
+      effectiveTo: null,
+      perOrderWalkMinor: '20000',
+      perOrderCarMinor: '20000',
+      perKmMinor: '0',
+      note: 'проверка автообновления отчёта',
+    },
+  });
+  expect(tariff.status()).toBe(201);
+  const activation = await page.request.put('/api/logistics/ledger/activation', {
+    headers: authorized,
+    data: { activeFrom: today },
+  });
+  expect(activation.status()).toBe(200);
+
+  /*
+   * Первый проход импорта по заказу.
+   *
+   * Сеялка кладёт заказ в базу напрямую, и исходной ревизии импорта у него нет.
+   * А рост оплаты определяется сравнением с ПРЕДЫДУЩИМ снимком: без него импорт
+   * честно не знает, выросла ли оплата, и задания не ставит. В рабочем контуре
+   * заказ всегда приходит импортом, поэтому такой снимок у него есть с рождения;
+   * здесь он создаётся тем же входом, с нынешней (нулевой) оплатой.
+   */
+  const firstPass = await page.request.post('/api/testing/source-payment', {
+    headers: authorized,
+    data: { orderNumber: own, payedSumMinor: 0 },
+  });
+  expect(firstPass.status()).toBe(200);
+
+  // --- Обычный путь: сделка → лист → курьер → отгрузка → «Доставлен» ---------
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Сделки' }).first().click();
+  await page.getByLabel('Поиск в этом дне').fill(own ?? '');
+  await page.getByLabel('Поиск в этом дне').press('Enter');
+  const card = page.locator(`[data-testid="deal-card"][data-order-number="${own}"]`);
+  await expect(card).toBeVisible({ timeout: 20_000 });
+  await card.getByTestId('deal-pick').click();
+  await page.getByTestId('deals-manual-draft').click();
+  await page.getByTestId('create-route-sheet').click();
+  await expect(page).toHaveURL(/\/logistics\/route-sheets/);
+
+  await page.getByTestId('sheets-search').fill(own ?? '');
+  const sheet = page.getByTestId('sheets-UNSHIPPED').locator('[data-testid="sheet-row"]').first();
+  await expect(sheet).toBeVisible({ timeout: 20_000 });
+  await sheet.getByTestId('sheet-courier-pick').click();
+  await sheet.getByTestId('sheet-courier-combobox-field').fill(courier.phone);
+  await expect(page.getByTestId('sheet-courier-combobox-option')).toHaveCount(1);
+  await page.getByTestId('sheet-courier-combobox-option').first().click();
+  await expect(sheet.getByTestId('sheet-ship')).toBeEnabled();
+  const sheetNumber = (await sheet.getAttribute('data-sheet-number')) ?? '';
+  await sheet.getByTestId('sheet-ship').click();
+  await expect(
+    page.getByTestId('sheets-SHIPPED').locator(`[data-sheet-number="${sheetNumber}"]`),
+  ).toBeVisible({ timeout: 20_000 });
+
+  const courierContext = await browser.newContext();
+  const courierPage = await courierContext.newPage();
+  await login(courierPage, courier.phone, courier.pin);
+  const courierCard = courierPage.locator(
+    `[data-testid="delivery-order"][data-order-number="${own}"]`,
+  );
+  await expect(courierCard).toBeVisible({ timeout: 20_000 });
+  await courierCard.getByTestId('delivery-open-delivered').click();
+  await courierPage.getByTestId('delivery-submit').click();
+  await expect(courierPage.locator('.toast-region')).toContainText('Маршрут завершён', {
+    timeout: 20_000,
+  });
+  await courierContext.close();
+
+  // --- Наблюдатели открывают отчёт и больше его не трогают -------------------
+
+  const seedWatcher = async (
+    role: 'LOGISTICIAN' | 'SUPERVISOR',
+  ): Promise<{ phone: string; pin: string }> => {
+    const phone = uniquePhone();
+    const pin = '9753';
+    const created = await page.request.post('/api/users', {
+      headers: authorized,
+      data: { fullName: `Наблюдатель ${role}`, phone, roles: [role] },
+    });
+    expect(created.status()).toBe(201);
+    const body = (await created.json()) as { activationCode: string };
+    const activated = await page.request.post('/api/auth/activate', {
+      data: { phone, code: body.activationCode, pin },
+    });
+    expect(activated.status()).toBe(200);
+    return { phone, pin };
+  };
+
+  /** Открывает отчёт по этому курьеру и дожидается наличных заказа. */
+  const openReport = async (account: { phone: string; pin: string }): Promise<Page> => {
+    const context = await browser.newContext();
+    const watcher = await context.newPage();
+    await login(watcher, account.phone, account.pin);
+    await openSection(watcher, 'Логистика');
+    await watcher.getByRole('link', { name: 'Отчёты' }).first().click();
+    await watcher.waitForURL('**/logistics/reports', { timeout: 30_000 });
+    await expect(watcher.getByTestId('reports-screen')).toBeVisible({ timeout: 30_000 });
+    await watcher.getByTestId('reports-courier-combobox-field').fill(courier.phone);
+    await expect(watcher.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
+    await watcher.getByTestId('reports-courier-combobox-option').first().click();
+    // Заказ 4990 ₽ наличными минус 200 ₽ оплаты работы: за курьером 4790 ₽.
+    await expect(watcher.getByTestId('reports-closing')).toHaveText('4790,00 ₽', {
+      timeout: 25_000,
+    });
+    return watcher;
+  };
+
+  const logistPage = await openReport(await seedWatcher('LOGISTICIAN'));
+  const supervisorPage = await openReport(await seedWatcher('SUPERVISOR'));
+
+  // --- Источник сообщает оплату ---------------------------------------------
+
+  const paid = await page.request.post('/api/testing/source-payment', {
+    headers: authorized,
+    // Покупатель оплатил заказ целиком: наличных за курьером остаться не должно.
+    data: { orderNumber: own, payedSumMinor: 499000 },
+  });
+  expect(paid.status()).toBe(200);
+
+  /*
+   * Ни одной перезагрузки. Наличные снялись, оплата работы осталась:
+   * курьер всё отвёз, и его труд от способа расчёта не зависит.
+   */
+  for (const watcher of [logistPage, supervisorPage]) {
+    await expect(watcher.getByTestId('reports-closing')).toHaveText('-200,00 ₽', {
+      timeout: 30_000,
+    });
+  }
+
+  // --- Источник сообщает отмену ---------------------------------------------
+
+  const cancelled = await page.request.post('/api/testing/source-cancellation', {
+    headers: authorized,
+    data: { orderNumber: own, cancelled: true },
+  });
+  expect(cancelled.status()).toBe(200);
+
+  // Финансовый результат снят целиком: заказ не даёт ни плюса, ни минуса.
+  for (const watcher of [logistPage, supervisorPage]) {
+    await expect(watcher.getByTestId('reports-closing')).toHaveText('0,00 ₽', {
+      timeout: 30_000,
+    });
+  }
+
   await logistPage.context().close();
   await supervisorPage.context().close();
 });

@@ -44,6 +44,11 @@ import { createOrderFinanceHandler, ORDER_FINANCE_TOPIC } from './order-sync.js'
 import { createMkadDistanceHandler, MKAD_DISTANCE_TOPIC } from './mkad-auto.js';
 import { LEDGER_SETTING_KEY } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
+import { appendEntry } from './ledger.js';
+import { buildSettlementWorkbook } from './export-xlsx.js';
+import { buildSettlementPdf, settlementPdfTitle, settlementSummaryLines } from './export-pdf.js';
+import ExcelJS from 'exceljs';
+import { PDFDocument } from 'pdf-lib';
 
 let ctx: TestContext;
 let deliveryDeps: DeliveryDeps;
@@ -844,5 +849,192 @@ describe('позднее начисление километров за МКАД
     const days = await report(DAY, NEXT_DAY, scenario.courierId);
     expect(days.totals.distanceFeesMinor).toBe('0');
     expect(days.totals.closingBalanceMinor).toBe('0');
+  });
+});
+
+// --- Сценарий 5: один набор данных по всей цепочке представления ---------------
+
+describe('один набор данных: журнал → API → дни → период → XLSX → PDF', () => {
+  it('суммы, знаки, даты и подписи совпадают на каждом шаге', async () => {
+    /*
+     * Набор подобран так, чтобы в нём была каждая сторона расчёта: наличные
+     * заказа, оплата работы, километры за МКАД, расход, сдача денег логисту и
+     * начальный долг. Одинокая категория ничего не доказала бы: путаница
+     * возникает именно там, где рядом стоят приход, заработок и долг.
+     */
+    const scenario = await seedScenario({
+      sum: 500_000,
+      payedSum: 0,
+      perOrderMinor: 30_000n,
+      perKmMinor: 4_000n,
+    });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+
+    /*
+     * Операции дня, не привязанные к доставке, пишутся тем же `appendEntry`,
+     * что и всё остальное: проверяется представление, а не способ ввода.
+     */
+    const admin = await actorFor(['ADMIN']);
+    const manual = [
+      { kind: 'OPENING_DEBT' as const, amountMinor: 100_000n, reason: 'долг до перехода на ERP' },
+      { kind: 'CASH_HANDED_TO_LOGIST' as const, amountMinor: 200_000n, reason: 'сдача выручки' },
+      { kind: 'EXPENSE_PARKING' as const, amountMinor: 15_000n, reason: 'парковка у подъезда' },
+    ];
+    for (const operation of manual) {
+      await ctx.db.$transaction((tx) =>
+        appendEntry(tx, {
+          courierUserId: scenario.courierId,
+          kind: operation.kind,
+          amountMinor: operation.amountMinor,
+          operationDate: DAY,
+          actorUserId: admin.userId,
+          reason: operation.reason,
+          idempotencyKey: unique(operation.kind),
+        }),
+      );
+    }
+
+    // 1. ЖУРНАЛ. Знак и день каждой записи — то, из чего растёт всё остальное.
+    const journal = await ctx.db.courierLedgerEntry.findMany({
+      where: { courierUserId: scenario.courierId },
+      select: { kind: true, amountMinor: true, operationDate: true },
+    });
+    const byKind = new Map(journal.map((entry) => [entry.kind, entry.amountMinor]));
+    expect(byKind.get('CASH_RECEIVED')).toBe(500_000n);
+    expect(byKind.get('DELIVERY_FEE')).toBe(-30_000n);
+    expect(byKind.get('DISTANCE_FEE')).toBe(-50_000n);
+    expect(byKind.get('OPENING_DEBT')).toBe(100_000n);
+    expect(byKind.get('CASH_HANDED_TO_LOGIST')).toBe(-200_000n);
+    expect(byKind.get('EXPENSE_PARKING')).toBe(-15_000n);
+    for (const entry of journal) {
+      expect(entry.operationDate.toISOString().slice(0, 10)).toBe(DAY);
+    }
+    // Долг курьера за день: 5000 − 300 − 500 + 1000 − 2000 − 150 = 3050 ₽.
+    expect(journal.reduce((total, entry) => total + entry.amountMinor, 0n)).toBe(305_000n);
+
+    // 2. API. Отчёт видит те же операции тем же днём.
+    const built = await report(DAY, DAY, scenario.courierId);
+    expect(built.period).toEqual({ from: DAY, to: DAY });
+    expect(built.entries.map((entry) => entry.operationDate)).toEqual(built.entries.map(() => DAY));
+    // `entries` — весь журнал периода, включая записи доставки.
+    expect(built.entries.map((entry) => entry.kind).sort()).toEqual([
+      'CASH_HANDED_TO_LOGIST',
+      'CASH_RECEIVED',
+      'DELIVERY_FEE',
+      'DISTANCE_FEE',
+      'EXPENSE_PARKING',
+      'OPENING_DEBT',
+    ]);
+
+    // 3. ИТОГ ПЕРИОДА. Каждая категория показана положительной величиной,
+    //    кроме корректировок наличных, у которых минус — часть смысла.
+    expect(built.totals).toMatchObject({
+      openingBalanceMinor: '0',
+      cashReceivedMinor: '500000',
+      cashCorrectionsMinor: '0',
+      handedToLogistMinor: '200000',
+      issuedToCourierMinor: '0',
+      deliveryFeesMinor: '30000',
+      attemptFeesMinor: '0',
+      distanceFeesMinor: '50000',
+      expensesMinor: '15000',
+      bonusesMinor: '0',
+      adjustmentsMinor: '0',
+      openingDebtMinor: '100000',
+      closingBalanceMinor: '305000',
+    });
+
+    // 4. ДНЕВНЫЕ ГРУППЫ. Итог дня объясняет изменение баланса целиком.
+    expect(built.days).toHaveLength(1);
+    const day = built.days[0];
+    expect(day?.date).toBe(DAY);
+    const group = day?.couriers[0];
+    expect(group?.orders).toBe(1);
+    expect(group?.sheets).toBe(1);
+    expect(group?.cashMinor).toBe('500000');
+    expect(group?.deliveryFeesMinor).toBe('30000');
+    expect(group?.distanceFeesMinor).toBe('50000');
+    expect(group?.distanceKmTenths).toBe(125);
+    expect(group?.extraExpensesMinor).toBe('15000');
+    expect(group?.handedMinor).toBe('200000');
+    expect(group?.issuedMinor).toBe('0');
+    // Начислено — заработок дня: 300 + 500 + 150 = 950 ₽.
+    expect(group?.accruedMinor).toBe('95000');
+    expect(group?.totalMinor).toBe(built.totals.closingBalanceMinor);
+    /*
+     * Журнал дня — только то, что не легло в строку доставки. Записи самой
+     * доставки показаны строкой заказа, и повторять их операциями нельзя:
+     * это был бы двойной счёт.
+     */
+    expect(group?.operations.entries.map((entry) => entry.kind).sort()).toEqual([
+      'CASH_HANDED_TO_LOGIST',
+      'EXPENSE_PARKING',
+      'OPENING_DEBT',
+    ]);
+    // Начальный долг остался отдельной операцией, а не ушёл в «Доп.».
+    expect(group?.extraExpensesMinor).toBe('15000');
+
+    // 5. XLSX. Лист «Итоги» — подписи и рубли, лист «Заказы» — та же группа.
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(
+      (await buildSettlementWorkbook(built)) as unknown as Parameters<typeof workbook.xlsx.load>[0],
+    );
+    const summary = workbook.getWorksheet('Итоги');
+    const named = new Map<string, unknown>();
+    summary?.eachRow((row) => named.set(String(row.getCell(1).value ?? ''), row.getCell(2).value));
+    expect(named.get('Период')).toBe(`${DAY} — ${DAY}`);
+    expect(named.get('Наличные, полученные курьером')).toBe(5000);
+    expect(named.get('Базовая оплата доставок')).toBe(300);
+    expect(named.get('Километры за МКАД')).toBe(500);
+    expect(named.get('Расходы')).toBe(150);
+    expect(named.get('Сдано логисту')).toBe(2000);
+    expect(named.get('Начальный долг')).toBe(1000);
+    expect(named.get('Корректировки наличных (оплата в МойСклад)')).toBe(0);
+    expect(named.get('Конечный баланс')).toBe(3050);
+
+    const orders = workbook.getWorksheet('Заказы');
+    const dayRow = orders?.getRow(2);
+    expect(dayRow?.getCell(1).value).toBe('Итог дня');
+    expect(dayRow?.getCell(2).value).toBe(DAY);
+    expect(dayRow?.getCell(11).value).toBe(5000); // Наличные
+    expect(dayRow?.getCell(14).value).toBe(300); // За заказ
+    expect(dayRow?.getCell(15).value).toBe(12.5); // За МКАД, км
+    expect(dayRow?.getCell(16).value).toBe(500); // За МКАД, ₽
+    expect(dayRow?.getCell(17).value).toBe(150); // Доп.
+    expect(dayRow?.getCell(18).value).toBe(950); // Начислено
+    expect(dayRow?.getCell(19).value).toBe(2000); // Курьер сдал
+    expect(dayRow?.getCell(21).value).toBe(3050); // Итог
+
+    /*
+     * 6. PDF. Проверяются те самые подписи и суммы, что уходят на бумагу.
+     *
+     * Текст из готового файла обратно не разбирается: парсера PDF в проекте
+     * нет, а разбор доказывал бы работу чужой библиотеки. Содержимое сводки
+     * рождается в `settlementSummaryLines`, и доказывается оно там же; сам
+     * файл проверяется как документ — он открывается, у него одна страница
+     * и верный заголовок с периодом.
+     */
+    expect(settlementSummaryLines(built)).toEqual([
+      ['Начальный баланс', '0,00 ₽'],
+      ['Наличные, полученные курьером', '5000,00 ₽'],
+      ['Корректировки наличных', '0,00 ₽'],
+      ['Сдано логисту', '2000,00 ₽'],
+      ['Выдано курьеру', '0,00 ₽'],
+      ['Базовая оплата доставок', '300,00 ₽'],
+      ['Оплачиваемые попытки', '0,00 ₽'],
+      ['Километры за МКАД', '500,00 ₽'],
+      ['Расходы', '150,00 ₽'],
+      ['Доплаты', '0,00 ₽'],
+      ['Обратные корректировки', '0,00 ₽'],
+      ['Начальный долг', '1000,00 ₽'],
+    ]);
+
+    const pdfBytes = await buildSettlementPdf(built);
+    const reopened = await PDFDocument.load(pdfBytes);
+    expect(reopened.getPageCount()).toBe(1);
+    expect(reopened.getTitle()).toBe(settlementPdfTitle(built));
+    expect(reopened.getTitle()).toContain(DAY);
   });
 });
