@@ -164,16 +164,28 @@ export interface CashEntryInput {
  * Повтор с тем же ключом возвращает уже созданную запись: повторное нажатие
  * не удваивает деньги. Расход проверяется по остатку под блокировкой.
  */
-export async function appendCash(
+export interface AppendedCashEntry {
+  entry: CashEntryView;
+  /**
+   * Создала ли ЭТА транзакция запись.
+   *
+   * Повтор обязан вернуть прежнюю и не писать вторую строку аудита: в
+   * финансовом контуре журнал важнее самой записи — он утверждает, сколько
+   * раз деньги вносили.
+   */
+  created: boolean;
+}
+
+export async function appendCashEntry(
   tx: TransactionClient,
   input: CashEntryInput,
-): Promise<CashEntryView> {
+): Promise<AppendedCashEntry> {
   const existing = await tx.logistCashEntry.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
     select: SELECT,
   });
   if (existing !== null) {
-    return toCashView(existing);
+    return { entry: toCashView(existing), created: false };
   }
 
   await lockDesk(tx, input.logistUserId);
@@ -213,7 +225,16 @@ export async function appendCash(
     },
     select: SELECT,
   });
-  return toCashView(created);
+  return { entry: toCashView(created), created: true };
+}
+
+/** Прежний контракт: вызывающим, которым признак «создано» не нужен. */
+export async function appendCash(
+  tx: TransactionClient,
+  input: CashEntryInput,
+): Promise<CashEntryView> {
+  const { entry } = await appendCashEntry(tx, input);
+  return entry;
 }
 
 /**

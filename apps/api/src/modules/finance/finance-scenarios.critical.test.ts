@@ -824,6 +824,26 @@ describe('отмена до доставки', () => {
     ).toBe(2);
     expect(await runQueue(new Date(`${NEXT_DAY}T10:00:00.000Z`), scenario)).toBe(0);
 
+    /*
+     * Номер берётся из счётчика заказа, и он вырос ровно дважды.
+     *
+     * Без этого утверждения проверка не отличила бы «счётчик сработал» от
+     * «второе задание встало по другой причине».
+     */
+    const counted = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: scenario.orderId },
+      select: { cancellationCount: true },
+    });
+    expect(counted.cancellationCount).toBe(2);
+    expect(
+      await ctx.db.outboxMessage.count({
+        where: {
+          topic: ORDER_FINANCE_TOPIC,
+          idempotencyKey: `${ORDER_FINANCE_TOPIC}:cancel:${scenario.orderId}:2`,
+        },
+      }),
+    ).toBe(1);
+
     // Исходные записи целы, снятие сделано обратными: 3 начисления — 3 отмены.
     expect(await entryCount(scenario.orderId, 'CASH_RECEIVED')).toBe(1);
     expect(await entryCount(scenario.orderId, 'DELIVERY_FEE')).toBe(1);

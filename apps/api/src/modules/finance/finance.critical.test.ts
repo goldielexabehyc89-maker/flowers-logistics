@@ -821,6 +821,7 @@ describe('группировка отчёта', () => {
         totalMinor: '600',
         settlementMissing: false,
         financeCancelled: false,
+        sourceCancelled: false,
       },
       {
         attemptId: 'a2',
@@ -848,6 +849,7 @@ describe('группировка отчёта', () => {
         totalMinor: '-2600',
         settlementMissing: false,
         financeCancelled: false,
+        sourceCancelled: false,
       },
     ];
 
@@ -921,6 +923,7 @@ describe('группировка отчёта', () => {
       totalMinor: '0',
       settlementMissing: true,
       financeCancelled: false,
+      sourceCancelled: false,
     };
 
     const days = groupSettlement([base], [], new Map());

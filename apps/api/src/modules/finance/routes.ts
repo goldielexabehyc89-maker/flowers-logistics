@@ -2,8 +2,11 @@
  * API логистической истории, отчётов и денежных операций.
  *
  * Управленческий контур: `ADMIN`, `LOGISTICIAN` и `SUPERVISOR` (`FINANCE_ROLES`).
- * Управляющий читает отчёты и ведёт операции наравне с логистом; отдельные
- * действия — начальный долг, тарифы, включение учёта — остаются за `ADMIN`.
+ * Управляющий читает отчёты и заводит операции БЕЗ движения наличных — расходы,
+ * доплаты, оплачиваемые попытки. Всё, где участвует касса (сдача, выдача, касса
+ * компании), требует своей кассы и потому доступно логисту и администратору:
+ * кассы у управляющего не существует, и писать в чужую он не вправе
+ * (`resolveDeskOwner`). Начальный долг, тарифы и включение учёта — только `ADMIN`.
  * Курьерская история (`/api/delivery/history`) остаётся отдельной и здесь
  * не подменяется — у неё другой смысл и другая аудитория.
  *
@@ -44,7 +47,7 @@ import {
   signedAmount,
 } from './ledger.js';
 import {
-  appendCash,
+  appendCashEntry,
   cashBalanceOf,
   cashEntryByIdempotencyKey,
   reverseCash,
@@ -702,6 +705,23 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         }
 
         /*
+         * У передачи ДВА маршрута отмены, и очередь у них обязана быть общей.
+         *
+         * Журнал курьера пишет сначала свою обратную запись, потом кассовую;
+         * касса — наоборот. Разные ключи блокировки не сериализовали их вовсе,
+         * и две одновременные отмены одной передачи упирались в уникальные
+         * индексы в противоположном порядке: PostgreSQL сообщал о взаимной
+         * блокировке, а человек видел внутреннюю ошибку — иногда с обеих
+         * сторон сразу, и тогда отмена не выполнялась вообще.
+         *
+         * Ключ передачи берётся ПЕРВЫМ в обоих маршрутах: порядок захвата
+         * одинаков, значит цикла ожидания не возникает.
+         */
+        if (source !== null && source.transferId !== null) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`transfer-reversal:${source.transferId}`})::bigint)`;
+        }
+
+        /*
          * Отмены одной записи выстраиваются в очередь по ключу.
          *
          * Предварительного поиска мало: победитель может зафиксироваться сразу
@@ -1123,7 +1143,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
          */
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash:${body.idempotencyKey}`})::bigint)`;
 
-        const created = await appendCash(tx, {
+        const { entry: created, created: isNew } = await appendCashEntry(tx, {
           logistUserId,
           kind,
           amountMinor: body.amountMinor,
@@ -1134,6 +1154,17 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
 
         if (!sameCashOperation(created)) {
           cashConflict();
+        }
+
+        /*
+         * Аудит и событие пишет только та транзакция, которая создала запись.
+         *
+         * Очередь по ключу сделала повторы ТИХИМИ: раньше второй запрос падал,
+         * а теперь успешно дописывал бы третью строку аудита о деньгах,
+         * внесённых один раз. В финансовом контуре это хуже самой записи.
+         */
+        if (!isNew) {
+          return created;
         }
 
         await writeAudit(tx, {
@@ -1195,17 +1226,9 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
 
     const runReversal = async (): Promise<unknown> =>
       deps.db.$transaction(async (tx) => {
-        /*
-         * Отмены одной записи кассы выстраиваются в очередь по ключу — так же,
-         * как отмены в журнале курьера. Без этого две одновременные отмены
-         * (в том числе со стороны кассы и со стороны передачи) упирались
-         * в уникальность и доходили до человека отказом.
-         */
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash-reversal:${id}`})::bigint)`;
-
         const source = await tx.logistCashEntry.findUnique({
           where: { id },
-          select: { logistUserId: true, transferId: true },
+          select: { logistUserId: true, transferId: true, kind: true },
         });
         if (source === null) {
           throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
@@ -1213,15 +1236,31 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         // Логист отменяет только в своей кассе.
         resolveDeskOwner(actor, source.logistUserId);
 
-        const created =
-          source.transferId === null
-            ? await reverseCash(tx, {
-                entryId: id,
-                actorUserId: actor.userId,
-                reason: body.reason,
-                operationDate: moscowCalendarDate(new Date()),
-              })
-            : null;
+        /*
+         * Обратную запись отменить нельзя — и у передачи тоже.
+         *
+         * У обратной записи передачи есть `transferId`, и маршрут уходил в
+         * отмену передачи мимо собственного запрета: человек отменял
+         * корректировку, а получал сообщение про уже отменённую операцию.
+         */
+        if (source.kind === 'ADJUSTMENT') {
+          throw new AppError('CONFLICT', {
+            publicMessage: 'Корректировку нельзя отменить: заведите новую операцию с причиной.',
+          });
+        }
+
+        /*
+         * Общая очередь обеих сторон передачи — тот же ключ и тот же порядок
+         * захвата, что в отмене операции журнала. Без него две отмены одной
+         * передачи вставляли записи в противоположном порядке и упирались во
+         * взаимную блокировку, а человек видел внутреннюю ошибку.
+         */
+        if (source.transferId !== null) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`transfer-reversal:${source.transferId}`})::bigint)`;
+        }
+
+        // Отмены одной записи кассы выстраиваются в очередь по своему ключу.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash-reversal:${id}`})::bigint)`;
 
         if (source.transferId !== null) {
           await reverseTransfer(tx, {
@@ -1231,6 +1270,22 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
             operationDate: moscowCalendarDate(new Date()),
           });
         }
+
+        /*
+         * Возвращается созданная обратная запись — и у передачи тоже.
+         *
+         * Прежде маршрут отдавал `entry: null`, хотя запись создавалась:
+         * контракт ответа зависел от того, передача это или нет.
+         */
+        const created =
+          source.transferId === null
+            ? await reverseCash(tx, {
+                entryId: id,
+                actorUserId: actor.userId,
+                reason: body.reason,
+                operationDate: moscowCalendarDate(new Date()),
+              })
+            : await cashEntryByIdempotencyKey(tx, `cash-reversal:${id}`);
 
         await writeAudit(tx, {
           action: 'FINANCE_CASH_REVERSED',

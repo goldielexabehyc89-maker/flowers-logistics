@@ -67,7 +67,7 @@ async function courierId(): Promise<string> {
 }
 
 /**
- * Сколько соединений СЕЙЧАС заблокированы чужой транзакцией.
+ * Сколько соединений СЕЙЧАС заблокированы НАШИМ барьером.
  *
  * `pg_blocking_pids` отвечает именно на этот вопрос, в отличие от «прошло
  * столько-то миллисекунд» или «кто-то чего-то ждёт»: запрос, который всё ещё
@@ -78,28 +78,79 @@ async function courierId(): Promise<string> {
  * Без него любое заблокированное соединение соседа засчитывалось бы за наше,
  * и проверка проходила бы, даже не встав на блокировку.
  */
-async function blockedBackends(): Promise<number> {
+async function blockedBackends(blockerPid: number): Promise<number> {
   const rows = await ctx.db.$queryRaw<{ count: bigint }[]>`
     SELECT count(*)::bigint AS count
     FROM pg_stat_activity
-    WHERE cardinality(pg_blocking_pids(pid)) > 0
+    WHERE pg_blocking_pids(pid) @> ARRAY[${blockerPid}::integer]
       AND datname = current_database()
   `;
   return Number(rows[0]?.count ?? 0n);
 }
 
-/** Ждёт, пока нужное число соединений встанет на блокировку. Ограничено по времени. */
-async function waitForBlocked(expected: number, timeoutMs = 10_000): Promise<number> {
+/**
+ * Ждёт, пока нужное число соединений встанет на блокировку ИМЕННО НАШЕГО
+ * барьера. Ограничено по времени.
+ *
+ * Считать все заблокированные соединения базы недостаточно: параллельный
+ * прогон или оставленная сессия дали бы нужное число без участия проверяемых
+ * запросов, и барьер доказывал бы только сам факт чужого ожидания.
+ */
+async function waitForBlockedBy(
+  blockerPid: number,
+  expected: number,
+  timeoutMs = 10_000,
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let seen = 0;
   while (Date.now() < deadline) {
-    seen = await blockedBackends();
+    seen = await blockedBackends(blockerPid);
     if (seen >= expected) {
       return seen;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return seen;
+}
+
+/** Соединение, удерживающее ключ, и сигнал «ключ захвачен». */
+async function holdKey(key: string): Promise<{
+  pid: number;
+  release: () => void;
+  done: Promise<void>;
+}> {
+  let release!: () => void;
+  let locked!: (pid: number) => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const lockedSignal = new Promise<number>((resolve) => (locked = resolve));
+
+  const done = ctx.db.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
+      const rows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid()::integer AS pid`;
+      locked(rows[0]?.pid ?? 0);
+      await released;
+    },
+    { timeout: 20_000, maxWait: 20_000 },
+  );
+
+  return { pid: await lockedSignal, release, done };
+}
+
+/** Курсор ленты событий: идентификатор растёт монотонно, время — нет. */
+async function lastEventId(): Promise<bigint> {
+  const row = await ctx.db.realtimeEvent.findFirst({
+    orderBy: { id: 'desc' },
+    select: { id: true },
+  });
+  return row?.id ?? 0n;
+}
+
+/** Сколько событий учёта появилось после курсора. */
+async function ledgerEventsAfter(cursor: bigint): Promise<number> {
+  return ctx.db.realtimeEvent.count({
+    where: { topic: 'finance.ledger_changed', id: { gt: cursor } },
+  });
 }
 
 interface DebtBody {
@@ -595,20 +646,7 @@ describe('права и идемпотентность на уровне API', (
     const key = unique('barrier-create');
     const cursor = await lastEventId();
 
-    let release!: () => void;
-    let locked!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
-
-    const holder = ctx.db.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`opening-debt:${key}`})::bigint)`;
-        locked();
-        await released;
-      },
-      { timeout: 20_000, maxWait: 20_000 },
-    );
-    await lockedSignal;
+    const barrier = await holdKey(`opening-debt:${key}`);
 
     let settled = 0;
     const first = postDebt(token, {
@@ -637,11 +675,11 @@ describe('права и идемпотентность на уровне API', (
      * через `pg_blocking_pids`, а не по времени: иначе «ещё не ответили» могло
      * бы означать «ещё проверяют права».
      */
-    expect(await waitForBlocked(2)).toBeGreaterThanOrEqual(2);
+    expect(await waitForBlockedBy(barrier.pid, 2)).toBeGreaterThanOrEqual(2);
     expect(settled).toBe(0);
 
-    release();
-    await holder;
+    barrier.release();
+    await barrier.done;
     const [a, b] = await Promise.all([first, second]);
 
     expect([a.statusCode, b.statusCode].sort((left, right) => left - right)).toEqual([201, 409]);
@@ -675,20 +713,7 @@ describe('права и идемпотентность на уровне API', (
     const entryId = debt.json().entry?.id ?? '';
     const cursor = await lastEventId();
 
-    let release!: () => void;
-    let locked!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
-
-    const holder = ctx.db.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${entryId}`})::bigint)`;
-        locked();
-        await released;
-      },
-      { timeout: 20_000, maxWait: 20_000 },
-    );
-    await lockedSignal;
+    const barrier = await holdKey(`reversal:${entryId}`);
 
     const reverseOnce = (): Promise<{
       statusCode: number;
@@ -711,11 +736,11 @@ describe('права и идемпотентность на уровне API', (
       return response;
     });
 
-    expect(await waitForBlocked(2)).toBeGreaterThanOrEqual(2);
+    expect(await waitForBlockedBy(barrier.pid, 2)).toBeGreaterThanOrEqual(2);
     expect(settled).toBe(0);
 
-    release();
-    await holder;
+    barrier.release();
+    await barrier.done;
     const [a, b] = await Promise.all([first, second]);
 
     // Оба успешны и отдают одну и ту же обратную запись.
@@ -759,21 +784,7 @@ describe('права и идемпотентность на уровне API', (
     const entryId = created.json().entry?.id ?? '';
     const cursor = await lastEventId();
 
-    let release!: () => void;
-    let locked!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
-
-    // Барьер держит ключ ОТМЕНЫ: она встанет на него, внесение пройдёт мимо.
-    const holder = ctx.db.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${entryId}`})::bigint)`;
-        locked();
-        await released;
-      },
-      { timeout: 20_000, maxWait: 20_000 },
-    );
-    await lockedSignal;
+    const barrier = await holdKey(`reversal:${entryId}`);
 
     let reversalSettled = 0;
     const reverse = (
@@ -788,7 +799,7 @@ describe('права и идемпотентность на уровне API', (
       return response;
     });
 
-    expect(await waitForBlocked(1)).toBeGreaterThanOrEqual(1);
+    expect(await waitForBlockedBy(barrier.pid, 1)).toBeGreaterThanOrEqual(1);
     expect(reversalSettled).toBe(0);
 
     /*
@@ -805,8 +816,8 @@ describe('права и идемпотентность на уровне API', (
     expect(repeated.statusCode).toBe(201);
     expect(repeated.json().entry?.id).toBe(entryId);
 
-    release();
-    await holder;
+    barrier.release();
+    await barrier.done;
 
     const reversal = await reverse;
     expect(reversal.statusCode).toBe(200);
@@ -1023,18 +1034,6 @@ describe('ключ идемпотентности общих операций', 
     idempotencyKey: string;
   }
 
-  /** Курсор ленты событий: идентификатор растёт монотонно, время — нет. */
-  const lastEventId = async (): Promise<bigint> => {
-    const row = await ctx.db.realtimeEvent.findFirst({
-      orderBy: { id: 'desc' },
-      select: { id: true },
-    });
-    return row?.id ?? 0n;
-  };
-
-  const ledgerEventsAfter = async (cursor: bigint): Promise<number> =>
-    ctx.db.realtimeEvent.count({ where: { topic: 'finance.ledger_changed', id: { gt: cursor } } });
-
   const postOperation = (
     token: string,
     body: OperationBody,
@@ -1115,20 +1114,7 @@ describe('ключ идемпотентности общих операций', 
     const key = unique('op-barrier');
     const cursor = await lastEventId();
 
-    let release!: () => void;
-    let locked!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
-
-    const holder = ctx.db.$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ledger-operation:${key}`})::bigint)`;
-        locked();
-        await released;
-      },
-      { timeout: 20_000, maxWait: 20_000 },
-    );
-    await lockedSignal;
+    const barrier = await holdKey(`ledger-operation:${key}`);
 
     const body = {
       courierUserId: courier,
@@ -1149,11 +1135,11 @@ describe('ключ идемпотентности общих операций', 
       return response;
     });
 
-    expect(await waitForBlocked(2)).toBeGreaterThanOrEqual(2);
+    expect(await waitForBlockedBy(barrier.pid, 2)).toBeGreaterThanOrEqual(2);
     expect(settled).toBe(0);
 
-    release();
-    await holder;
+    barrier.release();
+    await barrier.done;
     const [a, b] = await Promise.all([first, second]);
 
     expect([a.statusCode, b.statusCode]).toEqual([201, 201]);
@@ -1332,11 +1318,35 @@ describe('передача наличных и касса через маршр�
     });
     expect(replay.statusCode).toBe(409);
     expect(await ctx.db.logistCashEntry.count({ where: { logistUserId: logistId } })).toBe(0);
+
+    /*
+     * И отдельно — сам ПОРЯДОК проверки прав.
+     *
+     * Здесь логист называет чужую кассу прямо. Отказ обязан прийти от права,
+     * а не от сверки ключа: `resolveDeskOwner` выполняется до любого ответа,
+     * в том числе до быстрого пути повтора. Без явного `logistUserId`
+     * предыдущее утверждение прошло бы и при старом порядке.
+     */
+    const explicit = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/logistics/ledger/operations',
+      headers: { authorization: `Bearer ${logistToken}` },
+      payload: {
+        courierUserId: courier,
+        kind: 'CASH_HANDED_TO_LOGIST',
+        amountMinor: '120000',
+        operationDate: DAY,
+        logistUserId: foreignDesk.id,
+        idempotencyKey: key,
+      },
+    });
+    expect(explicit.statusCode).toBe(403);
   });
 
   it('двойное нажатие «Взять из компании» не даёт отказа и не удваивает кассу', async () => {
     const { token, userId } = await tokenFor(['LOGISTICIAN']);
     const key = unique('company');
+    const cursor = await lastEventId();
     const body = {
       direction: 'TAKE',
       amountMinor: '400000',
@@ -1345,16 +1355,60 @@ describe('передача наличных и касса через маршр�
     };
 
     /*
-     * Оба запроса обязаны завершиться успешно. Внутри `appendCash` поиск по
-     * ключу стоит ДО блокировки кассы, поэтому без внешней очереди второй
-     * запрос доходил до вставки и получал отказ сервера.
+     * Управляемая гонка, а не просто одновременный старт: барьер держит ключ,
+     * пока ОБА запроса на него не встанут. Без барьера второй запрос вправе
+     * успеть прочитать ключ уже после фиксации первого и уйти повтором — тогда
+     * ни очередь, ни признак «создано» не выполняются, а итоги всё равно
+     * сходятся, и проверка не отличает работу механизма от её отсутствия.
      */
-    const [first, second] = await Promise.all([postCompany(token, body), postCompany(token, body)]);
-    expect([first.statusCode, second.statusCode]).toEqual([201, 201]);
-    expect(first.json().entry?.id).toBe(second.json().entry?.id);
+    const barrier = await holdKey(`cash:${key}`);
+    let settled = 0;
+    const first = postCompany(token, body).then((response) => {
+      settled += 1;
+      return response;
+    });
+    const second = postCompany(token, body).then((response) => {
+      settled += 1;
+      return response;
+    });
+
+    expect(await waitForBlockedBy(barrier.pid, 2)).toBeGreaterThanOrEqual(2);
+    expect(settled).toBe(0);
+    barrier.release();
+    await barrier.done;
+
+    // Оба запроса обязаны завершиться успешно: внутри `appendCash` поиск по
+    // ключу стоит ДО блокировки кассы, и без очереди второй получал отказ.
+    const [a, b] = await Promise.all([first, second]);
+    expect([a.statusCode, b.statusCode]).toEqual([201, 201]);
+    expect(a.json().entry?.id).toBe(b.json().entry?.id);
 
     expect(await ctx.db.logistCashEntry.count({ where: { logistUserId: userId } })).toBe(1);
     expect(await cashBalanceOf(ctx.db, userId, null)).toBe(400_000n);
+
+    /*
+     * Одна операция — одна строка истории и одно событие.
+     *
+     * Очередь по ключу сделала повторы тихими: проигравший больше не падает,
+     * а значит обязан молчать и в аудите. Иначе журнал утверждал бы, что
+     * деньги в кассу вносили дважды.
+     */
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_CASH_MOVED', entityId: a.json().entry?.id ?? '' },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
+
+    // Третий, уже неконкурентный повтор тоже ничего не дописывает.
+    const third = await postCompany(token, body);
+    expect(third.statusCode).toBe(201);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_CASH_MOVED', entityId: a.json().entry?.id ?? '' },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
 
     // Тот же ключ с другой суммой — другая операция, а не повтор.
     const otherAmount = await postCompany(token, { ...body, amountMinor: '900000' });
@@ -1391,5 +1445,74 @@ describe('передача наличных и касса через маршр�
 
     expect(await ctx.db.logistCashEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
     expect(await cashBalanceOf(ctx.db, userId, null)).toBe(0n);
+  });
+  it('одну передачу отменяют с ДВУХ маршрутов сразу: без взаимной блокировки', async () => {
+    /*
+     * У передачи две стороны и два маршрута отмены. Журнал курьера писал
+     * сначала свою обратную запись, потом кассовую; касса — наоборот. Ключи
+     * блокировки были разные, маршруты не выстраивались в очередь и упирались
+     * в уникальные индексы в противоположном порядке: PostgreSQL сообщал о
+     * взаимной блокировке, человек видел внутреннюю ошибку, а иногда падали
+     * ОБЕ стороны и отмена не выполнялась вовсе.
+     *
+     * Путь достижим из продукта: отмена видна и на экране кассы, и в журнале
+     * расчётов, и нажать их могут двое разом. Повторяется несколько раз —
+     * взаимная блокировка возникает не при каждом чередовании.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const desk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const courier = await courierId();
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const created = await postOperation(adminToken, {
+        courierUserId: courier,
+        kind: 'CASH_HANDED_TO_LOGIST',
+        amountMinor: '100000',
+        operationDate: DAY,
+        logistUserId: desk.id,
+        idempotencyKey: unique('two-routes'),
+      });
+      expect(created.statusCode).toBe(201);
+      const ledgerId = created.json().entry?.id ?? '';
+      const cashEntry = await ctx.db.logistCashEntry.findFirstOrThrow({
+        where: { logistUserId: desk.id, kind: 'RECEIVED_FROM_COURIER', reversedBy: { is: null } },
+        orderBy: { occurredAt: 'desc' },
+        select: { id: true },
+      });
+
+      const viaLedger = ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/ledger/operations/${ledgerId}/reverse`,
+        headers: { authorization: `Bearer ${adminToken}` },
+        payload: { reason: 'отмена передачи из журнала' },
+      }) as unknown as Promise<{ statusCode: number }>;
+      const viaCash = ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/cash/${cashEntry.id}/reverse`,
+        headers: { authorization: `Bearer ${adminToken}` },
+        payload: { reason: 'отмена передачи из кассы' },
+      }) as unknown as Promise<{ statusCode: number }>;
+
+      const [ledgerResponse, cashResponse] = await Promise.all([viaLedger, viaCash]);
+
+      // Ни одна сторона не вправе ответить внутренней ошибкой.
+      for (const status of [ledgerResponse.statusCode, cashResponse.statusCode]) {
+        expect([200, 409]).toContain(status);
+      }
+      // И хотя бы одна обязана выполнить отмену.
+      expect([ledgerResponse.statusCode, cashResponse.statusCode]).toContain(200);
+
+      // Обе стороны передачи отменены ровно по одному разу.
+      expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: ledgerId } })).toBe(
+        1,
+      );
+      expect(await ctx.db.logistCashEntry.count({ where: { reversesEntryId: cashEntry.id } })).toBe(
+        1,
+      );
+    }
+
+    // Передачи и их отмены сошлись в ноль на обеих сторонах.
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(0n);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
   });
 });
