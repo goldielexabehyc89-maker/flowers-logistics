@@ -71,12 +71,18 @@ async function courierId(): Promise<string> {
  * `pg_blocking_pids` отвечает именно на этот вопрос, в отличие от «прошло
  * столько-то миллисекунд» или «кто-то чего-то ждёт»: запрос, который всё ещё
  * проверяет права, здесь не считается.
+ *
+ * Отбор по `current_database()` обязателен: `pg_stat_activity` общая на весь
+ * кластер, а в том же контейнере живёт база разработки со своим приложением.
+ * Без него любое заблокированное соединение соседа засчитывалось бы за наше,
+ * и проверка проходила бы, даже не встав на блокировку.
  */
 async function blockedBackends(): Promise<number> {
   const rows = await ctx.db.$queryRaw<{ count: bigint }[]>`
     SELECT count(*)::bigint AS count
     FROM pg_stat_activity
     WHERE cardinality(pg_blocking_pids(pid)) > 0
+      AND datname = current_database()
   `;
   return Number(rows[0]?.count ?? 0n);
 }
@@ -896,6 +902,59 @@ describe('права и идемпотентность на уровне API', (
     expect(await balanceOf(ctx.db, courier, null)).toBe(250_000n);
   });
 
+  it('запрет держится и ПОСЛЕ отмены долга: правилом, а не состоянием', async () => {
+    /*
+     * Разбор гонки по факту «обратная запись существует» превращал в успех
+     * что угодно: запись существует и после любой давно завершённой отмены,
+     * и отказ по правам молча становился ответом 200 с чужой обратной
+     * записью. Ограничение «начальный долг отменяет только администратор
+     * своим действием» обязано держаться правилом.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const { token: logistToken } = await tokenFor(['LOGISTICIAN']);
+    const courier = await courierId();
+
+    const created = await postDebt(adminToken, {
+      courierUserId: courier,
+      amountMinor: '300000',
+      operationDate: DAY,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: unique('http-generic-after-reverse'),
+    });
+    const entryId = created.json().entry?.id ?? '';
+
+    // Долг отменён СВОИМ действием администратора — обратная запись появилась.
+    const reversed = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/logistics/ledger/opening-debt/${entryId}/reverse`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { reason: 'внесено по ошибке' },
+    });
+    expect(reversed.statusCode).toBe(200);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+
+    const auditsBefore = await ctx.db.auditLog.count({
+      where: { action: 'FINANCE_OPERATION_REVERSED' },
+    });
+
+    // Общий эндпоинт обязан отказать ровно так же, как и до отмены.
+    for (const token of [logistToken, adminToken]) {
+      const response = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/ledger/operations/${entryId}/reverse`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { reason: 'обход отдельного действия' },
+      });
+      expect(response.statusCode).toBe(403);
+    }
+
+    // И не оставить следа: ни второй обратной записи, ни лишнего аудита.
+    expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
+    expect(await ctx.db.auditLog.count({ where: { action: 'FINANCE_OPERATION_REVERSED' } })).toBe(
+      auditsBefore,
+    );
+  });
+
   it('отказ при нулевой и отрицательной сумме, некорректной дате и получателе не-курьере', async () => {
     const { token } = await tokenFor(['ADMIN']);
     const courier = await courierId();
@@ -940,5 +999,146 @@ describe('права и идемпотентность на уровне API', (
 
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
     expect(await balanceOf(ctx.db, notCourier.id, null)).toBe(0n);
+  });
+});
+
+/**
+ * Тот же контракт ключа — у ОБЫЧНЫХ денежных операций.
+ *
+ * Идемпотентность, явный конфликт при чужих данных и разбор гонки снаружи
+ * транзакции были починены сначала для начального долга. Но ключом пользуется
+ * весь журнал: «Доп. расход», «Доплата», «Оплачиваемая попытка», сдача и
+ * выдача наличных. Починка, дошедшая до одного эндпоинта, оставляла бы в
+ * остальных тот же дефект — молчаливый ответ «сохранено» о чужой сумме
+ * и 500 на двойном нажатии.
+ */
+describe('ключ идемпотентности общих операций', () => {
+  interface OperationBody {
+    courierUserId: string;
+    kind: string;
+    amountMinor: string;
+    operationDate: string;
+    reason?: string;
+    idempotencyKey: string;
+  }
+
+  /** Курсор ленты событий: идентификатор растёт монотонно, время — нет. */
+  const lastEventId = async (): Promise<bigint> => {
+    const row = await ctx.db.realtimeEvent.findFirst({
+      orderBy: { id: 'desc' },
+      select: { id: true },
+    });
+    return row?.id ?? 0n;
+  };
+
+  const ledgerEventsAfter = async (cursor: bigint): Promise<number> =>
+    ctx.db.realtimeEvent.count({ where: { topic: 'finance.ledger_changed', id: { gt: cursor } } });
+
+  const postOperation = (
+    token: string,
+    body: OperationBody,
+  ): Promise<{ statusCode: number; json: () => { entry?: { id: string } } }> =>
+    ctx.app.inject({
+      method: 'POST',
+      url: '/api/logistics/ledger/operations',
+      headers: { authorization: `Bearer ${token}` },
+      payload: body,
+    }) as never;
+
+  it('тот же ключ с другой суммой — конфликт, а не тихий возврат прежней операции', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('op-conflict');
+
+    const first = await postOperation(token, {
+      courierUserId: courier,
+      kind: 'EXPENSE_PARKING',
+      amountMinor: '20000',
+      operationDate: DAY,
+      reason: 'парковка у адреса',
+      idempotencyKey: key,
+    });
+    expect(first.statusCode).toBe(201);
+
+    // Повтор той же операции идемпотентен: та же запись, без второго аудита.
+    const repeat = await postOperation(token, {
+      courierUserId: courier,
+      kind: 'EXPENSE_PARKING',
+      amountMinor: '20000',
+      operationDate: DAY,
+      reason: 'парковка у адреса',
+      idempotencyKey: key,
+    });
+    expect(repeat.statusCode).toBe(201);
+    expect(repeat.json().entry?.id).toBe(first.json().entry?.id);
+
+    /*
+     * А вот ДРУГАЯ сумма с тем же ключом — другая операция. Путь достижим:
+     * форма не закрывается при ошибке и оставляет прежний ключ, человек
+     * правит сумму и отправляет снова.
+     */
+    const withOtherAmount = await postOperation(token, {
+      courierUserId: courier,
+      kind: 'EXPENSE_PARKING',
+      amountMinor: '50000',
+      operationDate: DAY,
+      reason: 'парковка у адреса',
+      idempotencyKey: key,
+    });
+    expect(withOtherAmount.statusCode).toBe(409);
+
+    expect(await ctx.db.courierLedgerEntry.count({ where: { courierUserId: courier } })).toBe(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(-20_000n);
+    expect(
+      await ctx.db.auditLog.count({
+        where: {
+          action: 'FINANCE_OPERATION_RECORDED',
+          entityId: first.json().entry?.id ?? '',
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('два одновременных запроса с одним ключом: оба успешны, запись одна', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('op-race');
+    const cursor = await lastEventId();
+
+    const body = {
+      courierUserId: courier,
+      kind: 'BONUS',
+      amountMinor: '30000',
+      operationDate: DAY,
+      reason: 'доплата за сложный адрес',
+      idempotencyKey: key,
+    };
+
+    /*
+     * Ни один из двух ответов не вправе быть отказом.
+     *
+     * Проигравшая транзакция упирается в уникальность, её транзакция
+     * становится аварийной — и раньше это доходило до человека как 500 на
+     * обычном двойном нажатии.
+     */
+    const [first, second] = await Promise.all([
+      postOperation(token, body),
+      postOperation(token, body),
+    ]);
+    expect([first.statusCode, second.statusCode]).toEqual([201, 201]);
+    expect(first.json().entry?.id).toBe(second.json().entry?.id);
+
+    expect(await ctx.db.courierLedgerEntry.count({ where: { courierUserId: courier } })).toBe(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(-30_000n);
+    // Одна операция — одна строка истории и одно событие.
+    expect(
+      await ctx.db.auditLog.count({
+        where: {
+          action: 'FINANCE_OPERATION_RECORDED',
+          entityId: first.json().entry?.id ?? '',
+        },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
   });
 });

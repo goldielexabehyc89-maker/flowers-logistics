@@ -14,7 +14,7 @@
 import type { AuthenticatedActor } from '../auth/guards.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { AppError } from '../../platform/errors.js';
-import { appendEntry, reversalKey } from './ledger.js';
+import { appendLedgerEntry, reversalKey } from './ledger.js';
 import { appendCash, newTransferId, reverseCash } from './cash.js';
 import type { CashEntryView } from './cash.js';
 import type { LedgerEntryView } from './ledger.js';
@@ -36,6 +36,13 @@ export interface TransferResult {
   courierEntry: LedgerEntryView;
   cashEntry: CashEntryView;
   transferId: string;
+  /**
+   * Создала ли ЭТА транзакция запись долга курьера.
+   *
+   * Повтор с тем же ключом отдаёт прежнюю передачу, и аудит с событием
+   * тогда писать нельзя: одна операция — одна строка истории.
+   */
+  created: boolean;
 }
 
 /**
@@ -102,7 +109,7 @@ export async function recordTransfer(
       idempotencyKey: `cash:${input.idempotencyKey}`,
     });
 
-    const courierEntry = await appendEntry(tx, {
+    const { entry: courierEntry, created } = await appendLedgerEntry(tx, {
       courierUserId: input.courierUserId,
       kind: 'CASH_HANDED_TO_LOGIST',
       amountMinor: input.amountMinor,
@@ -112,7 +119,7 @@ export async function recordTransfer(
       idempotencyKey: input.idempotencyKey,
     });
 
-    return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId };
+    return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId, created };
   }
 
   // Логист выдал деньги курьеру: касса уменьшается, долг курьера растёт.
@@ -127,7 +134,7 @@ export async function recordTransfer(
     idempotencyKey: `cash:${input.idempotencyKey}`,
   });
 
-  const courierEntry = await appendEntry(tx, {
+  const { entry: courierEntry, created } = await appendLedgerEntry(tx, {
     courierUserId: input.courierUserId,
     kind: 'CASH_ISSUED_TO_COURIER',
     amountMinor: input.amountMinor,
@@ -137,7 +144,7 @@ export async function recordTransfer(
     idempotencyKey: input.idempotencyKey,
   });
 
-  return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId };
+  return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId, created };
 }
 
 /**

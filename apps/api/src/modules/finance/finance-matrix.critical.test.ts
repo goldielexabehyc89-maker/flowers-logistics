@@ -23,6 +23,7 @@ import {
 } from '../auth/testing/harness.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import type { Role } from '@fl/shared';
+import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
 import { buildSettlementReport, type SettlementReport, type SettlementTotals } from './reports.js';
 
@@ -363,5 +364,197 @@ describe('заработок считается ровно один раз', () 
     expect(onDay.totals.attemptFeesMinor).toBe('0');
     expect(onDay.totals.expensesMinor).toBe('0');
     expect(onDay.totals.bonusesMinor).toBe('0');
+  });
+});
+
+// --- Вторая дорога: записи, привязанные к доставке ----------------------------
+
+/**
+ * Доставленный заказ со снимком тарифа и денежным фактом.
+ *
+ * Нужен потому, что у отчёта ДВЕ дороги: запись без попытки показывается
+ * журналом дня, а запись, привязанная к попытке своего дня, уходит в строку
+ * доставки и считается там. Матрица, проверяющая только журнал, доказывала бы
+ * ровно половину правила «каждый вид ровно в одной категории».
+ */
+async function seedDeliveryRow(courierUserId: string): Promise<{
+  attemptId: string;
+  orderId: string;
+  routeId: string;
+}> {
+  const admin = await actorFor(['ADMIN']);
+  const order = await ctx.db.deliveryOrder.create({
+    data: {
+      externalId: randomUUID(),
+      externalName: unique('MX'),
+      externalUpdated: new Date(),
+      deliveryDate: toDateColumn(DAY),
+      inScope: true,
+      cashCollectable: true,
+      sumMinor: 0n,
+      payedSumMinor: 0n,
+      cashToCollectMinor: 0n,
+      paymentTypeName: 'Наличные/карта на ТТ',
+    },
+    select: { id: true },
+  });
+
+  const route = await ctx.db.deliveryRoute.create({
+    data: {
+      number: unique('RMX'),
+      deliveryDate: toDateColumn(DAY),
+      // Черновик: начислению состояние маршрута безразлично, а активный
+      // маршрут далёкого месяца занимал бы место в общем списке дней.
+      state: 'DRAFT',
+      vehicleType: 'CAR',
+      createdById: admin.userId,
+      courierUserId,
+    },
+    select: { id: true },
+  });
+
+  const participation = await ctx.db.routeOrder.create({
+    data: { routeId: route.id, orderId: order.id, position: 1, addedById: admin.userId },
+    select: { id: true },
+  });
+
+  const version = await ctx.db.courierTariffVersion.create({
+    data: {
+      kind: 'REGULAR',
+      effectiveFrom: toDateColumn('2030-09-01'),
+      effectiveTo: null,
+      perOrderWalkMinor: 0n,
+      perOrderCarMinor: 0n,
+      perKmMinor: 0n,
+      createdById: admin.userId,
+    },
+    select: { id: true },
+  });
+
+  await ctx.db.routeTariffSnapshot.create({
+    data: {
+      routeId: route.id,
+      tariffVersionId: version.id,
+      vehicleType: 'CAR',
+      perOrderMinor: 0n,
+      perKmMinor: 0n,
+      deliveryDate: toDateColumn(DAY),
+    },
+  });
+
+  const attempt = await ctx.db.deliveryAttempt.create({
+    data: {
+      routeOrderId: participation.id,
+      orderId: order.id,
+      routeId: route.id,
+      outcome: 'DELIVERED',
+      courierUserId,
+      activeKey: participation.id,
+    },
+    select: { id: true },
+  });
+
+  await ctx.db.deliveryMoneyFact.create({
+    data: {
+      attemptId: attempt.id,
+      orderId: order.id,
+      routeId: route.id,
+      courierUserId,
+      cashCollectable: true,
+      cashToCollectMinor: 0n,
+      paymentTypeName: 'Наличные/карта на ТТ',
+    },
+  });
+
+  return { attemptId: attempt.id, orderId: order.id, routeId: route.id };
+}
+
+/** Запись, привязанная к конкретной доставке. */
+async function appendOnAttempt(
+  courierUserId: string,
+  kind: string,
+  delivery: { attemptId: string; orderId: string; routeId: string },
+  key: string,
+  day: string,
+): Promise<string> {
+  const admin = await actorFor(['ADMIN']);
+  const entry = await ctx.db.$transaction((tx) =>
+    appendEntry(tx, {
+      courierUserId,
+      kind: kind as never,
+      amountMinor: AMOUNT,
+      operationDate: day,
+      actorUserId: admin.userId,
+      reason: 'проверка матрицы категорий по строке доставки',
+      routeId: delivery.routeId,
+      orderId: delivery.orderId,
+      attemptId: delivery.attemptId,
+      idempotencyKey: key,
+    }),
+  );
+  return entry.id;
+}
+
+/** Виды, которые вообще бывают у конкретной доставки. */
+const ATTEMPT_CASES: readonly Case[] = CASES.filter((item) =>
+  [
+    'CASH_RECEIVED',
+    'CASH_PAYMENT_CORRECTION',
+    'DELIVERY_FEE',
+    'DISTANCE_FEE',
+    'ATTEMPT_FEE',
+    'BONUS',
+    'EXPENSE_PARKING',
+    'EXPENSE_TOLL',
+    'EXPENSE_TRANSIT',
+    'EXPENSE_REPAIR',
+    'EXPENSE_LOADING',
+    'EXPENSE_OTHER',
+  ].includes(item.kind),
+);
+
+describe.each(ATTEMPT_CASES)('категория $kind в строке доставки', (item) => {
+  it('считается один раз в своей категории и не дублируется журналом', async () => {
+    const courier = (await actorFor(['COURIER'])).userId;
+    const delivery = await seedDeliveryRow(courier);
+    const entryId = await appendOnAttempt(
+      courier,
+      item.kind,
+      delivery,
+      unique(`row-${item.kind}`),
+      DAY,
+    );
+
+    const onDay = await report(DAY, DAY, courier);
+    expectOnly(onDay.totals, item.field, item.shown);
+    expect(onDay.totals.closingBalanceMinor).toBe(item.balance.toString());
+
+    /*
+     * Запись ушла в строку доставки и НЕ повторяется журналом дня: одно и то
+     * же место, а не два. Иначе день считал бы сумму дважды.
+     */
+    const group = onDay.days.find((day) => day.date === DAY)?.couriers[0];
+    expect(group?.operations.entries.map((entry) => entry.id)).not.toContain(entryId);
+    expect(BigInt(group?.totalMinor ?? '0')).toBe(item.balance);
+    expect(BigInt(group?.accruedMinor ?? '0')).toBe(item.salary ? item.shown : 0n);
+
+    // Отмена следующего дня уводит категорию в минус и обнуляет период.
+    const admin = await actorFor(['ADMIN']);
+    await ctx.db.$transaction((tx) =>
+      reverseEntry(tx, {
+        entryId,
+        actorUserId: admin.userId,
+        reason: 'проверка снятия по строке доставки',
+        operationDate: NEXT_DAY,
+      }),
+    );
+
+    const onNext = await report(NEXT_DAY, NEXT_DAY, courier);
+    expectOnly(onNext.totals, item.field, -item.shown);
+
+    const both = await report(DAY, NEXT_DAY, courier);
+    expectOnly(both.totals, item.field, 0n);
+    expect(both.totals.closingBalanceMinor).toBe('0');
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
   });
 });

@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { LogistCashKind, Prisma } from '../../generated/prisma/client.js';
+import type { LogistCashKind } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
@@ -177,35 +177,29 @@ export async function appendCash(
     }
   }
 
-  try {
-    const created = await tx.logistCashEntry.create({
-      data: {
-        logistUserId: input.logistUserId,
-        kind: input.kind,
-        amountMinor: amount,
-        operationDate: toDateColumn(input.operationDate),
-        actorUserId: input.actorUserId,
-        courierUserId: input.courierUserId ?? null,
-        transferId: input.transferId ?? null,
-        reason: input.reason ?? null,
-        idempotencyKey: input.idempotencyKey,
-      },
-      select: SELECT,
-    });
-    return toCashView(created);
-  } catch (error) {
-    // Гонка одинаковых запросов: победил другой — отдаём его запись.
-    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-      const row = await tx.logistCashEntry.findUnique({
-        where: { idempotencyKey: input.idempotencyKey },
-        select: SELECT,
-      });
-      if (row !== null) {
-        return toCashView(row);
-      }
-    }
-    throw error;
-  }
+  /*
+   * Победитель гонки читается ВЫЗЫВАЮЩИМ, уже после отката.
+   *
+   * Перехватывать здесь уникальность и тут же перечитывать запись нельзя:
+   * нарушение уникальности переводит транзакцию PostgreSQL в аварийное
+   * состояние, и следующий запрос в ней падает с `25P02`, подменяя понятную
+   * ошибку невнятной. Разбор гонки живёт снаружи транзакции.
+   */
+  const created = await tx.logistCashEntry.create({
+    data: {
+      logistUserId: input.logistUserId,
+      kind: input.kind,
+      amountMinor: amount,
+      operationDate: toDateColumn(input.operationDate),
+      actorUserId: input.actorUserId,
+      courierUserId: input.courierUserId ?? null,
+      transferId: input.transferId ?? null,
+      reason: input.reason ?? null,
+      idempotencyKey: input.idempotencyKey,
+    },
+    select: SELECT,
+  });
+  return toCashView(created);
 }
 
 /**

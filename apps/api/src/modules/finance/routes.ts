@@ -10,6 +10,7 @@
  */
 
 import { z } from 'zod';
+import { Prisma } from '../../generated/prisma/client.js';
 import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
@@ -32,7 +33,6 @@ import {
   validateTariffPeriod,
 } from './tariffs.js';
 import {
-  appendEntry,
   appendLedgerEntry,
   balanceOf,
   entryByIdempotencyKey,
@@ -198,9 +198,18 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
    * одна. Проигравшая транзакция к этому моменту уже аварийна, поэтому читать
    * победителя можно только ПОСЛЕ её отката — здесь. Обоим запросам отдаётся
    * один и тот же результат: обратная запись одна, баланс меняется один раз.
+   *
+   * Признаком гонки служит САМА ОШИБКА, а не наличие обратной записи. Запись
+   * существует и после любой давно завершённой отмены, и разбор «по факту
+   * существования» превращал бы в успех что угодно: отказ по правам, ненайденную
+   * операцию, отказ базы. Ограничение «начальный долг отменяет только
+   * администратор» держалось бы тогда не правилом, а состоянием.
    */
-  const reversalWinner = async (entryId: string): Promise<unknown | null> =>
-    entryByIdempotencyKey(deps.db, `reversal:${entryId}`);
+  const isUniqueViolation = (error: unknown): boolean =>
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+
+  const reversalWinner = async (entryId: string, error: unknown): Promise<unknown | null> =>
+    isUniqueViolation(error) ? entryByIdempotencyKey(deps.db, `reversal:${entryId}`) : null;
 
   // --- История -------------------------------------------------------------
 
@@ -440,90 +449,178 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
           ? ('ISSUED_TO_COURIER' as const)
           : null;
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      if (transfer !== null) {
-        const logistUserId = resolveDeskOwner(actor, body.logistUserId);
-        const result = await recordTransfer(tx, actor, {
-          kind: transfer,
+    /*
+     * Тот же ключ с другими данными — это не повтор, а другая операция.
+     *
+     * Повтор (двойной клик, сетевой повтор, гонка) обязан вернуть ту же запись
+     * и не создать второй. А молча отдать её в ответ на запрос с ДРУГОЙ суммой,
+     * датой, видом или курьером значило бы ответить «сохранено» о том, что не
+     * сохранялось. Путь достижим: форма не закрывается при ошибке и оставляет
+     * прежний ключ, а человек правит сумму и отправляет снова.
+     */
+    const sameOperation = (candidate: {
+      kind: string;
+      courierUserId: string;
+      operationDate: string;
+      amountMinor: string;
+    }): boolean =>
+      candidate.kind === body.kind &&
+      candidate.courierUserId === body.courierUserId &&
+      candidate.operationDate === body.operationDate &&
+      BigInt(candidate.amountMinor) === signedAmount(body.kind, body.amountMinor);
+
+    const conflict = (): never => {
+      throw new AppError('CONFLICT', {
+        publicMessage: 'Этот ключ идемпотентности уже использован для другой операции.',
+      });
+    };
+
+    // Повтор уже сохранённой операции: ни второй записи, ни второй строки аудита.
+    const known = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
+    if (known !== null) {
+      return sameOperation(known) ? reply.code(201).send({ entry: known }) : conflict();
+    }
+
+    const runOperation = async (): Promise<unknown> =>
+      deps.db.$transaction(async (tx) => {
+        /*
+         * Запросы с ОДНИМ ключом выстраиваются в очередь.
+         *
+         * Предварительного поиска мало: победитель вправе зафиксироваться между
+         * ним и вставкой. Блокировка по ключу делает такое чередование
+         * невозможным, а признак `created` закрывает его, даже если оно случится.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ledger-operation:${body.idempotencyKey}`})::bigint)`;
+
+        if (transfer !== null) {
+          const logistUserId = resolveDeskOwner(actor, body.logistUserId);
+          const result = await recordTransfer(tx, actor, {
+            kind: transfer,
+            courierUserId: body.courierUserId,
+            logistUserId,
+            amountMinor: body.amountMinor,
+            operationDate: body.operationDate,
+            idempotencyKey: body.idempotencyKey,
+          });
+
+          if (!sameOperation(result.courierEntry)) {
+            conflict();
+          }
+
+          // Аудит и событие пишет только та транзакция, которая создала запись.
+          if (!result.created) {
+            return result.courierEntry;
+          }
+
+          await writeAudit(tx, {
+            action: 'FINANCE_OPERATION_RECORDED',
+            entityType: 'CourierLedgerEntry',
+            entityId: result.courierEntry.id,
+            actorUserId: actor.userId,
+            actorRoles: actor.roles,
+            newValue: {
+              kind: result.courierEntry.kind,
+              amountMinor: result.courierEntry.amountMinor,
+              operationDate: result.courierEntry.operationDate,
+              courierUserId: result.courierEntry.courierUserId,
+              // Владелец кассы и автор различаются, когда действует администратор.
+              logistUserId,
+              transferId: result.transferId,
+            },
+            ...contextOf(request),
+          });
+
+          await publishRealtimeEvent(tx, {
+            topic: 'finance.ledger_changed',
+            payload: { operationDate: result.courierEntry.operationDate },
+            audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+          });
+
+          return result.courierEntry;
+        }
+
+        const { entry: created, created: isNew } = await appendLedgerEntry(tx, {
           courierUserId: body.courierUserId,
-          logistUserId,
+          kind: body.kind,
           amountMinor: body.amountMinor,
           operationDate: body.operationDate,
+          actorUserId: actor.userId,
+          reason: body.reason ?? null,
+          comment: body.comment ?? null,
+          routeId: body.routeId ?? null,
+          orderId: body.orderId ?? null,
+          attemptId: body.attemptId ?? null,
           idempotencyKey: body.idempotencyKey,
         });
+
+        /*
+         * Контракт сверяется на КАЖДОМ пути возврата существующей операции,
+         * включая тот, где запись нашёл сам `appendLedgerEntry`.
+         */
+        if (!sameOperation(created)) {
+          conflict();
+        }
+
+        if (!isNew) {
+          return created;
+        }
 
         await writeAudit(tx, {
           action: 'FINANCE_OPERATION_RECORDED',
           entityType: 'CourierLedgerEntry',
-          entityId: result.courierEntry.id,
+          entityId: created.id,
           actorUserId: actor.userId,
           actorRoles: actor.roles,
+          // Ни комментария, ни причины: они могут содержать что угодно, включая
+          // персональные подробности. В аудите — вид, сумма и день.
           newValue: {
-            kind: result.courierEntry.kind,
-            amountMinor: result.courierEntry.amountMinor,
-            operationDate: result.courierEntry.operationDate,
-            courierUserId: result.courierEntry.courierUserId,
-            // Владелец кассы и автор различаются, когда действует администратор.
-            logistUserId,
-            transferId: result.transferId,
+            kind: created.kind,
+            amountMinor: created.amountMinor,
+            operationDate: created.operationDate,
+            courierUserId: created.courierUserId,
           },
           ...contextOf(request),
         });
 
+        /*
+         * Realtime без денег и без людей.
+         *
+         * Экрану достаточно знать, что учёт изменился, чтобы перечитать отчёт;
+         * суммы и имена в поток событий не попадают.
+         */
         await publishRealtimeEvent(tx, {
           topic: 'finance.ledger_changed',
-          payload: { operationDate: result.courierEntry.operationDate },
+          payload: { operationDate: created.operationDate },
           audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
         });
 
-        return result.courierEntry;
-      }
-
-      const created = await appendEntry(tx, {
-        courierUserId: body.courierUserId,
-        kind: body.kind,
-        amountMinor: body.amountMinor,
-        operationDate: body.operationDate,
-        actorUserId: actor.userId,
-        reason: body.reason ?? null,
-        comment: body.comment ?? null,
-        routeId: body.routeId ?? null,
-        orderId: body.orderId ?? null,
-        attemptId: body.attemptId ?? null,
-        idempotencyKey: body.idempotencyKey,
+        return created;
       });
 
-      await writeAudit(tx, {
-        action: 'FINANCE_OPERATION_RECORDED',
-        entityType: 'CourierLedgerEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        // Ни комментария, ни причины: они могут содержать что угодно, включая
-        // персональные подробности. В аудите — вид, сумма и день.
-        newValue: {
-          kind: created.kind,
-          amountMinor: created.amountMinor,
-          operationDate: created.operationDate,
-          courierUserId: created.courierUserId,
-        },
-        ...contextOf(request),
-      });
-
+    let entry;
+    try {
+      entry = await runOperation();
+    } catch (error) {
       /*
-       * Realtime без денег и без людей.
+       * Гонку выигрывает один запрос, и его запись — это и есть результат.
        *
-       * Экрану достаточно знать, что учёт изменился, чтобы перечитать отчёт;
-       * суммы и имена в поток событий не попадают.
+       * Нарушение уникальности переводит транзакцию PostgreSQL в аварийное
+       * состояние, поэтому победитель читается только здесь, после отката.
+       * Любая другая ошибка остаётся ошибкой, а чужая операция под тем же
+       * ключом — конфликтом, а не молчаливым «сохранено».
        */
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
-      });
-
-      return created;
-    });
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const winner = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
+      if (winner === null) {
+        throw error;
+      }
+      if (!sameOperation(winner)) {
+        conflict();
+      }
+      entry = winner;
+    }
 
     return reply.code(201).send({ entry });
   });
@@ -612,7 +709,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         return created;
       });
     } catch (error) {
-      const winner = await reversalWinner(id);
+      const winner = await reversalWinner(id, error);
       if (winner === null) {
         throw error;
       }
@@ -855,7 +952,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
        * Проигравший гонку получает ту же обратную запись, а не 500: отмена
        * идемпотентна, и оба запроса обязаны увидеть один результат.
        */
-      const winner = await reversalWinner(id);
+      const winner = await reversalWinner(id, error);
       if (winner === null) {
         throw error;
       }

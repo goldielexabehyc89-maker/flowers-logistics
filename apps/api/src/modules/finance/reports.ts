@@ -318,15 +318,24 @@ export async function buildSettlementReport(
       ]).toString(),
       bonusesMinor: changeOf(own, ['BONUS']).toString(),
       /*
-       * Финансовый результат доставки снят.
+       * Финансовый результат доставки снят — ИМЕННО В ЭТОМ ДНЕ.
        *
        * Отмена из МоегоСклада НЕ создаёт отмену результата доставки: физический
        * факт остаётся, снимаются только деньги. Поэтому признак отдельный от
        * `cancelled` — иначе отменённый заказ выглядел бы обычной доставкой
        * с нулевыми колонками и без объяснения.
+       *
+       * Признаком служит СОСТОЯНИЕ СТРОКИ, а не отметка заказа. Отмена, пришедшая
+       * на следующий день, лежит в своём дне, а день доставки честно сохраняет
+       * ненулевой итог — и помечать его «снято» значило бы прятать деньги,
+       * которые в итог дня и периода входят полностью. Одна обратная запись
+       * (например, отменённая по ошибке оплачиваемая попытка) тоже не делает
+       * снятой всю доставку.
        */
       financeCancelled:
-        fact.attempt.order.cancelledInSource || own.some((entry) => entry.reversesEntryId !== null),
+        own.length > 0 &&
+        own.some((entry) => entry.reversesEntryId !== null) &&
+        own.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n) === 0n,
       totalMinor: own.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n).toString(),
       settlementMissing: snapshot === null,
     };

@@ -156,11 +156,21 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           fee: toRubles(row.deliveryFeeMinor),
           km: row.beyondMkadKmTenths === null ? null : row.beyondMkadKmTenths / 10,
           distance: toRubles(row.distanceFeeMinor),
+          /*
+           * «Доп.» строки: расход или доплата, привязанные к попытке.
+           *
+           * Они входят в «Доп.» и «Начислено» дня, поэтому обязаны быть видны
+           * и здесь — иначе сумма строк не сходится с итогом дня, и разницу
+           * не объяснить. Правило то же, что на экране и в `grouping.ts`.
+           */
+          extra: toRubles((BigInt(row.expensesMinor) + BigInt(row.bonusesMinor)).toString()),
           accrued: toRubles(
             (
               BigInt(row.deliveryFeeMinor) +
               BigInt(row.distanceFeeMinor) +
-              BigInt(row.attemptFeeMinor)
+              BigInt(row.attemptFeeMinor) +
+              BigInt(row.expensesMinor) +
+              BigInt(row.bonusesMinor)
             ).toString(),
           ),
           total: toRubles(row.totalMinor),
@@ -169,7 +179,9 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
             : row.cancelled
               ? 'Результат отменён'
               : row.financeCancelled
-                ? 'Финансовый результат отменён'
+                ? // Итог строки остаётся числом: пометка объясняет ноль, а не
+                  // заменяет сумму. Так файл и экран говорят одно и то же.
+                  'Финансовый результат отменён'
                 : '',
         });
       }

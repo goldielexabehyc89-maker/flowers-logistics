@@ -419,17 +419,18 @@ describe('оплата в источнике уменьшает наличные
       );
 
     /*
-     * Ошибки не глушатся: проигравшая транзакция вправе упереться ТОЛЬКО в
-     * уникальность ключа. Любая другая — настоящий отказ, и тест обязан упасть.
+     * Оба запроса обязаны ЗАВЕРШИТЬСЯ УСПЕШНО.
+     *
+     * Строка заказа блокируется первой, поэтому второй запрос не соревнуется
+     * за уникальность, а ждёт первого и перечитывает уже снятое: разница
+     * выходит нулевой, и вставлять ему нечего. Разрешать здесь отказ по
+     * уникальности значило бы заранее согласиться с симптомом, который эта
+     * проверка и должна ловить: убери блокировку — и тест продолжил бы
+     * проходить, доказывая только то, что запись в итоге одна.
      */
-    const results = await Promise.allSettled([run(), run()]);
-    for (const result of results) {
-      if (result.status === 'rejected') {
-        const code = (result.reason as { code?: string }).code ?? String(result.reason);
-        expect(code).toBe('P2002');
-      }
-    }
-    expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+    const [first, second] = await Promise.all([run(), run()]);
+    // Один снял разницу, другой увидел, что снимать уже нечего.
+    expect([first, second].filter(Boolean)).toHaveLength(1);
 
     expect(
       await ctx.db.courierLedgerEntry.count({
@@ -552,10 +553,14 @@ describe('оплата в источнике уменьшает наличные
     expect(sumDays('distanceFeesMinor')).toBe(BigInt(both.totals.distanceFeesMinor));
     expect(sumDays('accruedMinor')).toBe(0n);
 
-    // Строка доставки осталась на своём дне и помечена.
+    /*
+     * Строка доставки осталась на своём дне и НЕ помечена снятой: снятие
+     * пришло на следующий день и живёт там. Пометка на дне доставки прятала бы
+     * настоящие деньги этого дня за словом «отменён».
+     */
     const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
     expect(row?.deliveryDate).toBe(DAY);
-    expect(row?.financeCancelled).toBe(true);
+    expect(row?.financeCancelled).toBe(false);
     expect(row?.outcome).toBe('DELIVERED');
   });
 
@@ -667,8 +672,13 @@ describe('оплата в источнике уменьшает наличные
     const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
     expect(row?.cashMinor).toBe('500000');
     expect(row?.deliveryFeeMinor).toBe('20000');
-    // И при этом честно помечен как отменённый по деньгам.
-    expect(row?.financeCancelled).toBe(true);
+    /*
+     * Строка дня доставки «снятой» НЕ помечается: снятие лежит в следующем
+     * дне, а этот день честно несёт свои 4 800 ₽ и полностью входит в итог
+     * периода. Пометка здесь спрятала бы настоящие деньги за словом «отменён».
+     */
+    expect(row?.financeCancelled).toBe(false);
+    expect(row?.totalMinor).toBe('480000');
 
     // День отмены существует и несёт обратные записи.
     const cancelDay = both.days.find((day) => day.date === NEXT_DAY);
@@ -1187,11 +1197,25 @@ describe('выгрузка показывает корректировки, а �
     expect(named.get('Наличные, полученные курьером')).toBe(0);
     expect(named.get('Конечный баланс')).toBe(0);
 
-    // Но дневные движения в листе «Заказы» сохранены и помечены.
+    /*
+     * Дневные движения в листе «Заказы» сохранены.
+     *
+     * Строка дня доставки НЕ помечается снятой: снятие пришло на следующий
+     * день. Её итог остаётся настоящим числом, а обратные записи видны
+     * отдельной строкой своего дня — именно так это выглядит и на экране.
+     */
     const rows = workbook.getWorksheet('Заказы');
     const notes: string[] = [];
-    rows?.eachRow((row) => notes.push(String(row.getCell(22).value ?? '')));
-    expect(notes).toContain('Финансовый результат отменён');
+    const totals: unknown[] = [];
+    rows?.eachRow((row) => {
+      notes.push(String(row.getCell(22).value ?? ''));
+      totals.push(row.getCell(21).value);
+    });
+    expect(notes).not.toContain('Финансовый результат отменён');
+    // 4 700 ₽ дня доставки: 5 000 наличных минус 200 оплаты работы и 100 МКАД.
+    expect(totals).toContain(4700);
+    // И ровно столько же снято в день отмены — не спрятано, а показано минусом.
+    expect(totals).toContain(-4700);
   });
 
   it('XLSX: подписи, знаки и суммы итогов и журнала', async () => {

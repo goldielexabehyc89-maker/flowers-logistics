@@ -30,7 +30,7 @@ import type { TransactionClient } from '../auth/sessions.js';
 import type { OutboxHandler } from '../outbox/worker.js';
 import { enqueueOutbox } from '../outbox/producer.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
-import { appendEntry } from './ledger.js';
+import { appendLedgerEntry } from './ledger.js';
 import { reverseDeliveryAccruals } from './accrual.js';
 
 export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
@@ -45,9 +45,26 @@ export function cashCorrectionJobKey(orderId: string, payedSumMinor: bigint): st
   return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${payedSumMinor.toString()}`;
 }
 
-/** Ключ задания на снятие денег отменённого заказа: отмена бывает один раз. */
-export function cancellationJobKey(orderId: string): string {
-  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}`;
+/** Общее начало ключей заданий на снятие денег этого заказа. */
+function cancellationKeyPrefix(orderId: string): string {
+  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}:`;
+}
+
+/**
+ * Ключ задания на снятие денег отменённого заказа.
+ *
+ * В ключ входит НОМЕР отмены, а не только заказ. Отмену в источнике снимают
+ * и ставят заново: заказ возвращается в работу и успевает получить новые
+ * деньги — хотя бы оплаченную попытку от логиста. Ключ из одного заказа был бы
+ * занят навсегда, повторная отмена не поставила бы задания вовсе, и новые
+ * деньги так и остались бы за курьером по отменённому заказу. Сообщения
+ * очереди не удаляются, поэтому «занят навсегда» здесь буквально.
+ *
+ * Номер, а не момент времени: два события отмены обязаны различаться даже
+ * тогда, когда часы отдали одно и то же значение.
+ */
+export function cancellationJobKey(orderId: string, generation: number): string {
+  return `${cancellationKeyPrefix(orderId)}${generation}`;
 }
 
 /** Ключ самой корректирующей записи: одна на попытку и состояние оплаты. */
@@ -70,9 +87,23 @@ export async function enqueueCancelledOrderFinance(
   tx: TransactionClient,
   input: { orderId: string },
 ): Promise<void> {
+  /*
+   * Номер этой отмены — сколько заданий по заказу уже стояло, плюс одно.
+   *
+   * Считать безопасно: вызывающий уже изменил строку заказа в этой же
+   * транзакции, то есть держит её блокировку, и два события отмены одного
+   * заказа не могут считать одновременно.
+   */
+  const previous = await tx.outboxMessage.count({
+    where: {
+      topic: ORDER_FINANCE_TOPIC,
+      idempotencyKey: { startsWith: cancellationKeyPrefix(input.orderId) },
+    },
+  });
+
   await enqueueOutbox(tx, {
     topic: ORDER_FINANCE_TOPIC,
-    idempotencyKey: cancellationJobKey(input.orderId),
+    idempotencyKey: cancellationJobKey(input.orderId, previous + 1),
     payload: { reason: 'CANCEL', orderId: input.orderId },
   });
 }
@@ -178,7 +209,17 @@ export async function applyCashPaymentCorrection(
       continue;
     }
 
-    await appendEntry(tx, {
+    /*
+     * Менялся ли журнал — решает ЗАПИСЬ, а не намерение её создать.
+     *
+     * Ключ корректировки одинаков для попытки и состояния оплаты. Если
+     * предыдущую корректировку человек отменил, она перестаёт учитываться
+     * в `alreadyRemoved`, и `delta` снова окажется положительной — но запись
+     * по этому ключу уже существует, и новой не появится. Сообщать отчёту
+     * «журнал изменился» в таком случае значило бы звать его перечитывать
+     * то, что не менялось.
+     */
+    const { created } = await appendLedgerEntry(tx, {
       courierUserId: entry.courierUserId,
       kind: 'CASH_PAYMENT_CORRECTION',
       amountMinor: delta,
@@ -190,7 +231,7 @@ export async function applyCashPaymentCorrection(
       attemptId: entry.attemptId,
       idempotencyKey: cashCorrectionEntryKey(entry.attemptId, order.payedSumMinor),
     });
-    changed = true;
+    changed = changed || created;
   }
 
   return changed;

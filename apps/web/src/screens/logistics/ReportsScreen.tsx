@@ -284,6 +284,17 @@ export function signOf(minor: string): string {
   return BigInt(minor) < 0n ? '−' : '+';
 }
 
+/**
+ * «Доп.» одной доставки: расходы и доплаты, привязанные к её попытке.
+ *
+ * Считается там же, где и у дня (`grouping.ts`), чтобы сумма строк сходилась
+ * с итогом дня. Без общего правила строка показывала бы прочерк, а день —
+ * деньги, и объяснить разницу было бы нечем.
+ */
+export function rowExtra(row: { expensesMinor: string; bonusesMinor: string }): string {
+  return (BigInt(row.expensesMinor) + BigInt(row.bonusesMinor)).toString();
+}
+
 /** Величина суммы без знака: направление задаёт вид операции или столбец. */
 export function absMoney(minor: string): string {
   const value = BigInt(minor);
@@ -972,14 +983,22 @@ export function ReportsScreen(): React.JSX.Element {
                                     ? 'не рассчитано'
                                     : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
                                 </td>
-                                {/* Доп., сдача и выдача — операции дня, а не заказа. */}
-                                <td />
+                                {/*
+                                  «Доп.» строки: расход или доплату можно
+                                  привязать к попытке. Такая сумма входит в
+                                  «Доп.» и «Начислено» дня, и не показать её
+                                  здесь значило бы оставить итог дня без
+                                  объяснения. Сдача и выдача — операции дня,
+                                  к заказу они не относятся.
+                                */}
+                                <td>{formatMoney(rowExtra(row))}</td>
                                 <td>
                                   {formatMoney(
                                     (
                                       BigInt(row.deliveryFeeMinor) +
                                       BigInt(row.distanceFeeMinor) +
-                                      BigInt(row.attemptFeeMinor)
+                                      BigInt(row.attemptFeeMinor) +
+                                      BigInt(rowExtra(row))
                                     ).toString(),
                                   )}
                                 </td>
@@ -988,21 +1007,28 @@ export function ReportsScreen(): React.JSX.Element {
                                 <td>
                                   {row.settlementMissing ? (
                                     <span className="reports__missing">Расчёт отсутствует</span>
-                                  ) : row.financeCancelled ? (
-                                    /*
-                                      Доставка состоялась, но денег по ней нет.
-                                      Без этой пометки строка с нулями читалась
-                                      бы как ошибка расчёта, а не как отмена.
-                                    */
-                                    <span
-                                      className="reports__missing"
-                                      data-testid="reports-finance-cancelled"
-                                      title="Заказ отменён в источнике: начисления сняты обратными записями, факт доставки сохранён"
-                                    >
-                                      Финрезультат отменён
-                                    </span>
                                   ) : (
-                                    formatMoney(row.totalMinor)
+                                    <>
+                                      {formatMoney(row.totalMinor)}
+                                      {row.financeCancelled ? (
+                                        /*
+                                          Доставка состоялась, но за этот день
+                                          её деньги сняты целиком. Число
+                                          остаётся на месте: оно входит в итог
+                                          дня и периода, и прятать его нельзя —
+                                          пометка объясняет ноль, а не заменяет
+                                          его.
+                                        */
+                                        <span
+                                          className="reports__missing"
+                                          data-testid="reports-finance-cancelled"
+                                          title="Начисления этой доставки сняты обратными записями того же дня; факт доставки сохранён"
+                                        >
+                                          {' '}
+                                          Финрезультат отменён
+                                        </span>
+                                      ) : null}
+                                    </>
                                   )}
                                 </td>
                               </tr>,

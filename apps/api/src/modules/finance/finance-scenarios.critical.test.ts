@@ -44,7 +44,7 @@ import { createOrderFinanceHandler, ORDER_FINANCE_TOPIC } from './order-sync.js'
 import { createMkadDistanceHandler, MKAD_DISTANCE_TOPIC } from './mkad-auto.js';
 import { LEDGER_SETTING_KEY } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
-import { appendEntry } from './ledger.js';
+import { appendEntry, reverseEntry } from './ledger.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf, settlementPdfTitle, settlementSummaryLines } from './export-pdf.js';
 import ExcelJS from 'exceljs';
@@ -290,6 +290,20 @@ async function deliver(scenario: Scenario): Promise<void> {
   );
 }
 
+/**
+ * Действующая попытка доставки этого заказа.
+ *
+ * Нужна там, где операцию логиста привязывают к конкретной доставке: ровно
+ * такие записи и снимает отмена заказа.
+ */
+async function activeAttemptOf(scenario: Scenario): Promise<string> {
+  const attempt = await ctx.db.deliveryAttempt.findFirstOrThrow({
+    where: { orderId: scenario.orderId, activeKey: { not: null } },
+    select: { id: true },
+  });
+  return attempt.id;
+}
+
 /** Новая оплата или отмена приходит тем же импортом, что и в проде. */
 async function syncSource(
   scenario: Scenario,
@@ -461,6 +475,7 @@ async function blockedBackends(): Promise<number> {
     SELECT count(*)::bigint AS count
     FROM pg_stat_activity
     WHERE cardinality(pg_blocking_pids(pid)) > 0
+      AND datname = current_database()
   `;
   return Number(rows[0]?.count ?? 0n);
 }
@@ -639,8 +654,80 @@ describe('доставка, оплаты и отмена одним заказо
 
     expect(await sumKind(scenario.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(-200_000n);
     expect(await entryCount(scenario.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(1);
-    // Второго события тоже нет: журнал не менялся.
+    // Второго события тоже нет: воркеру нечего было обрабатывать.
     expect(await ledgerEventsAfter(afterFirstRun)).toHaveLength(0);
+
+    /*
+     * Тот же обработчик запускается ЯВНО, будто задание пришло повторно.
+     *
+     * Без этого проверка доказывала бы только «сообщения в очереди нет»:
+     * ожидание «события не появилось» выполнялось бы ещё до того, как
+     * обработчик решил его не публиковать. Здесь он честно отрабатывает
+     * и обязан промолчать — записывать нечего.
+     */
+    const beforeReplay = await lastEventId();
+    await ctx.db.$transaction((tx) =>
+      createOrderFinanceHandler({ now: () => new Date(`${DAY}T16:00:00.000Z`) })(
+        {
+          id: randomUUID(),
+          topic: ORDER_FINANCE_TOPIC,
+          idempotencyKey: unique('replay'),
+          payload: { reason: 'PAYMENT', orderId: scenario.orderId },
+          attempts: 0,
+          maxAttempts: 5,
+        },
+        tx,
+      ),
+    );
+    expect(await entryCount(scenario.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(1);
+    expect(await ledgerEventsAfter(beforeReplay)).toHaveLength(0);
+  });
+
+  it('корректировка, отменённая человеком, повторным заданием не воскресает', async () => {
+    /*
+     * Ключ корректировки один на попытку и состояние оплаты. Если человек
+     * отменил корректировку обратной записью, снятое перестаёт учитываться,
+     * и разница снова окажется положительной — но запись по этому ключу уже
+     * есть, и новой не появится. Значит и событие «журнал изменился» слать
+     * не о чем: иначе отчёт звали бы перечитывать то, что не менялось.
+     */
+    const scenario = await seedScenario({ sum: 500_000, payedSum: 0, perOrderMinor: 20_000n });
+    await deliver(scenario);
+    await syncSource(scenario, { sum: 500_000, payedSum: 200_000 });
+    expect(await runQueue(new Date(`${DAY}T15:00:00.000Z`), scenario)).toBe(1);
+
+    const correction = await ctx.db.courierLedgerEntry.findFirstOrThrow({
+      where: { orderId: scenario.orderId, kind: 'CASH_PAYMENT_CORRECTION' },
+      select: { id: true },
+    });
+    const admin = await actorFor(['ADMIN']);
+    await ctx.db.$transaction((tx) =>
+      reverseEntry(tx, {
+        entryId: correction.id,
+        actorUserId: admin.userId,
+        reason: 'снято по решению администратора',
+        operationDate: DAY,
+      }),
+    );
+
+    const beforeReplay = await lastEventId();
+    await ctx.db.$transaction((tx) =>
+      createOrderFinanceHandler({ now: () => new Date(`${DAY}T17:00:00.000Z`) })(
+        {
+          id: randomUUID(),
+          topic: ORDER_FINANCE_TOPIC,
+          idempotencyKey: unique('replay-after-reversal'),
+          payload: { reason: 'PAYMENT', orderId: scenario.orderId },
+          attempts: 0,
+          maxAttempts: 5,
+        },
+        tx,
+      ),
+    );
+
+    // Вторая корректировка не появилась, и события об изменении журнала нет.
+    expect(await entryCount(scenario.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(1);
+    expect(await ledgerEventsAfter(beforeReplay)).toHaveLength(0);
   });
 });
 
@@ -664,6 +751,66 @@ describe('отмена до доставки', () => {
     // Начислений нет ни одного: ни наличных, ни оплаты доставки.
     expect(await ctx.db.courierLedgerEntry.count({ where: { orderId: scenario.orderId } })).toBe(0);
     expect(await contribution(scenario.orderId)).toBe(0n);
+  });
+
+  it('снятая и поставленная заново отмена снимает деньги ОБА раза', async () => {
+    /*
+     * Отмену в источнике снимают: заказ возвращается в работу, его везут ещё
+     * раз и он получает новые начисления. Вторая отмена обязана снять и их.
+     *
+     * Ключ задания «один заказ — одна отмена» держался бы вечно: сообщения
+     * очереди не удаляются, повторная постановка вставляла бы ноль строк, и
+     * снятие не выполнялось бы никогда — деньги отменённого заказа так и
+     * оставались бы за курьером.
+     */
+    const scenario = await seedScenario({ sum: 400_000, payedSum: 0, perOrderMinor: 20_000n });
+    await deliver(scenario);
+    expect(await contribution(scenario.orderId)).toBe(380_000n);
+
+    await syncSource(scenario, { sum: 400_000, payedSum: 0, cancelled: true });
+    expect(await runQueue(new Date(`${DAY}T12:00:00.000Z`), scenario)).toBe(1);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+
+    // Отмену сняли: заказ снова в работе.
+    await syncSource(scenario, { sum: 400_000, payedSum: 0 });
+    const restored = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: scenario.orderId },
+      select: { cancelledInSource: true },
+    });
+    expect(restored.cancelledInSource).toBe(false);
+
+    /*
+     * У вернувшегося в работу заказа появляются новые деньги: логист оплатил
+     * курьеру попытку. Это обычная ручная операция, привязанная к доставке.
+     */
+    const logist = await actorFor(['LOGISTICIAN']);
+    const attemptId = await activeAttemptOf(scenario);
+    await ctx.db.$transaction((tx) =>
+      appendEntry(tx, {
+        courierUserId: scenario.courierId,
+        kind: 'ATTEMPT_FEE',
+        amountMinor: 20_000n,
+        operationDate: DAY,
+        actorUserId: logist.userId,
+        reason: 'оплачиваемая попытка после возврата заказа в работу',
+        routeId: scenario.routeId,
+        orderId: scenario.orderId,
+        attemptId,
+        idempotencyKey: unique('attempt-fee'),
+      }),
+    );
+    expect(await contribution(scenario.orderId)).toBe(-20_000n);
+
+    // Вторая отмена обязана поставить СВОЁ задание и снять новые деньги.
+    await syncSource(scenario, { sum: 400_000, payedSum: 0, cancelled: true });
+    expect(await runQueue(new Date(`${NEXT_DAY}T09:00:00.000Z`), scenario)).toBe(1);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+
+    // Исходные записи целы, снятие сделано обратными: 3 начисления — 3 отмены.
+    expect(await entryCount(scenario.orderId, 'CASH_RECEIVED')).toBe(1);
+    expect(await entryCount(scenario.orderId, 'DELIVERY_FEE')).toBe(1);
+    expect(await entryCount(scenario.orderId, 'ATTEMPT_FEE')).toBe(1);
+    expect(await entryCount(scenario.orderId, 'ADJUSTMENT')).toBe(3);
   });
 });
 
