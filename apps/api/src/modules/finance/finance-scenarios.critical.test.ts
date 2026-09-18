@@ -413,6 +413,14 @@ async function runQueue(
       workerId: unique('w'),
       handlerTimeoutMs: 30_000,
     });
+    if (result.failed > 0) {
+      const broken = await ctx.db.outboxMessage.findMany({
+        where: { status: { in: ['ERROR', 'DEAD'] } },
+        select: { topic: true, lastError: true },
+        take: 3,
+      });
+      expect(JSON.stringify(broken)).toBe('');
+    }
     expect(result.failed).toBe(0);
     expect(result.dead).toBe(0);
     expect(result.lost).toBe(0);
@@ -2416,5 +2424,193 @@ describe('защита снятой попытки на прежних данн�
 
     expect(changed).toBe(false);
     expect(await balanceOf(ctx.db, scenario.courierId, NEXT_DAY)).toBe(0n);
+  });
+});
+
+// --- Приёмка b069192: фоновый путь и снятая попытка ----------------------------
+
+describe('позднее начисление километров снятой попытке', () => {
+  /** Непогашенная оплата километров по заказу. */
+  const distanceEntries = (orderId: string): Promise<number> =>
+    ctx.db.courierLedgerEntry.count({
+      where: { orderId, kind: 'DISTANCE_FEE', reversedBy: { is: null } },
+    });
+
+  it('фоновый обработчик не оплачивает километры попытке, чей результат снят', async () => {
+    /*
+     * Запрет восстановления снятой попытки стоял на ручном пересчёте и не стоял
+     * на фоновом начислении — а начисление создают оба. Отложенный расчёт МКАД
+     * приходил уже после снятия отмены и возвращал попытке 800 ₽ днём
+     * первоначальной доставки, хотя ручной пересчёт правильно отказывал.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    // Расстояния ещё нет: задание МКАД ждёт ответа маршрутизатора.
+    await deliver(scenario);
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+
+    // Заказ отменяют: финансовый результат попытки снимается.
+    await syncSource(scenario, { sum: 100_000, payedSum: 0, cancelled: true });
+    /*
+     * Маршрутизатор отвечает и здесь: задание МКАД ставит сама доставка, и без
+     * ответа оно ушло бы в отложенную ошибку. Отменённому заказу это денег не
+     * даёт — сохраняется только снимок расстояния.
+     */
+    expect(
+      await runQueue(new Date(`${DAY}T11:00:00.000Z`), scenario, { meters: 20_000 }),
+    ).toBeGreaterThan(0);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+    const attempt = await ctx.db.deliveryAttempt.findFirstOrThrow({
+      where: { routeOrderId: scenario.routeOrderId, activeKey: { not: null } },
+      select: { financeStrippedAt: true },
+    });
+    expect(attempt.financeStrippedAt).not.toBeNull();
+
+    // Отмену снимают, но новой доставки нет: попытка та же.
+    await syncSource(scenario, { sum: 100_000, payedSum: 0 });
+
+    /*
+     * Приходит отложенный расчёт: точку уточнили, задание считается заново и
+     * даёт 20,0 км по 40 ₽. Именно здесь фоновый путь и обходил запрет.
+     */
+    await ctx.db.deliveryOrder.update({
+      where: { id: scenario.orderId },
+      data: { geoLatMicro: 55_400_000, geoLonMicro: 37_400_000 },
+    });
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+    expect(
+      await runQueue(new Date(`${DAY}T19:00:00.000Z`), scenario, { meters: 20_000 }),
+    ).toBeGreaterThan(0);
+
+    expect(await distanceEntries(scenario.orderId)).toBe(0);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+
+    // Повтор задания тоже ничего не добавляет.
+    await ctx.db.deliveryOrder.update({
+      where: { id: scenario.orderId },
+      data: { geoLatMicro: 55_450_000, geoLonMicro: 37_450_000 },
+    });
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+    await runQueue(new Date(`${DAY}T20:00:00.000Z`), scenario, { meters: 20_000 });
+    expect(await distanceEntries(scenario.orderId)).toBe(0);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+  });
+
+  it('снятая прежней версией попытка тоже не оплачивается фоновым путём', async () => {
+    /*
+     * У отмен прежней версии отметки на попытке нет, а причина обратной записи
+     * пуста. Неизвестная причина означает возможное снятие — и фоновый путь
+     * обязан считаться с ней так же, как ручной.
+     */
+    const scenario = await seedScenario({
+      sum: 100_000,
+      payedSum: 0,
+      perOrderMinor: 20_000n,
+      perKmMinor: 4_000n,
+    });
+    await seedGeo(scenario);
+    await deliver(scenario);
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+
+    // Фикстура прежних данных: обратные записи без причины и без отметки.
+    const accruals = await ctx.db.courierLedgerEntry.findMany({
+      where: { orderId: scenario.orderId, kind: { not: 'ADJUSTMENT' }, reversedBy: { is: null } },
+      select: { id: true, amountMinor: true, routeId: true, attemptId: true },
+    });
+    const admin = await actorFor(['ADMIN']);
+    for (const entry of accruals) {
+      await ctx.db.courierLedgerEntry.create({
+        data: {
+          courierUserId: scenario.courierId,
+          kind: 'ADJUSTMENT',
+          amountMinor: -entry.amountMinor,
+          operationDate: new Date(`${DAY}T00:00:00.000Z`),
+          actorUserId: admin.userId,
+          reason: 'Отмена в МойСклад: заказ исключён из расчётов с курьером',
+          routeId: entry.routeId,
+          orderId: scenario.orderId,
+          attemptId: entry.attemptId,
+          reversesEntryId: entry.id,
+          idempotencyKey: `reversal:${entry.id}`,
+        },
+      });
+    }
+    expect(await contribution(scenario.orderId)).toBe(0n);
+
+    expect(
+      await runQueue(new Date(`${DAY}T19:00:00.000Z`), scenario, { meters: 20_000 }),
+    ).toBeGreaterThan(0);
+
+    expect(await distanceEntries(scenario.orderId)).toBe(0);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+  });
+
+  it('неотменённый заказ получает ровно одно догоняющее начисление', async () => {
+    /*
+     * Контроль: запрет не должен отключать штатный путь. Расстояния к моменту
+     * доставки не было, оно пришло позже — курьеру платят, и ровно один раз.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await deliver(scenario);
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+
+    expect(
+      await runQueue(new Date(`${DAY}T19:00:00.000Z`), scenario, { meters: 20_000 }),
+    ).toBeGreaterThan(0);
+    expect(await distanceEntries(scenario.orderId)).toBe(1);
+    expect(BigInt((await report(DAY, DAY, scenario.courierId)).totals.distanceFeesMinor)).toBe(
+      80_000n,
+    );
+
+    // Повтор задания второй записи не создаёт.
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+    await runQueue(new Date(`${DAY}T20:00:00.000Z`), scenario, { meters: 20_000 });
+    expect(await distanceEntries(scenario.orderId)).toBe(1);
+  });
+
+  it('новая доставка после снятой отмены оплачивается фоновым путём', async () => {
+    /*
+     * Контроль: отмена из прошлого круга не должна закрывать деньги НОВОЙ,
+     * законной попытки того же заказа.
+     */
+    const scenario = await seedScenario({ sum: 100_000, payedSum: 0, perKmMinor: 4_000n });
+    await seedGeo(scenario);
+    await deliver(scenario);
+
+    await syncSource(scenario, { sum: 100_000, payedSum: 0, cancelled: true });
+    /*
+     * Маршрутизатор отвечает и здесь: задание МКАД ставит сама доставка, и без
+     * ответа оно ушло бы в ошибку с отсрочкой, а сценарий проверял бы не то.
+     * Отменённому заказу это денег всё равно не даёт — только снимок.
+     */
+    expect(
+      await runQueue(new Date(`${DAY}T11:00:00.000Z`), scenario, { meters: 20_000 }),
+    ).toBeGreaterThan(0);
+    expect(await distanceEntries(scenario.orderId)).toBe(0);
+    await syncSource(scenario, { sum: 100_000, payedSum: 0 });
+
+    // Прежний результат отменяет логист, заказ везут заново.
+    const oldAttempt = await ctx.db.deliveryAttempt.findFirstOrThrow({
+      where: { routeOrderId: scenario.routeOrderId, activeKey: { not: null } },
+      select: { id: true },
+    });
+    const logist = await actorFor(['LOGISTICIAN']);
+    await cancelDeliveryResult(
+      deliveryDeps,
+      logist,
+      oldAttempt.id,
+      { reason: 'заказ вернули в работу' },
+      CONTEXT,
+    );
+    await deliver(scenario);
+
+    // Новая попытка получает свои километры обычным порядком.
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+    await runQueue(new Date(`${DAY}T19:00:00.000Z`), scenario, { meters: 20_000 });
+    expect(await distanceEntries(scenario.orderId)).toBe(1);
+    expect(BigInt((await report(DAY, DAY, scenario.courierId)).totals.distanceFeesMinor)).toBe(
+      80_000n,
+    );
   });
 });

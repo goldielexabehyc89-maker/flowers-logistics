@@ -295,6 +295,19 @@ export async function accrueDistanceFee(
   }
 
   /*
+   * Снятой попытке километры не начисляются — ни ручным пересчётом, ни этим
+   * путём. Отмена заказа закрывает её финансовый результат, и снятие отмены
+   * его не восстанавливает: это отдельное решение человека.
+   */
+  const paidTo = await tx.deliveryAttempt.findUnique({
+    where: { id: input.attemptId },
+    select: { id: true, financeStrippedAt: true, occurredAt: true },
+  });
+  if (paidTo === null || (await isFinanceStripped(tx, paidTo))) {
+    return;
+  }
+
+  /*
    * Догоняющее начисление существует ровно для одного случая: расстояния на
    * момент доставки НЕ БЫЛО (маршрутизатор не ответил), и оно пришло позже.
    *
@@ -308,14 +321,9 @@ export async function accrueDistanceFee(
    * расчёт к моменту доставки» читается прямо.
    */
   if (input.catchUp === true) {
-    const attempt = await tx.deliveryAttempt.findUnique({
-      where: { id: input.attemptId },
-      select: { occurredAt: true },
-    });
     const settledAtDelivery =
-      attempt !== null &&
       (await tx.routeOrderDistance.count({
-        where: { routeOrderId: input.routeOrderId, capturedAt: { lte: attempt.occurredAt } },
+        where: { routeOrderId: input.routeOrderId, capturedAt: { lte: paidTo.occurredAt } },
       })) > 0;
     if (settledAtDelivery) {
       return;
@@ -366,6 +374,48 @@ const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
   'DISTANCE_FEE',
   'CASH_PAYMENT_CORRECTION',
 ];
+
+/**
+ * Закрыт ли финансовый результат ЭТОЙ попытки отменой заказа.
+ *
+ * Общая на оба пути начисления километров: ручной пересчёт и фоновое
+ * догоняющее начисление. Пока признак стоял только на ручном, отложенный
+ * расчёт МКАД возвращал снятой попытке 800 ₽ днём доставки — запрет обходился
+ * вторым создателем той же проводки.
+ *
+ * Два признака, потому что данные бывают двух возрастов:
+ *  · отметка на попытке — событие отмены, независимо от того, нашлась ли
+ *    ненулевая проводка для сторно;
+ *  · причина обратной записи — для отмен, сделанных до появления отметки.
+ *    Пустая причина означает «неизвестно», а не «отмены не было»: молча
+ *    возвращать снятые деньги нельзя, при неоднозначности отказ.
+ *
+ * Отмена из прошлого круга НОВУЮ доставку не закрывает: и отметка, и причины
+ * относятся к конкретной попытке, а у новой попытки их нет.
+ */
+async function isFinanceStripped(
+  tx: TransactionClient,
+  attempt: { id: string; financeStrippedAt: Date | null },
+): Promise<boolean> {
+  const active = await tx.courierLedgerEntry.count({
+    where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] }, reversedBy: { is: null } },
+  });
+  if (active > 0) {
+    return false;
+  }
+  if (attempt.financeStrippedAt !== null) {
+    return true;
+  }
+  const unknownOrCancelled = await tx.courierLedgerEntry.count({
+    where: {
+      attemptId: attempt.id,
+      reversesEntryId: { not: null },
+      reversesEntry: { kind: { in: [...ACCRUED_KINDS] } },
+      OR: [{ reversalCause: 'ORDER_CANCELLED' }, { reversalCause: null }],
+    },
+  });
+  return unknownOrCancelled > 0;
+}
 
 /**
  * Пересчёт километров после того, как деньги уже начислены.
@@ -455,27 +505,7 @@ export async function restateDistanceFee(
    * относится ко всей истории заказа — из-за него старая отмена блокировала
    * километры НОВОЙ, законной доставки того же заказа.
    */
-  const active = await tx.courierLedgerEntry.count({
-    where: { attemptId: attempt.id, kind: { in: [...ACCRUED_KINDS] }, reversedBy: { is: null } },
-  });
-  /*
-   * Неизвестная причина — это «возможно, снятие», а не «снятия не было».
-   *
-   * У отмен, созданных прежней версией, причины нет вовсе: колонка появилась
-   * позже и осталась пустой. Считая пустоту доказательством обычной правки,
-   * обновление возвращало 800 ₽ попытке, деньги которой сняла отмена заказа.
-   * Молча восстанавливать снятое нельзя — при неоднозначности отказ.
-   */
-  const stripMarks = await tx.courierLedgerEntry.count({
-    where: {
-      attemptId: attempt.id,
-      reversesEntryId: { not: null },
-      reversesEntry: { kind: { in: [...ACCRUED_KINDS] } },
-      OR: [{ reversalCause: 'ORDER_CANCELLED' }, { reversalCause: null }],
-    },
-  });
-  const stripped = active === 0 && (attempt.financeStrippedAt !== null || stripMarks > 0);
-  if (stripped) {
+  if (await isFinanceStripped(tx, attempt)) {
     return false;
   }
 
