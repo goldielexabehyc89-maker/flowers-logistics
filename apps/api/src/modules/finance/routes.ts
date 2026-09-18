@@ -718,6 +718,23 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
          * одинаков, значит цикла ожидания не возникает.
          */
         if (source !== null && source.transferId !== null) {
+          /*
+           * Отмена передачи двигает КАССУ, а значит требует права на неё.
+           *
+           * Этот маршрут открыт всему финансовому контуру, но у передачи есть
+           * вторая сторона — наличные конкретного логиста. Без проверки чужой
+           * логист и управляющий обнуляли бы кассу, к которой не имеют
+           * отношения, и снимали долг курьера: на СОЗДАНИИ передачи право
+           * проверяется, а на отмене проверки не было вовсе.
+           */
+          const cashSide = await tx.logistCashEntry.findFirst({
+            where: { transferId: source.transferId, kind: { not: 'ADJUSTMENT' } },
+            select: { logistUserId: true },
+          });
+          if (cashSide !== null) {
+            resolveDeskOwner(actor, cashSide.logistUserId);
+          }
+
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`transfer-reversal:${source.transferId}`})::bigint)`;
         }
 

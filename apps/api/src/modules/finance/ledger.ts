@@ -289,7 +289,18 @@ export async function reverseLedgerEntry(
       reversesEntryId: source.id,
       idempotencyKey: reversalKey(source.id),
     },
-    include: { reversedBy: { select: { id: true } } },
+    /*
+     * Вид отменяемой записи возвращается сразу.
+     *
+     * По нему журнал называет операцию своими словами — «Отмена начального
+     * долга» вместо общей «корректировки». Без этого свежесозданная отмена
+     * приходила в ответе безымянной и получала правильное название только
+     * после перечитывания списка.
+     */
+    include: {
+      reversedBy: { select: { id: true } },
+      reversesEntry: { select: { kind: true } },
+    },
   });
 
   return { entry: toLedgerView(created), created: true };

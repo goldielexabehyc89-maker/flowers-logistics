@@ -1013,13 +1013,20 @@ export function ReportsScreen(): React.JSX.Element {
                                 <td />
                                 <td />
                                 <td>
+                                  {/*
+                                    Пометки СКЛАДЫВАЮТСЯ, а не вытесняют друг
+                                    друга — как и в выгрузке. Отсутствие расчёта
+                                    раньше затирало «Финрезультат отменён», и
+                                    одна и та же строка в файле была помечена,
+                                    а на экране нет.
+                                  */}
                                   {row.settlementMissing ? (
                                     <span className="reports__missing">Расчёт отсутствует</span>
                                   ) : (
-                                    <>
-                                      {formatMoney(row.totalMinor)}
-                                      {row.financeCancelled ? (
-                                        /*
+                                    formatMoney(row.totalMinor)
+                                  )}
+                                  {row.financeCancelled ? (
+                                    /*
                                           Доставка состоялась, но за этот день
                                           её деньги сняты целиком. Число
                                           остаётся на месте: оно входит в итог
@@ -1027,17 +1034,15 @@ export function ReportsScreen(): React.JSX.Element {
                                           пометка объясняет ноль, а не заменяет
                                           его.
                                         */
-                                        <span
-                                          className="reports__missing"
-                                          data-testid="reports-finance-cancelled"
-                                          title="Начисления этой доставки сняты обратными записями того же дня; факт доставки сохранён"
-                                        >
-                                          {' '}
-                                          Финрезультат отменён
-                                        </span>
-                                      ) : null}
-                                    </>
-                                  )}
+                                    <span
+                                      className="reports__missing"
+                                      data-testid="reports-finance-cancelled"
+                                      title="Начисления этой доставки сняты обратными записями того же дня; факт доставки сохранён"
+                                    >
+                                      {' '}
+                                      Финрезультат отменён
+                                    </span>
+                                  ) : null}
                                 </td>
                               </tr>,
                             );

@@ -1480,18 +1480,49 @@ describe('передача наличных и касса через маршр�
         select: { id: true },
       });
 
-      const viaLedger = ctx.app.inject({
-        method: 'POST',
-        url: `/api/logistics/ledger/operations/${ledgerId}/reverse`,
-        headers: { authorization: `Bearer ${adminToken}` },
-        payload: { reason: 'отмена передачи из журнала' },
-      }) as unknown as Promise<{ statusCode: number }>;
-      const viaCash = ctx.app.inject({
-        method: 'POST',
-        url: `/api/logistics/cash/${cashEntry.id}/reverse`,
-        headers: { authorization: `Bearer ${adminToken}` },
-        payload: { reason: 'отмена передачи из кассы' },
-      }) as unknown as Promise<{ statusCode: number }>;
+      /*
+       * Барьер на ОБЩЕМ ключе передачи, а не просто одновременный старт.
+       *
+       * Взаимная блокировка возникает не при каждом чередовании, поэтому
+       * «запустили два запроса и не получили 500» не отличает работу общего
+       * ключа от удачного расписания. Барьер доказывает главное: оба маршрута
+       * встают на ОДИН ключ ДО любой своей вставки — значит вставлять в
+       * противоположном порядке они уже не могут.
+       */
+      const transfer = await ctx.db.logistCashEntry.findUniqueOrThrow({
+        where: { id: cashEntry.id },
+        select: { transferId: true },
+      });
+      const barrier = await holdKey(`transfer-reversal:${transfer.transferId ?? ''}`);
+
+      let settled = 0;
+      const viaLedger = (
+        ctx.app.inject({
+          method: 'POST',
+          url: `/api/logistics/ledger/operations/${ledgerId}/reverse`,
+          headers: { authorization: `Bearer ${adminToken}` },
+          payload: { reason: 'отмена передачи из журнала' },
+        }) as unknown as Promise<{ statusCode: number }>
+      ).then((response) => {
+        settled += 1;
+        return response;
+      });
+      const viaCash = (
+        ctx.app.inject({
+          method: 'POST',
+          url: `/api/logistics/cash/${cashEntry.id}/reverse`,
+          headers: { authorization: `Bearer ${adminToken}` },
+          payload: { reason: 'отмена передачи из кассы' },
+        }) as unknown as Promise<{ statusCode: number }>
+      ).then((response) => {
+        settled += 1;
+        return response;
+      });
+
+      expect(await waitForBlockedBy(barrier.pid, 2)).toBeGreaterThanOrEqual(2);
+      expect(settled).toBe(0);
+      barrier.release();
+      await barrier.done;
 
       const [ledgerResponse, cashResponse] = await Promise.all([viaLedger, viaCash]);
 
@@ -1512,6 +1543,57 @@ describe('передача наличных и касса через маршр�
     }
 
     // Передачи и их отмены сошлись в ноль на обеих сторонах.
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(0n);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+  });
+  it('отмену передачи из журнала не выполняет ни чужой логист, ни управляющий', async () => {
+    /*
+     * Отмена передачи двигает КАССУ. На создании право проверяется, а на
+     * отмене проверки не было вовсе: чужой логист и управляющий обнуляли
+     * наличные в кассе, к которой не имеют отношения, и снимали долг курьера.
+     * Маршрут открыт всему финансовому контуру, поэтому право на кассу здесь
+     * обязано проверяться отдельно от роли.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const { token: foreignLogistToken } = await tokenFor(['LOGISTICIAN']);
+    const { token: supervisorToken } = await tokenFor(['SUPERVISOR']);
+    const desk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const courier = await courierId();
+
+    const created = await postOperation(adminToken, {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '100000',
+      operationDate: DAY,
+      logistUserId: desk.id,
+      idempotencyKey: unique('reverse-rights'),
+    });
+    expect(created.statusCode).toBe(201);
+    const ledgerId = created.json().entry?.id ?? '';
+
+    for (const token of [foreignLogistToken, supervisorToken]) {
+      const response = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/ledger/operations/${ledgerId}/reverse`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { reason: 'чужая касса' },
+      });
+      expect(response.statusCode).toBe(403);
+    }
+
+    // Деньги остались на месте: ни касса, ни долг курьера не тронуты.
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(100_000n);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(-100_000n);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: ledgerId } })).toBe(0);
+
+    // А администратор, назвавший эту кассу при создании, отменяет обычным порядком.
+    const byAdmin = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/logistics/ledger/operations/${ledgerId}/reverse`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { reason: 'ошибочная передача' },
+    });
+    expect(byAdmin.statusCode).toBe(200);
     expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(0n);
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
   });

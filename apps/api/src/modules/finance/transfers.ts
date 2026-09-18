@@ -165,7 +165,7 @@ export async function reverseTransfer(
 ): Promise<void> {
   const cashEntries = await tx.logistCashEntry.findMany({
     where: { transferId: input.transferId, kind: { not: 'ADJUSTMENT' } },
-    select: { id: true },
+    select: { id: true, reversedBy: { select: { id: true } } },
   });
   const courierEntries = await tx.courierLedgerEntry.findMany({
     where: { transferId: input.transferId, kind: { not: 'ADJUSTMENT' } },
@@ -173,6 +173,17 @@ export async function reverseTransfer(
   });
 
   for (const entry of cashEntries) {
+    /*
+     * Уже отменённая сторона пропускается — как и сторона курьера ниже.
+     *
+     * Иначе повтор отмены одной передачи отвечал по-разному в зависимости от
+     * того, с какого экрана нажали: из журнала приходил прежний результат,
+     * а из кассы — отказ. Одно и то же действие обязано отвечать одинаково.
+     */
+    if (entry.reversedBy !== null) {
+      continue;
+    }
+
     await reverseCash(tx, {
       entryId: entry.id,
       actorUserId: input.actorUserId,

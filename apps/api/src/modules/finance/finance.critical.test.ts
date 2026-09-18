@@ -34,6 +34,7 @@ import { buildSettlementReport, dayBefore } from './reports.js';
 import { groupSettlement, pageOfGroups } from './grouping.js';
 import { assertPayloadIsSafe, publishRealtimeEvent } from '../realtime/events.js';
 import { isInsideRing, nearestRingPoint, parseRing, ringSha256, toKmTenths } from './mkad.js';
+import ExcelJS from 'exceljs';
 import { buildSettlementWorkbook, toRubles } from './export-xlsx.js';
 import { buildSettlementPdf, debtDirection, formatRubles } from './export-pdf.js';
 
@@ -930,6 +931,91 @@ describe('группировка отчёта', () => {
     expect(days[0]?.couriers[0]?.settlementMissing).toBe(true);
     // Курьера нет в справочнике — группа всё равно называет себя честно.
     expect(days[0]?.couriers[0]?.fullName).toBe('Курьер удалён из справочника');
+  });
+
+  it('пометки строки складываются, а отсутствие расчёта их не вытесняет', async () => {
+    /*
+     * Раньше «Расчёт отсутствует» затирало всё остальное, и отменённый в
+     * источнике заказ без тарифного снимка выглядел в файле обычной строкой
+     * без расчёта — при том что на экране отмена показывается всегда.
+     *
+     * Проверяется именно сочетание: на строке с расчётом старое выражение
+     * давало тот же результат, и такая проверка ничего не доказывала бы.
+     */
+    const marked = {
+      attemptId: 'a-marked',
+      orderId: 'o-marked',
+      orderNumber: 'N-M',
+      routeId: 'r1',
+      routeNumber: 'R-1',
+      deliveryDate: '2028-04-11',
+      courierUserId: 'c1',
+      outcome: 'DELIVERED',
+      cancelled: true,
+      cashCollectable: true,
+      cashMinor: '0',
+      paymentTypeName: null,
+      vehicleType: null,
+      perOrderMinor: null,
+      perKmMinor: null,
+      beyondMkadKmTenths: null,
+      distanceSource: null,
+      deliveryFeeMinor: '0',
+      distanceFeeMinor: '0',
+      attemptFeeMinor: '0',
+      expensesMinor: '0',
+      bonusesMinor: '0',
+      totalMinor: '0',
+      settlementMissing: true,
+      financeCancelled: true,
+      sourceCancelled: true,
+    };
+
+    const report = {
+      period: { from: '2028-04-11', to: '2028-04-11' },
+      courierUserId: 'c1',
+      totals: {
+        openingBalanceMinor: '0',
+        cashReceivedMinor: '0',
+        cashCorrectionsMinor: '0',
+        handedToLogistMinor: '0',
+        issuedToCourierMinor: '0',
+        deliveryFeesMinor: '0',
+        attemptFeesMinor: '0',
+        distanceFeesMinor: '0',
+        expensesMinor: '0',
+        bonusesMinor: '0',
+        adjustmentsMinor: '0',
+        openingDebtMinor: '0',
+        closingBalanceMinor: '0',
+      },
+      rows: [marked],
+      days: groupSettlement([marked], [], new Map()),
+      totalGroups: 1,
+      hasMore: false,
+      entries: [],
+      ledgerActiveFrom: '2028-04-01',
+    };
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(
+      (await buildSettlementWorkbook(report)) as unknown as Parameters<
+        typeof workbook.xlsx.load
+      >[0],
+    );
+    const sheet = workbook.getWorksheet('Заказы');
+    const notes: string[] = [];
+    sheet?.eachRow((row) => {
+      if (String(row.getCell(1).value ?? '') === 'Заказ') {
+        notes.push(String(row.getCell(22).value ?? ''));
+      }
+    });
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('Расчёт отсутствует');
+    expect(notes[0]).toContain('Отменён в МоемСкладе');
+    expect(notes[0]).toContain('Начисления дня сняты');
+    expect(notes[0]).toContain('Результат отменён');
   });
 
   it('страница режется по группам, а не по строкам', () => {
