@@ -127,11 +127,23 @@ function sumOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): b
  * объясняет изменение баланса, а даты не переписываются задним числом.
  */
 function settledWithinPeriod(entries: readonly LedgerEntryView[]): ReadonlySet<string> {
-  const present = new Set(entries.map((entry) => entry.id));
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const settled = new Set<string>();
   for (const entry of entries) {
-    if (entry.reversesEntryId !== null && present.has(entry.reversesEntryId)) {
-      settled.add(entry.reversesEntryId);
+    if (entry.reversesEntryId === null) {
+      continue;
+    }
+    const source = byId.get(entry.reversesEntryId);
+    /*
+     * Гасится пара ОДНОГО дня.
+     *
+     * Отмена, пришедшая в другой день, — это движение того, другого дня: в свой
+     * день начисление действительно было. Спрятать обе записи значило бы
+     * показать разные итоги одного и того же дня в зависимости от границ
+     * отчёта — ровно то, чего быть не должно.
+     */
+    if (source !== undefined && source.operationDate === entry.operationDate) {
+      settled.add(source.id);
       settled.add(entry.id);
     }
   }
@@ -257,13 +269,34 @@ export async function buildSettlementReport(
   });
   const distanceByRouteOrder = new Map(distances.map((row) => [row.routeOrderId, row]));
 
+  /*
+   * Проводка принадлежит СВОЕМУ дню, а не дню доставки.
+   *
+   * Строка доставки собирает только записи своего дня; корректировка или
+   * отмена другого дня уходит в журнал этого другого дня. Иначе итог дня
+   * менялся бы от того, насколько широкий период выбран: при обоих днях
+   * корректировка пряталась внутрь строки доставки, и её день исчезал.
+   * Двойного счёта нет: запись попадает ровно в одно место.
+   */
+  const deliveryDayOfAttempt = new Map(
+    facts.map((fact) => [fact.attemptId, fromDateColumn(fact.attempt.route.deliveryDate)]),
+  );
+
   const byAttempt = new Map<string, LedgerEntryView[]>();
+  const takenByRows = new Set<string>();
   for (const entry of entries) {
     if (entry.attemptId === null) {
       continue;
     }
+    if (deliveryDayOfAttempt.get(entry.attemptId) !== entry.operationDate) {
+      continue;
+    }
     byAttempt.set(entry.attemptId, [...(byAttempt.get(entry.attemptId) ?? []), entry]);
+    takenByRows.add(entry.id);
   }
+
+  /** Всё, что не попало в строку доставки, показывается журналом своего дня. */
+  const journalEntries = entries.filter((entry) => !takenByRows.has(entry.id));
 
   const rows: SettlementRow[] = facts.map((fact) => {
     const own = byAttempt.get(fact.attemptId) ?? [];
@@ -357,7 +390,7 @@ export async function buildSettlementReport(
     ).map((user) => [user.id, { id: user.id, fullName: user.fullName, phone: user.phone }]),
   );
 
-  const grouped = groupSettlement(rows, entries, profiles);
+  const grouped = groupSettlement(rows, journalEntries, profiles);
   const page = pageOfGroups(grouped, input.limit ?? Number.MAX_SAFE_INTEGER, input.offset ?? 0);
 
   return {

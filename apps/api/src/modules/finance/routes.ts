@@ -33,12 +33,12 @@ import {
 } from './tariffs.js';
 import {
   appendEntry,
+  appendLedgerEntry,
   balanceOf,
   entryByIdempotencyKey,
-  toLedgerView,
+  reverseLedgerEntry,
   EXPENSE_KINDS,
   openingDebtsOf,
-  reverseEntry,
   signedAmount,
 } from './ledger.js';
 import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
@@ -557,29 +557,26 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         }
 
         /*
-         * Отмена уже проведена — отдаём её и НЕ пишем аудит второй раз.
+         * Отмены одной записи выстраиваются в очередь по ключу.
          *
-         * Повторный запрос (сетевой повтор, вторая вкладка) обязан быть
-         * идемпотентным целиком: одна обратная запись и одна строка аудита.
+         * Предварительного поиска мало: победитель может зафиксироваться сразу
+         * после него, и тогда отмена вернётся уже существующей — маршрут принял
+         * бы её за новую и повторил аудит и событие. Признак `created` ниже
+         * закрывает этот путь окончательно, даже без блокировки.
          */
-        const already = await tx.courierLedgerEntry.findUnique({
-          where: { idempotencyKey: `reversal:${id}` },
-          include: {
-            reversedBy: { select: { id: true } },
-            reversesEntry: { select: { kind: true } },
-            actor: { select: { fullName: true } },
-          },
-        });
-        if (already !== null) {
-          return toLedgerView(already);
-        }
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${id}`})::bigint)`;
 
-        const created = await reverseEntry(tx, {
+        const { entry: created, created: isNewReversal } = await reverseLedgerEntry(tx, {
           entryId: id,
           actorUserId: actor.userId,
           reason: body.reason,
           operationDate: moscowCalendarDate(new Date()),
         });
+
+        // Аудит, событие и отмену встречной передачи делает только создатель.
+        if (!isNewReversal) {
+          return created;
+        }
 
         /*
          * У передачи две стороны, и отменяются они вместе.
@@ -702,23 +699,18 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
          * Поэтому повтор распознаётся здесь же, до записи: контракт сверяется
          * на КАЖДОМ пути возврата существующей операции.
          */
-        const existing = await tx.courierLedgerEntry.findUnique({
-          where: { idempotencyKey: body.idempotencyKey },
-          include: {
-            reversedBy: { select: { id: true } },
-            reversesEntry: { select: { kind: true } },
-            actor: { select: { fullName: true } },
-          },
-        });
-        if (existing !== null) {
-          const view = toLedgerView(existing);
-          if (!sameOperation(view)) {
-            conflict();
-          }
-          return view;
-        }
+        /*
+         * Запросы с ОДНИМ ключом выстраиваются в очередь.
+         *
+         * Предварительного SELECT недостаточно: победитель вправе
+         * зафиксироваться между проверкой и вставкой, и тогда `appendEntry`
+         * вернул бы чужую запись уже внутри транзакции. Блокировка по ключу
+         * делает такое чередование невозможным, а признак `created` ниже
+         * закрывает его даже если оно случится.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`opening-debt:${body.idempotencyKey}`})::bigint)`;
 
-        const created = await appendEntry(tx, {
+        const { entry: saved, created: isNew } = await appendLedgerEntry(tx, {
           courierUserId: body.courierUserId,
           kind: 'OPENING_DEBT',
           amountMinor: body.amountMinor,
@@ -728,6 +720,21 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
           reason: body.reason,
           idempotencyKey: body.idempotencyKey,
         });
+
+        /*
+         * Контракт сверяется на КАЖДОМ пути возврата существующей операции,
+         * включая тот, где запись нашёл сам `appendEntry`.
+         */
+        if (!sameOperation(saved)) {
+          conflict();
+        }
+
+        // Аудит и событие пишет только та транзакция, которая создала запись.
+        if (!isNew) {
+          return saved;
+        }
+
+        const created = saved;
 
         await writeAudit(tx, {
           action: 'FINANCE_OPERATION_RECORDED',
@@ -804,29 +811,26 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         }
 
         /*
-         * Отмена уже проведена — отдаём её и НЕ пишем аудит второй раз.
+         * Отмены одной записи выстраиваются в очередь по ключу.
          *
-         * Повторный запрос (сетевой повтор, вторая вкладка) обязан быть
-         * идемпотентным целиком: одна обратная запись и одна строка аудита.
+         * Предварительного поиска мало: победитель может зафиксироваться сразу
+         * после него, и тогда отмена вернётся уже существующей — маршрут принял
+         * бы её за новую и повторил аудит и событие. Признак `created` ниже
+         * закрывает этот путь окончательно, даже без блокировки.
          */
-        const already = await tx.courierLedgerEntry.findUnique({
-          where: { idempotencyKey: `reversal:${id}` },
-          include: {
-            reversedBy: { select: { id: true } },
-            reversesEntry: { select: { kind: true } },
-            actor: { select: { fullName: true } },
-          },
-        });
-        if (already !== null) {
-          return toLedgerView(already);
-        }
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${id}`})::bigint)`;
 
-        const created = await reverseEntry(tx, {
+        const { entry: created, created: isNewReversal } = await reverseLedgerEntry(tx, {
           entryId: id,
           actorUserId: actor.userId,
           reason: body.reason,
           operationDate: moscowCalendarDate(new Date()),
         });
+
+        // Аудит, событие и отмену встречной передачи делает только создатель.
+        if (!isNewReversal) {
+          return created;
+        }
 
         await writeAudit(tx, {
           action: 'FINANCE_OPERATION_REVERSED',

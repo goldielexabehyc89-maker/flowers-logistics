@@ -524,6 +524,169 @@ describe('права и идемпотентность на уровне API', (
     expect(await balanceOf(ctx.db, courier, null)).toBe(300_000n);
   });
 
+  /** Счётчик финансовых событий: аудит и уведомление обязаны быть по одному. */
+  async function lastEventId(): Promise<bigint> {
+    const row = await ctx.db.realtimeEvent.findFirst({
+      orderBy: { id: 'desc' },
+      select: { id: true },
+    });
+    return row?.id ?? 0n;
+  }
+
+  async function ledgerEventsAfter(cursor: bigint): Promise<number> {
+    return ctx.db.realtimeEvent.count({
+      where: { topic: 'finance.ledger_changed', id: { gt: cursor } },
+    });
+  }
+
+  /**
+   * Управляемое чередование, а не просто одновременный старт.
+   *
+   * Оба запроса удерживаются на блокировке ключа, пока тест её не отпустит.
+   * Так воспроизводится именно тот порядок, из-за которого второй запрос
+   * раньше получал 201 с чужой суммой: он доходил до записи уже после того,
+   * как победитель зафиксировался.
+   */
+  it('управляемая гонка создания: чужая сумма получает 409, а не 201', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+    const key = unique('barrier-create');
+    const cursor = await lastEventId();
+
+    let release!: () => void;
+    let locked!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
+
+    const holder = ctx.db.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`opening-debt:${key}`})::bigint)`;
+        locked();
+        await released;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+    await lockedSignal;
+
+    let settled = 0;
+    const first = postDebt(token, {
+      courierUserId: courier,
+      amountMinor: '500000',
+      operationDate: DAY,
+      reason: 'первая сумма',
+      idempotencyKey: key,
+    }).then((response) => {
+      settled += 1;
+      return response;
+    });
+    const second = postDebt(token, {
+      courierUserId: courier,
+      amountMinor: '700000',
+      operationDate: DAY,
+      reason: 'другая сумма тем же ключом',
+      idempotencyKey: key,
+    }).then((response) => {
+      settled += 1;
+      return response;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Ни один не проскочил мимо блокировки: чередование действительно наше.
+    expect(settled).toBe(0);
+
+    release();
+    await holder;
+    const [a, b] = await Promise.all([first, second]);
+
+    expect([a.statusCode, b.statusCode].sort((left, right) => left - right)).toEqual([201, 409]);
+
+    const entries = await ctx.db.courierLedgerEntry.findMany({
+      where: { courierUserId: courier, kind: 'OPENING_DEBT' },
+      select: { id: true, amountMinor: true },
+    });
+    expect(entries).toHaveLength(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(entries[0]?.amountMinor);
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_OPERATION_RECORDED', entityId: entries[0]?.id ?? '' },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
+  });
+
+  it('управляемая гонка отмены: одна обратная запись, один аудит, одно событие', async () => {
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+
+    const debt = await postDebt(token, {
+      courierUserId: courier,
+      amountMinor: '400000',
+      operationDate: DAY,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: unique('barrier-reverse'),
+    });
+    expect(debt.statusCode).toBe(201);
+    const entryId = debt.json().entry?.id ?? '';
+    const cursor = await lastEventId();
+
+    let release!: () => void;
+    let locked!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const lockedSignal = new Promise<void>((resolve) => (locked = resolve));
+
+    const holder = ctx.db.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${entryId}`})::bigint)`;
+        locked();
+        await released;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+    await lockedSignal;
+
+    const reverseOnce = (): Promise<{
+      statusCode: number;
+      json: () => { entry?: { id: string } };
+    }> =>
+      ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/ledger/opening-debt/${entryId}/reverse`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { reason: 'внесено по ошибке' },
+      }) as never;
+
+    let settled = 0;
+    const first = reverseOnce().then((response) => {
+      settled += 1;
+      return response;
+    });
+    const second = reverseOnce().then((response) => {
+      settled += 1;
+      return response;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(0);
+
+    release();
+    await holder;
+    const [a, b] = await Promise.all([first, second]);
+
+    // Оба успешны и отдают одну и ту же обратную запись.
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
+    expect(a.json().entry?.id).toBe(b.json().entry?.id);
+
+    expect(await ctx.db.courierLedgerEntry.count({ where: { reversesEntryId: entryId } })).toBe(1);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+    // История не дублируется: один аудит и одно событие на одну отмену.
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_OPERATION_REVERSED', entityId: a.json().entry?.id ?? '' },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
+  });
+
   it('не-администратору запрещено вносить и отменять начальный долг', async () => {
     const { token: adminToken } = await tokenFor(['ADMIN']);
     const courier = await courierId();

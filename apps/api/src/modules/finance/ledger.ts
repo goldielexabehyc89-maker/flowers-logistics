@@ -161,10 +161,23 @@ export function toLedgerView(row: {
  * повтор получает отказ уникальности, и мы возвращаем уже существующую запись,
  * а не создаём вторую.
  */
-export async function appendEntry(
+/**
+ * Результат записи: САМА запись и признак, создала ли её эта транзакция.
+ *
+ * Без признака повтор неотличим от создания: вызывающий код писал бы аудит и
+ * realtime-событие на чужую запись, а запрос с другими данными получал бы
+ * «сохранено» о том, что не сохранялось. Предварительным SELECT это не
+ * лечится — победитель может зафиксироваться между проверкой и вставкой.
+ */
+export interface AppendedEntry {
+  entry: LedgerEntryView;
+  created: boolean;
+}
+
+export async function appendLedgerEntry(
   tx: TransactionClient,
   input: LedgerEntryInput,
-): Promise<LedgerEntryView> {
+): Promise<AppendedEntry> {
   if (input.amountMinor === 0n) {
     throw new AppError('VALIDATION_FAILED', {
       publicMessage: 'Сумма операции не может быть нулевой.',
@@ -176,7 +189,7 @@ export async function appendEntry(
     include: { reversedBy: { select: { id: true } } },
   });
   if (existing !== null) {
-    return toLedgerView(existing);
+    return { entry: toLedgerView(existing), created: false };
   }
 
   /*
@@ -205,7 +218,15 @@ export async function appendEntry(
     },
     include: { reversedBy: { select: { id: true } }, actor: { select: { fullName: true } } },
   });
-  return toLedgerView(created);
+  return { entry: toLedgerView(created), created: true };
+}
+
+/** Прежний контракт для вызывающих, которым признак создания не нужен. */
+export async function appendEntry(
+  tx: TransactionClient,
+  input: LedgerEntryInput,
+): Promise<LedgerEntryView> {
+  return (await appendLedgerEntry(tx, input)).entry;
 }
 
 /**
@@ -215,10 +236,10 @@ export async function appendEntry(
  * суммой и обязательной причиной. Повторная отмена невозможна — уникальность
  * ссылки закрыта индексом.
  */
-export async function reverseEntry(
+export async function reverseLedgerEntry(
   tx: TransactionClient,
   input: { entryId: string; actorUserId: string; reason: string; operationDate: string },
-): Promise<LedgerEntryView> {
+): Promise<AppendedEntry> {
   const source = await tx.courierLedgerEntry.findUnique({
     where: { id: input.entryId },
     include: { reversedBy: { select: { id: true } } },
@@ -237,7 +258,8 @@ export async function reverseEntry(
       include: { reversedBy: { select: { id: true } } },
     });
     if (existing !== null) {
-      return toLedgerView(existing);
+      // Отмена уже есть: её и возвращаем, но НЕ выдаём за новую.
+      return { entry: toLedgerView(existing), created: false };
     }
     throw new AppError('CONFLICT', { publicMessage: 'Эта операция уже отменена.' });
   }
@@ -270,7 +292,15 @@ export async function reverseEntry(
     include: { reversedBy: { select: { id: true } } },
   });
 
-  return toLedgerView(created);
+  return { entry: toLedgerView(created), created: true };
+}
+
+/** Прежний контракт для вызывающих, которым признак создания не нужен. */
+export async function reverseEntry(
+  tx: TransactionClient,
+  input: { entryId: string; actorUserId: string; reason: string; operationDate: string },
+): Promise<LedgerEntryView> {
+  return (await reverseLedgerEntry(tx, input)).entry;
 }
 
 /** Баланс курьера на конец дня включительно. `null` — по всем записям. */
