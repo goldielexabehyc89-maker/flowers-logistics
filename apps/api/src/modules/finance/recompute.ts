@@ -212,6 +212,9 @@ export async function recomputeDeliveriesForDate(
             actorUserId: input.actorUserId,
             reason: attempt.cancellation.reason ?? 'Пересчёт: отмена результата доставки',
             operationDate: moscowCalendarDate(attempt.cancellation.occurredAt),
+            // Пересчёт заново начисляет только системные виды: сняв ручную
+            // запись, он её не восстановит.
+            scope: 'SYSTEM',
           });
           reversalsApplied += 1;
         }

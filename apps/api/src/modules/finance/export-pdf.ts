@@ -76,8 +76,22 @@ export function debtDirection(balanceMinor: string): string {
  * доказать. Порядок строк — тот же, что и на странице.
  */
 export function settlementSummaryLines(report: SettlementReport): [string, string][] {
+  /*
+   * Баланс существует только у КОНКРЕТНОГО курьера.
+   *
+   * Без отбора входящее сальдо сервер отдаёт нулём, и «начальный баланс
+   * 0,00 ₽» рядом с «конечным» читалось бы как утверждение о долге, которого
+   * никто не считал. Без курьера строка называет то, что действительно
+   * посчитано, — изменение за период.
+   */
+  const perCourier = report.courierUserId !== null;
   return [
-    ['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)],
+    ...(perCourier
+      ? ([['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)]] as [
+          string,
+          string,
+        ][])
+      : []),
     ['Наличные, полученные курьером', formatRubles(report.totals.cashReceivedMinor)],
     ['Корректировки наличных', formatRubles(report.totals.cashCorrectionsMinor)],
     ['Сдано логисту', formatRubles(report.totals.handedToLogistMinor)],
@@ -171,7 +185,12 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
 
   cursor -= 8;
   const closing = formatRubles(report.totals.closingBalanceMinor);
-  write(`Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`, 13);
+  write(
+    report.courierUserId === null
+      ? `Изменение за период: ${closing} (по всем курьерам; баланс считается по одному)`
+      : `Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`,
+    13,
+  );
 
   /*
    * Групповые итоги на бумаге: день, курьер, заказы и итог.
@@ -188,7 +207,18 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
         const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
         const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
         const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
-        const right = `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)} · итог ${formatRubles(group.totalMinor)}`;
+        /*
+         * Начальный долг называется отдельно — как на экране и в книге.
+         *
+         * Он не попадает ни в один из показателей строки, но входит в итог:
+         * день из одного долга давал бы на бумаге нули по всем колонкам при
+         * ненулевом итоге, и объяснить его было бы нечем.
+         */
+        const debt =
+          BigInt(group.openingDebtMinor) === 0n
+            ? ''
+            : ` · нач. долг ${formatRubles(group.openingDebtMinor)}`;
+        const right = `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)}${debt} · итог ${formatRubles(group.totalMinor)}`;
         page.drawText(left, {
           x: MARGIN,
           y: cursor,

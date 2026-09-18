@@ -626,6 +626,7 @@ describe('деньги доставки', () => {
       actorUserId: logist.userId,
       reason: 'ошибочная доставка',
       operationDate: day,
+      scope: 'ALL',
     });
 
     expect(await balanceOf(ctx.db, courier.userId, null)).toBe(0n);
@@ -633,6 +634,94 @@ describe('деньги доставки', () => {
     // Исходные записи остались: история не переписана.
     const entries = await ctx.db.courierLedgerEntry.count({ where: { attemptId } });
     expect(entries).toBe(4);
+  });
+
+  it('отмена РЕЗУЛЬТАТА снимает и оплаченную попытку, а отмена заказа — нет', async () => {
+    /*
+     * Поводы разные, и снимается разное.
+     *
+     * Отмена результата: самой попытки больше нет, и оплата за неё теряет
+     * основание — снимается всё, что на попытке висело. Отмена заказа в
+     * источнике: доставка состоялась, расход курьер понёс, попытку логист
+     * одобрил — эти деньги отмена заказа не возвращает.
+     */
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-27';
+    await activateLedger(EARLIER);
+    await seedTariff({ from: day, perOrder: 20_000n, perKm: 0n });
+
+    const manual = async (attemptId: string, seeded: { routeId: string; orderId: string }) => {
+      await ctx.db.$transaction((tx) =>
+        appendEntry(tx, {
+          courierUserId: courier.userId,
+          kind: 'ATTEMPT_FEE',
+          amountMinor: 15_000n,
+          operationDate: day,
+          actorUserId: logist.userId,
+          reason: 'оплачиваемая попытка',
+          routeId: seeded.routeId,
+          orderId: seeded.orderId,
+          attemptId,
+          idempotencyKey: unique('attempt-fee'),
+        }),
+      );
+    };
+
+    const prepare = async (): Promise<{ attemptId: string }> => {
+      const seeded = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 50_000n });
+      const rates = await resolveTariff(ctx.db, day);
+      await captureRouteTariff(ctx.db, {
+        routeId: seeded.routeId,
+        deliveryDate: day,
+        vehicleType: 'CAR',
+        rates: rates!,
+      });
+      const attemptId = await seedAttempt({ ...seeded, courierId: courier.userId });
+      await accrueDeliveryResult(ctx.db, await readLedgerActivation(ctx.db), {
+        attemptId,
+        routeOrderId: seeded.routeOrderId,
+        routeId: seeded.routeId,
+        orderId: seeded.orderId,
+        courierUserId: courier.userId,
+        actorUserId: courier.userId,
+        outcome: 'DELIVERED',
+      });
+      await manual(attemptId, seeded);
+      return { attemptId };
+    };
+
+    const byResult = await prepare();
+    await reverseDeliveryAccruals(ctx.db, {
+      attemptId: byResult.attemptId,
+      actorUserId: logist.userId,
+      reason: 'результат отменён',
+      operationDate: day,
+      scope: 'ALL',
+    });
+    const leftAfterResult = await ctx.db.courierLedgerEntry.count({
+      where: { attemptId: byResult.attemptId, kind: 'ATTEMPT_FEE', reversedBy: { is: null } },
+    });
+    expect(leftAfterResult).toBe(0);
+
+    const byOrder = await prepare();
+    await reverseDeliveryAccruals(ctx.db, {
+      attemptId: byOrder.attemptId,
+      actorUserId: logist.userId,
+      reason: 'заказ отменён в источнике',
+      operationDate: day,
+      scope: 'SYSTEM',
+    });
+    const leftAfterOrder = await ctx.db.courierLedgerEntry.count({
+      where: { attemptId: byOrder.attemptId, kind: 'ATTEMPT_FEE', reversedBy: { is: null } },
+    });
+    expect(leftAfterOrder).toBe(1);
+    // А начисленное системой снято в обоих случаях.
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { attemptId: byOrder.attemptId, kind: 'CASH_RECEIVED', reversedBy: { is: null } },
+      }),
+    ).toBe(0);
   });
 
   it('до включения учёта начислений нет вовсе', async () => {
@@ -1159,6 +1248,7 @@ describe('наличные в строке отчёта', () => {
       actorUserId: logist.userId,
       reason: 'результат отменён логистом',
       operationDate: day,
+      scope: 'ALL',
     });
 
     const report = await buildSettlementReport(ctx.db, {

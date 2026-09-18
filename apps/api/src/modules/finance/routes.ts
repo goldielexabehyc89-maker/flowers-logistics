@@ -235,11 +235,12 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
   // --- История -------------------------------------------------------------
 
   app.get('/api/logistics/history', async (request) => {
-    await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
     const query = historyQuerySchema.parse(request.query);
     assertPeriod(query.from, query.to);
 
-    return listHistory(deps.db, query);
+    // Движения кассы видны по тем же правилам, что на экране кассы.
+    return listHistory(deps.db, { ...query, visibleLogistIds: await visibleDesks(actor) });
   });
 
   app.get('/api/logistics/history/routes/:id', async (request) => {
@@ -1285,21 +1286,23 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
           throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
         }
         /*
-         * Обратную запись отменить нельзя — и у передачи тоже.
+         * Право на кассу проверяется ПЕРВЫМ, до любых суждений о записи.
          *
-         * Стоит ДО проверки права на кассу: иначе человек отменял
-         * корректировку, а слышал, что у его роли нет своей кассы. Отвечать
-         * нужно на то, что он сделал. Тот же порядок — в отмене операции
-         * журнала.
+         * Порядок «сначала вид, потом право» давал оракул: подставив чужой
+         * идентификатор, посторонний различал по коду ответа корректировку
+         * (CONFLICT) и обычную запись (FORBIDDEN), то есть узнавал о чужой
+         * кассе то, чего видеть не должен. Владельцу и администратору
+         * правильное сообщение про корректировку приходит ниже; для того, у
+         * кого прав нет, «нет доступа к этой кассе» — и есть точный ответ.
          */
+        resolveDeskOwner(actor, source.logistUserId);
+
+        // Обратную запись отменить нельзя — и у передачи тоже.
         if (source.kind === 'ADJUSTMENT') {
           throw new AppError('CONFLICT', {
             publicMessage: 'Корректировку нельзя отменить: заведите новую операцию с причиной.',
           });
         }
-
-        // Логист отменяет только в своей кассе.
-        resolveDeskOwner(actor, source.logistUserId);
 
         /*
          * Общая очередь обеих сторон передачи — тот же ключ и тот же порядок

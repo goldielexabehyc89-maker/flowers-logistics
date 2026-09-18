@@ -834,7 +834,6 @@ describe('отмена в источнике исключает заказ из 
     expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(200_000n);
 
     await cancelInSource(delivery);
-    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,

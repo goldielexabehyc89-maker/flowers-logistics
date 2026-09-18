@@ -1326,6 +1326,7 @@ describe('один набор данных: журнал → API → дни → 
           extraExpensesMinor: '0',
           handedMinor: '0',
           issuedMinor: '0',
+          openingDebtMinor: '0',
           accruedMinor: '0',
           totalMinor: '0',
           settlementMissing: false,

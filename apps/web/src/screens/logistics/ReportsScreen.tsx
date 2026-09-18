@@ -232,6 +232,10 @@ export function formatMoney(minor: string): string {
  * Число встаёт ровно под тот столбец, в который оно вошло итогом дня: расход
  * под «Доп.», сдача под «Курьер сдал», выдача под «Выдано курьеру». Так строку
  * журнала можно сверить со свёрнутой строкой глазами, не считая в уме.
+ *
+ * Оплачиваемая попытка идёт под «Начислено», а не под «Доп.»: своего столбца
+ * у неё в таблице нет, а в «Доп.» её нет и в расчёте — там только расходы и
+ * доплаты. Стоя под «Доп.», она не сходилась бы со свёрнутой строкой.
  */
 export function journalColumn(kind: string): number {
   if (kind === 'CASH_HANDED_TO_LOGIST') {
@@ -240,10 +244,43 @@ export function journalColumn(kind: string): number {
   if (kind === 'CASH_ISSUED_TO_COURIER') {
     return 12;
   }
-  if (kind === 'ADJUSTMENT') {
+  if (kind === 'ADJUSTMENT' || kind === 'ATTEMPT_FEE') {
     return 10;
   }
   return 9;
+}
+
+/**
+ * Подпись и слова под итогом периода.
+ *
+ * Отдельной чистой функцией: это решение о том, что человек прочитает как
+ * «баланс», и оно обязано быть проверяемым без рендера. Признак — сам ОТБОР,
+ * а не найденное имя: справочник отдаёт первую сотню активных курьеров и
+ * может ещё не загрузиться, и по имени отчёт по выбранному курьеру
+ * подписывался бы «все курьеры».
+ */
+export function balanceCaption(
+  courierUserId: string,
+  courierName: string | null,
+  closingBalanceMinor: string,
+): { title: string; words: string; showOpening: boolean } {
+  if (courierUserId === '') {
+    return {
+      title: 'Изменение за период · все курьеры',
+      words: 'выберите курьера, чтобы увидеть его баланс',
+      showOpening: false,
+    };
+  }
+  return {
+    title: `Конечный баланс${courierName === null ? '' : ` · ${courierName}`}`,
+    words: debtWords(closingBalanceMinor),
+    showOpening: true,
+  };
+}
+
+/** Показывать ли кнопку «Показать ещё»: дальше предела отчёт не листается. */
+export function canShowMore(hasMore: boolean, pages: number): boolean {
+  return hasMore && GROUPS_PER_PAGE * pages < GROUPS_LIMIT;
 }
 
 /**
@@ -765,26 +802,43 @@ export function ReportsScreen(): React.JSX.Element {
                 «курьер должен компании». При ненулевых входящих сальдо это
                 прямая дезинформация о направлении долга — поэтому без курьера
                 показывается изменение и называется изменением.
+
+                Признак — сам ОТБОР, а не найденное имя: справочник отдаёт
+                первую сотню активных курьеров и может ещё не загрузиться.
+                По имени отчёт по выбранному курьеру подписывался бы «все
+                курьеры», а его настоящий начальный баланс прятался.
               */}
               <div className="reports__balance" data-testid="reports-balance">
                 <span className="reports__balance-title">
-                  {courierName === null
-                    ? 'Изменение за период · все курьеры'
-                    : `Конечный баланс · ${courierName}`}
+                  {
+                    balanceCaption(
+                      courierUserId,
+                      courierName,
+                      settlements.data.totals.closingBalanceMinor,
+                    ).title
+                  }
                 </span>
                 <span className="reports__balance-value" data-testid="reports-closing">
                   {formatMoney(settlements.data.totals.closingBalanceMinor)}
                 </span>
                 <span className="reports__balance-words">
-                  {courierName === null
-                    ? 'выберите курьера, чтобы увидеть его баланс'
-                    : debtWords(settlements.data.totals.closingBalanceMinor)}
+                  {
+                    balanceCaption(
+                      courierUserId,
+                      courierName,
+                      settlements.data.totals.closingBalanceMinor,
+                    ).words
+                  }
                 </span>
-                {courierName === null ? null : (
+                {balanceCaption(
+                  courierUserId,
+                  courierName,
+                  settlements.data.totals.closingBalanceMinor,
+                ).showOpening ? (
                   <span className="reports__balance-opening">
                     Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
                   </span>
-                )}
+                ) : null}
               </div>
 
               <div className="reports__metrics">
@@ -1243,7 +1297,7 @@ export function ReportsScreen(): React.JSX.Element {
                 </div>
 
                 {settlements.data.hasMore &&
-                  (GROUPS_PER_PAGE * pages < GROUPS_LIMIT ? (
+                  (canShowMore(settlements.data.hasMore, pages) ? (
                     <Button
                       data-testid="reports-more"
                       onClick={() => setPages((current) => current + 1)}

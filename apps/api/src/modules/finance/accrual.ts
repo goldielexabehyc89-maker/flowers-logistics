@@ -307,12 +307,8 @@ export async function accrueDistanceFee(
 /**
  * Виды, которые начисляет САМА система по результату доставки.
  *
- * Снимается только это. Расход, доплату или оплачиваемую попытку логист
- * заводит руками и привязывает к попытке — такую запись отменяет человек, а не
- * автоматическая отмена заказа: курьер эти деньги уже потратил или заработал,
- * и отмена заказа в источнике их не возвращает. Молча снимать чужое решение
- * нельзя — по тому же правилу, по которому не возвращается снятая
- * корректировка наличных.
+ * Список закрытый и сверен с местами записи: `accrueDeliveryResult`,
+ * `accrueDistanceFee` и корректировка наличных после оплаты в источнике.
  */
 const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
   'CASH_RECEIVED',
@@ -321,14 +317,37 @@ const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
   'CASH_PAYMENT_CORRECTION',
 ];
 
+/**
+ * Что именно снимать — решает ВЫЗЫВАЮЩИЙ, потому что поводы разные.
+ *
+ * `SYSTEM` — снимается только начисленное системой. Так снимает деньги отмена
+ * заказа в источнике: расход курьера и доплату логист одобрил руками, эти
+ * деньги уже потрачены или заработаны, и отмена заказа их не возвращает. Так
+ * же работает пересчёт: он заново начисляет только системные виды, и сняв
+ * ручную запись, он её не восстановит.
+ *
+ * `ALL` — снимается всё, что висит на попытке. Так снимается ОТМЕНА РЕЗУЛЬТАТА
+ * доставки: самой попытки больше нет, и оплачиваемая попытка вместе с
+ * привязанным к ней расходом теряет основание.
+ */
+export type ReversalScope = 'SYSTEM' | 'ALL';
+
 export async function reverseDeliveryAccruals(
   tx: TransactionClient,
-  input: { attemptId: string; actorUserId: string; reason: string; operationDate: string },
-): Promise<void> {
+  input: {
+    attemptId: string;
+    actorUserId: string;
+    reason: string;
+    operationDate: string;
+    scope: ReversalScope;
+  },
+): Promise<boolean> {
   const entries = await tx.courierLedgerEntry.findMany({
     where: {
       attemptId: input.attemptId,
-      kind: { in: [...ACCRUED_KINDS] },
+      ...(input.scope === 'SYSTEM'
+        ? { kind: { in: [...ACCRUED_KINDS] } }
+        : { kind: { not: 'ADJUSTMENT' } }),
       reversedBy: { is: null },
     },
     select: {
@@ -358,4 +377,8 @@ export async function reverseDeliveryAccruals(
       },
     });
   }
+
+  // Было ли что снимать: вызывающий по этому признаку решает, сообщать ли
+  // отчёту об изменении журнала.
+  return entries.length > 0;
 }

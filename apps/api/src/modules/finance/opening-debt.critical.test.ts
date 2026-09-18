@@ -1725,4 +1725,66 @@ describe('передача наличных и касса через маршр�
       0,
     );
   });
+  it('начальный долг и его отмена не двигают «Ожидается к сдаче»', async () => {
+    /*
+     * За начальным долгом не стоит наличных: сдать его нельзя. Попав в этот
+     * показатель, он навсегда разводил ожидаемую сдачу с тем, что логист может
+     * получить. Отмена долга — это ADJUSTMENT, и отбор по одному виду её не
+     * ловил: долг показатель не менял, а его исправление — занижало.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+    const courier = await courierId();
+
+    const expected = async (): Promise<bigint> => {
+      const report = await buildCashReport(ctx.db, {
+        from: DAY,
+        to: DAY,
+        limit: 50,
+        offset: 0,
+        visibleLogistIds: null,
+      });
+      return BigInt(report.summary.expectedFromCouriersMinor);
+    };
+
+    const before = await expected();
+
+    const created = await postDebt(token, {
+      courierUserId: courier,
+      amountMinor: '500000',
+      operationDate: DAY,
+      reason: 'долг до перехода на ERP',
+      idempotencyKey: unique('expected-debt'),
+    });
+    expect(created.statusCode).toBe(201);
+    expect(await expected()).toBe(before);
+
+    const reversed = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/logistics/ledger/opening-debt/${created.json().entry?.id ?? ''}/reverse`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { reason: 'внесено по ошибке' },
+    });
+    expect(reversed.statusCode).toBe(200);
+    // И отмена тоже не двигает: обе записи вне наличных.
+    expect(await expected()).toBe(before);
+  });
+
+  it('предел листания отчёта совпадает с тем, что просит экран', async () => {
+    /*
+     * Экран наращивает `limit` по 25 групп, не двигая `offset`. При потолке
+     * ниже его предела очередное нажатие «Показать ещё» упиралось в отказ
+     * проверки, и длинный период досмотреть было нельзя вовсе.
+     */
+    const { token } = await tokenFor(['ADMIN']);
+    const ask = (limit: number): Promise<{ statusCode: number }> =>
+      ctx.app.inject({
+        method: 'GET',
+        url: `/api/logistics/reports/settlements?from=${DAY}&to=${DAY}&limit=${limit}&offset=0`,
+        headers: { authorization: `Bearer ${token}` },
+      }) as never;
+
+    expect((await ask(1000)).statusCode).toBe(200);
+    // Выше предела — честный отказ, а не молчаливое усечение.
+    expect((await ask(1001)).statusCode).toBe(400);
+  });
 });

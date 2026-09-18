@@ -53,9 +53,17 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Показатель', key: 'name', width: 38 },
     { header: 'Сумма, ₽', key: 'value', width: 16, style: { numFmt: '#,##0.00' } },
   ];
+  /*
+   * Баланс существует только у КОНКРЕТНОГО курьера: без отбора входящее сальдо
+   * равно нулю, и «конечный баланс» — это изменение за период. Называть его
+   * балансом значило бы утверждать о долге, которого никто не считал.
+   */
+  const perCourier = report.courierUserId !== null;
   summary.addRows([
     { name: 'Период', value: `${report.period.from} — ${report.period.to}` },
-    { name: 'Начальный баланс', value: toRubles(report.totals.openingBalanceMinor) },
+    ...(perCourier
+      ? [{ name: 'Начальный баланс', value: toRubles(report.totals.openingBalanceMinor) }]
+      : []),
     { name: 'Наличные, полученные курьером', value: toRubles(report.totals.cashReceivedMinor) },
     {
       name: 'Корректировки наличных (оплата в МойСклад)',
@@ -70,7 +78,10 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { name: 'Доплаты', value: toRubles(report.totals.bonusesMinor) },
     { name: 'Обратные корректировки', value: toRubles(report.totals.adjustmentsMinor) },
     { name: 'Начальный долг', value: toRubles(report.totals.openingDebtMinor) },
-    { name: 'Конечный баланс', value: toRubles(report.totals.closingBalanceMinor) },
+    {
+      name: perCourier ? 'Конечный баланс' : 'Изменение за период (по всем курьерам)',
+      value: toRubles(report.totals.closingBalanceMinor),
+    },
   ]);
   summary.getRow(1).font = { bold: true };
 

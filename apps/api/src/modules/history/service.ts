@@ -70,6 +70,8 @@ export interface HistoryFilters {
   search?: string | undefined;
   limit: number;
   offset: number;
+  /** Кассы, доступные пользователю. `null` — все (администратор). */
+  visibleLogistIds: string[] | null;
 }
 
 export interface HistoryRouteRow {
@@ -223,8 +225,23 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
     },
   });
 
+  /*
+   * Касса — чужие деньги, и в истории она видна по тем же правилам, что на
+   * своём экране: логист видит только свою, администратор — все. Прежде здесь
+   * фильтра не было вовсе, и движения чужих касс попадали в общий список.
+   */
   const cashMoves = await db.logistCashEntry.findMany({
-    where: { operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) } },
+    where: {
+      operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) },
+      ...(filters.visibleLogistIds === null
+        ? {}
+        : { logistUserId: { in: filters.visibleLogistIds } }),
+      /*
+       * При отборе по курьеру в дне не должно оказаться чужих операций:
+       * человек смотрит одного курьера, а видел бы всю кассу дня.
+       */
+      ...(filters.courierUserId === undefined ? {} : { courierUserId: filters.courierUserId }),
+    },
     orderBy: [{ occurredAt: 'desc' }],
     take: 500,
     select: {

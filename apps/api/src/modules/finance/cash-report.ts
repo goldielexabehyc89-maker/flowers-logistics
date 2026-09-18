@@ -233,11 +233,22 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
         where: { logistUserId: id },
         _sum: { amountMinor: true },
       });
+      /*
+       * Остаток НА КОНЕЦ ПЕРИОДА — отдельно от «сейчас».
+       *
+       * Прежде оба показателя считались по всем записям, и отчёт за прошлый
+       * период показывал сегодняшний остаток под подписью «остаток на конец».
+       */
+      const closing = await db.logistCashEntry.aggregate({
+        where: { logistUserId: id, operationDate: { lte: toDateColumn(filters.to) } },
+        _sum: { amountMinor: true },
+      });
       return {
         id,
         fullName: profile?.fullName ?? 'Логист удалён из справочника',
         phone: profile?.phone ?? null,
         balanceMinor: (balance._sum.amountMinor ?? 0n).toString(),
+        closingMinor: (closing._sum.amountMinor ?? 0n).toString(),
       };
     }),
   );
@@ -259,7 +270,17 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
   const expected = await db.courierLedgerEntry.aggregate({
     where: {
       operationDate: { lte: toDateColumn(filters.to) },
-      kind: { not: 'OPENING_DEBT' },
+      /*
+       * Исключается и САМ долг, и его отмена.
+       *
+       * У обратной записи собственный вид всегда `ADJUSTMENT`, поэтому отбор
+       * по одному виду её не ловил: заведённый долг показатель не менял, а его
+       * исправление — занижало ровно на ту же сумму. Правило «категория
+       * обратной записи — категория отменяемой» здесь то же, что в отчёте.
+       */
+      NOT: {
+        OR: [{ kind: 'OPENING_DEBT' }, { reversesEntry: { kind: 'OPENING_DEBT' } }],
+      },
     },
     _sum: { amountMinor: true },
   });
@@ -276,15 +297,8 @@ export async function buildCashReport(db: Database, filters: CashFilters): Promi
     takenMinor: abs(sumOf(entries, ['TAKEN_FROM_COMPANY'])).toString(),
     issuedMinor: abs(sumOf(entries, ['ISSUED_TO_COURIER'])).toString(),
     handedMinor: abs(sumOf(entries, ['HANDED_TO_COMPANY'])).toString(),
-    /*
-     * Остаток на конец периода — он же наличные в кассах сейчас.
-     *
-     * Это одно и то же число под двумя подписями: остаток кассы накопительный
-     * и считается по всем её записям. Разными они станут, только если начать
-     * считать остаток на дату; пока этого нет, честнее называть их вместе,
-     * чем делать вид, что показателя два.
-     */
-    closingMinor: desks.reduce((total, desk) => total + BigInt(desk.balanceMinor), 0n).toString(),
+    // Остаток на конец ПЕРИОДА, а не сегодняшний: см. выше.
+    closingMinor: desks.reduce((total, desk) => total + BigInt(desk.closingMinor), 0n).toString(),
   };
 
   return {
