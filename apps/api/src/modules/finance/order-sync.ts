@@ -29,7 +29,8 @@ import { moscowCalendarDate } from '@fl/shared';
 import type { TransactionClient } from '../auth/sessions.js';
 import type { OutboxHandler } from '../outbox/worker.js';
 import { enqueueOutbox } from '../outbox/producer.js';
-import { appendEntry } from './ledger.js';
+import { publishRealtimeEvent } from '../realtime/events.js';
+import { appendLedgerEntry } from './ledger.js';
 import { reverseDeliveryAccruals } from './accrual.js';
 
 export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
@@ -37,16 +38,50 @@ export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
 /**
  * Ключ задания на корректировку наличных.
  *
- * В ключ входит оплаченная сумма: один и тот же приход из источника не
- * обрабатывается дважды, а новое изменение оплаты — это уже другое задание.
+ * В ключ входит НОМЕР события оплаты, а не её величина. Выполненные сообщения
+ * очереди не удаляются, поэтому ключ из величины занимался навсегда:
+ * «оплата 2000 → отмена результата → новая доставка → снова оплата 2000» не
+ * ставила второго задания, и за новой доставкой оставались все 5000 наличных
+ * вместо 3000.
+ *
+ * От двойного списания это не ослабляет защиту: её держат не ключ задания, а
+ * ключ самой записи (`cashCorrectionEntryKey`, «попытка + состояние оплаты») и
+ * формула, которая никогда не снимает больше начисленного. Номер же растёт
+ * только на РОСТЕ оплаты, поэтому повторный импорт одного снимка задания не
+ * ставит вовсе.
  */
-export function cashCorrectionJobKey(orderId: string, payedSumMinor: bigint): string {
-  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:${payedSumMinor.toString()}`;
+export function cashCorrectionJobKey(orderId: string, generation: number): string {
+  /*
+   * Отдельное слово `event` в ключе — это ПРОСТРАНСТВО ИМЁН, а не украшение.
+   *
+   * Прежний формат `…:payment:<заказ>:<сумма в копейках>` отличался от нового
+   * только смыслом последнего числа. Оплата в одну копейку давала ровно тот же
+   * ключ, что событие номер один, — и на обновлении существующей очереди первое
+   * же новое задание считалось бы уже выполненным. Сообщения не удаляются,
+   * поэтому прежние ключи живут вечно и обязаны не пересекаться с новыми.
+   */
+  return `${ORDER_FINANCE_TOPIC}:payment:${orderId}:event:${generation}`;
 }
 
-/** Ключ задания на снятие денег отменённого заказа: отмена бывает один раз. */
-export function cancellationJobKey(orderId: string): string {
-  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}`;
+/**
+ * Ключ задания на снятие денег отменённого заказа.
+ *
+ * В ключ входит НОМЕР отмены, а не только заказ. Отмену в источнике снимают
+ * и ставят заново: заказ возвращается в работу, получает новую доставку —
+ * а с ней наличные, оплату заказа и километры. Ключ из одного заказа был бы
+ * занят навсегда, повторная отмена не поставила бы задания вовсе, и эти новые
+ * деньги так и остались бы за курьером по отменённому заказу. Сообщения
+ * очереди не удаляются, поэтому «занят навсегда» здесь буквально.
+ *
+ * Оплаченная попытка в этот список НЕ входит ни при первой отмене, ни при
+ * повторной: отмена заказа снимает только начисленное системой (`SYSTEM`),
+ * а попытка состоялась и оплачена логистом отдельным решением.
+ *
+ * Номер, а не момент времени: два события отмены обязаны различаться даже
+ * тогда, когда часы отдали одно и то же значение.
+ */
+export function cancellationJobKey(orderId: string, generation: number): string {
+  return `${ORDER_FINANCE_TOPIC}:cancel:${orderId}:${generation}`;
 }
 
 /** Ключ самой корректирующей записи: одна на попытку и состояние оплаты. */
@@ -56,22 +91,22 @@ export function cashCorrectionEntryKey(attemptId: string, payedSumMinor: bigint)
 
 export async function enqueueCashPaymentCorrection(
   tx: TransactionClient,
-  input: { orderId: string; payedSumMinor: bigint },
+  input: { orderId: string; generation: number },
 ): Promise<void> {
   await enqueueOutbox(tx, {
     topic: ORDER_FINANCE_TOPIC,
-    idempotencyKey: cashCorrectionJobKey(input.orderId, input.payedSumMinor),
+    idempotencyKey: cashCorrectionJobKey(input.orderId, input.generation),
     payload: { reason: 'PAYMENT', orderId: input.orderId },
   });
 }
 
 export async function enqueueCancelledOrderFinance(
   tx: TransactionClient,
-  input: { orderId: string },
+  input: { orderId: string; generation: number },
 ): Promise<void> {
   await enqueueOutbox(tx, {
     topic: ORDER_FINANCE_TOPIC,
-    idempotencyKey: cancellationJobKey(input.orderId),
+    idempotencyKey: cancellationJobKey(input.orderId, input.generation),
     payload: { reason: 'CANCEL', orderId: input.orderId },
   });
 }
@@ -99,7 +134,19 @@ function rubles(minor: bigint): string {
 export async function applyCashPaymentCorrection(
   tx: TransactionClient,
   input: { orderId: string; now: Date },
-): Promise<void> {
+): Promise<boolean> {
+  /*
+   * Строка заказа блокируется ПЕРВОЙ.
+   *
+   * Ту же строку блокируют импорт и начисление доставки. Без этого обработчик
+   * мог прочитать ещё пустой журнал незавершённой доставки, успешно завершиться
+   * и стать DONE, а начисление появлялось бы следом — по старой оплате и уже
+   * некому его поправить. Под общей блокировкой обработчик либо ждёт доставку и
+   * видит её записи, либо отрабатывает раньше, а доставка считает уже по новой
+   * оплате.
+   */
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
+
   const order = await tx.deliveryOrder.findUnique({
     where: { id: input.orderId },
     select: {
@@ -110,7 +157,7 @@ export async function applyCashPaymentCorrection(
     },
   });
   if (order === null) {
-    return;
+    return false;
   }
 
   /*
@@ -118,7 +165,7 @@ export async function applyCashPaymentCorrection(
    * Оплата, пришедшая после отмены, ничего не меняет — итог остаётся нулевым.
    */
   if (order.cancelledInSource) {
-    return;
+    return false;
   }
 
   // Наличные бывают только по успешной доставке: корректировать нечего, пока
@@ -140,6 +187,7 @@ export async function applyCashPaymentCorrection(
   const outstanding = order.sumMinor - order.payedSumMinor;
   const remaining = outstanding > 0n ? outstanding : 0n;
 
+  let changed = false;
   for (const entry of accrued) {
     if (entry.attemptId === null) {
       continue;
@@ -164,7 +212,17 @@ export async function applyCashPaymentCorrection(
       continue;
     }
 
-    await appendEntry(tx, {
+    /*
+     * Менялся ли журнал — решает ЗАПИСЬ, а не намерение её создать.
+     *
+     * Ключ корректировки одинаков для попытки и состояния оплаты. Если
+     * предыдущую корректировку человек отменил, она перестаёт учитываться
+     * в `alreadyRemoved`, и `delta` снова окажется положительной — но запись
+     * по этому ключу уже существует, и новой не появится. Сообщать отчёту
+     * «журнал изменился» в таком случае значило бы звать его перечитывать
+     * то, что не менялось.
+     */
+    const { created } = await appendLedgerEntry(tx, {
       courierUserId: entry.courierUserId,
       kind: 'CASH_PAYMENT_CORRECTION',
       amountMinor: delta,
@@ -176,7 +234,10 @@ export async function applyCashPaymentCorrection(
       attemptId: entry.attemptId,
       idempotencyKey: cashCorrectionEntryKey(entry.attemptId, order.payedSumMinor),
     });
+    changed = changed || created;
   }
+
+  return changed;
 }
 
 /**
@@ -187,15 +248,59 @@ export async function applyCashPaymentCorrection(
  * В сумме вклад заказа становится нулевым — ни плюса, ни минуса, — а история
  * показывает и исходные суммы, и их снятие.
  *
- * Не трогается ничто, что к этой доставке не относится: начальный долг,
- * фактические передачи денег курьер ↔ логист и ручные операции без привязки
- * к попытке остаются как были. Физическая доставка не отменяется: снимаются
- * только деньги.
+ * Снимается только НАЧИСЛЕННОЕ СИСТЕМОЙ. Начальный долг, фактические передачи
+ * денег курьер ↔ логист и ручные операции логиста — в том числе привязанные
+ * к попытке — остаются как были: эти деньги курьер уже потратил или заработал,
+ * и отмена заказа в источнике их не возвращает. Поэтому вклад отменённого
+ * заказа равен нулю ровно в той части, которую начислила система; одобренный
+ * человеком расход в нём остаётся и снимается только тем же человеком.
+ * Физическая доставка не отменяется: снимаются только деньги.
  */
 export async function stripCancelledOrderFinance(
   tx: TransactionClient,
   input: { orderId: string; now: Date },
-): Promise<void> {
+): Promise<boolean> {
+  // Та же блокировка, что у доставки и импорта: снимать нужно ПОСЛЕ того, как
+  // параллельная доставка зафиксировала свои начисления, иначе снимать нечего.
+  await tx.$queryRaw`SELECT "id" FROM "DeliveryOrder" WHERE "id" = ${input.orderId}::uuid FOR UPDATE`;
+
+  /*
+   * Заказ обязан быть отменён ПРЯМО СЕЙЧАС, а не в момент постановки задания.
+   *
+   * Задание выполняется отдельно и при неудачах откладывается с отсрочкой до
+   * пятнадцати минут. За это время отмену в источнике успевают снять: заказ
+   * возвращается в работу, и снимать его деньги уже не за что. Соседние
+   * обработчики эту проверку делают (`applyCashPaymentCorrection`,
+   * `accrueDeliveryResult`), а снятие — не делало.
+   */
+  const order = await tx.deliveryOrder.findUnique({
+    where: { id: input.orderId },
+    select: { cancelledInSource: true },
+  });
+  if (order === null || !order.cancelledInSource) {
+    return false;
+  }
+
+  /*
+   * Отмена закрывает финансовый результат КАЖДОЙ доставки заказа — независимо
+   * от того, осталось ли что сторнировать.
+   *
+   * Попытку могли обнулить раньше (например, километры исправили в ноль). Тогда
+   * непогашенных записей нет, сторно не создаётся — и признак снятия, выведенный
+   * из обратных записей, не появлялся вовсе. После снятия отмены правка
+   * километров возвращала такой попытке деньги.
+   */
+  const delivered = await tx.deliveryAttempt.findMany({
+    where: { orderId: input.orderId, activeKey: { not: null }, outcome: 'DELIVERED' },
+    select: { id: true },
+  });
+  if (delivered.length > 0) {
+    await tx.deliveryAttempt.updateMany({
+      where: { id: { in: delivered.map((attempt) => attempt.id) } },
+      data: { financeStrippedAt: input.now },
+    });
+  }
+
   const entries = await tx.courierLedgerEntry.findMany({
     where: {
       orderId: input.orderId,
@@ -214,14 +319,32 @@ export async function stripCancelledOrderFinance(
   }
 
   const operationDate = moscowCalendarDate(input.now);
+
+  /*
+   * Изменением считается СНЯТАЯ запись, а не найденная попытка.
+   *
+   * Снимается только начисленное системой, а попытки ищутся шире — по любой
+   * непогашенной записи. У заказа, где осталась лишь ручная операция логиста,
+   * попытка нашлась бы, снимать было бы нечего, а отчёт получал бы событие
+   * «журнал изменился» и перечитывался у всех открытых вкладок.
+   */
+  let reversed = false;
   for (const [attemptId, courierUserId] of attempts) {
-    await reverseDeliveryAccruals(tx, {
+    const done = await reverseDeliveryAccruals(tx, {
       attemptId,
       actorUserId: courierUserId,
       reason: 'Отмена в МойСклад: заказ исключён из расчётов с курьером',
       operationDate,
+      /*
+       * Ручное решение логиста остаётся: расход курьер уже понёс, доплату
+       * заработал, и отмена заказа в источнике их не возвращает.
+       */
+      scope: 'SYSTEM',
     });
+    reversed = reversed || done;
   }
+
+  return reversed;
 }
 
 export interface OrderFinanceHandlerDeps {
@@ -246,11 +369,26 @@ export function createOrderFinanceHandler(deps: OrderFinanceHandlerDeps = {}): O
       return;
     }
 
-    if (payload.reason === 'CANCEL') {
-      await stripCancelledOrderFinance(tx, { orderId, now: now() });
-      return;
-    }
+    const at = now();
+    const changed =
+      payload.reason === 'CANCEL'
+        ? await stripCancelledOrderFinance(tx, { orderId, now: at })
+        : await applyCashPaymentCorrection(tx, { orderId, now: at });
 
-    await applyCashPaymentCorrection(tx, { orderId, now: now() });
+    /*
+     * Открытый отчёт обязан обновиться сам.
+     *
+     * Событие публикуется В ТОЙ ЖЕ транзакции и только когда журнал
+     * действительно изменился: события импорта заказа отчёт не инвалидируют и
+     * приходят раньше этого задания. Аудитория — все роли, которым разрешён
+     * отчёт расчётов, включая управляющего.
+     */
+    if (changed) {
+      await publishRealtimeEvent(tx, {
+        topic: 'finance.ledger_changed',
+        payload: { operationDate: moscowCalendarDate(at) },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+      });
+    }
   };
 }

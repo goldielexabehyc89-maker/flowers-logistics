@@ -212,6 +212,15 @@ export async function recomputeDeliveriesForDate(
             actorUserId: input.actorUserId,
             reason: attempt.cancellation.reason ?? 'Пересчёт: отмена результата доставки',
             operationDate: moscowCalendarDate(attempt.cancellation.occurredAt),
+            /*
+             * Тот же повод — та же область, что у боевого пути.
+             *
+             * Пересчёт воспроизводит прожитую последовательность теми же
+             * функциями; сняв здесь не то, что снимала отмена результата, он
+             * дал бы состояние, отличное от прожитого, и по коду нельзя было
+             * бы сказать, какое из них верное.
+             */
+            scope: 'ATTEMPT',
           });
           reversalsApplied += 1;
         }

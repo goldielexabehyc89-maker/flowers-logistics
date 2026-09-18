@@ -12,7 +12,15 @@
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { balanceOf, entriesOf, type LedgerEntryView } from './ledger.js';
-import { groupSettlement, pageOfGroups, type CourierProfile, type DayGroup } from './grouping.js';
+import {
+  CASH_KINDS,
+  changeOf,
+  groupSettlement,
+  pageOfGroups,
+  rawOf,
+  type CourierProfile,
+  type DayGroup,
+} from './grouping.js';
 
 export interface Period {
   from: string;
@@ -23,6 +31,13 @@ export interface SettlementTotals {
   /** Баланс на начало периода: сумма всех записей строго до его первого дня. */
   openingBalanceMinor: string;
   cashReceivedMinor: string;
+  /**
+   * Корректировки наличных после оплаты в источнике: со знаком, обычно минус.
+   *
+   * Отдельно от наличных и БЕЗ модуля: иначе период, в котором есть только
+   * корректировка, показал бы снятие как приход.
+   */
+  cashCorrectionsMinor: string;
   handedToLogistMinor: string;
   issuedToCourierMinor: string;
   deliveryFeesMinor: string;
@@ -61,8 +76,30 @@ export interface SettlementRow {
   /** Ставки маршрута. `null` — маршрут подтверждён до включения учёта. */
   perOrderMinor: string | null;
   perKmMinor: string | null;
-  /** Расстояние за МКАД. `null` — не рассчитано. */
+  /**
+   * Расстояние за МКАД, ПО КОТОРОМУ начислены деньги. `null` — не рассчитано.
+   *
+   * Именно оплаченное, а не текущее: строка обязана сходиться сама с собой.
+   * Живой снимок меняется и после доставки — автоматическим пересчётом, сменой
+   * координат, правкой человека, — и строка показывала «20,0 км · 500,00 ₽»
+   * при ставке 40 ₽/км, то есть арифметику, которая не сходится ни с чем.
+   */
   beyondMkadKmTenths: number | null;
+  /**
+   * Текущий расчёт, если он РАСХОДИТСЯ с оплаченным. `null` — расхождения нет.
+   *
+   * Деньги меняет только решение человека, поэтому расхождение не исправляется
+   * молча: оно называется прямо, и по нему видно, что пересчитать.
+   */
+  currentKmTenths: number | null;
+  /**
+   * Деньги за километры есть, а сами километры не сохранены.
+   *
+   * Так выглядят начисления, сделанные до появления поля: восстановить их
+   * основание нечем, и подставлять вместо него текущий снимок значило бы
+   * показать чужие километры рядом с прежней суммой.
+   */
+  distanceBasisUnknown: boolean;
   distanceSource: 'COMPUTED' | 'MANUAL' | null;
   deliveryFeeMinor: string;
   distanceFeeMinor: string;
@@ -72,6 +109,22 @@ export interface SettlementRow {
   totalMinor: string;
   /** Расчёта нет: тарифного снимка у маршрута не существует. */
   settlementMissing: boolean;
+  /**
+   * Все начисления ЭТОГО дня по этой доставке сняты обратными записями.
+   *
+   * Про день, а не про заказ: отмена, пришедшая на следующий день, живёт
+   * в своём дне, а день доставки честно несёт свои деньги. Физический факт
+   * доставки сохраняется в любом случае.
+   */
+  financeCancelled: boolean;
+  /**
+   * Заказ отменён в источнике — независимо от того, в каком дне сняты деньги.
+   *
+   * Отдельный признак: «деньги дня сняты» и «заказ отменён» — разные факты,
+   * и в отчёте за день доставки первый ложен, а второй истинен. Без него
+   * отменённый заказ выглядел бы обычной успешной доставкой.
+   */
+  sourceCancelled: boolean;
 }
 
 export interface SettlementReport {
@@ -93,17 +146,6 @@ export interface SettlementReport {
   hasMore: boolean;
   /** Дата включения учёта. `null` — учёт выключен. */
   ledgerActiveFrom: string | null;
-}
-
-function sumOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): bigint {
-  return entries
-    .filter((entry) => kinds.includes(entry.kind))
-    .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
-}
-
-/** Модуль суммы: в отчёте расходы показываются положительными числами. */
-function abs(value: bigint): bigint {
-  return value < 0n ? -value : value;
 }
 
 /** День, предшествующий первому дню периода: по нему считается входящий баланс. */
@@ -140,27 +182,41 @@ export async function buildSettlementReport(
 
   const totals: SettlementTotals = {
     openingBalanceMinor: opening.toString(),
-    // Наличные за период — за вычетом того, что оплатили в источнике уже после
-    // доставки: итог обязан сходиться с журналом и со строками заказов.
-    cashReceivedMinor: abs(sumOf(entries, ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'])).toString(),
-    handedToLogistMinor: abs(sumOf(entries, ['CASH_HANDED_TO_LOGIST'])).toString(),
-    issuedToCourierMinor: abs(sumOf(entries, ['CASH_ISSUED_TO_COURIER'])).toString(),
-    deliveryFeesMinor: abs(sumOf(entries, ['DELIVERY_FEE'])).toString(),
-    attemptFeesMinor: abs(sumOf(entries, ['ATTEMPT_FEE'])).toString(),
-    distanceFeesMinor: abs(sumOf(entries, ['DISTANCE_FEE'])).toString(),
-    expensesMinor: abs(
-      sumOf(entries, [
-        'EXPENSE_PARKING',
-        'EXPENSE_TOLL',
-        'EXPENSE_TRANSIT',
-        'EXPENSE_REPAIR',
-        'EXPENSE_LOADING',
-        'EXPENSE_OTHER',
-      ]),
-    ).toString(),
-    bonusesMinor: abs(sumOf(entries, ['BONUS'])).toString(),
-    adjustmentsMinor: sumOf(entries, ['ADJUSTMENT']).toString(),
-    openingDebtMinor: sumOf(entries, ['OPENING_DEBT']).toString(),
+    /*
+     * Каждый показатель — ИЗМЕНЕНИЕ за период, а обратная запись считается
+     * в категории той операции, которую отменяет. Поэтому день начисления даёт
+     * плюс, день отмены — минус, а за оба дня выходит ноль: отменённая зарплата
+     * не остаётся в зарплате, и при этом движения обоих дней сохраняются.
+     */
+    cashReceivedMinor: changeOf(entries, ['CASH_RECEIVED']).toString(),
+    /*
+     * Корректировки наличных показываются со знаком журнала: это уменьшение,
+     * и минус здесь — часть смысла показателя.
+     */
+    cashCorrectionsMinor: rawOf(entries, ['CASH_PAYMENT_CORRECTION']).toString(),
+    handedToLogistMinor: changeOf(entries, ['CASH_HANDED_TO_LOGIST']).toString(),
+    issuedToCourierMinor: changeOf(entries, ['CASH_ISSUED_TO_COURIER']).toString(),
+    deliveryFeesMinor: changeOf(entries, ['DELIVERY_FEE']).toString(),
+    attemptFeesMinor: changeOf(entries, ['ATTEMPT_FEE']).toString(),
+    distanceFeesMinor: changeOf(entries, ['DISTANCE_FEE']).toString(),
+    expensesMinor: changeOf(entries, [
+      'EXPENSE_PARKING',
+      'EXPENSE_TOLL',
+      'EXPENSE_TRANSIT',
+      'EXPENSE_REPAIR',
+      'EXPENSE_LOADING',
+      'EXPENSE_OTHER',
+    ]).toString(),
+    bonusesMinor: changeOf(entries, ['BONUS']).toString(),
+    /*
+     * Здесь остаются только обратные записи, чью исходную операцию определить
+     * не удалось. В норме их нет: каждая отмена учтена в своей категории.
+     */
+    adjustmentsMinor: entries
+      .filter((entry) => entry.kind === 'ADJUSTMENT' && entry.reversesKind === null)
+      .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
+      .toString(),
+    openingDebtMinor: changeOf(entries, ['OPENING_DEBT']).toString(),
     closingBalanceMinor: (opening + periodSum).toString(),
   };
 
@@ -186,7 +242,7 @@ export async function buildSettlementReport(
           outcome: true,
           routeOrderId: true,
           cancellation: { select: { id: true } },
-          order: { select: { externalName: true } },
+          order: { select: { externalName: true, cancelledInSource: true } },
           route: { select: { number: true, deliveryDate: true } },
         },
       },
@@ -208,16 +264,156 @@ export async function buildSettlementReport(
   });
   const distanceByRouteOrder = new Map(distances.map((row) => [row.routeOrderId, row]));
 
+  /*
+   * Проводка принадлежит СВОЕМУ дню, а не дню доставки.
+   *
+   * Строка доставки собирает только записи своего дня; корректировка или
+   * отмена другого дня уходит в журнал этого другого дня. Иначе итог дня
+   * менялся бы от того, насколько широкий период выбран: при обоих днях
+   * корректировка пряталась внутрь строки доставки, и её день исчезал.
+   * Двойного счёта нет: запись попадает ровно в одно место.
+   */
+  const deliveryDayOfAttempt = new Map(
+    facts.map((fact) => [fact.attemptId, fromDateColumn(fact.attempt.route.deliveryDate)]),
+  );
+  /*
+   * Чей это заказ. Попытка одна, а курьер у записи — свой.
+   *
+   * У `attemptId` записи журнала нет внешнего ключа, и маршрут операций
+   * принимает любой uuid. Запись курьера B с попыткой курьера A уходила в
+   * строку A: у A в «Доп.» появлялись чужие деньги, а у B они пропадали из
+   * отчёта, оставаясь в его балансе. Итог дня переставал быть вкладом дня в
+   * баланс, и один и тот же день показывался по-разному в общем отчёте и в
+   * отчёте по курьеру. Строку доставки наполняют только записи ЕЁ курьера.
+   */
+  const courierOfAttempt = new Map(facts.map((fact) => [fact.attemptId, fact.courierUserId]));
+
   const byAttempt = new Map<string, LedgerEntryView[]>();
+  const takenByRows = new Set<string>();
   for (const entry of entries) {
     if (entry.attemptId === null) {
       continue;
     }
+    if (deliveryDayOfAttempt.get(entry.attemptId) !== entry.operationDate) {
+      continue;
+    }
+    if (courierOfAttempt.get(entry.attemptId) !== entry.courierUserId) {
+      continue;
+    }
     byAttempt.set(entry.attemptId, [...(byAttempt.get(entry.attemptId) ?? []), entry]);
+    takenByRows.add(entry.id);
   }
+
+  /** Всё, что не попало в строку доставки, показывается журналом своего дня. */
+  const journalEntries = entries.filter((entry) => !takenByRows.has(entry.id));
+
+  /*
+   * Километры и деньги строки — ОДНОГО временного среза.
+   *
+   * Деньги строки берутся из проводок её дня, поэтому и километры обязаны
+   * браться оттуда же: они хранятся в самой записи начисления. Прежде строка
+   * считала их по всем дням сразу — и день доставки после вчерашней правки
+   * показывал «20 км · 500 ₽», арифметику, не сходящуюся ни с чем.
+   *
+   * Восстанавливать километры делением суммы на ставку нельзя: сумма уже
+   * округлена, и при ставке 40,01 ₽/км 12,5 км превращались в 12,4.
+   */
+  /**
+   * Километры ДНЯ: начисления минус их отмены — тем же правилом, что и деньги.
+   *
+   * Складывать одни начисления нельзя: правка в день доставки оставляла
+   * исходные километры рядом с новыми, и 12,5 → 20 давали «32,5 км · 800 ₽»,
+   * а несколько правок — 65 км. Деньги при этом были верны, то есть строка
+   * противоречила сама себе.
+   *
+   * `unknown` — деньги за километры есть, а сами километры не сохранены: так
+   * выглядят записи, начисленные до появления поля. Подставлять им текущий
+   * снимок нельзя, это чужие километры рядом с прежней суммой.
+   */
+  const kmOfDay = (own: readonly LedgerEntryView[]): { km: number | null; unknown: boolean } => {
+    let km = 0;
+    let seen = false;
+    let unknown = false;
+    for (const entry of own) {
+      if (entry.kind === 'DISTANCE_FEE') {
+        seen = true;
+        if (entry.distanceKmTenths === null) {
+          unknown = true;
+        } else {
+          km += entry.distanceKmTenths;
+        }
+        continue;
+      }
+      if (entry.kind === 'ADJUSTMENT' && entry.reversesKind === 'DISTANCE_FEE') {
+        seen = true;
+        if (entry.reversesDistanceKmTenths === null) {
+          unknown = true;
+        } else {
+          km -= entry.reversesDistanceKmTenths;
+        }
+      }
+    }
+    if (!seen) {
+      return { km: null, unknown: false };
+    }
+    return unknown ? { km: null, unknown: true } : { km, unknown: false };
+  };
+
+  /*
+   * Сколько километров ОПЛАЧЕНО этой попытке сейчас — по всем дням.
+   *
+   * Нужно не строке, а пометке: расхождение текущего расчёта с оплаченным
+   * означает, что деньги не соответствуют нынешнему измерению. Как только
+   * человек пересчитает, расхождение исчезнет само.
+   */
+  const paidDistance = await db.courierLedgerEntry.groupBy({
+    by: ['attemptId'],
+    where: {
+      attemptId: { in: facts.map((fact) => fact.attemptId) },
+      kind: 'DISTANCE_FEE',
+      reversedBy: { is: null },
+      distanceKmTenths: { not: null },
+    },
+    _sum: { distanceKmTenths: true },
+  });
+  const paidKmByAttempt = new Map(
+    paidDistance.map((row) => [row.attemptId as string, row._sum.distanceKmTenths ?? 0]),
+  );
+
+  const distanceOf = (
+    attemptId: string,
+    own: readonly LedgerEntryView[],
+    current: { roundedKmTenths: number } | null,
+  ): {
+    beyondMkadKmTenths: number | null;
+    currentKmTenths: number | null;
+    distanceBasisUnknown: boolean;
+  } => {
+    const currentKm = current?.roundedKmTenths ?? null;
+    const day = kmOfDay(own);
+    /*
+     * Ничего не начислено — оплачено ноль километров, а не «столько, сколько
+     * показывает снимок». Разница видна сразу: расчёт есть, денег по нему нет.
+     * Если расчёта нет вовсе, так и написано — «не рассчитано».
+     */
+    const paidKm = day.unknown ? null : (paidKmByAttempt.get(attemptId) ?? 0);
+    const shown = day.unknown ? null : (day.km ?? (currentKm === null ? null : 0));
+    return {
+      beyondMkadKmTenths: shown,
+      // Текущий расчёт называется отдельно, пока он не совпал с оплаченным.
+      currentKmTenths: paidKm !== null && currentKm === paidKm ? null : currentKm,
+      distanceBasisUnknown: day.unknown,
+    };
+  };
 
   const rows: SettlementRow[] = facts.map((fact) => {
     const own = byAttempt.get(fact.attemptId) ?? [];
+    /*
+     * Колонки строки — изменения её дня, `totalMinor` — вклад в баланс.
+     * Отмена того же дня попадает в те же категории с обратным знаком и
+     * обнуляет их; отмена другого дня живёт в журнале своего дня.
+     */
+
     const snapshot = snapshotByRoute.get(fact.routeId) ?? null;
     const distance = distanceByRouteOrder.get(fact.attempt.routeOrderId) ?? null;
 
@@ -248,34 +444,49 @@ export async function buildSettlementReport(
        * покупатель доплатил в МойСклад, и сдавать столько он не должен.
        * Суммы корректировок отрицательные, поэтому просто складываются.
        */
-      cashMinor: own
-        .filter(
-          (entry) =>
-            (entry.kind === 'CASH_RECEIVED' || entry.kind === 'CASH_PAYMENT_CORRECTION') &&
-            !entry.reversed,
-        )
-        .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
-        .toString(),
+      cashMinor: rawOf(own, CASH_KINDS).toString(),
       paymentTypeName: fact.paymentTypeName,
       vehicleType: snapshot === null ? null : (snapshot.vehicleType as 'CAR' | 'FOOT'),
       perOrderMinor: snapshot === null ? null : snapshot.perOrderMinor.toString(),
       perKmMinor: snapshot === null ? null : snapshot.perKmMinor.toString(),
-      beyondMkadKmTenths: distance?.roundedKmTenths ?? null,
+      ...distanceOf(fact.attemptId, own, distance),
       distanceSource: (distance?.source ?? null) as 'COMPUTED' | 'MANUAL' | null,
-      deliveryFeeMinor: abs(sumOf(own, ['DELIVERY_FEE'])).toString(),
-      distanceFeeMinor: abs(sumOf(own, ['DISTANCE_FEE'])).toString(),
-      attemptFeeMinor: abs(sumOf(own, ['ATTEMPT_FEE'])).toString(),
-      expensesMinor: abs(
-        sumOf(own, [
-          'EXPENSE_PARKING',
-          'EXPENSE_TOLL',
-          'EXPENSE_TRANSIT',
-          'EXPENSE_REPAIR',
-          'EXPENSE_LOADING',
-          'EXPENSE_OTHER',
-        ]),
-      ).toString(),
-      bonusesMinor: abs(sumOf(own, ['BONUS'])).toString(),
+      deliveryFeeMinor: changeOf(own, ['DELIVERY_FEE']).toString(),
+      distanceFeeMinor: changeOf(own, ['DISTANCE_FEE']).toString(),
+      attemptFeeMinor: changeOf(own, ['ATTEMPT_FEE']).toString(),
+      expensesMinor: changeOf(own, [
+        'EXPENSE_PARKING',
+        'EXPENSE_TOLL',
+        'EXPENSE_TRANSIT',
+        'EXPENSE_REPAIR',
+        'EXPENSE_LOADING',
+        'EXPENSE_OTHER',
+      ]).toString(),
+      bonusesMinor: changeOf(own, ['BONUS']).toString(),
+      /*
+       * Начисления ЭТОГО дня по этой доставке сняты — все до одного.
+       *
+       * Отмена из МоегоСклада НЕ создаёт отмену результата доставки: физический
+       * факт остаётся, снимаются только деньги. Поэтому признак отдельный от
+       * `cancelled`.
+       *
+       * Признаком служит СОСТОЯНИЕ СТРОКИ, а не отметка заказа: отмена,
+       * пришедшая на следующий день, лежит в своём дне, а день доставки честно
+       * сохраняет ненулевой итог — помечать его «снято» значило бы прятать
+       * деньги, которые входят в итог дня и периода полностью. И проверяется
+       * КАЖДОЕ начисление, а не нулевая сумма: день, где отменили одну запись,
+       * а остаток случайно сошёлся в ноль, снятым целиком не является.
+       */
+      financeCancelled: (() => {
+        const accruals = own.filter((entry) => entry.kind !== 'ADJUSTMENT');
+        const reversedHere = new Set(
+          own
+            .filter((entry) => entry.reversesEntryId !== null)
+            .map((entry) => entry.reversesEntryId as string),
+        );
+        return accruals.length > 0 && accruals.every((entry) => reversedHere.has(entry.id));
+      })(),
+      sourceCancelled: fact.attempt.order.cancelledInSource,
       totalMinor: own.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n).toString(),
       settlementMissing: snapshot === null,
     };
@@ -299,15 +510,44 @@ export async function buildSettlementReport(
     ).map((user) => [user.id, { id: user.id, fullName: user.fullName, phone: user.phone }]),
   );
 
-  const grouped = groupSettlement(rows, entries, profiles);
+  const grouped = groupSettlement(rows, journalEntries, profiles);
   const page = pageOfGroups(grouped, input.limit ?? Number.MAX_SAFE_INTEGER, input.offset ?? 0);
+
+  /*
+   * Плоские списки описывают СТРАНИЦУ, а не весь период.
+   *
+   * Постраничность идёт по группам «день + курьер», но рядом с двадцатью
+   * группами в ответе лежали все строки заказов и весь журнал периода — без
+   * какой-либо границы. Месяц по всем курьерам отдавал тысячи строк на каждое
+   * обновление журнала, и предел `limit` не значил ничего.
+   *
+   * Итоги при этом остаются периодными: они считаются по всему отбору, и
+   * сумма по видимым строкам итогом не является.
+   *
+   * Без `limit` (обе выгрузки) видно всё, и списки совпадают с прежними —
+   * включая записи, вошедшие в строки доставок.
+   */
+  const visibleRows = page.days.flatMap((day) => day.couriers.flatMap((group) => group.rows));
+  const visibleAttempts = new Set(visibleRows.map((row) => row.attemptId));
+  const visibleJournal = new Set(
+    page.days.flatMap((day) =>
+      day.couriers.flatMap((group) => group.operations.entries.map((entry) => entry.id)),
+    ),
+  );
+  const visibleEntries = entries.filter(
+    (entry) =>
+      visibleJournal.has(entry.id) ||
+      (entry.attemptId !== null &&
+        takenByRows.has(entry.id) &&
+        visibleAttempts.has(entry.attemptId)),
+  );
 
   return {
     period: { from: input.from, to: input.to },
     courierUserId: input.courierUserId ?? null,
     totals,
-    rows,
-    entries,
+    rows: visibleRows,
+    entries: visibleEntries,
     days: page.days,
     totalGroups: page.totalGroups,
     limit: input.limit ?? page.totalGroups,

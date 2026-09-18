@@ -26,7 +26,13 @@ import {
   StatusBadge,
   TextInput,
 } from '../../ui/components';
-import { formatMoscowDateTime, shiftCalendarDate, VEHICLE_TYPE_LABELS } from '@fl/shared';
+import {
+  formatMoscowDateTime,
+  ledgerEntryTitle,
+  ledgerKindLabel,
+  shiftCalendarDate,
+  VEHICLE_TYPE_LABELS,
+} from '@fl/shared';
 import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
@@ -46,6 +52,8 @@ interface SettlementTotals {
   adjustmentsMinor: string;
   /** Начальный долг, заведённый в этом периоде: отдельная строка, не заработок. */
   openingDebtMinor: string;
+  /** Корректировки наличных после оплаты в источнике: со знаком, обычно минус. */
+  cashCorrectionsMinor: string;
   closingBalanceMinor: string;
 }
 
@@ -62,6 +70,10 @@ interface SettlementRow {
   perOrderMinor: string | null;
   perKmMinor: string | null;
   beyondMkadKmTenths: number | null;
+  /** Текущий расчёт, если он расходится с оплаченным; иначе `null`. */
+  currentKmTenths: number | null;
+  /** Деньги за километры есть, а сами километры не сохранены (прежние записи). */
+  distanceBasisUnknown: boolean;
   deliveryFeeMinor: string;
   distanceFeeMinor: string;
   attemptFeeMinor: string;
@@ -69,6 +81,9 @@ interface SettlementRow {
   bonusesMinor: string;
   totalMinor: string;
   settlementMissing: boolean;
+  /** Финансовый результат доставки снят: деньги по заказу не действуют. */
+  financeCancelled: boolean;
+  sourceCancelled: boolean;
 }
 
 interface LedgerEntry {
@@ -80,6 +95,9 @@ interface LedgerEntry {
   actorName: string | null;
   reason: string | null;
   reversed: boolean;
+  /** Что именно отменяет обратная запись. */
+  reversesKind: string | null;
+  reversesEntryId: string | null;
 }
 
 interface CourierGroup {
@@ -96,6 +114,7 @@ interface CourierGroup {
   extraExpensesMinor: string;
   handedMinor: string;
   issuedMinor: string;
+  openingDebtMinor: string;
   accruedMinor: string;
   totalMinor: string;
   settlementMissing: boolean;
@@ -144,27 +163,17 @@ interface OperationalReport {
   failureReasons: { name: string; count: number }[];
 }
 
-const OPERATION_LABELS: Record<string, string> = {
-  CASH_RECEIVED: 'Наличные получены курьером',
-  DELIVERY_FEE: 'Оплата за доставку',
-  DISTANCE_FEE: 'Оплата километров за МКАД',
-  ATTEMPT_FEE: 'Оплачиваемая попытка',
-  CASH_HANDED_TO_LOGIST: 'Курьер сдал логисту',
-  CASH_ISSUED_TO_COURIER: 'Логист выдал курьеру',
-  EXPENSE_PARKING: 'Расход: парковка',
-  EXPENSE_TOLL: 'Расход: платная дорога',
-  EXPENSE_TRANSIT: 'Расход: общественный транспорт',
-  EXPENSE_REPAIR: 'Расход: ремонт',
-  EXPENSE_LOADING: 'Расход: погрузка',
-  EXPENSE_OTHER: 'Дополнительный расход',
-  BONUS: 'Доплата курьеру',
-  ADJUSTMENT: 'Обратная корректировка',
-  OPENING_DEBT: 'Начальный долг',
-  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
-};
-
 /** Сколько групп «день + курьер» показывать за раз. */
 const GROUPS_PER_PAGE = 25;
+
+/**
+ * Предел, согласованный с сервером (`SETTLEMENT_GROUPS_LIMIT`).
+ *
+ * Страница наращивает `limit`, не двигая `offset`, поэтому дальше этого числа
+ * групп показать нечем. Упереться молча нельзя: человек должен понимать, что
+ * видит не весь период, и сузить срок.
+ */
+const GROUPS_LIMIT = 1000;
 
 /**
  * Что заводится прямо из ячейки таблицы.
@@ -222,23 +231,146 @@ export function formatMoney(minor: string): string {
 }
 
 /**
- * В каком столбце показывать сумму операции журнала.
+ * Столбцы таблицы расчётов — ОДИН список на шапку и на журнал.
  *
- * Число встаёт ровно под тот столбец, в который оно вошло итогом дня: расход
- * под «Доп.», сдача под «Курьер сдал», выдача под «Выдано курьеру». Так строку
- * журнала можно сверить со свёрнутой строкой глазами, не считая в уме.
+ * Шапка рисуется отсюда, и номер столбца для суммы журнала считается отсюда же.
+ * Пока номера были вписаны в код числами, они могли разойтись с шапкой при
+ * первой же вставке столбца: суммы уехали бы под соседние заголовки молча.
  */
+export const SETTLEMENT_COLUMNS: readonly string[] = [
+  'Дата',
+  'Курьер',
+  'Листы',
+  'Заказы',
+  'Статус',
+  'Наличные',
+  'За заказ',
+  'За МКАД',
+  'Доп.',
+  'Начислено',
+  'Курьер сдал',
+  'Выдано курьеру',
+  'Итог',
+];
+
+/**
+ * Под каким ЗАГОЛОВКОМ стоит сумма операции журнала.
+ *
+ * Именно заголовком, а не числом: столбцы задаются одним списком, шапка
+ * рисуется из него же, и номер считается по имени. Номера в коде расходились
+ * бы с шапкой при первой же вставке столбца — молча и незаметно.
+ *
+ * Правило одно: операция встаёт под тем столбцом, в чей итог дня она вошла
+ * на сервере (`grouping.ts`). Наличные, оплата заказа и километры имеют свои
+ * столбцы; расходы и доплаты — «Доп.»; у оплачиваемой попытки своего столбца
+ * нет, и она показывается под «Начислено», куда и входит.
+ */
+const JOURNAL_HEADERS: Record<string, string> = {
+  CASH_RECEIVED: 'Наличные',
+  DELIVERY_FEE: 'За заказ',
+  DISTANCE_FEE: 'За МКАД',
+  ATTEMPT_FEE: 'Начислено',
+  CASH_HANDED_TO_LOGIST: 'Курьер сдал',
+  CASH_ISSUED_TO_COURIER: 'Выдано курьеру',
+};
+
+/**
+ * Первый столбец, в котором вообще может стоять сумма журнала.
+ *
+ * Слева от него — дата, название операции и автор на две ячейки. Заголовок из
+ * этой части дал бы отрицательный colSpan у ячейки основания и сломал бы
+ * строку целиком, а заметить это можно было бы только глазами.
+ */
+const FIRST_MONEY_COLUMN = 6;
+
 export function journalColumn(kind: string): number {
-  if (kind === 'CASH_HANDED_TO_LOGIST') {
-    return 11;
+  const column = SETTLEMENT_COLUMNS.indexOf(JOURNAL_HEADERS[kind] ?? 'Доп.') + 1;
+  return column < FIRST_MONEY_COLUMN ? SETTLEMENT_COLUMNS.indexOf('Доп.') + 1 : column;
+}
+
+/**
+ * Подпись и слова под итогом периода.
+ *
+ * Отдельной чистой функцией: это решение о том, что человек прочитает как
+ * «баланс», и оно обязано быть проверяемым без рендера. Признак — сам ОТБОР,
+ * а не найденное имя: справочник отдаёт первую сотню активных курьеров и
+ * может ещё не загрузиться, и по имени отчёт по выбранному курьеру
+ * подписывался бы «все курьеры».
+ */
+export function balanceCaption(
+  courierUserId: string,
+  courierName: string | null,
+  closingBalanceMinor: string,
+): { title: string; words: string; showOpening: boolean } {
+  if (courierUserId === '') {
+    return {
+      title: 'Изменение за период · все курьеры',
+      words: 'выберите курьера, чтобы увидеть его баланс',
+      showOpening: false,
+    };
   }
-  if (kind === 'CASH_ISSUED_TO_COURIER') {
-    return 12;
+  return {
+    title: `Конечный баланс${courierName === null ? '' : ` · ${courierName}`}`,
+    words: debtWords(closingBalanceMinor),
+    showOpening: true,
+  };
+}
+
+/** Показывать ли кнопку «Показать ещё»: дальше предела отчёт не листается. */
+export function canShowMore(hasMore: boolean, pages: number): boolean {
+  return hasMore && GROUPS_PER_PAGE * pages < GROUPS_LIMIT;
+}
+
+/**
+ * Операции, которым нужна СВОЯ строка журнала.
+ *
+ * Их нельзя ставить под денежные и зарплатные столбцы: начальный долг, его
+ * отмена и корректировка наличных меняют только баланс. В общем виде сумма
+ * встала бы под «Доп.» или «Начислено», и снятие долга читалось бы как
+ * положительная зарплата. Поэтому такие строки называют операцию словами,
+ * показывают знак и направление и ссылаются на исходную запись.
+ */
+export function correctiveOperation(
+  entry: Pick<LedgerEntry, 'kind' | 'amountMinor' | 'reversesKind'>,
+): { title: string; direction: string } | null {
+  if (entry.kind === 'OPENING_DEBT') {
+    return { title: ledgerKindLabel(entry.kind), direction: 'увеличивает долг' };
   }
-  if (kind === 'ADJUSTMENT') {
-    return 10;
+  if (entry.kind === 'CASH_PAYMENT_CORRECTION') {
+    return {
+      title: ledgerKindLabel(entry.kind),
+      direction: 'уменьшает наличные за курьером',
+    };
   }
-  return 9;
+  if (entry.kind === 'ADJUSTMENT') {
+    const negative = BigInt(entry.amountMinor) < 0n;
+    return {
+      /*
+       * Название берётся из ОБЩЕГО словаря — того же, что у выгрузки.
+       * Пока названия жили в двух местах, одна и та же строка называлась на
+       * экране и в файле по-разному, и найти её в выгрузке было нельзя.
+       */
+      title: ledgerEntryTitle(entry),
+      direction: negative ? 'уменьшает долг' : 'увеличивает долг',
+    };
+  }
+  return null;
+}
+
+/** Знак суммы словом-символом: направление должно читаться без догадок. */
+export function signOf(minor: string): string {
+  return BigInt(minor) < 0n ? '−' : '+';
+}
+
+/**
+ * «Доп.» одной доставки: расходы и доплаты, привязанные к её попытке.
+ *
+ * Считается там же, где и у дня (`grouping.ts`), чтобы сумма строк сходилась
+ * с итогом дня. Без общего правила строка показывала бы прочерк, а день —
+ * деньги, и объяснить разницу было бы нечем.
+ */
+export function rowExtra(row: { expensesMinor: string; bonusesMinor: string }): string {
+  return (BigInt(row.expensesMinor) + BigInt(row.bonusesMinor)).toString();
 }
 
 /** Величина суммы без знака: направление задаёт вид операции или столбец. */
@@ -268,6 +400,26 @@ export function ReportsScreen(): React.JSX.Element {
    * отказом и на прямой запрос, поэтому скрытие здесь — только про удобство.
    */
   const isAdmin = (user?.roles ?? []).includes('ADMIN');
+
+  /*
+   * Кому предлагать отмену операции.
+   *
+   * Отмена ПЕРЕДАЧИ наличных двигает кассу конкретного логиста, поэтому сервер
+   * требует права на неё: администратор или сам владелец кассы. Управляющий
+   * кассы не имеет вовсе. Без этой проверки кнопка предлагалась всем, кто видит
+   * отчёт, и заканчивалась отказом — а обещать действие, которое всегда
+   * отклоняют, хуже, чем не показывать его.
+   *
+   * Это удобство, а не защита: сервер отвечает отказом и на прямой запрос.
+   */
+  const canReverse = (entry: LedgerEntry): boolean => {
+    const isTransfer =
+      entry.kind === 'CASH_HANDED_TO_LOGIST' || entry.kind === 'CASH_ISSUED_TO_COURIER';
+    if (!isTransfer) {
+      return true;
+    }
+    return isAdmin || (user?.roles ?? []).includes('LOGISTICIAN');
+  };
 
   const [mode, setMode] = useState<'SETTLEMENTS' | 'CASH' | 'OPERATIONS'>('SETTLEMENTS');
   /*
@@ -380,7 +532,7 @@ export function ReportsScreen(): React.JSX.Element {
     }
     if (withPaging) {
       // Страница считается ГРУППАМИ: группа курьера не делится между страницами.
-      search.set('limit', String(GROUPS_PER_PAGE * pages));
+      search.set('limit', String(Math.min(GROUPS_PER_PAGE * pages, GROUPS_LIMIT)));
       search.set('offset', '0');
     }
     return search.toString();
@@ -680,20 +832,51 @@ export function ReportsScreen(): React.JSX.Element {
               периода лежат рядом в своём лотке.
             */}
             <div className="reports__totals">
+              {/*
+                Баланс существует только у КОНКРЕТНОГО курьера.
+
+                Без отбора начальный баланс сервер отдаёт нулём, и «конечный
+                баланс» превращался в изменение за период, подписанное словами
+                «курьер должен компании». При ненулевых входящих сальдо это
+                прямая дезинформация о направлении долга — поэтому без курьера
+                показывается изменение и называется изменением.
+
+                Признак — сам ОТБОР, а не найденное имя: справочник отдаёт
+                первую сотню активных курьеров и может ещё не загрузиться.
+                По имени отчёт по выбранному курьеру подписывался бы «все
+                курьеры», а его настоящий начальный баланс прятался.
+              */}
               <div className="reports__balance" data-testid="reports-balance">
                 <span className="reports__balance-title">
-                  Конечный баланс
-                  {courierName === null ? '' : ` · ${courierName}`}
+                  {
+                    balanceCaption(
+                      courierUserId,
+                      courierName,
+                      settlements.data.totals.closingBalanceMinor,
+                    ).title
+                  }
                 </span>
                 <span className="reports__balance-value" data-testid="reports-closing">
                   {formatMoney(settlements.data.totals.closingBalanceMinor)}
                 </span>
                 <span className="reports__balance-words">
-                  {debtWords(settlements.data.totals.closingBalanceMinor)}
+                  {
+                    balanceCaption(
+                      courierUserId,
+                      courierName,
+                      settlements.data.totals.closingBalanceMinor,
+                    ).words
+                  }
                 </span>
-                <span className="reports__balance-opening">
-                  Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
-                </span>
+                {balanceCaption(
+                  courierUserId,
+                  courierName,
+                  settlements.data.totals.closingBalanceMinor,
+                ).showOpening ? (
+                  <span className="reports__balance-opening">
+                    Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
+                  </span>
+                ) : null}
               </div>
 
               <div className="reports__metrics">
@@ -724,6 +907,19 @@ export function ReportsScreen(): React.JSX.Element {
               его заработок и не движение наличных, и смешивать их нельзя.
               В периодах после дня учёта сумма уже сидит в начальном балансе.
             */}
+            {settlements.data.totals.cashCorrectionsMinor !== '0' && (
+              <p
+                className="reports__notice"
+                role="status"
+                data-testid="reports-cash-corrections-total"
+              >
+                Корректировки наличных за период:{' '}
+                {signOf(settlements.data.totals.cashCorrectionsMinor)}
+                {formatMoney(absMoney(settlements.data.totals.cashCorrectionsMinor))} — заказы
+                оплатили в МоемСкладе уже после доставки, столько наличных курьер не сдаёт.
+              </p>
+            )}
+
             {settlements.data.totals.openingDebtMinor !== '0' && (
               <p className="reports__notice" role="status" data-testid="reports-opening-debt-total">
                 Начальный долг за период: {formatMoney(settlements.data.totals.openingDebtMinor)} —
@@ -758,19 +954,13 @@ export function ReportsScreen(): React.JSX.Element {
                   <table className="reports__table" data-testid="reports-rows">
                     <thead>
                       <tr>
-                        <th>Дата</th>
-                        <th>Курьер</th>
-                        <th>Листы</th>
-                        <th>Заказы</th>
-                        <th>Статус</th>
-                        <th>Наличные</th>
-                        <th>За заказ</th>
-                        <th>За МКАД</th>
-                        <th>Доп.</th>
-                        <th>Начислено</th>
-                        <th>Курьер сдал</th>
-                        <th>Выдано курьеру</th>
-                        <th>Итог</th>
+                        {/*
+                          Шапка рисуется из того же списка, по которому журнал
+                          вычисляет свой столбец: два места разошлись бы.
+                        */}
+                        {SETTLEMENT_COLUMNS.map((name) => (
+                          <th key={name}>{name}</th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -862,11 +1052,30 @@ export function ReportsScreen(): React.JSX.Element {
                                 </button>
                               </td>
                               <td>
+                                {/*
+                                  Итог дня — число, а пометка стоит РЯДОМ.
+                                  Достаточно одной строки без тарифного снимка,
+                                  чтобы слова заменили итог всего дня, — при том
+                                  что деньги входят в баланс курьера и в итоги
+                                  периода, а в выгрузке число сохраняется.
+                                */}
+                                {formatMoney(group.totalMinor)}
+                                {/*
+                                  Начальный долг не попадает ни в один столбец:
+                                  он не заработок и не движение наличных. Но в
+                                  итог дня входит, и без пояснения строка
+                                  показывала бы нули во всех столбцах при
+                                  ненулевом итоге.
+                                */}
+                                {BigInt(group.openingDebtMinor) !== 0n ? (
+                                  <span className="muted text-sm">
+                                    {' '}
+                                    в т. ч. начальный долг {formatMoney(group.openingDebtMinor)}
+                                  </span>
+                                ) : null}
                                 {group.settlementMissing ? (
-                                  <span className="reports__missing">Расчёт отсутствует</span>
-                                ) : (
-                                  formatMoney(group.totalMinor)
-                                )}
+                                  <span className="reports__missing"> Расчёт отсутствует</span>
+                                ) : null}
                               </td>
                             </tr>,
                           ];
@@ -902,7 +1111,14 @@ export function ReportsScreen(): React.JSX.Element {
                                     tone={row.outcome === 'DELIVERED' ? 'success' : 'error'}
                                   >
                                     {row.outcome === 'DELIVERED' ? 'Доставлен' : 'Не доставлен'}
-                                    {row.cancelled ? ' (отменён)' : ''}
+                                    {row.cancelled ? ' (результат отменён)' : ''}
+                                    {/*
+                                      Отмена заказа в источнике — не отмена
+                                      результата. Показывается всегда, в каком
+                                      бы дне ни сняли деньги: иначе отменённый
+                                      заказ читался бы как обычная доставка.
+                                    */}
+                                    {row.sourceCancelled ? ' (отменён в МоемСкладе)' : ''}
                                   </StatusBadge>
                                 </td>
                                 <td>{formatMoney(row.cashMinor)}</td>
@@ -912,29 +1128,83 @@ export function ReportsScreen(): React.JSX.Element {
                                     : formatMoney(row.deliveryFeeMinor)}
                                 </td>
                                 <td>
-                                  {row.beyondMkadKmTenths === null
-                                    ? 'не рассчитано'
-                                    : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
+                                  {/*
+                                    Три разных случая, которые нельзя смешивать:
+                                    расстояние не рассчитано; рассчитано и
+                                    оплачено; деньги есть, а километры прежних
+                                    записей не сохранены. В последнем случае
+                                    подставлять текущий снимок нельзя — это
+                                    чужие километры рядом с прежней суммой.
+                                  */}
+                                  {row.distanceBasisUnknown
+                                    ? `км неизвестны · ${formatMoney(row.distanceFeeMinor)}`
+                                    : row.beyondMkadKmTenths === null
+                                      ? 'не рассчитано'
+                                      : `${(row.beyondMkadKmTenths / 10).toFixed(1)} км · ${formatMoney(row.distanceFeeMinor)}`}
+                                  {/*
+                                    Текущий расчёт отличается от оплаченного.
+                                    Деньги меняет только решение человека,
+                                    поэтому расхождение не исправляется молча:
+                                    строка сходится сама с собой, а новый
+                                    расчёт назван рядом.
+                                  */}
+                                  {row.currentKmTenths !== null && (
+                                    <div className="muted text-sm" data-testid="reports-km-stale">
+                                      {`расчёт уточнён: ${(row.currentKmTenths / 10).toFixed(1)} км`}
+                                    </div>
+                                  )}
                                 </td>
-                                {/* Доп., сдача и выдача — операции дня, а не заказа. */}
-                                <td />
+                                {/*
+                                  «Доп.» строки: расход или доплату можно
+                                  привязать к попытке. Такая сумма входит в
+                                  «Доп.» и «Начислено» дня, и не показать её
+                                  здесь значило бы оставить итог дня без
+                                  объяснения. Сдача и выдача — операции дня,
+                                  к заказу они не относятся.
+                                */}
+                                <td>{formatMoney(rowExtra(row))}</td>
                                 <td>
                                   {formatMoney(
                                     (
                                       BigInt(row.deliveryFeeMinor) +
                                       BigInt(row.distanceFeeMinor) +
-                                      BigInt(row.attemptFeeMinor)
+                                      BigInt(row.attemptFeeMinor) +
+                                      BigInt(rowExtra(row))
                                     ).toString(),
                                   )}
                                 </td>
                                 <td />
                                 <td />
                                 <td>
+                                  {/*
+                                    Пометки СКЛАДЫВАЮТСЯ, а не вытесняют друг
+                                    друга — как и в выгрузке. Отсутствие расчёта
+                                    раньше затирало «Финрезультат отменён», и
+                                    одна и та же строка в файле была помечена,
+                                    а на экране нет.
+                                  */}
+                                  {formatMoney(row.totalMinor)}
                                   {row.settlementMissing ? (
-                                    <span className="reports__missing">Расчёт отсутствует</span>
-                                  ) : (
-                                    formatMoney(row.totalMinor)
-                                  )}
+                                    <span className="reports__missing"> Расчёт отсутствует</span>
+                                  ) : null}
+                                  {row.financeCancelled ? (
+                                    /*
+                                          Доставка состоялась, но за этот день
+                                          её деньги сняты целиком. Число
+                                          остаётся на месте: оно входит в итог
+                                          дня и периода, и прятать его нельзя —
+                                          пометка объясняет ноль, а не заменяет
+                                          его.
+                                        */
+                                    <span
+                                      className="reports__missing"
+                                      data-testid="reports-finance-cancelled"
+                                      title="Начисления этой доставки сняты обратными записями того же дня; факт доставки сохранён"
+                                    >
+                                      {' '}
+                                      Финрезультат отменён
+                                    </span>
+                                  ) : null}
                                 </td>
                               </tr>,
                             );
@@ -957,7 +1227,8 @@ export function ReportsScreen(): React.JSX.Element {
                              * направлении, рядом видно основание, а отменить
                              * её может только администратор.
                              */
-                            if (entry.kind === 'OPENING_DEBT') {
+                            const corrective = correctiveOperation(entry);
+                            if (corrective !== null) {
                               rows.push(
                                 <tr
                                   key={entry.id}
@@ -966,13 +1237,11 @@ export function ReportsScreen(): React.JSX.Element {
                                   data-testid="reports-payment"
                                 >
                                   <td>{formatMoscowDateTime(entry.occurredAt)}</td>
-                                  <td className="reports__detail-order">
-                                    {OPERATION_LABELS[entry.kind]}
-                                  </td>
+                                  <td className="reports__detail-order">{corrective.title}</td>
                                   <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                   <td
                                     className="reports__detail-reason"
-                                    colSpan={7}
+                                    colSpan={SETTLEMENT_COLUMNS.length - 6}
                                     title={entry.reason ?? undefined}
                                   >
                                     {entry.reason ?? ''}
@@ -981,6 +1250,7 @@ export function ReportsScreen(): React.JSX.Element {
                                     {entry.reversed ? (
                                       <span className="muted text-sm">отменён</span>
                                     ) : (
+                                      entry.kind === 'OPENING_DEBT' &&
                                       isAdmin && (
                                         <button
                                           type="button"
@@ -1003,9 +1273,10 @@ export function ReportsScreen(): React.JSX.Element {
                                       )
                                     )}
                                   </td>
-                                  <td data-testid="reports-opening-debt-amount">
-                                    +{formatMoney(absMoney(entry.amountMinor))}
-                                    <span className="muted text-sm"> увеличивает долг</span>
+                                  <td data-testid="reports-corrective-amount">
+                                    {signOf(entry.amountMinor)}
+                                    {formatMoney(absMoney(entry.amountMinor))}
+                                    <span className="muted text-sm"> {corrective.direction}</span>
                                   </td>
                                 </tr>,
                               );
@@ -1027,7 +1298,7 @@ export function ReportsScreen(): React.JSX.Element {
                                 */}
                                 <td>{formatMoscowDateTime(entry.occurredAt)}</td>
                                 <td className="reports__detail-order">
-                                  {OPERATION_LABELS[entry.kind] ?? entry.kind}
+                                  {ledgerKindLabel(entry.kind)}
                                 </td>
                                 <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                 <td
@@ -1044,11 +1315,12 @@ export function ReportsScreen(): React.JSX.Element {
                                   ошибка ввода.
                                 */}
                                 <td>{formatMoney(absMoney(entry.amountMinor))}</td>
-                                <td colSpan={13 - journalColumn(entry.kind)}>
+                                <td colSpan={SETTLEMENT_COLUMNS.length - journalColumn(entry.kind)}>
                                   {entry.reversed ? (
                                     <span className="muted text-sm">отменена</span>
                                   ) : (
-                                    entry.kind !== 'ADJUSTMENT' && (
+                                    entry.kind !== 'ADJUSTMENT' &&
+                                    canReverse(entry) && (
                                       <button
                                         type="button"
                                         className="reports__reverse"
@@ -1078,14 +1350,20 @@ export function ReportsScreen(): React.JSX.Element {
                   </table>
                 </div>
 
-                {settlements.data.hasMore && (
-                  <Button
-                    data-testid="reports-more"
-                    onClick={() => setPages((current) => current + 1)}
-                  >
-                    Показать ещё
-                  </Button>
-                )}
+                {settlements.data.hasMore &&
+                  (canShowMore(settlements.data.hasMore, pages) ? (
+                    <Button
+                      data-testid="reports-more"
+                      onClick={() => setPages((current) => current + 1)}
+                    >
+                      Показать ещё
+                    </Button>
+                  ) : (
+                    <p className="reports__notice" role="status" data-testid="reports-limit">
+                      Показаны первые {GROUPS_LIMIT} групп «день + курьер». Дальше отчёт не
+                      листается — выберите более короткий срок или отдельного курьера.
+                    </p>
+                  ))}
               </>
             )}
           </>

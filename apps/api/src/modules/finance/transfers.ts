@@ -14,7 +14,7 @@
 import type { AuthenticatedActor } from '../auth/guards.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { AppError } from '../../platform/errors.js';
-import { appendEntry, reversalKey } from './ledger.js';
+import { appendLedgerEntry, reversalKey } from './ledger.js';
 import { appendCash, newTransferId, reverseCash } from './cash.js';
 import type { CashEntryView } from './cash.js';
 import type { LedgerEntryView } from './ledger.js';
@@ -36,6 +36,13 @@ export interface TransferResult {
   courierEntry: LedgerEntryView;
   cashEntry: CashEntryView;
   transferId: string;
+  /**
+   * Создала ли ЭТА транзакция запись долга курьера.
+   *
+   * Повтор с тем же ключом отдаёт прежнюю передачу, и аудит с событием
+   * тогда писать нельзя: одна операция — одна строка истории.
+   */
+  created: boolean;
 }
 
 /**
@@ -68,7 +75,17 @@ export function resolveDeskOwner(actor: AuthenticatedActor, requested: string | 
     return requested;
   }
 
-  throw new AppError('FORBIDDEN', { message: 'cash desk is not available for this role' });
+  /*
+   * Причина называется словами, как и у чужой кассы выше.
+   *
+   * Без `publicMessage` человек получал безымянный отказ и не понимал, что
+   * дело не в правах «вообще», а в отсутствии у его роли собственной кассы.
+   */
+  throw new AppError('FORBIDDEN', {
+    message: 'cash desk is not available for this role',
+    publicMessage:
+      'Операции с наличными ведут логист и администратор: своей кассы у этой роли нет.',
+  });
 }
 
 /**
@@ -102,7 +119,7 @@ export async function recordTransfer(
       idempotencyKey: `cash:${input.idempotencyKey}`,
     });
 
-    const courierEntry = await appendEntry(tx, {
+    const { entry: courierEntry, created } = await appendLedgerEntry(tx, {
       courierUserId: input.courierUserId,
       kind: 'CASH_HANDED_TO_LOGIST',
       amountMinor: input.amountMinor,
@@ -112,7 +129,7 @@ export async function recordTransfer(
       idempotencyKey: input.idempotencyKey,
     });
 
-    return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId };
+    return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId, created };
   }
 
   // Логист выдал деньги курьеру: касса уменьшается, долг курьера растёт.
@@ -127,7 +144,7 @@ export async function recordTransfer(
     idempotencyKey: `cash:${input.idempotencyKey}`,
   });
 
-  const courierEntry = await appendEntry(tx, {
+  const { entry: courierEntry, created } = await appendLedgerEntry(tx, {
     courierUserId: input.courierUserId,
     kind: 'CASH_ISSUED_TO_COURIER',
     amountMinor: input.amountMinor,
@@ -137,7 +154,7 @@ export async function recordTransfer(
     idempotencyKey: input.idempotencyKey,
   });
 
-  return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId };
+  return { courierEntry, cashEntry, transferId: cashEntry.transferId ?? transferId, created };
 }
 
 /**
@@ -155,23 +172,44 @@ export async function reverseTransfer(
     reason: string;
     operationDate: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   const cashEntries = await tx.logistCashEntry.findMany({
     where: { transferId: input.transferId, kind: { not: 'ADJUSTMENT' } },
-    select: { id: true },
+    select: { id: true, reversedBy: { select: { id: true } } },
   });
   const courierEntries = await tx.courierLedgerEntry.findMany({
     where: { transferId: input.transferId, kind: { not: 'ADJUSTMENT' } },
     select: { id: true, courierUserId: true, amountMinor: true, routeId: true, orderId: true },
   });
 
+  /*
+   * Сделала ли ЭТА транзакция хоть одну отмену.
+   *
+   * Пропуск уже отменённых сторон сделал повтор успешным — и заодно снял
+   * единственную преграду перед вторым аудитом: маршрут кассы писал историю
+   * и событие безусловно. Вторую строку получал тот, кто ничего не сделал.
+   */
+  let reversed = false;
+
   for (const entry of cashEntries) {
+    /*
+     * Уже отменённая сторона пропускается — как и сторона курьера ниже.
+     *
+     * Иначе повтор отмены одной передачи отвечал по-разному в зависимости от
+     * того, с какого экрана нажали: из журнала приходил прежний результат,
+     * а из кассы — отказ. Одно и то же действие обязано отвечать одинаково.
+     */
+    if (entry.reversedBy !== null) {
+      continue;
+    }
+
     await reverseCash(tx, {
       entryId: entry.id,
       actorUserId: input.actorUserId,
       reason: input.reason,
       operationDate: input.operationDate,
     });
+    reversed = true;
   }
 
   for (const entry of courierEntries) {
@@ -198,5 +236,8 @@ export async function reverseTransfer(
         idempotencyKey: reversalKey(entry.id),
       },
     });
+    reversed = true;
   }
+
+  return reversed;
 }

@@ -31,10 +31,18 @@ import {
 } from './tariffs.js';
 import { accrueDeliveryResult, captureRouteTariff, reverseDeliveryAccruals } from './accrual.js';
 import { buildSettlementReport, dayBefore } from './reports.js';
+import type { SettlementReport, SettlementRow } from './reports.js';
 import { groupSettlement, pageOfGroups } from './grouping.js';
 import { assertPayloadIsSafe, publishRealtimeEvent } from '../realtime/events.js';
 import { isInsideRing, nearestRingPoint, parseRing, ringSha256, toKmTenths } from './mkad.js';
-import { buildSettlementWorkbook, toRubles } from './export-xlsx.js';
+import ExcelJS from 'exceljs';
+import {
+  buildSettlementWorkbook,
+  ledgerEntryLabel,
+  ledgerKindLabel,
+  toRubles,
+} from './export-xlsx.js';
+import { ledgerEntryTitle, ledgerKindLabel as sharedKindLabel } from '@fl/shared';
 import { buildSettlementPdf, debtDirection, formatRubles } from './export-pdf.js';
 
 let ctx: TestContext;
@@ -67,19 +75,29 @@ async function seedTariff(input: {
   from: string;
   to?: string | null;
   /** Единая ставка «За заказ»: если не заданы раздельные, обе равны ей. */
-  perOrder: bigint;
+  perOrder?: bigint;
   perOrderWalk?: bigint;
   perOrderCar?: bigint;
   perKm: bigint;
 }): Promise<string> {
   const admin = await actorFor(['ADMIN']);
+  /*
+   * Ставка обязана быть задана явно — единой или раздельными.
+   * Молчаливый ноль означал бы «работа курьера не оплачивается», и тест
+   * доказывал бы не выбор ставки, а отсутствие начисления.
+   */
+  const walk = input.perOrderWalk ?? input.perOrder;
+  const car = input.perOrderCar ?? input.perOrder;
+  if (walk === undefined || car === undefined) {
+    throw new Error('seedTariff: нужна единая ставка perOrder либо обе раздельные');
+  }
   const row = await ctx.db.courierTariffVersion.create({
     data: {
       kind: input.kind ?? 'REGULAR',
       effectiveFrom: toDateColumn(input.from),
       effectiveTo: input.to === undefined || input.to === null ? null : toDateColumn(input.to),
-      perOrderWalkMinor: input.perOrderWalk ?? input.perOrder,
-      perOrderCarMinor: input.perOrderCar ?? input.perOrder,
+      perOrderWalkMinor: walk,
+      perOrderCarMinor: car,
       perKmMinor: input.perKm,
       createdById: admin.userId,
     },
@@ -608,6 +626,7 @@ describe('деньги доставки', () => {
       actorUserId: logist.userId,
       reason: 'ошибочная доставка',
       operationDate: day,
+      scope: 'ATTEMPT',
     });
 
     expect(await balanceOf(ctx.db, courier.userId, null)).toBe(0n);
@@ -615,6 +634,138 @@ describe('деньги доставки', () => {
     // Исходные записи остались: история не переписана.
     const entries = await ctx.db.courierLedgerEntry.count({ where: { attemptId } });
     expect(entries).toBe(4);
+  });
+
+  it('отмена РЕЗУЛЬТАТА снимает и оплаченную попытку, а отмена заказа — нет', async () => {
+    /*
+     * Поводы разные, и снимается разное.
+     *
+     * Отмена результата: самой попытки больше нет, и оплата за неё теряет
+     * основание — снимается всё, что на попытке висело. Отмена заказа в
+     * источнике: доставка состоялась, расход курьер понёс, попытку логист
+     * одобрил — эти деньги отмена заказа не возвращает.
+     */
+    const courier = await actorFor(['COURIER']);
+    const logist = await actorFor(['LOGISTICIAN']);
+    const day = '2028-04-27';
+    await activateLedger(EARLIER);
+    await seedTariff({ from: day, perOrder: 20_000n, perKm: 0n });
+
+    const manual = async (attemptId: string, seeded: { routeId: string; orderId: string }) => {
+      await ctx.db.$transaction((tx) =>
+        appendEntry(tx, {
+          courierUserId: courier.userId,
+          kind: 'ATTEMPT_FEE',
+          amountMinor: 15_000n,
+          operationDate: day,
+          actorUserId: logist.userId,
+          reason: 'оплачиваемая попытка',
+          routeId: seeded.routeId,
+          orderId: seeded.orderId,
+          attemptId,
+          idempotencyKey: unique('attempt-fee'),
+        }),
+      );
+      /*
+       * Живые деньги курьера на той же попытке: парковка, которую он оплатил
+       * из своего кармана, и доплата за сложный адрес. К начислению системы
+       * они отношения не имеют, и ни один повод отмены их не возвращает.
+       */
+      await ctx.db.$transaction(async (tx) => {
+        await appendEntry(tx, {
+          courierUserId: courier.userId,
+          kind: 'EXPENSE_PARKING',
+          amountMinor: 30_000n,
+          operationDate: day,
+          actorUserId: logist.userId,
+          reason: 'парковка у дома клиента',
+          routeId: seeded.routeId,
+          orderId: seeded.orderId,
+          attemptId,
+          idempotencyKey: unique('parking'),
+        });
+        await appendEntry(tx, {
+          courierUserId: courier.userId,
+          kind: 'BONUS',
+          amountMinor: 10_000n,
+          operationDate: day,
+          actorUserId: logist.userId,
+          reason: 'сложный адрес',
+          routeId: seeded.routeId,
+          orderId: seeded.orderId,
+          attemptId,
+          idempotencyKey: unique('bonus'),
+        });
+      });
+    };
+
+    /** Непогашенные расходы и доплаты курьера на попытке. */
+    const ownMoneyLeft = (attemptId: string): Promise<number> =>
+      ctx.db.courierLedgerEntry.count({
+        where: {
+          attemptId,
+          kind: { in: ['EXPENSE_PARKING', 'BONUS'] },
+          reversedBy: { is: null },
+        },
+      });
+
+    const prepare = async (): Promise<{ attemptId: string }> => {
+      const seeded = await seedRouteWithOrder({ courierId: courier.userId, day, cash: 50_000n });
+      const rates = await resolveTariff(ctx.db, day);
+      await captureRouteTariff(ctx.db, {
+        routeId: seeded.routeId,
+        deliveryDate: day,
+        vehicleType: 'CAR',
+        rates: rates!,
+      });
+      const attemptId = await seedAttempt({ ...seeded, courierId: courier.userId });
+      await accrueDeliveryResult(ctx.db, await readLedgerActivation(ctx.db), {
+        attemptId,
+        routeOrderId: seeded.routeOrderId,
+        routeId: seeded.routeId,
+        orderId: seeded.orderId,
+        courierUserId: courier.userId,
+        actorUserId: courier.userId,
+        outcome: 'DELIVERED',
+      });
+      await manual(attemptId, seeded);
+      return { attemptId };
+    };
+
+    const byResult = await prepare();
+    await reverseDeliveryAccruals(ctx.db, {
+      attemptId: byResult.attemptId,
+      actorUserId: logist.userId,
+      reason: 'результат отменён',
+      operationDate: day,
+      scope: 'ATTEMPT',
+    });
+    const leftAfterResult = await ctx.db.courierLedgerEntry.count({
+      where: { attemptId: byResult.attemptId, kind: 'ATTEMPT_FEE', reversedBy: { is: null } },
+    });
+    expect(leftAfterResult).toBe(0);
+    // Свои деньги курьера отмена результата не забирает: расход он уже понёс.
+    expect(await ownMoneyLeft(byResult.attemptId)).toBe(2);
+
+    const byOrder = await prepare();
+    await reverseDeliveryAccruals(ctx.db, {
+      attemptId: byOrder.attemptId,
+      actorUserId: logist.userId,
+      reason: 'заказ отменён в источнике',
+      operationDate: day,
+      scope: 'SYSTEM',
+    });
+    const leftAfterOrder = await ctx.db.courierLedgerEntry.count({
+      where: { attemptId: byOrder.attemptId, kind: 'ATTEMPT_FEE', reversedBy: { is: null } },
+    });
+    expect(leftAfterOrder).toBe(1);
+    expect(await ownMoneyLeft(byOrder.attemptId)).toBe(2);
+    // А начисленное системой снято в обоих случаях.
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { attemptId: byOrder.attemptId, kind: 'CASH_RECEIVED', reversedBy: { is: null } },
+      }),
+    ).toBe(0);
   });
 
   it('до включения учёта начислений нет вовсе', async () => {
@@ -810,6 +961,8 @@ describe('группировка отчёта', () => {
         bonusesMinor: '0',
         totalMinor: '600',
         settlementMissing: false,
+        financeCancelled: false,
+        sourceCancelled: false,
       },
       {
         attemptId: 'a2',
@@ -836,6 +989,8 @@ describe('группировка отчёта', () => {
         bonusesMinor: '0',
         totalMinor: '-2600',
         settlementMissing: false,
+        financeCancelled: false,
+        sourceCancelled: false,
       },
     ];
 
@@ -848,6 +1003,7 @@ describe('группировка отчёта', () => {
         operationDate: '2028-04-10',
         occurredAt: '2028-04-10T10:00:00.000Z',
         actorUserId: 'l1',
+        actorName: 'Логист',
         reason: null,
         comment: null,
         routeId: null,
@@ -855,6 +1011,8 @@ describe('группировка отчёта', () => {
         attemptId: null,
         reversesEntryId: null,
         reversed: false,
+        reversesKind: null,
+        transferId: null,
       },
     ];
 
@@ -905,12 +1063,118 @@ describe('группировка отчёта', () => {
       bonusesMinor: '0',
       totalMinor: '0',
       settlementMissing: true,
+      financeCancelled: false,
+      sourceCancelled: false,
     };
 
     const days = groupSettlement([base], [], new Map());
     expect(days[0]?.couriers[0]?.settlementMissing).toBe(true);
     // Курьера нет в справочнике — группа всё равно называет себя честно.
     expect(days[0]?.couriers[0]?.fullName).toBe('Курьер удалён из справочника');
+  });
+
+  it('названия операций выгрузка берёт из ОБЩЕГО словаря, а не из своего', () => {
+    /*
+     * Пока словарь был свой, файл называл отмену «обратной корректировкой»,
+     * а экран — «Отмена начального долга»: найти в выгрузке строку, увиденную
+     * на экране, было нельзя. Проверяется именно тождество функций: два
+     * одинаковых на вид словаря однажды разъедутся снова.
+     */
+    expect(ledgerEntryLabel).toBe(ledgerEntryTitle);
+    expect(ledgerKindLabel).toBe(sharedKindLabel);
+  });
+
+  it('пометки строки складываются, а отсутствие расчёта их не вытесняет', async () => {
+    /*
+     * Раньше «Расчёт отсутствует» затирало всё остальное, и отменённый в
+     * источнике заказ без тарифного снимка выглядел в файле обычной строкой
+     * без расчёта — при том что на экране отмена показывается всегда.
+     *
+     * Проверяется именно сочетание: на строке с расчётом старое выражение
+     * давало тот же результат, и такая проверка ничего не доказывала бы.
+     */
+    const marked: SettlementRow = {
+      attemptId: 'a-marked',
+      orderId: 'o-marked',
+      orderNumber: 'N-M',
+      routeId: 'r1',
+      routeNumber: 'R-1',
+      deliveryDate: '2028-04-11',
+      courierUserId: 'c1',
+      outcome: 'DELIVERED',
+      cancelled: true,
+      cashCollectable: true,
+      cashMinor: '0',
+      paymentTypeName: null,
+      vehicleType: null,
+      perOrderMinor: null,
+      perKmMinor: null,
+      beyondMkadKmTenths: null,
+      distanceSource: null,
+      deliveryFeeMinor: '0',
+      distanceFeeMinor: '0',
+      attemptFeeMinor: '0',
+      expensesMinor: '0',
+      bonusesMinor: '0',
+      totalMinor: '0',
+      settlementMissing: true,
+      financeCancelled: true,
+      sourceCancelled: true,
+    };
+
+    const report: SettlementReport = {
+      period: { from: '2028-04-11', to: '2028-04-11' },
+      courierUserId: 'c1',
+      totals: {
+        openingBalanceMinor: '0',
+        cashReceivedMinor: '0',
+        cashCorrectionsMinor: '0',
+        handedToLogistMinor: '0',
+        issuedToCourierMinor: '0',
+        deliveryFeesMinor: '0',
+        attemptFeesMinor: '0',
+        distanceFeesMinor: '0',
+        expensesMinor: '0',
+        bonusesMinor: '0',
+        adjustmentsMinor: '0',
+        openingDebtMinor: '0',
+        closingBalanceMinor: '0',
+      },
+      rows: [marked],
+      days: groupSettlement([marked], [], new Map()),
+      totalGroups: 1,
+      hasMore: false,
+      entries: [],
+      ledgerActiveFrom: '2028-04-01',
+      limit: 50,
+      offset: 0,
+    };
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(
+      (await buildSettlementWorkbook(report)) as unknown as Parameters<
+        typeof workbook.xlsx.load
+      >[0],
+    );
+    const sheet = workbook.getWorksheet('Заказы');
+    /*
+     * Столбец ищется по ЗАГОЛОВКУ, а не по номеру: номер в проверке просто
+     * повторяет число из кода и молча уезжает при вставке столбца.
+     */
+    const headers = (sheet?.getRow(1).values as unknown[]).map((name) => String(name ?? ''));
+    const noteColumn = headers.indexOf('Примечание');
+    const notes: string[] = [];
+    sheet?.eachRow((row) => {
+      if (String(row.getCell(1).value ?? '') === 'Заказ') {
+        notes.push(String(row.getCell(noteColumn).value ?? ''));
+      }
+    });
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('Расчёт отсутствует');
+    expect(notes[0]).toContain('Отменён в МоемСкладе');
+    expect(notes[0]).toContain('Начисления дня сняты');
+    expect(notes[0]).toContain('Результат отменён');
   });
 
   it('страница режется по группам, а не по строкам', () => {
@@ -1034,6 +1298,7 @@ describe('наличные в строке отчёта', () => {
       actorUserId: logist.userId,
       reason: 'результат отменён логистом',
       operationDate: day,
+      scope: 'ATTEMPT',
     });
 
     const report = await buildSettlementReport(ctx.db, {

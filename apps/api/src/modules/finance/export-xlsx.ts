@@ -12,7 +12,11 @@
  */
 
 import ExcelJS from 'exceljs';
-import { VEHICLE_TYPE_LABELS } from '@fl/shared';
+import {
+  VEHICLE_TYPE_LABELS,
+  ledgerEntryTitle,
+  ledgerKindLabel as sharedKindLabel,
+} from '@fl/shared';
 import type { SettlementReport } from './reports.js';
 
 /** Минорные единицы в рубли. Делится ровно один раз и в одном месте. */
@@ -25,28 +29,12 @@ const OUTCOME_LABELS: Record<string, string> = {
   NOT_DELIVERED: 'Не доставлен',
 };
 
-const KIND_LABELS: Record<string, string> = {
-  CASH_RECEIVED: 'Наличные получены курьером',
-  DELIVERY_FEE: 'Оплата за доставку',
-  DISTANCE_FEE: 'Оплата километров за МКАД',
-  ATTEMPT_FEE: 'Оплачиваемая попытка',
-  CASH_HANDED_TO_LOGIST: 'Курьер сдал логисту',
-  CASH_ISSUED_TO_COURIER: 'Логист выдал курьеру',
-  EXPENSE_PARKING: 'Расход: парковка',
-  EXPENSE_TOLL: 'Расход: платная дорога',
-  EXPENSE_TRANSIT: 'Расход: общественный транспорт',
-  EXPENSE_REPAIR: 'Расход: ремонт',
-  EXPENSE_LOADING: 'Расход: погрузка',
-  EXPENSE_OTHER: 'Дополнительный расход',
-  BONUS: 'Доплата курьеру',
-  ADJUSTMENT: 'Обратная корректировка',
-  OPENING_DEBT: 'Начальный долг',
-  CASH_PAYMENT_CORRECTION: 'Корректировка наличных: оплата в МойСклад',
-};
-
-export function ledgerKindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind;
-}
+/*
+ * Названия операций живут в общем пакете: экран и файл обязаны называть одну
+ * строку одинаково, иначе найти её в выгрузке по увиденному на экране нельзя.
+ */
+export const ledgerKindLabel = sharedKindLabel;
+export const ledgerEntryLabel = ledgerEntryTitle;
 
 export async function buildSettlementWorkbook(report: SettlementReport): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
@@ -65,10 +53,22 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Показатель', key: 'name', width: 38 },
     { header: 'Сумма, ₽', key: 'value', width: 16, style: { numFmt: '#,##0.00' } },
   ];
+  /*
+   * Баланс существует только у КОНКРЕТНОГО курьера: без отбора входящее сальдо
+   * равно нулю, и «конечный баланс» — это изменение за период. Называть его
+   * балансом значило бы утверждать о долге, которого никто не считал.
+   */
+  const perCourier = report.courierUserId !== null;
   summary.addRows([
     { name: 'Период', value: `${report.period.from} — ${report.period.to}` },
-    { name: 'Начальный баланс', value: toRubles(report.totals.openingBalanceMinor) },
+    ...(perCourier
+      ? [{ name: 'Начальный баланс', value: toRubles(report.totals.openingBalanceMinor) }]
+      : []),
     { name: 'Наличные, полученные курьером', value: toRubles(report.totals.cashReceivedMinor) },
+    {
+      name: 'Корректировки наличных (оплата в МойСклад)',
+      value: toRubles(report.totals.cashCorrectionsMinor),
+    },
     { name: 'Сдано логисту', value: toRubles(report.totals.handedToLogistMinor) },
     { name: 'Выдано курьеру', value: toRubles(report.totals.issuedToCourierMinor) },
     { name: 'Базовая оплата доставок', value: toRubles(report.totals.deliveryFeesMinor) },
@@ -78,7 +78,10 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { name: 'Доплаты', value: toRubles(report.totals.bonusesMinor) },
     { name: 'Обратные корректировки', value: toRubles(report.totals.adjustmentsMinor) },
     { name: 'Начальный долг', value: toRubles(report.totals.openingDebtMinor) },
-    { name: 'Конечный баланс', value: toRubles(report.totals.closingBalanceMinor) },
+    {
+      name: perCourier ? 'Конечный баланс' : 'Изменение за период (по всем курьерам)',
+      value: toRubles(report.totals.closingBalanceMinor),
+    },
   ]);
   summary.getRow(1).font = { bold: true };
 
@@ -98,12 +101,30 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Тип', key: 'vehicle', width: 12 },
     { header: 'Ставка/заказ, ₽', key: 'rate', width: 16, style: { numFmt: '#,##0.00' } },
     { header: 'За заказ, ₽', key: 'fee', width: 14, style: { numFmt: '#,##0.00' } },
+    /*
+     * Километры, ПО КОТОРЫМ начислены деньги, и рядом — текущий расчёт, если
+     * он другой. Одна колонка «километры» показывала бы живой снимок рядом с
+     * прежней суммой: арифметика строки не сходилась бы, и объяснить это в
+     * файле было бы нечем.
+     */
     { header: 'За МКАД, км', key: 'km', width: 12, style: { numFmt: '#,##0.0' } },
+    { header: 'Текущий расчёт, км', key: 'kmNow', width: 18, style: { numFmt: '#,##0.0' } },
     { header: 'За МКАД, ₽', key: 'distance', width: 14, style: { numFmt: '#,##0.00' } },
+    /*
+     * Оплачиваемая попытка своим столбцом.
+     *
+     * Она входит в «Начислено», но в «Доп.» её нет намеренно (иначе удвоится).
+     * Без собственного столбца «Начислено» в файле не раскладывалось: «За
+     * заказ» + «За МКАД» + «Доп.» не давали его суммы, и объяснить разницу
+     * было нечем. На экране столбца нет по недостатку места, и там она стоит
+     * под «Начислено»; в файле место есть.
+     */
+    { header: 'За попытку, ₽', key: 'attempt', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Доп., ₽', key: 'extra', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Начислено, ₽', key: 'accrued', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Курьер сдал, ₽', key: 'handed', width: 16, style: { numFmt: '#,##0.00' } },
     { header: 'Выдано курьеру, ₽', key: 'issued', width: 18, style: { numFmt: '#,##0.00' } },
+    { header: 'Начальный долг, ₽', key: 'debt', width: 18, style: { numFmt: '#,##0.00' } },
     { header: 'Итог, ₽', key: 'total', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Примечание', key: 'note', width: 24 },
   ];
@@ -127,11 +148,16 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
         cash: toRubles(group.cashMinor),
         fee: toRubles(group.deliveryFeesMinor),
         km: group.distanceKmTenths / 10,
+        kmNow: null,
         distance: toRubles(group.distanceFeesMinor),
+        attempt: toRubles(group.attemptFeesMinor),
         extra: toRubles(group.extraExpensesMinor),
         accrued: toRubles(group.accruedMinor),
         handed: toRubles(group.handedMinor),
         issued: toRubles(group.issuedMinor),
+        // Начальный долг не попадает ни в один столбец заработка и наличных,
+        // но входит в итог дня: без него итог нечем объяснить.
+        debt: toRubles(group.openingDebtMinor),
         total: toRubles(group.totalMinor),
         note: group.settlementMissing ? 'Расчёт отсутствует' : '',
       }).font = { bold: true };
@@ -151,20 +177,54 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           cash: toRubles(row.cashMinor),
           fee: toRubles(row.deliveryFeeMinor),
           km: row.beyondMkadKmTenths === null ? null : row.beyondMkadKmTenths / 10,
+          kmNow: row.currentKmTenths === null ? null : row.currentKmTenths / 10,
           distance: toRubles(row.distanceFeeMinor),
+          /*
+           * «Доп.» строки: расход или доплата, привязанные к попытке.
+           *
+           * Они входят в «Доп.» и «Начислено» дня, поэтому обязаны быть видны
+           * и здесь — иначе сумма строк не сходится с итогом дня, и разницу
+           * не объяснить. Правило то же, что на экране и в `grouping.ts`.
+           */
+          attempt: toRubles(row.attemptFeeMinor),
+          extra: toRubles((BigInt(row.expensesMinor) + BigInt(row.bonusesMinor)).toString()),
           accrued: toRubles(
             (
               BigInt(row.deliveryFeeMinor) +
               BigInt(row.distanceFeeMinor) +
-              BigInt(row.attemptFeeMinor)
+              BigInt(row.attemptFeeMinor) +
+              BigInt(row.expensesMinor) +
+              BigInt(row.bonusesMinor)
             ).toString(),
           ),
           total: toRubles(row.totalMinor),
-          note: row.settlementMissing
-            ? 'Расчёт отсутствует'
-            : row.cancelled
-              ? 'Результат отменён'
-              : '',
+          /*
+           * Пометки СКЛАДЫВАЮТСЯ, а не вытесняют друг друга.
+           *
+           * Отсутствие расчёта раньше затирало всё остальное, и отменённый
+           * в источнике заказ без тарифного снимка выглядел в файле обычной
+           * строкой без расчёта — а на экране плашка отмены стоит всегда.
+           * Итог строки при этом остаётся числом: пометка объясняет ноль,
+           * а не заменяет сумму.
+           */
+          note: [
+            row.settlementMissing ? 'Расчёт отсутствует' : '',
+            row.cancelled ? 'Результат отменён' : '',
+            // Отмена заказа в источнике и снятие его денег — разные факты:
+            // в день доставки первый истинен, а второй нет.
+            row.sourceCancelled ? 'Отменён в МоемСкладе' : '',
+            row.financeCancelled ? 'Начисления дня сняты' : '',
+            // Деньги меняет только решение человека, поэтому расхождение
+            // текущего расчёта с оплаченным называется прямо.
+            row.currentKmTenths === null
+              ? ''
+              : `Расчёт уточнён: ${(row.currentKmTenths / 10).toFixed(1).replace('.', ',')} км`,
+            // Прежние начисления: километры не сохранены, и восстановить их
+            // нечем. Молчание здесь читалось бы как «километров не было».
+            row.distanceBasisUnknown ? 'Километры начисления неизвестны' : '',
+          ]
+            .filter((note) => note !== '')
+            .join('; '),
         });
       }
     }
@@ -208,7 +268,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           courier: group.fullName,
           phone: group.phone ?? '',
           time: entry.occurredAt,
-          kind: ledgerKindLabel(entry.kind),
+          kind: ledgerEntryLabel(entry),
           amount: toRubles(entry.amountMinor),
           author: entry.actorName ?? '',
           reason: entry.reason ?? '',

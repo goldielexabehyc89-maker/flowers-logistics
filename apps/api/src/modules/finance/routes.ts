@@ -1,7 +1,12 @@
 /**
  * API логистической истории, отчётов и денежных операций.
  *
- * Читают и пишут только `ADMIN` и `LOGISTICIAN`: это управленческий контур.
+ * Управленческий контур: `ADMIN`, `LOGISTICIAN` и `SUPERVISOR` (`FINANCE_ROLES`).
+ * Управляющий читает отчёты и заводит операции БЕЗ движения наличных — расходы,
+ * доплаты, оплачиваемые попытки. Всё, где участвует касса (сдача, выдача, касса
+ * компании), требует своей кассы и потому доступно логисту и администратору:
+ * кассы у управляющего не существует, и писать в чужую он не вправе
+ * (`resolveDeskOwner`). Начальный долг, тарифы и включение учёта — только `ADMIN`.
  * Курьерская история (`/api/delivery/history`) остаётся отдельной и здесь
  * не подменяется — у неё другой смысл и другая аудитория.
  *
@@ -10,6 +15,7 @@
  */
 
 import { z } from 'zod';
+import { Prisma } from '../../generated/prisma/client.js';
 import type { AppServer } from '../../platform/http/types.js';
 import type { Database } from '../../platform/db.js';
 import type { AppConfig } from '../../platform/config.js';
@@ -32,19 +38,26 @@ import {
   validateTariffPeriod,
 } from './tariffs.js';
 import {
-  appendEntry,
+  appendLedgerEntry,
   balanceOf,
   entryByIdempotencyKey,
+  reverseLedgerEntry,
   EXPENSE_KINDS,
   openingDebtsOf,
-  reverseEntry,
   signedAmount,
 } from './ledger.js';
-import { appendCash, cashBalanceOf, reverseCash } from './cash.js';
+import {
+  appendCashEntry,
+  cashBalanceOf,
+  cashEntryByIdempotencyKey,
+  reverseCash,
+  signedCash,
+} from './cash.js';
 import { buildCashReport, visibleDeskIds } from './cash-report.js';
 import { recordTransfer, resolveDeskOwner, reverseTransfer } from './transfers.js';
 import { buildOperationalReport, buildSettlementReport } from './reports.js';
-import { computeBeyondMkad, saveDistanceSnapshot } from './mkad.js';
+import { computeBeyondMkad, saveDistanceSnapshot, saveDistanceSnapshotTx } from './mkad.js';
+import { restateDistanceFee } from './accrual.js';
 import { activeRing, bundle } from './mkad-bundle.js';
 import { ValhallaClient } from '../integrations/valhalla/client.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
@@ -65,9 +78,19 @@ const periodSchema = z.object({
   courierUserId: z.string().uuid().optional(),
 });
 
-/** Постраничность отчёта считается ГРУППАМИ «день + курьер», а не строками. */
+/**
+ * Постраничность отчёта считается ГРУППАМИ «день + курьер», а не строками.
+ *
+ * Предел согласован с экраном: он просит по 25 групп за нажатие и наращивает
+ * `limit`, не двигая `offset`. При потолке 200 девятое нажатие «Показать ещё»
+ * получало отказ проверки, и период с бо́льшим числом групп досмотреть до конца
+ * было нельзя вовсе. Потолок остаётся — он защищает ответ от неограниченного
+ * роста, — но экран о него не спотыкается и честно говорит, когда упёрся.
+ */
+const SETTLEMENT_GROUPS_LIMIT = 1000;
+
 const settlementQuerySchema = periodSchema.extend({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  limit: z.coerce.number().int().min(1).max(SETTLEMENT_GROUPS_LIMIT).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
 
@@ -83,31 +106,64 @@ const moneySchema = z.coerce
   .bigint()
   .refine((value) => value > 0n, 'Сумма должна быть больше нуля');
 
-const operationSchema = z.object({
-  courierUserId: z.string().uuid(),
-  kind: z.enum([
-    'CASH_HANDED_TO_LOGIST',
-    'CASH_ISSUED_TO_COURIER',
-    'BONUS',
-    'ATTEMPT_FEE',
-    'EXPENSE_PARKING',
-    'EXPENSE_TOLL',
-    'EXPENSE_TRANSIT',
-    'EXPENSE_REPAIR',
-    'EXPENSE_LOADING',
-    'EXPENSE_OTHER',
-  ]),
-  amountMinor: moneySchema,
-  operationDate: dateSchema,
-  reason: z.string().trim().min(3).max(500).optional(),
-  comment: z.string().trim().min(1).max(500).optional(),
-  routeId: z.string().uuid().optional(),
-  orderId: z.string().uuid().optional(),
-  attemptId: z.string().uuid().optional(),
-  /** Чья касса участвует в передаче. Логисту разрешена только своя. */
-  logistUserId: z.string().uuid().optional(),
-  idempotencyKey: z.string().trim().min(8).max(120),
-});
+/**
+ * Виды, у которых есть вторая сторона — касса логиста.
+ *
+ * Привязка к доставке им не передаётся (`recordTransfer` её не сохраняет),
+ * поэтому принимать её молча нельзя: сверка ключа идемпотентности сравнивала
+ * бы присланный uuid с пустым полем сохранённой записи и отвечала конфликтом
+ * на ПЕРВЫЙ же запрос с новым ключом.
+ */
+const TRANSFER_KINDS: readonly string[] = ['CASH_HANDED_TO_LOGIST', 'CASH_ISSUED_TO_COURIER'];
+
+const operationSchema = z
+  .object({
+    courierUserId: z.string().uuid(),
+    kind: z.enum([
+      'CASH_HANDED_TO_LOGIST',
+      'CASH_ISSUED_TO_COURIER',
+      'BONUS',
+      'ATTEMPT_FEE',
+      'EXPENSE_PARKING',
+      'EXPENSE_TOLL',
+      'EXPENSE_TRANSIT',
+      'EXPENSE_REPAIR',
+      'EXPENSE_LOADING',
+      'EXPENSE_OTHER',
+    ]),
+    amountMinor: moneySchema,
+    operationDate: dateSchema,
+    reason: z.string().trim().min(3).max(500).optional(),
+    comment: z.string().trim().min(1).max(500).optional(),
+    routeId: z.string().uuid().optional(),
+    orderId: z.string().uuid().optional(),
+    attemptId: z.string().uuid().optional(),
+    /** Чья касса участвует в передаче. Логисту разрешена только своя. */
+    logistUserId: z.string().uuid().optional(),
+    idempotencyKey: z.string().trim().min(8).max(120),
+  })
+  .superRefine((value, context) => {
+    /*
+     * Передача наличных к доставке не привязывается.
+     *
+     * Её вторая сторона — касса логиста, и привязку `recordTransfer` не
+     * сохраняет. Принять её молча значило бы обещать то, чего не будет, и
+     * заодно превратить первый же запрос с новым ключом в «ключ уже
+     * использован»: сверка сравнивала бы присланный uuid с пустым полем.
+     */
+    if (!TRANSFER_KINDS.includes(value.kind)) {
+      return;
+    }
+    for (const field of ['routeId', 'orderId', 'attemptId'] as const) {
+      if (value[field] !== undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: [field],
+          message: 'Передача наличных не привязывается к доставке.',
+        });
+      }
+    }
+  });
 
 const reversalSchema = z.object({ reason: z.string().trim().min(3).max(500) });
 
@@ -182,22 +238,76 @@ function contextOf(request: { ip: string; headers: Record<string, unknown> }): {
   return { ip: request.ip, userAgent: typeof agent === 'string' ? agent.slice(0, 255) : null };
 }
 
+/**
+ * Наибольший срок одного отчёта — 366 дней.
+ *
+ * Год с запасом на високосный: «за год» — законный вопрос, «за всё время» —
+ * нет. Отчёты поднимают журнал, денежные факты, тарифные снимки и километры
+ * целиком за период, и ни одна из этих выборок не ограничена числом строк:
+ * `from=2000-01-01` вытянул бы всю историю в память одним запросом.
+ */
+const MAX_PERIOD_DAYS = 366;
+
 /** Период не может быть перевёрнутым и длиннее года: отчёт обязан считаться. */
 function assertPeriod(from: string, to: string): void {
   if (to < from) {
     throw new AppError('VALIDATION_FAILED', { publicMessage: 'Конец периода раньше его начала.' });
   }
+  /*
+   * Длина считается по календарю, а не вычитанием дат строками: у месяцев
+   * разное число дней, и «31-е минус 1-е» не является длиной ни в одном месяце.
+   */
+  const days =
+    Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  if (days > MAX_PERIOD_DAYS) {
+    throw new AppError('VALIDATION_FAILED', {
+      publicMessage: `Период длиннее года: выберите срок не больше ${MAX_PERIOD_DAYS} дней.`,
+    });
+  }
+}
+
+/**
+ * Какие кассы человек вправе видеть. `null` — все (администратор).
+ *
+ * ОДНА функция на все места, где это решается: экран кассы, обе её выгрузки
+ * и история. Правило жило тремя копиями, и выгрузки повторяли его выражением
+ * вместо вызова — то есть расхождение зависело бы от того, вспомнит ли о них
+ * тот, кто однажды изменит правило.
+ */
+function visibleDesks(actor: { userId: string; roles: readonly string[] }): string[] | null {
+  return actor.roles.includes('ADMIN') ? null : [actor.userId];
 }
 
 export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDeps): Promise<void> {
+  /**
+   * Обратная запись, созданная победителем гонки.
+   *
+   * Две одновременные отмены одной записи упираются в уникальность: выживает
+   * одна. Проигравшая транзакция к этому моменту уже аварийна, поэтому читать
+   * победителя можно только ПОСЛЕ её отката — здесь. Обоим запросам отдаётся
+   * один и тот же результат: обратная запись одна, баланс меняется один раз.
+   *
+   * Признаком гонки служит САМА ОШИБКА, а не наличие обратной записи. Запись
+   * существует и после любой давно завершённой отмены, и разбор «по факту
+   * существования» превращал бы в успех что угодно: отказ по правам, ненайденную
+   * операцию, отказ базы. Ограничение «начальный долг отменяет только
+   * администратор» держалось бы тогда не правилом, а состоянием.
+   */
+  const isUniqueViolation = (error: unknown): boolean =>
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+
+  const reversalWinner = async (entryId: string, error: unknown): Promise<unknown | null> =>
+    isUniqueViolation(error) ? entryByIdempotencyKey(deps.db, `reversal:${entryId}`) : null;
+
   // --- История -------------------------------------------------------------
 
   app.get('/api/logistics/history', async (request) => {
-    await authenticateWithRoles(request, deps, FINANCE_ROLES);
+    const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
     const query = historyQuerySchema.parse(request.query);
     assertPeriod(query.from, query.to);
 
-    return listHistory(deps.db, query);
+    // Движения кассы видны по тем же правилам, что на экране кассы.
+    return listHistory(deps.db, { ...query, visibleLogistIds: visibleDesks(actor) });
   });
 
   app.get('/api/logistics/history/routes/:id', async (request) => {
@@ -355,7 +465,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       search: query.search,
       limit: Number.MAX_SAFE_INTEGER,
       offset: 0,
-      visibleLogistIds: actor.roles.includes('ADMIN') ? null : [actor.userId],
+      visibleLogistIds: visibleDesks(actor),
     });
 
     await writeAudit(deps.db, {
@@ -386,7 +496,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       search: query.search,
       limit: Number.MAX_SAFE_INTEGER,
       offset: 0,
-      visibleLogistIds: actor.roles.includes('ADMIN') ? null : [actor.userId],
+      visibleLogistIds: visibleDesks(actor),
     });
 
     await writeAudit(deps.db, {
@@ -428,90 +538,232 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
           ? ('ISSUED_TO_COURIER' as const)
           : null;
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      if (transfer !== null) {
-        const logistUserId = resolveDeskOwner(actor, body.logistUserId);
-        const result = await recordTransfer(tx, actor, {
-          kind: transfer,
+    /*
+     * Владелец кассы определяется ДО любого ответа.
+     *
+     * `resolveDeskOwner` — это проверка права, а не деталь записи: логист
+     * работает только со своей кассой, администратор обязан назвать чужую.
+     * Выполненная только внутри транзакции, она пропускалась на быстром пути
+     * повтора, и логист по чужому ключу получал в ответ операцию по ЧУЖОЙ
+     * кассе — с суммой, курьером и днём.
+     */
+    const logistUserId = transfer === null ? null : resolveDeskOwner(actor, body.logistUserId);
+
+    /*
+     * Тот же ключ с другими данными — это не повтор, а другая операция.
+     *
+     * Повтор (двойной клик, сетевой повтор, гонка) обязан вернуть ту же запись
+     * и не создать второй. А молча отдать её в ответ на запрос с ДРУГОЙ суммой,
+     * датой, видом, курьером или КАССОЙ значило бы ответить «сохранено» о том,
+     * что не сохранялось. Путь достижим: форма не закрывается при ошибке и
+     * оставляет прежний ключ, а человек правит данные и отправляет снова.
+     */
+    const sameOperation = (candidate: {
+      kind: string;
+      courierUserId: string;
+      operationDate: string;
+      amountMinor: string;
+      routeId: string | null;
+      orderId: string | null;
+      attemptId: string | null;
+    }): boolean =>
+      candidate.kind === body.kind &&
+      candidate.courierUserId === body.courierUserId &&
+      candidate.operationDate === body.operationDate &&
+      BigInt(candidate.amountMinor) === signedAmount(body.kind, body.amountMinor) &&
+      /*
+       * Привязка — часть операции, а не пометка.
+       *
+       * Ею отчёт решает, показать сумму строкой доставки или журналом дня:
+       * от неё зависят столбец и группа, в которых человек увидит деньги.
+       * Тот же ключ с другой привязкой — другая операция, и отвечать на неё
+       * «сохранено» нельзя ровно по той же причине, что и на другую сумму.
+       */
+      candidate.routeId === (body.routeId ?? null) &&
+      candidate.orderId === (body.orderId ?? null) &&
+      candidate.attemptId === (body.attemptId ?? null);
+
+    /**
+     * У передачи есть вторая сторона — касса, и она тоже часть операции.
+     *
+     * Иначе тот же ключ с другой кассой отвечал бы «сохранено», а наличные
+     * так и оставались бы числиться за прежним логистом.
+     */
+    const sameDesk = async (candidate: { transferId: string | null }): Promise<boolean> => {
+      if (transfer === null) {
+        return true;
+      }
+      if (candidate.transferId === null) {
+        return false;
+      }
+      const cashSide = await deps.db.logistCashEntry.findFirst({
+        where: { transferId: candidate.transferId, kind: { not: 'ADJUSTMENT' } },
+        select: { logistUserId: true },
+      });
+      return cashSide !== null && cashSide.logistUserId === logistUserId;
+    };
+
+    const conflict = (): never => {
+      throw new AppError('CONFLICT', {
+        publicMessage: 'Этот ключ идемпотентности уже использован для другой операции.',
+      });
+    };
+
+    // Повтор уже сохранённой операции: ни второй записи, ни второй строки аудита.
+    const known = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
+    if (known !== null) {
+      return sameOperation(known) && (await sameDesk(known))
+        ? reply.code(201).send({ entry: known })
+        : conflict();
+    }
+
+    const runOperation = async (): Promise<unknown> =>
+      deps.db.$transaction(async (tx) => {
+        /*
+         * Запросы с ОДНИМ ключом выстраиваются в очередь.
+         *
+         * Предварительного поиска мало: победитель вправе зафиксироваться между
+         * ним и вставкой. Блокировка по ключу делает такое чередование
+         * невозможным, а признак `created` закрывает его, даже если оно случится.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ledger-operation:${body.idempotencyKey}`})::bigint)`;
+
+        if (transfer !== null && logistUserId !== null) {
+          const result = await recordTransfer(tx, actor, {
+            kind: transfer,
+            courierUserId: body.courierUserId,
+            logistUserId,
+            amountMinor: body.amountMinor,
+            operationDate: body.operationDate,
+            idempotencyKey: body.idempotencyKey,
+          });
+
+          /*
+           * Контракт сверяется и по кассе: `appendCash` находит запись по
+           * ключу, не глядя на владельца, и без этой проверки тот же ключ
+           * с другой кассой отвечал бы «сохранено».
+           */
+          if (
+            !sameOperation(result.courierEntry) ||
+            result.cashEntry.logistUserId !== logistUserId
+          ) {
+            conflict();
+          }
+
+          // Аудит и событие пишет только та транзакция, которая создала запись.
+          if (!result.created) {
+            return result.courierEntry;
+          }
+
+          await writeAudit(tx, {
+            action: 'FINANCE_OPERATION_RECORDED',
+            entityType: 'CourierLedgerEntry',
+            entityId: result.courierEntry.id,
+            actorUserId: actor.userId,
+            actorRoles: actor.roles,
+            newValue: {
+              kind: result.courierEntry.kind,
+              amountMinor: result.courierEntry.amountMinor,
+              operationDate: result.courierEntry.operationDate,
+              courierUserId: result.courierEntry.courierUserId,
+              // Владелец кассы и автор различаются, когда действует администратор.
+              logistUserId,
+              transferId: result.transferId,
+            },
+            ...contextOf(request),
+          });
+
+          await publishRealtimeEvent(tx, {
+            topic: 'finance.ledger_changed',
+            payload: { operationDate: result.courierEntry.operationDate },
+            audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+          });
+
+          return result.courierEntry;
+        }
+
+        const { entry: created, created: isNew } = await appendLedgerEntry(tx, {
           courierUserId: body.courierUserId,
-          logistUserId,
+          kind: body.kind,
           amountMinor: body.amountMinor,
           operationDate: body.operationDate,
+          actorUserId: actor.userId,
+          reason: body.reason ?? null,
+          comment: body.comment ?? null,
+          routeId: body.routeId ?? null,
+          orderId: body.orderId ?? null,
+          attemptId: body.attemptId ?? null,
           idempotencyKey: body.idempotencyKey,
         });
+
+        /*
+         * Контракт сверяется на КАЖДОМ пути возврата существующей операции,
+         * включая тот, где запись нашёл сам `appendLedgerEntry`.
+         */
+        if (!sameOperation(created)) {
+          conflict();
+        }
+
+        if (!isNew) {
+          return created;
+        }
 
         await writeAudit(tx, {
           action: 'FINANCE_OPERATION_RECORDED',
           entityType: 'CourierLedgerEntry',
-          entityId: result.courierEntry.id,
+          entityId: created.id,
           actorUserId: actor.userId,
           actorRoles: actor.roles,
+          // Ни комментария, ни причины: они могут содержать что угодно, включая
+          // персональные подробности. В аудите — вид, сумма и день.
           newValue: {
-            kind: result.courierEntry.kind,
-            amountMinor: result.courierEntry.amountMinor,
-            operationDate: result.courierEntry.operationDate,
-            courierUserId: result.courierEntry.courierUserId,
-            // Владелец кассы и автор различаются, когда действует администратор.
-            logistUserId,
-            transferId: result.transferId,
+            kind: created.kind,
+            amountMinor: created.amountMinor,
+            operationDate: created.operationDate,
+            courierUserId: created.courierUserId,
           },
           ...contextOf(request),
         });
 
+        /*
+         * Realtime без денег и без людей.
+         *
+         * Экрану достаточно знать, что учёт изменился, чтобы перечитать отчёт;
+         * суммы и имена в поток событий не попадают.
+         */
         await publishRealtimeEvent(tx, {
           topic: 'finance.ledger_changed',
-          payload: { operationDate: result.courierEntry.operationDate },
-          audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
         });
 
-        return result.courierEntry;
-      }
-
-      const created = await appendEntry(tx, {
-        courierUserId: body.courierUserId,
-        kind: body.kind,
-        amountMinor: body.amountMinor,
-        operationDate: body.operationDate,
-        actorUserId: actor.userId,
-        reason: body.reason ?? null,
-        comment: body.comment ?? null,
-        routeId: body.routeId ?? null,
-        orderId: body.orderId ?? null,
-        attemptId: body.attemptId ?? null,
-        idempotencyKey: body.idempotencyKey,
+        return created;
       });
 
-      await writeAudit(tx, {
-        action: 'FINANCE_OPERATION_RECORDED',
-        entityType: 'CourierLedgerEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        // Ни комментария, ни причины: они могут содержать что угодно, включая
-        // персональные подробности. В аудите — вид, сумма и день.
-        newValue: {
-          kind: created.kind,
-          amountMinor: created.amountMinor,
-          operationDate: created.operationDate,
-          courierUserId: created.courierUserId,
-        },
-        ...contextOf(request),
-      });
-
+    let entry;
+    try {
+      entry = await runOperation();
+    } catch (error) {
       /*
-       * Realtime без денег и без людей.
+       * Гонку выигрывает один запрос, и его запись — это и есть результат.
        *
-       * Экрану достаточно знать, что учёт изменился, чтобы перечитать отчёт;
-       * суммы и имена в поток событий не попадают.
+       * Нарушение уникальности переводит транзакцию PostgreSQL в аварийное
+       * состояние, поэтому победитель читается только здесь, после отката.
+       * Любая другая ошибка остаётся ошибкой, а чужая операция под тем же
+       * ключом — конфликтом, а не молчаливым «сохранено».
        */
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const winner = await entryByIdempotencyKey(deps.db, body.idempotencyKey);
+      if (winner === null) {
+        throw error;
+      }
+      if (!sameOperation(winner) || !(await sameDesk(winner))) {
+        conflict();
+      }
+      entry = winner;
+    }
 
     return reply.code(201).send({ entry });
   });
@@ -521,66 +773,151 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = reversalSchema.parse(request.body);
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const source = await tx.courierLedgerEntry.findUnique({
-        where: { id },
-        select: { transferId: true, kind: true },
-      });
-
-      /*
-       * Начальный долг отменяется только администратором и только своим
-       * действием.
-       *
-       * Этот эндпоинт открыт всему финансовому контуру (логист, управляющий),
-       * поэтому отмену начального долга он не выполняет НИ ДЛЯ КОГО — иначе
-       * ограничение «только ADMIN» обходилось бы прямым запросом сюда.
-       */
-      if (source !== null && source.kind === 'OPENING_DEBT') {
-        throw new AppError('FORBIDDEN', {
-          publicMessage: 'Отмена начального долга выполняется отдельным действием администратора.',
+    let entry;
+    try {
+      entry = await deps.db.$transaction(async (tx) => {
+        const source = await tx.courierLedgerEntry.findUnique({
+          where: { id },
+          select: { transferId: true, kind: true },
         });
-      }
 
-      const created = await reverseEntry(tx, {
-        entryId: id,
-        actorUserId: actor.userId,
-        reason: body.reason,
-        operationDate: moscowCalendarDate(new Date()),
-      });
+        /*
+         * Начальный долг отменяется только администратором и только своим
+         * действием.
+         *
+         * Этот эндпоинт открыт всему финансовому контуру (логист, управляющий),
+         * поэтому отмену начального долга он не выполняет НИ ДЛЯ КОГО — иначе
+         * ограничение «только ADMIN» обходилось бы прямым запросом сюда.
+         */
+        if (source !== null && source.kind === 'OPENING_DEBT') {
+          throw new AppError('FORBIDDEN', {
+            publicMessage:
+              'Отмена начального долга выполняется отдельным действием администратора.',
+          });
+        }
 
-      /*
-       * У передачи две стороны, и отменяются они вместе.
-       *
-       * Отменённая наполовину передача оставила бы деньги в кассе, которых
-       * у логиста нет, или долг у курьера, которого он не делал.
-       */
-      if (source !== null && source.transferId !== null) {
-        await reverseTransfer(tx, {
-          transferId: source.transferId,
+        /*
+         * Причина отказа называется ДО проверки права на кассу.
+         *
+         * У обратной записи передачи есть `transferId`, и проверка кассы
+         * срабатывала первой: человек отменял корректировку, а слышал, что
+         * у его роли нет своей кассы. Отвечать нужно на то, что он сделал.
+         */
+        if (source !== null && source.kind === 'ADJUSTMENT') {
+          throw new AppError('CONFLICT', {
+            publicMessage: 'Корректировку нельзя отменить: заведите новую операцию с причиной.',
+          });
+        }
+
+        /*
+         * У передачи ДВА маршрута отмены, и очередь у них обязана быть общей.
+         *
+         * Журнал курьера пишет сначала свою обратную запись, потом кассовую;
+         * касса — наоборот. Разные ключи блокировки не сериализовали их вовсе,
+         * и две одновременные отмены одной передачи упирались в уникальные
+         * индексы в противоположном порядке: PostgreSQL сообщал о взаимной
+         * блокировке, а человек видел внутреннюю ошибку — иногда с обеих
+         * сторон сразу, и тогда отмена не выполнялась вообще.
+         *
+         * Ключ передачи берётся ПЕРВЫМ в обоих маршрутах: порядок захвата
+         * одинаков, значит цикла ожидания не возникает.
+         */
+        if (source !== null && source.transferId !== null) {
+          /*
+           * Отмена передачи двигает КАССУ, а значит требует права на неё.
+           *
+           * Этот маршрут открыт всему финансовому контуру, но у передачи есть
+           * вторая сторона — наличные конкретного логиста. Без проверки чужой
+           * логист и управляющий обнуляли бы кассу, к которой не имеют
+           * отношения, и снимали долг курьера: на СОЗДАНИИ передачи право
+           * проверяется, а на отмене проверки не было вовсе.
+           */
+          const cashSide = await tx.logistCashEntry.findFirst({
+            where: { transferId: source.transferId, kind: { not: 'ADJUSTMENT' } },
+            select: { logistUserId: true },
+          });
+          /*
+           * Нет второй стороны — значит и разрешать нечего.
+           *
+           * «Данных не нашли, поэтому пропускаем» в правах на деньги работает
+           * наоборот: весь остальной модуль закрывается, а не открывается.
+           */
+          if (cashSide === null) {
+            throw new AppError('CONFLICT', {
+              message: 'transfer has no cash side',
+              publicMessage:
+                'У этой передачи не найдена кассовая сторона. Обратитесь к администратору.',
+            });
+          }
+          resolveDeskOwner(actor, cashSide.logistUserId);
+
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`transfer-reversal:${source.transferId}`})::bigint)`;
+        }
+
+        /*
+         * Отмены одной записи выстраиваются в очередь по ключу.
+         *
+         * Предварительного поиска мало: победитель может зафиксироваться сразу
+         * после него, и тогда отмена вернётся уже существующей — маршрут принял
+         * бы её за новую и повторил аудит и событие. Признак `created` ниже
+         * закрывает этот путь окончательно, даже без блокировки.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${id}`})::bigint)`;
+
+        const { entry: created, created: isNewReversal } = await reverseLedgerEntry(tx, {
+          // Отмена из журнала — всегда решение человека, с его причиной.
+          cause: 'MANUAL',
+          entryId: id,
           actorUserId: actor.userId,
           reason: body.reason,
           operationDate: moscowCalendarDate(new Date()),
         });
+
+        // Аудит, событие и отмену встречной передачи делает только создатель.
+        if (!isNewReversal) {
+          return created;
+        }
+
+        /*
+         * У передачи две стороны, и отменяются они вместе.
+         *
+         * Отменённая наполовину передача оставила бы деньги в кассе, которых
+         * у логиста нет, или долг у курьера, которого он не делал.
+         */
+        if (source !== null && source.transferId !== null) {
+          await reverseTransfer(tx, {
+            transferId: source.transferId,
+            actorUserId: actor.userId,
+            reason: body.reason,
+            operationDate: moscowCalendarDate(new Date()),
+          });
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_OPERATION_REVERSED',
+          entityType: 'CourierLedgerEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
+      });
+    } catch (error) {
+      const winner = await reversalWinner(id, error);
+      if (winner === null) {
+        throw error;
       }
-
-      await writeAudit(tx, {
-        action: 'FINANCE_OPERATION_REVERSED',
-        entityType: 'CourierLedgerEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
-        ...contextOf(request),
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+      entry = winner;
+    }
 
     return { entry };
   });
@@ -653,7 +990,27 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     let entry;
     try {
       entry = await deps.db.$transaction(async (tx) => {
-        const created = await appendEntry(tx, {
+        /*
+         * Запись могла появиться между предварительной проверкой и этой
+         * транзакцией.
+         *
+         * Тогда `appendEntry` молча вернул бы чужую запись, и запрос с ДРУГОЙ
+         * суммой получил бы 201 «сохранено» вместе с лишней строкой аудита.
+         * Поэтому повтор распознаётся здесь же, до записи: контракт сверяется
+         * на КАЖДОМ пути возврата существующей операции.
+         */
+        /*
+         * Запросы с ОДНИМ ключом выстраиваются в очередь.
+         *
+         * Предварительного SELECT недостаточно: победитель вправе
+         * зафиксироваться между проверкой и вставкой, и тогда `appendEntry`
+         * вернул бы чужую запись уже внутри транзакции. Блокировка по ключу
+         * делает такое чередование невозможным, а признак `created` ниже
+         * закрывает его даже если оно случится.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`opening-debt:${body.idempotencyKey}`})::bigint)`;
+
+        const { entry: saved, created: isNew } = await appendLedgerEntry(tx, {
           courierUserId: body.courierUserId,
           kind: 'OPENING_DEBT',
           amountMinor: body.amountMinor,
@@ -663,6 +1020,21 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
           reason: body.reason,
           idempotencyKey: body.idempotencyKey,
         });
+
+        /*
+         * Контракт сверяется на КАЖДОМ пути возврата существующей операции,
+         * включая тот, где запись нашёл сам `appendEntry`.
+         */
+        if (!sameOperation(saved)) {
+          conflict();
+        }
+
+        // Аудит и событие пишет только та транзакция, которая создала запись.
+        if (!isNew) {
+          return saved;
+        }
+
+        const created = saved;
 
         await writeAudit(tx, {
           action: 'FINANCE_OPERATION_RECORDED',
@@ -683,7 +1055,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         await publishRealtimeEvent(tx, {
           topic: 'finance.ledger_changed',
           payload: { operationDate: created.operationDate },
-          audienceRoles: ['ADMIN', 'LOGISTICIAN'],
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
         });
 
         return created;
@@ -722,45 +1094,75 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = reversalSchema.parse(request.body);
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const source = await tx.courierLedgerEntry.findUnique({
-        where: { id },
-        select: { kind: true },
-      });
-      if (source === null) {
-        throw new AppError('NOT_FOUND', { publicMessage: 'Операция не найдена.' });
-      }
-      if (source.kind !== 'OPENING_DEBT') {
-        throw new AppError('VALIDATION_FAILED', {
-          publicMessage: 'Этим действием отменяется только начальный долг.',
+    let entry;
+    try {
+      entry = await deps.db.$transaction(async (tx) => {
+        const source = await tx.courierLedgerEntry.findUnique({
+          where: { id },
+          select: { kind: true },
         });
+        if (source === null) {
+          throw new AppError('NOT_FOUND', { publicMessage: 'Операция не найдена.' });
+        }
+        if (source.kind !== 'OPENING_DEBT') {
+          throw new AppError('VALIDATION_FAILED', {
+            publicMessage: 'Этим действием отменяется только начальный долг.',
+          });
+        }
+
+        /*
+         * Отмены одной записи выстраиваются в очередь по ключу.
+         *
+         * Предварительного поиска мало: победитель может зафиксироваться сразу
+         * после него, и тогда отмена вернётся уже существующей — маршрут принял
+         * бы её за новую и повторил аудит и событие. Признак `created` ниже
+         * закрывает этот путь окончательно, даже без блокировки.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`reversal:${id}`})::bigint)`;
+
+        const { entry: created, created: isNewReversal } = await reverseLedgerEntry(tx, {
+          // Отмена из журнала — всегда решение человека, с его причиной.
+          cause: 'MANUAL',
+          entryId: id,
+          actorUserId: actor.userId,
+          reason: body.reason,
+          operationDate: moscowCalendarDate(new Date()),
+        });
+
+        // Аудит, событие и отмену встречной передачи делает только создатель.
+        if (!isNewReversal) {
+          return created;
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_OPERATION_REVERSED',
+          entityType: 'CourierLedgerEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
+      });
+    } catch (error) {
+      /*
+       * Проигравший гонку получает ту же обратную запись, а не 500: отмена
+       * идемпотентна, и оба запроса обязаны увидеть один результат.
+       */
+      const winner = await reversalWinner(id, error);
+      if (winner === null) {
+        throw error;
       }
-
-      const created = await reverseEntry(tx, {
-        entryId: id,
-        actorUserId: actor.userId,
-        reason: body.reason,
-        operationDate: moscowCalendarDate(new Date()),
-      });
-
-      await writeAudit(tx, {
-        action: 'FINANCE_OPERATION_REVERSED',
-        entityType: 'CourierLedgerEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        newValue: { reversesEntryId: id, amountMinor: created.amountMinor },
-        ...contextOf(request),
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+      entry = winner;
+    }
 
     return { entry };
   });
@@ -781,22 +1183,12 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
    * Логист видит только свою: наличные лежат у конкретного человека, и чужая
    * касса — это чужие деньги. Администратор видит все.
    */
-  const visibleDesks = async (actor: {
-    userId: string;
-    roles: readonly string[];
-  }): Promise<string[] | null> => {
-    if (actor.roles.includes('ADMIN')) {
-      return null;
-    }
-    return [actor.userId];
-  };
-
   app.get('/api/logistics/cash', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
     const query = cashQuerySchema.parse(request.query);
     assertPeriod(query.from, query.to);
 
-    const visible = await visibleDesks(actor);
+    const visible = visibleDesks(actor);
     return buildCashReport(deps.db, {
       from: query.from,
       to: query.to,
@@ -842,42 +1234,113 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const actor = await authenticateWithRoles(request, deps, FINANCE_ROLES);
     const body = companySchema.parse(request.body);
     const logistUserId = resolveDeskOwner(actor, body.logistUserId);
+    const kind = body.direction === 'TAKE' ? 'TAKEN_FROM_COMPANY' : 'HANDED_TO_COMPANY';
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const created = await appendCash(tx, {
-        logistUserId,
-        kind: body.direction === 'TAKE' ? 'TAKEN_FROM_COMPANY' : 'HANDED_TO_COMPANY',
-        amountMinor: body.amountMinor,
-        operationDate: body.operationDate,
-        actorUserId: actor.userId,
-        idempotencyKey: body.idempotencyKey,
+    /*
+     * Тот же ключ с другими данными — другая операция, а не повтор.
+     *
+     * Правило то же, что у журнала курьера: молчаливый возврат чужой записи
+     * означал бы ответ «сохранено» о том, что не сохранялось.
+     */
+    const sameCashOperation = (candidate: {
+      logistUserId: string;
+      kind: string;
+      amountMinor: string;
+      operationDate: string;
+    }): boolean =>
+      candidate.logistUserId === logistUserId &&
+      candidate.kind === kind &&
+      candidate.operationDate === body.operationDate &&
+      BigInt(candidate.amountMinor) === signedCash(kind, body.amountMinor);
+
+    const cashConflict = (): never => {
+      throw new AppError('CONFLICT', {
+        publicMessage: 'Этот ключ идемпотентности уже использован для другой операции.',
       });
+    };
 
-      await writeAudit(tx, {
-        action: 'FINANCE_CASH_MOVED',
-        entityType: 'LogistCashEntry',
-        entityId: created.id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        // Автор и владелец кассы хранятся раздельно: действие администратора
-        // не превращается в кассу владельца системы.
-        newValue: {
-          kind: created.kind,
-          amountMinor: created.amountMinor,
-          operationDate: created.operationDate,
+    const run = async (): Promise<unknown> =>
+      deps.db.$transaction(async (tx) => {
+        /*
+         * Запросы с одним ключом выстраиваются в очередь.
+         *
+         * Внутри `appendCash` поиск по ключу стоит ДО блокировки кассы, поэтому
+         * два одновременных запроса оба решают «ключа нет» и второй доходит до
+         * вставки. Без этой блокировки обычное двойное нажатие давало отказ.
+         */
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash:${body.idempotencyKey}`})::bigint)`;
+
+        const { entry: created, created: isNew } = await appendCashEntry(tx, {
           logistUserId,
-        },
-        ...contextOf(request),
+          kind,
+          amountMinor: body.amountMinor,
+          operationDate: body.operationDate,
+          actorUserId: actor.userId,
+          idempotencyKey: body.idempotencyKey,
+        });
+
+        if (!sameCashOperation(created)) {
+          cashConflict();
+        }
+
+        /*
+         * Аудит и событие пишет только та транзакция, которая создала запись.
+         *
+         * Очередь по ключу сделала повторы ТИХИМИ: раньше второй запрос падал,
+         * а теперь успешно дописывал бы третью строку аудита о деньгах,
+         * внесённых один раз. В финансовом контуре это хуже самой записи.
+         */
+        if (!isNew) {
+          return created;
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_CASH_MOVED',
+          entityType: 'LogistCashEntry',
+          entityId: created.id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          // Автор и владелец кассы хранятся раздельно: действие администратора
+          // не превращается в кассу владельца системы.
+          newValue: {
+            kind: created.kind,
+            amountMinor: created.amountMinor,
+            operationDate: created.operationDate,
+            logistUserId,
+          },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: created.operationDate },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
       });
 
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: created.operationDate },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+    let entry;
+    try {
+      entry = await run();
+    } catch (error) {
+      /*
+       * Победитель гонки читается снаружи: нарушение уникальности делает
+       * транзакцию аварийной, и перечитывать запись внутри неё нельзя.
+       * Любая другая ошибка остаётся ошибкой.
+       */
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      const winner = await cashEntryByIdempotencyKey(deps.db, body.idempotencyKey);
+      if (winner === null) {
+        throw error;
+      }
+      if (!sameCashOperation(winner)) {
+        cashConflict();
+      }
+      entry = winner;
+    }
 
     return reply.code(201).send({ entry });
   });
@@ -888,54 +1351,144 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = reversalSchema.parse(request.body);
 
-    const entry = await deps.db.$transaction(async (tx) => {
-      const source = await tx.logistCashEntry.findUnique({
-        where: { id },
-        select: { logistUserId: true, transferId: true },
-      });
-      if (source === null) {
-        throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
-      }
-      // Логист отменяет только в своей кассе.
-      resolveDeskOwner(actor, source.logistUserId);
-
-      const created =
-        source.transferId === null
-          ? await reverseCash(tx, {
-              entryId: id,
-              actorUserId: actor.userId,
-              reason: body.reason,
-              operationDate: moscowCalendarDate(new Date()),
-            })
-          : null;
-
-      if (source.transferId !== null) {
-        await reverseTransfer(tx, {
-          transferId: source.transferId,
-          actorUserId: actor.userId,
-          reason: body.reason,
-          operationDate: moscowCalendarDate(new Date()),
+    const runReversal = async (): Promise<unknown> =>
+      deps.db.$transaction(async (tx) => {
+        const source = await tx.logistCashEntry.findUnique({
+          where: { id },
+          select: { logistUserId: true, transferId: true, kind: true },
         });
+        if (source === null) {
+          throw new AppError('NOT_FOUND', { publicMessage: 'Операция кассы не найдена.' });
+        }
+        /*
+         * Право на кассу проверяется ПЕРВЫМ, до любых суждений о записи.
+         *
+         * Порядок «сначала вид, потом право» давал оракул: подставив чужой
+         * идентификатор, посторонний различал по коду ответа корректировку
+         * (CONFLICT) и обычную запись (FORBIDDEN), то есть узнавал о чужой
+         * кассе то, чего видеть не должен. Владельцу и администратору
+         * правильное сообщение про корректировку приходит ниже; для того, у
+         * кого прав нет, «нет доступа к этой кассе» — и есть точный ответ.
+         */
+        resolveDeskOwner(actor, source.logistUserId);
+
+        // Обратную запись отменить нельзя — и у передачи тоже.
+        if (source.kind === 'ADJUSTMENT') {
+          throw new AppError('CONFLICT', {
+            publicMessage: 'Корректировку нельзя отменить: заведите новую операцию с причиной.',
+          });
+        }
+
+        /*
+         * Общая очередь обеих сторон передачи — тот же ключ и тот же порядок
+         * захвата, что в отмене операции журнала. Без него две отмены одной
+         * передачи вставляли записи в противоположном порядке и упирались во
+         * взаимную блокировку, а человек видел внутреннюю ошибку.
+         */
+        if (source.transferId !== null) {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`transfer-reversal:${source.transferId}`})::bigint)`;
+        }
+
+        // Отмены одной записи кассы выстраиваются в очередь по своему ключу.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash-reversal:${id}`})::bigint)`;
+
+        /*
+         * Отменил ли ЧТО-ТО именно этот запрос.
+         *
+         * Повтор отмены передачи теперь успешен — уже отменённые стороны
+         * пропускаются, — и вместе с отказом ушла единственная преграда перед
+         * второй строкой аудита. Признак возвращает сама отмена: историю и
+         * событие пишет только тот, кто действительно отменил.
+         */
+        /*
+         * Повтор отвечает одинаково, передача это или нет.
+         *
+         * У передачи повтор уже был успешным, а у обычного движения кассы
+         * `reverseCash` отвечал отказом: одна и та же кнопка давала то тост
+         * «записано», то красную ошибку — в зависимости от вида записи.
+         * Отмена бывает один раз, и повтор возвращает её же.
+         *
+         * Ранний выход — только для записи БЕЗ передачи. У передачи сначала
+         * отрабатывает `reverseTransfer`: он идемпотентен и дочиняет половину,
+         * если вторая сторона почему-то осталась неотменённой. Выйти раньше
+         * него значило бы ответить «успех» о неполной отмене.
+         */
+        if (source.transferId === null) {
+          const already = await cashEntryByIdempotencyKey(tx, `cash-reversal:${id}`);
+          if (already !== null) {
+            return already;
+          }
+        }
+
+        const reversedNow =
+          source.transferId === null
+            ? true
+            : await reverseTransfer(tx, {
+                transferId: source.transferId,
+                actorUserId: actor.userId,
+                reason: body.reason,
+                operationDate: moscowCalendarDate(new Date()),
+              });
+
+        /*
+         * Возвращается созданная обратная запись — и у передачи тоже.
+         *
+         * Прежде маршрут отдавал `entry: null`, хотя запись создавалась:
+         * контракт ответа зависел от того, передача это или нет.
+         */
+        const created =
+          source.transferId === null
+            ? await reverseCash(tx, {
+                entryId: id,
+                actorUserId: actor.userId,
+                reason: body.reason,
+                operationDate: moscowCalendarDate(new Date()),
+              })
+            : await cashEntryByIdempotencyKey(tx, `cash-reversal:${id}`);
+
+        if (!reversedNow) {
+          return created;
+        }
+
+        await writeAudit(tx, {
+          action: 'FINANCE_CASH_REVERSED',
+          entityType: 'LogistCashEntry',
+          entityId: id,
+          actorUserId: actor.userId,
+          actorRoles: actor.roles,
+          newValue: { logistUserId: source.logistUserId, transfer: source.transferId !== null },
+          ...contextOf(request),
+        });
+
+        await publishRealtimeEvent(tx, {
+          topic: 'finance.ledger_changed',
+          payload: { operationDate: moscowCalendarDate(new Date()) },
+          audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+        });
+
+        return created;
+      });
+
+    let entry;
+    try {
+      entry = await runReversal();
+    } catch (error) {
+      /*
+       * Ту же запись успел отменить кто-то ещё — например, через отмену
+       * передачи со стороны журнала курьера: там свой ключ блокировки, и от
+       * этой очереди он не защищает. Человеку отвечаем тем же, что и на
+       * обычный повтор, а не невнятным отказом сервера.
+       */
+      if (!isUniqueViolation(error)) {
+        throw error;
       }
-
-      await writeAudit(tx, {
-        action: 'FINANCE_CASH_REVERSED',
-        entityType: 'LogistCashEntry',
-        entityId: id,
-        actorUserId: actor.userId,
-        actorRoles: actor.roles,
-        newValue: { logistUserId: source.logistUserId, transfer: source.transferId !== null },
-        ...contextOf(request),
-      });
-
-      await publishRealtimeEvent(tx, {
-        topic: 'finance.ledger_changed',
-        payload: { operationDate: moscowCalendarDate(new Date()) },
-        audienceRoles: ['ADMIN', 'LOGISTICIAN'],
-      });
-
-      return created;
-    });
+      const winner = await cashEntryByIdempotencyKey(deps.db, `cash-reversal:${id}`);
+      if (winner === null) {
+        throw error;
+      }
+      // Тот же ответ, что и у обычного повтора: отмена одна, и она вот эта.
+      entry = winner;
+    }
 
     return { entry };
   });
@@ -1206,15 +1759,35 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       });
     }
 
-    await saveDistanceSnapshot(deps.db, {
-      routeOrderId: body.routeOrderId,
-      ringVersionId: ring.id,
-      graphSha256: null,
-      meters: body.kmTenths * 100,
-      insideMkad: body.kmTenths === 0,
-      source: 'MANUAL',
-      actorUserId: actor.userId,
-      reason: body.reason,
+    /*
+     * Правка километров — это правка ДЕНЕГ, а не подписи под ними.
+     *
+     * Строка отчёта показывает километры живьём, а оплату — замороженной
+     * записью. Без пересчёта правка расходилась с деньгами молча: в отчёте
+     * и в выгрузке стояли исправленные километры и прежняя сумма.
+     *
+     * Снимок и деньги пишутся ОДНОЙ транзакцией. Двумя отказ между ними
+     * оставлял бы ровно то расхождение, ради устранения которого пересчёт и
+     * заведён, — и следа об этом не осталось бы: аудит пишется позже.
+     */
+    const restated = await deps.db.$transaction(async (tx) => {
+      await saveDistanceSnapshotTx(tx, {
+        routeOrderId: body.routeOrderId,
+        ringVersionId: ring.id,
+        graphSha256: null,
+        meters: body.kmTenths * 100,
+        insideMkad: body.kmTenths === 0,
+        source: 'MANUAL',
+        actorUserId: actor.userId,
+        reason: body.reason,
+      });
+      return restateDistanceFee(tx, {
+        routeOrderId: body.routeOrderId,
+        actorUserId: actor.userId,
+        reason: `Правка километров: ${body.reason}`,
+        // Днём исправления: закрытые дни задним числом не переписываются.
+        operationDate: moscowCalendarDate(new Date()),
+      });
     });
 
     await writeAudit(deps.db, {
@@ -1223,9 +1796,24 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       entityId: body.routeOrderId,
       actorUserId: actor.userId,
       actorRoles: actor.roles,
-      newValue: { kmTenths: body.kmTenths },
+      newValue: { kmTenths: body.kmTenths, restated },
       ...contextOf(request),
     });
+
+    /*
+     * Открытые отчёты перечитываются сами.
+     *
+     * Маршрут меняет деньги — значит, обязан сказать об этом, как и все
+     * остальные: иначе у логиста на экране висят прежние суммы, и разницу он
+     * увидит только после обновления страницы.
+     */
+    if (restated) {
+      await publishRealtimeEvent(deps.db, {
+        topic: 'finance.ledger_changed',
+        payload: { routeOrderId: body.routeOrderId },
+        audienceRoles: ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'],
+      });
+    }
 
     return { ok: true };
   });

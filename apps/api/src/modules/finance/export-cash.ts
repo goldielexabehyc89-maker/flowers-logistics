@@ -122,10 +122,16 @@ const BODY = 11;
 const LINE = 18;
 const FIXED_DATE = new Date(Date.UTC(2020, 0, 1, 0, 0, 0));
 
+/**
+ * Деньги на бумагу — СО ЗНАКОМ.
+ *
+ * Модуль здесь применять нельзя: форматтер денег, теряющий знак, превращает
+ * долг в приход молча. Сегодня все показатели кассы неотрицательны по
+ * построению, но это свойство агрегата, а не форматирования, и держаться на
+ * нём формат не должен.
+ */
 function rubles(minor: string): string {
-  const value = BigInt(minor);
-  const positive = value < 0n ? -value : value;
-  return `${(Number(positive) / 100).toFixed(2).replace('.', ',')} ₽`;
+  return `${(Number(BigInt(minor)) / 100).toFixed(2).replace('.', ',')} ₽`;
 }
 
 export async function buildCashPdf(report: CashReport): Promise<Uint8Array> {
@@ -136,10 +142,25 @@ export async function buildCashPdf(report: CashReport): Promise<Uint8Array> {
   document.setTitle(`Касса логистов ${report.period.from} — ${report.period.to}`);
 
   const font = await document.embedFont(fontBytes(), { subset: true });
-  const page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  let page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   let cursor = PAGE_HEIGHT - MARGIN;
 
+  /**
+   * Продолжение на новой странице.
+   *
+   * Документ состоял ровно из одной страницы: всё, что на неё не помещалось,
+   * молча не печаталось — и отчёт выглядел полным. За период в несколько дней
+   * половина групп «день + логист» просто исчезала.
+   */
+  const ensureRoom = (): void => {
+    if (cursor < MARGIN + LINE * 2) {
+      page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      cursor = PAGE_HEIGHT - MARGIN;
+    }
+  };
+
   const line = (text: string, size = BODY): void => {
+    ensureRoom();
     page.drawText(text, { x: MARGIN, y: cursor, size, font, color: rgb(0.12, 0.16, 0.23) });
     cursor -= LINE;
   };
@@ -158,6 +179,7 @@ export async function buildCashPdf(report: CashReport): Promise<Uint8Array> {
     ['Сдано в компанию', report.summary.handedMinor],
     ['Остаток на конец', report.summary.closingMinor],
   ] as [string, string][]) {
+    ensureRoom();
     page.drawText(name, { x: MARGIN, y: cursor, size: BODY, font, color: rgb(0.4, 0.45, 0.5) });
     const text = rubles(value);
     page.drawText(text, {
@@ -174,9 +196,7 @@ export async function buildCashPdf(report: CashReport): Promise<Uint8Array> {
   line('Дни и логисты', 13);
   for (const day of report.days) {
     for (const group of day.logists) {
-      if (cursor < MARGIN + LINE * 2) {
-        break;
-      }
+      ensureRoom();
       const left = `${day.date} · ${group.fullName}`;
       const right = `начало ${rubles(group.openingMinor)} · конец ${rubles(group.closingMinor)}`;
       page.drawText(left, { x: MARGIN, y: cursor, size: BODY, font, color: rgb(0.4, 0.45, 0.5) });

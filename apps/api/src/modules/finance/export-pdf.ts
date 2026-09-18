@@ -67,18 +67,126 @@ export function debtDirection(balanceMinor: string): string {
   return value > 0n ? 'курьер должен компании' : 'компания должна курьеру';
 }
 
+/**
+ * Сводка периода так, как она попадёт на бумагу: подпись и значение.
+ *
+ * Отдельной чистой функцией, потому что содержимое выгрузки обязано быть
+ * проверяемым. Разбирать готовый PDF обратно означало бы проверять чужую
+ * библиотеку: подписи, знаки и суммы рождаются здесь, и здесь же их можно
+ * доказать. Порядок строк — тот же, что и на странице.
+ */
+export function settlementSummaryLines(report: SettlementReport): [string, string][] {
+  /*
+   * Баланс существует только у КОНКРЕТНОГО курьера.
+   *
+   * Без отбора входящее сальдо сервер отдаёт нулём, и «начальный баланс
+   * 0,00 ₽» рядом с «конечным» читалось бы как утверждение о долге, которого
+   * никто не считал. Без курьера строка называет то, что действительно
+   * посчитано, — изменение за период.
+   */
+  const perCourier = report.courierUserId !== null;
+  return [
+    ...(perCourier
+      ? ([['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)]] as [
+          string,
+          string,
+        ][])
+      : []),
+    ['Наличные, полученные курьером', formatRubles(report.totals.cashReceivedMinor)],
+    ['Корректировки наличных', formatRubles(report.totals.cashCorrectionsMinor)],
+    ['Сдано логисту', formatRubles(report.totals.handedToLogistMinor)],
+    ['Выдано курьеру', formatRubles(report.totals.issuedToCourierMinor)],
+    ['Базовая оплата доставок', formatRubles(report.totals.deliveryFeesMinor)],
+    ['Оплачиваемые попытки', formatRubles(report.totals.attemptFeesMinor)],
+    ['Километры за МКАД', formatRubles(report.totals.distanceFeesMinor)],
+    ['Расходы', formatRubles(report.totals.expensesMinor)],
+    ['Доплаты', formatRubles(report.totals.bonusesMinor)],
+    ['Обратные корректировки', formatRubles(report.totals.adjustmentsMinor)],
+    ['Начальный долг', formatRubles(report.totals.openingDebtMinor)],
+  ];
+}
+
+/**
+ * Строки блока «Итоги по дням и курьерам» — то, что уходит на бумагу.
+ *
+ * Отдельной чистой функцией по той же причине, что и сводка: разбирать готовый
+ * PDF обратно значило бы проверять чужую библиотеку. Здесь же рождаются все
+ * числа и подписи блока, включая начальный долг, — и здесь их можно доказать.
+ * Пока блок собирался прямо в рисовании, его содержимое не проверяло ничто.
+ */
+export function settlementGroupLines(report: SettlementReport): [string, string][] {
+  const lines: [string, string][] = [];
+  for (const day of report.days) {
+    for (const group of day.couriers) {
+      const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
+      const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
+      const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
+      /*
+       * Начальный долг называется отдельно — как на экране и в книге.
+       *
+       * Он не попадает ни в один из показателей строки, но входит в итог:
+       * день из одного долга давал бы на бумаге нули по всем колонкам при
+       * ненулевом итоге, и объяснить его было бы нечем.
+       */
+      const debt =
+        BigInt(group.openingDebtMinor) === 0n
+          ? ''
+          : ` · нач. долг ${formatRubles(group.openingDebtMinor)}`;
+      lines.push([
+        left,
+        `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)}${debt} · итог ${formatRubles(group.totalMinor)}`,
+      ]);
+    }
+  }
+  return lines;
+}
+
+/** Подпись под итогом периода: у одного курьера баланс, у всех — изменение. */
+export function settlementClosingLine(report: SettlementReport): string {
+  const closing = formatRubles(report.totals.closingBalanceMinor);
+  return report.courierUserId === null
+    ? `Изменение за период: ${closing} (по всем курьерам; баланс считается по одному)`
+    : `Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`;
+}
+
+/** Заголовок документа: он же название файла у человека в загрузках. */
+export function settlementPdfTitle(report: SettlementReport): string {
+  return `Расчёты с курьерами ${report.period.from} — ${report.period.to}`;
+}
+
 export async function buildSettlementPdfAsync(report: SettlementReport): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   document.registerFontkit(fontkit);
   document.setCreationDate(FIXED_DATE);
   document.setModificationDate(FIXED_DATE);
-  document.setTitle(`Расчёты с курьерами ${report.period.from} — ${report.period.to}`);
+  document.setTitle(settlementPdfTitle(report));
 
   const font = await document.embedFont(fontBytes(), { subset: true });
-  const page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  let page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
 
   let cursor = PAGE_HEIGHT - MARGIN;
+
+  /**
+   * Продолжение на новой странице.
+   *
+   * Документ раньше состоял ровно из одной страницы: всё, что на неё не
+   * помещалось, просто не печаталось, и сказано об этом не было. За период
+   * длиннее нескольких дней бумажный отчёт молча оказывался неполным.
+   */
+  const nextPage = (): void => {
+    page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    cursor = PAGE_HEIGHT - MARGIN;
+  };
+
+  /** Хватает ли места на строку; если нет — продолжаем на следующей странице. */
+  const ensureRoom = (): void => {
+    if (cursor < MARGIN + LINE * 2) {
+      nextPage();
+    }
+  };
+
   const write = (text: string, size = BODY_SIZE): void => {
+    ensureRoom();
     page.drawText(text, {
       x: MARGIN,
       y: cursor,
@@ -99,21 +207,8 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   );
   cursor -= 6;
 
-  const lines: [string, string][] = [
-    ['Начальный баланс', formatRubles(report.totals.openingBalanceMinor)],
-    ['Наличные, полученные курьером', formatRubles(report.totals.cashReceivedMinor)],
-    ['Сдано логисту', formatRubles(report.totals.handedToLogistMinor)],
-    ['Выдано курьеру', formatRubles(report.totals.issuedToCourierMinor)],
-    ['Базовая оплата доставок', formatRubles(report.totals.deliveryFeesMinor)],
-    ['Оплачиваемые попытки', formatRubles(report.totals.attemptFeesMinor)],
-    ['Километры за МКАД', formatRubles(report.totals.distanceFeesMinor)],
-    ['Расходы', formatRubles(report.totals.expensesMinor)],
-    ['Доплаты', formatRubles(report.totals.bonusesMinor)],
-    ['Обратные корректировки', formatRubles(report.totals.adjustmentsMinor)],
-    ['Начальный долг', formatRubles(report.totals.openingDebtMinor)],
-  ];
-
-  for (const [name, value] of lines) {
+  for (const [name, value] of settlementSummaryLines(report)) {
+    ensureRoom();
     page.drawText(name, {
       x: MARGIN,
       y: cursor,
@@ -132,8 +227,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   }
 
   cursor -= 8;
-  const closing = formatRubles(report.totals.closingBalanceMinor);
-  write(`Конечный баланс: ${closing} — ${debtDirection(report.totals.closingBalanceMinor)}`, 13);
+  write(settlementClosingLine(report), 13);
 
   /*
    * Групповые итоги на бумаге: день, курьер, заказы и итог.
@@ -144,31 +238,23 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   if (report.days.length > 0) {
     cursor -= 10;
     write('Итоги по дням и курьерам', 13);
-    for (const day of report.days) {
-      for (const group of day.couriers) {
-        if (cursor < MARGIN + LINE * 2) {
-          break;
-        }
-        const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
-        const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
-        const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;
-        const right = `${group.orders} зак. (пеш ${walk}/авто ${car}) · доп. ${formatRubles(group.extraExpensesMinor)} · сдал ${formatRubles(group.handedMinor)} · выдано ${formatRubles(group.issuedMinor)} · итог ${formatRubles(group.totalMinor)}`;
-        page.drawText(left, {
-          x: MARGIN,
-          y: cursor,
-          size: BODY_SIZE,
-          font,
-          color: rgb(0.4, 0.45, 0.5),
-        });
-        page.drawText(right, {
-          x: PAGE_WIDTH - MARGIN - font.widthOfTextAtSize(right, BODY_SIZE),
-          y: cursor,
-          size: BODY_SIZE,
-          font,
-          color: rgb(0.12, 0.16, 0.23),
-        });
-        cursor -= LINE;
-      }
+    for (const [left, right] of settlementGroupLines(report)) {
+      ensureRoom();
+      page.drawText(left, {
+        x: MARGIN,
+        y: cursor,
+        size: BODY_SIZE,
+        font,
+        color: rgb(0.4, 0.45, 0.5),
+      });
+      page.drawText(right, {
+        x: PAGE_WIDTH - MARGIN - font.widthOfTextAtSize(right, BODY_SIZE),
+        y: cursor,
+        size: BODY_SIZE,
+        font,
+        color: rgb(0.12, 0.16, 0.23),
+      });
+      cursor -= LINE;
     }
   }
 

@@ -15,6 +15,78 @@
 import type { LedgerEntryView } from './ledger.js';
 import type { SettlementRow } from './reports.js';
 
+/**
+ * Виды, увеличивающие долг курьера компании.
+ *
+ * У них показатель отчёта равен самой сумме журнала; у остальных — сумме с
+ * обратным знаком, потому что в журнале заработок и расходы отрицательны, а
+ * в отчёте их показывают как положительный заработок.
+ */
+const DEBT_INCREASING: readonly string[] = [
+  'CASH_RECEIVED',
+  'CASH_ISSUED_TO_COURIER',
+  'OPENING_DEBT',
+];
+
+/**
+ * Категория записи: у обратной — категория ОТМЕНЯЕМОЙ операции.
+ *
+ * Иначе снятая зарплата оставалась бы в зарплате, а её отмена пряталась в общей
+ * строке «обратные корректировки», где смешаны наличные, заработок и долги.
+ * Отмена оплаты доставки — это изменение оплаты доставки, и считаться должна там.
+ */
+export function categoryKind(entry: Pick<LedgerEntryView, 'kind' | 'reversesKind'>): string {
+  return entry.kind === 'ADJUSTMENT' && entry.reversesKind !== null
+    ? entry.reversesKind
+    : entry.kind;
+}
+
+/**
+ * ИЗМЕНЕНИЕ показателя по категории, со знаком.
+ *
+ * День начисления даёт плюс, день отмены — минус, а за оба дня получается ноль.
+ * Модуль здесь применять нельзя: он превратил бы снятие в начисление.
+ */
+export function changeOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): bigint {
+  let total = 0n;
+  for (const entry of entries) {
+    const kind = categoryKind(entry);
+    if (!kinds.includes(kind)) {
+      continue;
+    }
+    const amount = BigInt(entry.amountMinor);
+    total += DEBT_INCREASING.includes(kind) ? amount : -amount;
+  }
+  return total;
+}
+
+/** Сумма журнала как есть: нужна там, где знак записи и есть смысл показателя. */
+export function rawOf(entries: readonly LedgerEntryView[], kinds: readonly string[]): bigint {
+  return entries
+    .filter((entry) => kinds.includes(categoryKind(entry)))
+    .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+}
+
+/** Наличные строки и дня: приход минус корректировки после оплаты в источнике. */
+export const CASH_KINDS: readonly string[] = ['CASH_RECEIVED', 'CASH_PAYMENT_CORRECTION'];
+
+/**
+ * Виды, попадающие в столбец «Доп.».
+ *
+ * Оплачиваемой попытки здесь НЕТ: у неё собственный столбец, и подсчёт в обоих
+ * сразу удваивал её в «Начислено» — одна попытка на 200 ₽ давала 400 ₽.
+ * Каждый вид принадлежит ровно одной категории заработка.
+ */
+export const EXTRA_KINDS: readonly string[] = [
+  'EXPENSE_PARKING',
+  'EXPENSE_TOLL',
+  'EXPENSE_TRANSIT',
+  'EXPENSE_REPAIR',
+  'EXPENSE_LOADING',
+  'EXPENSE_OTHER',
+  'BONUS',
+];
+
 /** Расходные и прочие операции, не привязанные к конкретной доставке. */
 export interface CourierOperationsGroup {
   count: number;
@@ -41,6 +113,14 @@ export interface CourierGroup {
   handedMinor: string;
   /** Деньги, выданные курьеру логистом за день. */
   issuedMinor: string;
+  /**
+   * Начальный долг, заведённый в этот день.
+   *
+   * Отдельным показателем, а не столбцом: это не заработок и не движение
+   * наличных. Но в итог дня он входит, и без него строка группы показывала бы
+   * нули во всех столбцах при ненулевом итоге — объяснить его было бы нечем.
+   */
+  openingDebtMinor: string;
   /**
    * Всё, что начислено курьеру за день: доставки, километры, попытки и
    * дополнительные расходы. Именно эта величина стоит в столбце «Начислено».
@@ -106,6 +186,7 @@ export function groupSettlement(
       extraExpensesMinor: '0',
       handedMinor: '0',
       issuedMinor: '0',
+      openingDebtMinor: '0',
       accruedMinor: '0',
       totalMinor: '0',
       settlementMissing: false,
@@ -121,12 +202,14 @@ export function groupSettlement(
     group.rows.push(row);
   }
 
+  /*
+   * Журнал дня показывает ровно то, что ему передали.
+   *
+   * Какие записи уже учтены строкой доставки, решает отчёт: он знает день
+   * каждой доставки и день каждой проводки. Здесь повторять этот отбор нельзя —
+   * иначе одно и то же правило жило бы в двух местах и однажды разошлось бы.
+   */
   for (const entry of entries) {
-    // В группу дня и курьера попадают только операции БЕЗ доставки: деньги
-    // самой доставки уже показаны её строкой, и второй раз их не считают.
-    if (entry.attemptId !== null) {
-      continue;
-    }
     const group = ensure(entry.operationDate, entry.courierUserId);
     group.operations.entries.push(entry);
   }
@@ -136,10 +219,21 @@ export function groupSettlement(
       const sheets = new Set(group.rows.map((row) => row.routeNumber));
       group.sheets = sheets.size;
       group.orders = group.rows.length;
-      group.cashMinor = sum(group.rows.map((row) => row.cashMinor)).toString();
-      group.deliveryFeesMinor = sum(group.rows.map((row) => row.deliveryFeeMinor)).toString();
-      group.distanceFeesMinor = sum(group.rows.map((row) => row.distanceFeeMinor)).toString();
-      group.attemptFeesMinor = sum(group.rows.map((row) => row.attemptFeeMinor)).toString();
+      group.cashMinor = (
+        sum(group.rows.map((row) => row.cashMinor)) + rawOf(group.operations.entries, CASH_KINDS)
+      ).toString();
+      group.deliveryFeesMinor = (
+        sum(group.rows.map((row) => row.deliveryFeeMinor)) +
+        changeOf(group.operations.entries, ['DELIVERY_FEE'])
+      ).toString();
+      group.distanceFeesMinor = (
+        sum(group.rows.map((row) => row.distanceFeeMinor)) +
+        changeOf(group.operations.entries, ['DISTANCE_FEE'])
+      ).toString();
+      group.attemptFeesMinor = (
+        sum(group.rows.map((row) => row.attemptFeeMinor)) +
+        changeOf(group.operations.entries, ['ATTEMPT_FEE'])
+      ).toString();
       group.distanceKmTenths = group.rows.reduce(
         (total, row) => total + (row.beyondMkadKmTenths ?? 0),
         0,
@@ -147,29 +241,35 @@ export function groupSettlement(
       /*
        * Суммы столбцов «Доп.», «Курьер сдал» и «Выдано курьеру».
        *
-       * Показываются положительными числами: направление задаёт столбец,
-       * а знак живёт в самой записи учёта и в итоге.
+       * Это ИЗМЕНЕНИЕ показателя за день, а не величина: направление задаёт
+       * столбец, но знак остаётся. День передачи даёт плюс, день её отмены —
+       * минус, за оба выходит ноль. Модуль здесь применять нельзя: он
+       * превратил бы снятие в новую передачу.
        */
-      const abs = (value: bigint): bigint => (value < 0n ? -value : value);
-      const ofKinds = (kinds: readonly string[]): bigint =>
-        group.operations.entries
-          .filter((entry) => kinds.includes(entry.kind))
-          .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n);
+      /*
+       * Журнал дня участвует в тех же категориях, что и строки доставок.
+       *
+       * Отмена, пришедшая на следующий день, строки не имеет — она лежит в
+       * журнале. Если её не учесть здесь, снятая зарплата так и останется
+       * в «Оплате доставок» и «Начислено» за период.
+       */
+      const journal = group.operations.entries;
 
-      group.extraExpensesMinor = abs(
-        ofKinds([
-          'EXPENSE_PARKING',
-          'EXPENSE_TOLL',
-          'EXPENSE_TRANSIT',
-          'EXPENSE_REPAIR',
-          'EXPENSE_LOADING',
-          'EXPENSE_OTHER',
-          'BONUS',
-          'ATTEMPT_FEE',
-        ]),
+      /*
+       * «Доп.» собирается и со строк доставок, и из журнала.
+       *
+       * Расход или доплату можно привязать к попытке — тогда они попадают
+       * в строку. Без слагаемого по строкам такие суммы исчезали бы из
+       * «Начислено», хотя баланс их учитывает.
+       */
+      group.extraExpensesMinor = (
+        sum(group.rows.map((row) => row.expensesMinor)) +
+        sum(group.rows.map((row) => row.bonusesMinor)) +
+        changeOf(journal, EXTRA_KINDS)
       ).toString();
-      group.handedMinor = abs(ofKinds(['CASH_HANDED_TO_LOGIST'])).toString();
-      group.issuedMinor = abs(ofKinds(['CASH_ISSUED_TO_COURIER'])).toString();
+      group.handedMinor = changeOf(journal, ['CASH_HANDED_TO_LOGIST']).toString();
+      group.issuedMinor = changeOf(journal, ['CASH_ISSUED_TO_COURIER']).toString();
+      group.openingDebtMinor = changeOf(journal, ['OPENING_DEBT']).toString();
 
       group.accruedMinor = (
         BigInt(group.deliveryFeesMinor) +

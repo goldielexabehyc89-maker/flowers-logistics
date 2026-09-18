@@ -70,6 +70,8 @@ export interface HistoryFilters {
   search?: string | undefined;
   limit: number;
   offset: number;
+  /** Кассы, доступные пользователю. `null` — все (администратор). */
+  visibleLogistIds: string[] | null;
 }
 
 export interface HistoryRouteRow {
@@ -91,6 +93,8 @@ export interface HistoryPayment {
   id: string;
   occurredAt: string;
   kind: string;
+  /** Вид отменяемой операции: по нему история называет отмену своими словами. */
+  reversesKind: string | null;
   amountMinor: string;
   courierName: string;
   actorName: string | null;
@@ -212,11 +216,32 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
       courier: { select: { fullName: true } },
       actor: { select: { fullName: true } },
       reversedBy: { select: { id: true } },
+      /*
+       * Вид отменяемой операции: по нему история называет отмену своими
+       * словами — тем же названием, что отчёт и выгрузка. Без него любая
+       * отмена читалась бы как безымянная «обратная корректировка».
+       */
+      reversesEntry: { select: { kind: true } },
     },
   });
 
+  /*
+   * Касса — чужие деньги, и в истории она видна по тем же правилам, что на
+   * своём экране: логист видит только свою, администратор — все. Прежде здесь
+   * фильтра не было вовсе, и движения чужих касс попадали в общий список.
+   */
   const cashMoves = await db.logistCashEntry.findMany({
-    where: { operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) } },
+    where: {
+      operationDate: { gte: toDateColumn(filters.from), lte: toDateColumn(filters.to) },
+      ...(filters.visibleLogistIds === null
+        ? {}
+        : { logistUserId: { in: filters.visibleLogistIds } }),
+      /*
+       * При отборе по курьеру в дне не должно оказаться чужих операций:
+       * человек смотрит одного курьера, а видел бы всю кассу дня.
+       */
+      ...(filters.courierUserId === undefined ? {} : { courierUserId: filters.courierUserId }),
+    },
     orderBy: [{ occurredAt: 'desc' }],
     take: 500,
     select: {
@@ -250,6 +275,7 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
         occurredAt: move.occurredAt.toISOString(),
         // Префикс отличает движение кассы от одноимённой записи у курьера.
         kind: `DESK_${move.kind}`,
+        reversesKind: null,
         amountMinor: move.amountMinor.toString(),
         courierName: move.courier?.fullName ?? move.logist.fullName,
         actorName: move.actor.fullName,
@@ -266,6 +292,7 @@ export async function listHistory(db: Database, filters: HistoryFilters): Promis
         id: payment.id,
         occurredAt: payment.occurredAt.toISOString(),
         kind: payment.kind,
+        reversesKind: payment.reversesEntry?.kind ?? null,
         amountMinor: payment.amountMinor.toString(),
         courierName: payment.courier.fullName,
         actorName: payment.actor.fullName,

@@ -15,7 +15,7 @@
  * получает ту же запись в ответ.
  */
 
-import type { CourierLedgerKind, Prisma } from '../../generated/prisma/client.js';
+import type { LedgerReversalCause, CourierLedgerKind } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
@@ -61,6 +61,8 @@ export interface LedgerEntryInput {
   routeId?: string | null;
   orderId?: string | null;
   attemptId?: string | null;
+  /** Километры, по которым начислена оплата за МКАД. Только у `DISTANCE_FEE`. */
+  distanceKmTenths?: number | null;
   /** Общая передача: та же операция на стороне кассы логиста. */
   transferId?: string | null;
   idempotencyKey: string;
@@ -81,7 +83,16 @@ export interface LedgerEntryView {
   routeId: string | null;
   orderId: string | null;
   attemptId: string | null;
+  /** Километры, по которым начислена оплата за МКАД. `null` у прежних записей. */
+  distanceKmTenths: number | null;
+  /** Километры ОТМЕНЯЕМОЙ записи — у обратной. Нужны, чтобы отмена вычитала их. */
+  reversesDistanceKmTenths: number | null;
   reversesEntryId: string | null;
+  /**
+   * Вид отменяемой записи: по нему журнал называет обратную операцию своими
+   * словами («Отмена начального долга»), а не общей «корректировкой».
+   */
+  reversesKind: CourierLedgerKind | null;
   /** Та же передача на стороне кассы логиста. */
   transferId: string | null;
   reversed: boolean;
@@ -109,7 +120,7 @@ export function reversalKey(entryId: string): string {
   return `reversal:${entryId}`;
 }
 
-function toView(row: {
+export function toLedgerView(row: {
   id: string;
   courierUserId: string;
   kind: CourierLedgerKind;
@@ -122,7 +133,9 @@ function toView(row: {
   routeId: string | null;
   orderId: string | null;
   attemptId: string | null;
+  distanceKmTenths?: number | null;
   reversesEntryId: string | null;
+  reversesEntry?: { kind: CourierLedgerKind; distanceKmTenths?: number | null } | null;
   transferId?: string | null;
   reversedBy?: { id: string } | null;
   actor?: { fullName: string } | null;
@@ -141,11 +154,28 @@ function toView(row: {
     routeId: row.routeId,
     orderId: row.orderId,
     attemptId: row.attemptId,
+    distanceKmTenths: row.distanceKmTenths ?? null,
     reversesEntryId: row.reversesEntryId,
+    reversesKind: row.reversesEntry?.kind ?? null,
+    reversesDistanceKmTenths: row.reversesEntry?.distanceKmTenths ?? null,
     transferId: row.transferId ?? null,
     reversed: (row.reversedBy ?? null) !== null,
   };
 }
+
+/**
+ * Что подтягивается к записи журнала в ЛЮБОМ ответе.
+ *
+ * Один набор на все пути — создание, повтор и чтение победителя гонки. Иначе
+ * контракт ответа зависел бы от того, первый это вызов или второй: у свежей
+ * отмены не было вида отменяемой операции, а имя автора отсутствовало везде,
+ * кроме списка.
+ */
+const REVERSAL_VIEW = {
+  reversedBy: { select: { id: true } },
+  reversesEntry: { select: { kind: true, distanceKmTenths: true } },
+  actor: { select: { fullName: true } },
+} as const;
 
 /**
  * Добавление записи.
@@ -154,10 +184,23 @@ function toView(row: {
  * повтор получает отказ уникальности, и мы возвращаем уже существующую запись,
  * а не создаём вторую.
  */
-export async function appendEntry(
+/**
+ * Результат записи: САМА запись и признак, создала ли её эта транзакция.
+ *
+ * Без признака повтор неотличим от создания: вызывающий код писал бы аудит и
+ * realtime-событие на чужую запись, а запрос с другими данными получал бы
+ * «сохранено» о том, что не сохранялось. Предварительным SELECT это не
+ * лечится — победитель может зафиксироваться между проверкой и вставкой.
+ */
+export interface AppendedEntry {
+  entry: LedgerEntryView;
+  created: boolean;
+}
+
+export async function appendLedgerEntry(
   tx: TransactionClient,
   input: LedgerEntryInput,
-): Promise<LedgerEntryView> {
+): Promise<AppendedEntry> {
   if (input.amountMinor === 0n) {
     throw new AppError('VALIDATION_FAILED', {
       publicMessage: 'Сумма операции не может быть нулевой.',
@@ -166,44 +209,48 @@ export async function appendEntry(
 
   const existing = await tx.courierLedgerEntry.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
-    include: { reversedBy: { select: { id: true } } },
+    include: REVERSAL_VIEW,
   });
   if (existing !== null) {
-    return toView(existing);
+    return { entry: toLedgerView(existing), created: false };
   }
 
-  try {
-    const created = await tx.courierLedgerEntry.create({
-      data: {
-        courierUserId: input.courierUserId,
-        kind: input.kind,
-        amountMinor: signedAmount(input.kind, input.amountMinor),
-        operationDate: toDateColumn(input.operationDate),
-        actorUserId: input.actorUserId,
-        reason: input.reason ?? null,
-        comment: input.comment ?? null,
-        routeId: input.routeId ?? null,
-        orderId: input.orderId ?? null,
-        attemptId: input.attemptId ?? null,
-        transferId: input.transferId ?? null,
-        idempotencyKey: input.idempotencyKey,
-      },
-      include: { reversedBy: { select: { id: true } }, actor: { select: { fullName: true } } },
-    });
-    return toView(created);
-  } catch (error) {
-    // Гонка двух одинаковых запросов: победил другой — отдаём его запись.
-    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-      const row = await tx.courierLedgerEntry.findUnique({
-        where: { idempotencyKey: input.idempotencyKey },
-        include: { reversedBy: { select: { id: true } } },
-      });
-      if (row !== null) {
-        return toView(row);
-      }
-    }
-    throw error;
-  }
+  /*
+   * Гонку здесь НЕ разбирают, и это осознанно.
+   *
+   * Нарушение уникальности переводит транзакцию PostgreSQL в аварийное
+   * состояние: любой следующий запрос в ней тоже упадёт, и «дочитать
+   * победителя» прямо тут невозможно — прежняя попытка лишь подменяла понятную
+   * ошибку уникальности невнятной «transaction aborted». Победитель читается
+   * ВЫЗЫВАЮЩИМ кодом после отката, отдельным запросом.
+   */
+  const created = await tx.courierLedgerEntry.create({
+    data: {
+      courierUserId: input.courierUserId,
+      kind: input.kind,
+      amountMinor: signedAmount(input.kind, input.amountMinor),
+      operationDate: toDateColumn(input.operationDate),
+      actorUserId: input.actorUserId,
+      reason: input.reason ?? null,
+      comment: input.comment ?? null,
+      routeId: input.routeId ?? null,
+      orderId: input.orderId ?? null,
+      attemptId: input.attemptId ?? null,
+      distanceKmTenths: input.distanceKmTenths ?? null,
+      transferId: input.transferId ?? null,
+      idempotencyKey: input.idempotencyKey,
+    },
+    include: REVERSAL_VIEW,
+  });
+  return { entry: toLedgerView(created), created: true };
+}
+
+/** Прежний контракт для вызывающих, которым признак создания не нужен. */
+export async function appendEntry(
+  tx: TransactionClient,
+  input: LedgerEntryInput,
+): Promise<LedgerEntryView> {
+  return (await appendLedgerEntry(tx, input)).entry;
 }
 
 /**
@@ -213,10 +260,24 @@ export async function appendEntry(
  * суммой и обязательной причиной. Повторная отмена невозможна — уникальность
  * ссылки закрыта индексом.
  */
-export async function reverseEntry(
+export async function reverseLedgerEntry(
   tx: TransactionClient,
-  input: { entryId: string; actorUserId: string; reason: string; operationDate: string },
-): Promise<LedgerEntryView> {
+  input: {
+    entryId: string;
+    actorUserId: string;
+    reason: string;
+    operationDate: string;
+    /**
+     * ПОЧЕМУ отменяем. Обязателен: повод решает, как запись читают потом.
+     *
+     * Снятие финансового результата отменённого заказа внешне неотличимо от
+     * обычной правки — у обоих все начисления попытки погашены. Пока повод
+     * приходилось угадывать по журналу, правка километров новой доставки
+     * молча блокировалась отменой, случившейся когда-то по тому же заказу.
+     */
+    cause: LedgerReversalCause;
+  },
+): Promise<AppendedEntry> {
   const source = await tx.courierLedgerEntry.findUnique({
     where: { id: input.entryId },
     include: { reversedBy: { select: { id: true } } },
@@ -232,56 +293,59 @@ export async function reverseEntry(
   if (source.reversedBy !== null) {
     const existing = await tx.courierLedgerEntry.findUnique({
       where: { idempotencyKey: reversalKey(input.entryId) },
-      include: { reversedBy: { select: { id: true } } },
+      include: REVERSAL_VIEW,
     });
     if (existing !== null) {
-      return toView(existing);
+      // Отмена уже есть: её и возвращаем, но НЕ выдаём за новую.
+      return { entry: toLedgerView(existing), created: false };
     }
     throw new AppError('CONFLICT', { publicMessage: 'Эта операция уже отменена.' });
   }
 
-  try {
-    const created = await tx.courierLedgerEntry.create({
-      data: {
-        courierUserId: source.courierUserId,
-        kind: 'ADJUSTMENT',
-        // Обратная сумма: знак уже стоит в исходной записи, поэтому здесь
-        // достаточно её отрицания и никакого правила вида не применяется.
-        amountMinor: -source.amountMinor,
-        operationDate: toDateColumn(input.operationDate),
-        actorUserId: input.actorUserId,
-        reason: input.reason,
-        routeId: source.routeId,
-        orderId: source.orderId,
-        attemptId: source.attemptId,
-        transferId: source.transferId,
-        reversesEntryId: source.id,
-        idempotencyKey: reversalKey(source.id),
-      },
-      include: { reversedBy: { select: { id: true } } },
-    });
+  /*
+   * Гонка двух отмен одной записи.
+   *
+   * Обе увидели `reversedBy === null`, уникальность пропускает ровно одну.
+   * Победившую запись здесь не читают по той же причине, что и в `appendEntry`:
+   * транзакция уже аварийная. Проигравший разбирается после отката — там же,
+   * где маршрут решает, каким ответом это считать.
+   */
+  const created = await tx.courierLedgerEntry.create({
+    data: {
+      courierUserId: source.courierUserId,
+      kind: 'ADJUSTMENT',
+      // Обратная сумма: знак уже стоит в исходной записи, поэтому здесь
+      // достаточно её отрицания и никакого правила вида не применяется.
+      amountMinor: -source.amountMinor,
+      operationDate: toDateColumn(input.operationDate),
+      actorUserId: input.actorUserId,
+      reason: input.reason,
+      routeId: source.routeId,
+      orderId: source.orderId,
+      attemptId: source.attemptId,
+      transferId: source.transferId,
+      reversesEntryId: source.id,
+      reversalCause: input.cause,
+      idempotencyKey: reversalKey(source.id),
+    },
+    include: REVERSAL_VIEW,
+  });
 
-    return toView(created);
-  } catch (error) {
-    /*
-     * Гонка двух отмен одной записи.
-     *
-     * Обе увидели `reversedBy === null` и обе пытаются создать обратную запись;
-     * уникальность `reversesEntryId`/ключа пропускает ровно одну. Проигравшему
-     * отдаём победившую запись, а не ошибку: обратная запись одна, и баланс
-     * меняется один раз.
-     */
-    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-      const winner = await tx.courierLedgerEntry.findUnique({
-        where: { idempotencyKey: reversalKey(input.entryId) },
-        include: { reversedBy: { select: { id: true } } },
-      });
-      if (winner !== null) {
-        return toView(winner);
-      }
-    }
-    throw error;
-  }
+  return { entry: toLedgerView(created), created: true };
+}
+
+/** Прежний контракт для вызывающих, которым признак создания не нужен. */
+export async function reverseEntry(
+  tx: TransactionClient,
+  input: {
+    entryId: string;
+    actorUserId: string;
+    reason: string;
+    operationDate: string;
+    cause: LedgerReversalCause;
+  },
+): Promise<LedgerEntryView> {
+  return (await reverseLedgerEntry(tx, input)).entry;
 }
 
 /** Баланс курьера на конец дня включительно. `null` — по всем записям. */
@@ -313,12 +377,9 @@ export async function entryByIdempotencyKey(
 ): Promise<LedgerEntryView | null> {
   const row = await db.courierLedgerEntry.findUnique({
     where: { idempotencyKey },
-    include: {
-      reversedBy: { select: { id: true } },
-      actor: { select: { fullName: true } },
-    },
+    include: REVERSAL_VIEW,
   });
-  return row === null ? null : toView(row);
+  return row === null ? null : toLedgerView(row);
 }
 
 /**
@@ -336,10 +397,11 @@ export async function openingDebtsOf(
     orderBy: [{ operationDate: 'asc' }, { occurredAt: 'asc' }],
     include: {
       reversedBy: { select: { id: true } },
+      reversesEntry: { select: { kind: true, distanceKmTenths: true } },
       actor: { select: { fullName: true } },
     },
   });
-  return rows.map(toView);
+  return rows.map(toLedgerView);
 }
 
 /** Записи периода одного курьера в порядке появления. */
@@ -355,8 +417,9 @@ export async function entriesOf(
     orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
     include: {
       reversedBy: { select: { id: true } },
+      reversesEntry: { select: { kind: true, distanceKmTenths: true } },
       actor: { select: { fullName: true } },
     },
   });
-  return rows.map(toView);
+  return rows.map(toLedgerView);
 }
