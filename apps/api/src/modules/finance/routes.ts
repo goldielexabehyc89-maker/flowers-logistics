@@ -731,9 +731,20 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
             where: { transferId: source.transferId, kind: { not: 'ADJUSTMENT' } },
             select: { logistUserId: true },
           });
-          if (cashSide !== null) {
-            resolveDeskOwner(actor, cashSide.logistUserId);
+          /*
+           * Нет второй стороны — значит и разрешать нечего.
+           *
+           * «Данных не нашли, поэтому пропускаем» в правах на деньги работает
+           * наоборот: весь остальной модуль закрывается, а не открывается.
+           */
+          if (cashSide === null) {
+            throw new AppError('CONFLICT', {
+              message: 'transfer has no cash side',
+              publicMessage:
+                'У этой передачи не найдена кассовая сторона. Обратитесь к администратору.',
+            });
           }
+          resolveDeskOwner(actor, cashSide.logistUserId);
 
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`transfer-reversal:${source.transferId}`})::bigint)`;
         }
@@ -1279,14 +1290,23 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
         // Отмены одной записи кассы выстраиваются в очередь по своему ключу.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cash-reversal:${id}`})::bigint)`;
 
-        if (source.transferId !== null) {
-          await reverseTransfer(tx, {
-            transferId: source.transferId,
-            actorUserId: actor.userId,
-            reason: body.reason,
-            operationDate: moscowCalendarDate(new Date()),
-          });
-        }
+        /*
+         * Отменил ли ЧТО-ТО именно этот запрос.
+         *
+         * Повтор отмены передачи теперь успешен — уже отменённые стороны
+         * пропускаются, — и вместе с отказом ушла единственная преграда перед
+         * второй строкой аудита. Признак возвращает сама отмена: историю и
+         * событие пишет только тот, кто действительно отменил.
+         */
+        const reversedNow =
+          source.transferId === null
+            ? true
+            : await reverseTransfer(tx, {
+                transferId: source.transferId,
+                actorUserId: actor.userId,
+                reason: body.reason,
+                operationDate: moscowCalendarDate(new Date()),
+              });
 
         /*
          * Возвращается созданная обратная запись — и у передачи тоже.
@@ -1303,6 +1323,10 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
                 operationDate: moscowCalendarDate(new Date()),
               })
             : await cashEntryByIdempotencyKey(tx, `cash-reversal:${id}`);
+
+        if (!reversedNow) {
+          return created;
+        }
 
         await writeAudit(tx, {
           action: 'FINANCE_CASH_REVERSED',

@@ -105,10 +105,31 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   document.setTitle(settlementPdfTitle(report));
 
   const font = await document.embedFont(fontBytes(), { subset: true });
-  const page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+  let page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
 
   let cursor = PAGE_HEIGHT - MARGIN;
+
+  /**
+   * Продолжение на новой странице.
+   *
+   * Документ раньше состоял ровно из одной страницы: всё, что на неё не
+   * помещалось, просто не печаталось, и сказано об этом не было. За период
+   * длиннее нескольких дней бумажный отчёт молча оказывался неполным.
+   */
+  const nextPage = (): void => {
+    page = document.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    cursor = PAGE_HEIGHT - MARGIN;
+  };
+
+  /** Хватает ли места на строку; если нет — продолжаем на следующей странице. */
+  const ensureRoom = (): void => {
+    if (cursor < MARGIN + LINE * 2) {
+      nextPage();
+    }
+  };
+
   const write = (text: string, size = BODY_SIZE): void => {
+    ensureRoom();
     page.drawText(text, {
       x: MARGIN,
       y: cursor,
@@ -130,6 +151,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
   cursor -= 6;
 
   for (const [name, value] of settlementSummaryLines(report)) {
+    ensureRoom();
     page.drawText(name, {
       x: MARGIN,
       y: cursor,
@@ -162,9 +184,7 @@ export async function buildSettlementPdfAsync(report: SettlementReport): Promise
     write('Итоги по дням и курьерам', 13);
     for (const day of report.days) {
       for (const group of day.couriers) {
-        if (cursor < MARGIN + LINE * 2) {
-          break;
-        }
+        ensureRoom();
         const walk = group.rows.filter((row) => row.vehicleType === 'FOOT').length;
         const car = group.rows.filter((row) => row.vehicleType === 'CAR').length;
         const left = `${day.date} · ${group.fullName}${group.phone === null ? '' : ` · ${group.phone}`}`;

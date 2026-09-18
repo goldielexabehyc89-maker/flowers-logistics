@@ -1597,4 +1597,84 @@ describe('передача наличных и касса через маршр�
     expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(0n);
     expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
   });
+
+  it('повтор отмены передачи из кассы не пишет вторую строку истории', async () => {
+    /*
+     * Пропуск уже отменённых сторон сделал повтор успешным — и заодно снял
+     * единственную преграду перед вторым аудитом: маршрут кассы писал историю
+     * и событие безусловно. Вторую строку получал тот, кто ничего не сделал.
+     */
+    const { token: adminToken } = await tokenFor(['ADMIN']);
+    const desk = await seedUser(ctx.db, { roles: ['LOGISTICIAN'] });
+    const courier = await courierId();
+
+    const created = await postOperation(adminToken, {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '70000',
+      operationDate: DAY,
+      logistUserId: desk.id,
+      idempotencyKey: unique('repeat-reverse'),
+    });
+    expect(created.statusCode).toBe(201);
+    const cashEntry = await ctx.db.logistCashEntry.findFirstOrThrow({
+      where: { logistUserId: desk.id, kind: 'RECEIVED_FROM_COURIER' },
+      select: { id: true },
+    });
+
+    const cursor = await lastEventId();
+    const reverseOnce = (): Promise<{ statusCode: number }> =>
+      ctx.app.inject({
+        method: 'POST',
+        url: `/api/logistics/cash/${cashEntry.id}/reverse`,
+        headers: { authorization: `Bearer ${adminToken}` },
+        payload: { reason: 'ошибочная передача' },
+      }) as never;
+
+    expect((await reverseOnce()).statusCode).toBe(200);
+    // Повтор успешен — отвечать по-разному с разных экранов нельзя.
+    expect((await reverseOnce()).statusCode).toBe(200);
+
+    expect(await ctx.db.logistCashEntry.count({ where: { reversesEntryId: cashEntry.id } })).toBe(
+      1,
+    );
+    // Но история и событие — только у того, кто действительно отменил.
+    expect(
+      await ctx.db.auditLog.count({
+        where: { action: 'FINANCE_CASH_REVERSED', entityId: cashEntry.id },
+      }),
+    ).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toBe(1);
+    expect(await cashBalanceOf(ctx.db, desk.id, null)).toBe(0n);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+  });
+
+  it('владелец кассы отменяет СВОЮ передачу из журнала', async () => {
+    /*
+     * Законный путь: новая проверка права не должна была его закрыть.
+     * Проверка отказа сама по себе этого не доказывает.
+     */
+    const { token: ownerToken, userId: ownerId } = await tokenFor(['LOGISTICIAN']);
+    const courier = await courierId();
+
+    const created = await postOperation(ownerToken, {
+      courierUserId: courier,
+      kind: 'CASH_HANDED_TO_LOGIST',
+      amountMinor: '90000',
+      operationDate: DAY,
+      idempotencyKey: unique('own-reverse'),
+    });
+    expect(created.statusCode).toBe(201);
+    const ledgerId = created.json().entry?.id ?? '';
+
+    const reversed = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/logistics/ledger/operations/${ledgerId}/reverse`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+      payload: { reason: 'ошибочная передача' },
+    });
+    expect(reversed.statusCode).toBe(200);
+    expect(await cashBalanceOf(ctx.db, ownerId, null)).toBe(0n);
+    expect(await balanceOf(ctx.db, courier, null)).toBe(0n);
+  });
 });

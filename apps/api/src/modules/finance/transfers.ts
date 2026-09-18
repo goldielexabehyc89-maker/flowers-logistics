@@ -75,7 +75,17 @@ export function resolveDeskOwner(actor: AuthenticatedActor, requested: string | 
     return requested;
   }
 
-  throw new AppError('FORBIDDEN', { message: 'cash desk is not available for this role' });
+  /*
+   * Причина называется словами, как и у чужой кассы выше.
+   *
+   * Без `publicMessage` человек получал безымянный отказ и не понимал, что
+   * дело не в правах «вообще», а в отсутствии у его роли собственной кассы.
+   */
+  throw new AppError('FORBIDDEN', {
+    message: 'cash desk is not available for this role',
+    publicMessage:
+      'Операции с наличными ведут логист и администратор: своей кассы у этой роли нет.',
+  });
 }
 
 /**
@@ -162,7 +172,7 @@ export async function reverseTransfer(
     reason: string;
     operationDate: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   const cashEntries = await tx.logistCashEntry.findMany({
     where: { transferId: input.transferId, kind: { not: 'ADJUSTMENT' } },
     select: { id: true, reversedBy: { select: { id: true } } },
@@ -171,6 +181,15 @@ export async function reverseTransfer(
     where: { transferId: input.transferId, kind: { not: 'ADJUSTMENT' } },
     select: { id: true, courierUserId: true, amountMinor: true, routeId: true, orderId: true },
   });
+
+  /*
+   * Сделала ли ЭТА транзакция хоть одну отмену.
+   *
+   * Пропуск уже отменённых сторон сделал повтор успешным — и заодно снял
+   * единственную преграду перед вторым аудитом: маршрут кассы писал историю
+   * и событие безусловно. Вторую строку получал тот, кто ничего не сделал.
+   */
+  let reversed = false;
 
   for (const entry of cashEntries) {
     /*
@@ -190,6 +209,7 @@ export async function reverseTransfer(
       reason: input.reason,
       operationDate: input.operationDate,
     });
+    reversed = true;
   }
 
   for (const entry of courierEntries) {
@@ -216,5 +236,8 @@ export async function reverseTransfer(
         idempotencyKey: reversalKey(entry.id),
       },
     });
+    reversed = true;
   }
+
+  return reversed;
 }

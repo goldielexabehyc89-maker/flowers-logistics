@@ -31,11 +31,12 @@ import {
 } from './tariffs.js';
 import { accrueDeliveryResult, captureRouteTariff, reverseDeliveryAccruals } from './accrual.js';
 import { buildSettlementReport, dayBefore } from './reports.js';
+import type { SettlementReport, SettlementRow } from './reports.js';
 import { groupSettlement, pageOfGroups } from './grouping.js';
 import { assertPayloadIsSafe, publishRealtimeEvent } from '../realtime/events.js';
 import { isInsideRing, nearestRingPoint, parseRing, ringSha256, toKmTenths } from './mkad.js';
 import ExcelJS from 'exceljs';
-import { buildSettlementWorkbook, toRubles } from './export-xlsx.js';
+import { buildSettlementWorkbook, ledgerEntryLabel, toRubles } from './export-xlsx.js';
 import { buildSettlementPdf, debtDirection, formatRubles } from './export-pdf.js';
 
 let ctx: TestContext;
@@ -933,6 +934,25 @@ describe('группировка отчёта', () => {
     expect(days[0]?.couriers[0]?.fullName).toBe('Курьер удалён из справочника');
   });
 
+  it('обратная запись называется в файле так же, как на экране', () => {
+    /*
+     * У отмены вид всегда `ADJUSTMENT`, и без вида ОТМЕНЯЕМОЙ операции файл
+     * называл любую отмену «обратной корректировкой», тогда как экран писал
+     * «Отмена начального долга». Одна строка не может называться по-разному.
+     */
+    expect(ledgerEntryLabel({ kind: 'OPENING_DEBT', reversesKind: null })).toBe('Начальный долг');
+    expect(ledgerEntryLabel({ kind: 'ADJUSTMENT', reversesKind: 'OPENING_DEBT' })).toBe(
+      'Отмена: начальный долг',
+    );
+    expect(ledgerEntryLabel({ kind: 'ADJUSTMENT', reversesKind: 'CASH_HANDED_TO_LOGIST' })).toBe(
+      'Отмена: курьер сдал логисту',
+    );
+    // Вид отменяемой операции неизвестен — остаётся прежнее общее название.
+    expect(ledgerEntryLabel({ kind: 'ADJUSTMENT', reversesKind: null })).toBe(
+      'Обратная корректировка',
+    );
+  });
+
   it('пометки строки складываются, а отсутствие расчёта их не вытесняет', async () => {
     /*
      * Раньше «Расчёт отсутствует» затирало всё остальное, и отменённый в
@@ -942,7 +962,7 @@ describe('группировка отчёта', () => {
      * Проверяется именно сочетание: на строке с расчётом старое выражение
      * давало тот же результат, и такая проверка ничего не доказывала бы.
      */
-    const marked = {
+    const marked: SettlementRow = {
       attemptId: 'a-marked',
       orderId: 'o-marked',
       orderNumber: 'N-M',
@@ -971,7 +991,7 @@ describe('группировка отчёта', () => {
       sourceCancelled: true,
     };
 
-    const report = {
+    const report: SettlementReport = {
       period: { from: '2028-04-11', to: '2028-04-11' },
       courierUserId: 'c1',
       totals: {
@@ -995,6 +1015,8 @@ describe('группировка отчёта', () => {
       hasMore: false,
       entries: [],
       ledgerActiveFrom: '2028-04-01',
+      limit: 50,
+      offset: 0,
     };
 
     const workbook = new ExcelJS.Workbook();

@@ -324,6 +324,26 @@ export function ReportsScreen(): React.JSX.Element {
    */
   const isAdmin = (user?.roles ?? []).includes('ADMIN');
 
+  /*
+   * Кому предлагать отмену операции.
+   *
+   * Отмена ПЕРЕДАЧИ наличных двигает кассу конкретного логиста, поэтому сервер
+   * требует права на неё: администратор или сам владелец кассы. Управляющий
+   * кассы не имеет вовсе. Без этой проверки кнопка предлагалась всем, кто видит
+   * отчёт, и заканчивалась отказом — а обещать действие, которое всегда
+   * отклоняют, хуже, чем не показывать его.
+   *
+   * Это удобство, а не защита: сервер отвечает отказом и на прямой запрос.
+   */
+  const canReverse = (entry: LedgerEntry): boolean => {
+    const isTransfer =
+      entry.kind === 'CASH_HANDED_TO_LOGIST' || entry.kind === 'CASH_ISSUED_TO_COURIER';
+    if (!isTransfer) {
+      return true;
+    }
+    return isAdmin || (user?.roles ?? []).includes('LOGISTICIAN');
+  };
+
   const [mode, setMode] = useState<'SETTLEMENTS' | 'CASH' | 'OPERATIONS'>('SETTLEMENTS');
   /*
    * По умолчанию — «День», то есть сегодняшняя московская операционная дата.
@@ -930,11 +950,17 @@ export function ReportsScreen(): React.JSX.Element {
                                 </button>
                               </td>
                               <td>
+                                {/*
+                                  Итог дня — число, а пометка стоит РЯДОМ.
+                                  Достаточно одной строки без тарифного снимка,
+                                  чтобы слова заменили итог всего дня, — при том
+                                  что деньги входят в баланс курьера и в итоги
+                                  периода, а в выгрузке число сохраняется.
+                                */}
+                                {formatMoney(group.totalMinor)}
                                 {group.settlementMissing ? (
-                                  <span className="reports__missing">Расчёт отсутствует</span>
-                                ) : (
-                                  formatMoney(group.totalMinor)
-                                )}
+                                  <span className="reports__missing"> Расчёт отсутствует</span>
+                                ) : null}
                               </td>
                             </tr>,
                           ];
@@ -1020,11 +1046,10 @@ export function ReportsScreen(): React.JSX.Element {
                                     одна и та же строка в файле была помечена,
                                     а на экране нет.
                                   */}
+                                  {formatMoney(row.totalMinor)}
                                   {row.settlementMissing ? (
-                                    <span className="reports__missing">Расчёт отсутствует</span>
-                                  ) : (
-                                    formatMoney(row.totalMinor)
-                                  )}
+                                    <span className="reports__missing"> Расчёт отсутствует</span>
+                                  ) : null}
                                   {row.financeCancelled ? (
                                     /*
                                           Доставка состоялась, но за этот день
@@ -1157,7 +1182,8 @@ export function ReportsScreen(): React.JSX.Element {
                                   {entry.reversed ? (
                                     <span className="muted text-sm">отменена</span>
                                   ) : (
-                                    entry.kind !== 'ADJUSTMENT' && (
+                                    entry.kind !== 'ADJUSTMENT' &&
+                                    canReverse(entry) && (
                                       <button
                                         type="button"
                                         className="reports__reverse"

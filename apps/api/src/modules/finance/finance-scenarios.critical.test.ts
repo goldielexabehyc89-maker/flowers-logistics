@@ -1261,4 +1261,46 @@ describe('один набор данных: журнал → API → дни → 
     expect(reopened.getTitle()).toBe(settlementPdfTitle(built));
     expect(reopened.getTitle()).toContain(DAY);
   });
+
+  it('длинный период продолжается на следующих страницах, а не обрывается', async () => {
+    /*
+     * Документ состоял ровно из одной страницы, и всё, что на неё не
+     * помещалось, просто не печаталось — молча. За период в несколько дней
+     * бумажный отчёт оказывался неполным, и сказано об этом не было.
+     *
+     * Группы выдумываются прямо здесь: проверяется поведение бумаги при
+     * большом числе групп, а не расчёт — его доказывают соседние проверки.
+     */
+    const many = Array.from({ length: 60 }, (_, index) => ({
+      date: DAY,
+      couriers: [
+        {
+          courierUserId: `c${index}`,
+          fullName: `Курьер ${index}`,
+          phone: null,
+          sheets: 1,
+          orders: 1,
+          cashMinor: '0',
+          deliveryFeesMinor: '0',
+          distanceKmTenths: 0,
+          distanceFeesMinor: '0',
+          attemptFeesMinor: '0',
+          extraExpensesMinor: '0',
+          handedMinor: '0',
+          issuedMinor: '0',
+          accruedMinor: '0',
+          totalMinor: '0',
+          settlementMissing: false,
+          rows: [],
+          operations: { count: 0, totalMinor: '0', entries: [] },
+        },
+      ],
+    }));
+
+    const long = { ...(await report(DAY, DAY, (await actorFor(['COURIER'])).userId)), days: many };
+    const document = await PDFDocument.load(await buildSettlementPdf(long));
+
+    // Шестьдесят групп на одну страницу не помещаются — значит их больше одной.
+    expect(document.getPageCount()).toBeGreaterThan(1);
+  });
 });

@@ -155,6 +155,20 @@ export function toLedgerView(row: {
 }
 
 /**
+ * Что подтягивается к записи журнала в ЛЮБОМ ответе.
+ *
+ * Один набор на все пути — создание, повтор и чтение победителя гонки. Иначе
+ * контракт ответа зависел бы от того, первый это вызов или второй: у свежей
+ * отмены не было вида отменяемой операции, а имя автора отсутствовало везде,
+ * кроме списка.
+ */
+const REVERSAL_VIEW = {
+  reversedBy: { select: { id: true } },
+  reversesEntry: { select: { kind: true } },
+  actor: { select: { fullName: true } },
+} as const;
+
+/**
  * Добавление записи.
  *
  * Идемпотентность обеспечивается уникальным ключом на уровне базы: параллельный
@@ -186,7 +200,7 @@ export async function appendLedgerEntry(
 
   const existing = await tx.courierLedgerEntry.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
-    include: { reversedBy: { select: { id: true } } },
+    include: REVERSAL_VIEW,
   });
   if (existing !== null) {
     return { entry: toLedgerView(existing), created: false };
@@ -216,7 +230,7 @@ export async function appendLedgerEntry(
       transferId: input.transferId ?? null,
       idempotencyKey: input.idempotencyKey,
     },
-    include: { reversedBy: { select: { id: true } }, actor: { select: { fullName: true } } },
+    include: REVERSAL_VIEW,
   });
   return { entry: toLedgerView(created), created: true };
 }
@@ -255,7 +269,7 @@ export async function reverseLedgerEntry(
   if (source.reversedBy !== null) {
     const existing = await tx.courierLedgerEntry.findUnique({
       where: { idempotencyKey: reversalKey(input.entryId) },
-      include: { reversedBy: { select: { id: true } } },
+      include: REVERSAL_VIEW,
     });
     if (existing !== null) {
       // Отмена уже есть: её и возвращаем, но НЕ выдаём за новую.
@@ -289,18 +303,7 @@ export async function reverseLedgerEntry(
       reversesEntryId: source.id,
       idempotencyKey: reversalKey(source.id),
     },
-    /*
-     * Вид отменяемой записи возвращается сразу.
-     *
-     * По нему журнал называет операцию своими словами — «Отмена начального
-     * долга» вместо общей «корректировки». Без этого свежесозданная отмена
-     * приходила в ответе безымянной и получала правильное название только
-     * после перечитывания списка.
-     */
-    include: {
-      reversedBy: { select: { id: true } },
-      reversesEntry: { select: { kind: true } },
-    },
+    include: REVERSAL_VIEW,
   });
 
   return { entry: toLedgerView(created), created: true };
@@ -343,10 +346,7 @@ export async function entryByIdempotencyKey(
 ): Promise<LedgerEntryView | null> {
   const row = await db.courierLedgerEntry.findUnique({
     where: { idempotencyKey },
-    include: {
-      reversedBy: { select: { id: true } },
-      actor: { select: { fullName: true } },
-    },
+    include: REVERSAL_VIEW,
   });
   return row === null ? null : toLedgerView(row);
 }

@@ -48,6 +48,21 @@ export function ledgerKindLabel(kind: string): string {
   return KIND_LABELS[kind] ?? kind;
 }
 
+/**
+ * Название операции журнала — то же, что на экране.
+ *
+ * У обратной записи вид всегда `ADJUSTMENT`, и без вида ОТМЕНЯЕМОЙ операции
+ * файл называл любую отмену «обратной корректировкой», тогда как экран писал
+ * «Отмена начального долга». Одна и та же строка не может называться в файле
+ * иначе, чем на экране.
+ */
+export function ledgerEntryLabel(entry: { kind: string; reversesKind: string | null }): string {
+  if (entry.kind !== 'ADJUSTMENT' || entry.reversesKind === null) {
+    return ledgerKindLabel(entry.kind);
+  }
+  return `Отмена: ${ledgerKindLabel(entry.reversesKind).toLowerCase()}`;
+}
+
 export async function buildSettlementWorkbook(report: SettlementReport): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Логистика';
@@ -236,7 +251,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           courier: group.fullName,
           phone: group.phone ?? '',
           time: entry.occurredAt,
-          kind: ledgerKindLabel(entry.kind),
+          kind: ledgerEntryLabel(entry),
           amount: toRubles(entry.amountMinor),
           author: entry.actorName ?? '',
           reason: entry.reason ?? '',
