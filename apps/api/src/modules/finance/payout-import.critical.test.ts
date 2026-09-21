@@ -31,6 +31,7 @@ import { buildSettlementReport } from './reports.js';
 import { buildCashReport } from './cash-report.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import {
+  CONFIRM_QUEUE_KEY,
   PAYOUT_IMPORT_REASON,
   phoneOfCounterparty,
   type PayoutPreview,
@@ -961,59 +962,112 @@ describe('отмена и права', () => {
 // --- Дефекты независимого ревью cbd529b -----------------------------------------
 
 describe('ревью cbd529b: воспроизведения и закрытие', () => {
-  it('1. две разные выгрузки с одной выплатой при одновременном подтверждении дают одну запись', async () => {
-    /*
-     * Блокировка только по хешу файла не защищала: два файла с одной выплатой
-     * получали разные очереди, оба не видели записи друг друга и проводили
-     * 5 000 ₽ дважды. Подтверждения выстраиваются в ОДНУ очередь независимо от
-     * файла, и проигравший видит выплату как возможный повтор.
-     */
+  type FileKey = 'first' | 'second';
+
+  /**
+   * Гонка двух РАЗНЫХ файлов с одной выплатой.
+   *
+   * Блокировка только по хешу файла не защищала: два файла получали разные
+   * очереди, не видели записей друг друга и проводили 5 000 ₽ дважды. Теперь
+   * подтверждения выстраиваются в одну очередь независимо от файла: победитель
+   * проводит выплату, проигравший получает отказ и после нового предпросмотра
+   * видит её как возможный повтор.
+   *
+   * Кто победит, решает порядок постановки в очередь: PostgreSQL выдаёт
+   * блокировку ждущим по порядку. `order` ставит в очередь первым названный
+   * файл и закрепляет его победу; `null` — одновременный старт, победитель
+   * любой, а последующие проверки выбирают проигравшего по ответу, а не по
+   * номеру файла.
+   */
+  async function crossFileRace(order: FileKey | null): Promise<void> {
     const { token } = await tokenFor(['ADMIN']);
     const who = await courier();
     const name = counterparty(who.phone);
-    const first = await buildPlanFactStatement([payoutRow(name, -5000, DAY_B)]);
-    const second = await buildPlanFactStatement([
-      payoutRow(name, -5000, DAY_B, { purpose: 'ЗП СМЗ (повторная выгрузка)' }),
-    ]);
-    const approvedFirst = approvedOf((await postPreview(token, first, 'первая.xlsx')).json());
-    const approvedSecond = approvedOf((await postPreview(token, second, 'вторая.xlsx')).json());
-    expect(approvedFirst).toHaveLength(1);
-    expect(approvedSecond).toHaveLength(1);
+    const files: Record<FileKey, { name: string; content: Buffer }> = {
+      first: {
+        name: 'первая.xlsx',
+        content: await buildPlanFactStatement([payoutRow(name, -5000, DAY_B)]),
+      },
+      second: {
+        name: 'вторая.xlsx',
+        content: await buildPlanFactStatement([
+          payoutRow(name, -5000, DAY_B, { purpose: 'ЗП СМЗ (повторная выгрузка)' }),
+        ]),
+      },
+    };
+    const previewOf = async (key: FileKey): Promise<PayoutPreview> =>
+      (await postPreview(token, files[key].content, files[key].name)).json();
+    const approved: Record<FileKey, ApprovedRow[]> = {
+      first: approvedOf(await previewOf('first')),
+      second: approvedOf(await previewOf('second')),
+    };
+    expect(approved.first).toHaveLength(1);
+    expect(approved.second).toHaveLength(1);
 
-    const barrier = await holdKey('payout-import:confirm');
-    const left = postConfirm(token, first, {
-      fileName: 'первая.xlsx',
-      idempotencyKey: unique('cross-a'),
-      approved: approvedFirst,
-    });
-    const right = postConfirm(token, second, {
-      fileName: 'вторая.xlsx',
-      idempotencyKey: unique('cross-b'),
-      approved: approvedSecond,
-    });
+    const barrier = await holdKey(CONFIRM_QUEUE_KEY);
+    const start = (key: FileKey): Promise<HttpResponse<PayoutImportResult>> =>
+      postConfirm(token, files[key].content, {
+        fileName: files[key].name,
+        idempotencyKey: unique(`cross-${key}`),
+        approved: approved[key],
+      });
+
+    let pending: Record<FileKey, Promise<HttpResponse<PayoutImportResult>>>;
+    if (order === null) {
+      pending = { first: start('first'), second: start('second') };
+    } else {
+      // Ведущий встаёт в очередь первым — и только затем стартует второй.
+      const follower: FileKey = order === 'first' ? 'second' : 'first';
+      const lead = start(order);
+      expect(await waitForBlockedBy(barrier.pid, 1)).toBeGreaterThanOrEqual(1);
+      const follow = start(follower);
+      pending =
+        order === 'first' ? { first: lead, second: follow } : { first: follow, second: lead };
+    }
+    // Оба запроса действительно стоят в общей очереди подтверждений.
     const blocked = await waitForBlockedBy(barrier.pid, 2);
     barrier.release();
     await barrier.done;
-    const [a, b] = await Promise.all([left, right]);
-
-    // Оба запроса действительно стояли в общей очереди подтверждений.
+    const results: Record<FileKey, HttpResponse<PayoutImportResult>> = {
+      first: await pending.first,
+      second: await pending.second,
+    };
     expect(blocked).toBeGreaterThanOrEqual(2);
-    expect([a.statusCode, b.statusCode].sort((x, y) => x - y)).toEqual([201, 409]);
+
+    expect([results.first.statusCode, results.second.statusCode].sort((x, y) => x - y)).toEqual([
+      201, 409,
+    ]);
+    const winner: FileKey = results.first.statusCode === 201 ? 'first' : 'second';
+    const loser: FileKey = winner === 'first' ? 'second' : 'first';
+    if (order !== null) {
+      expect(winner).toBe(order);
+    }
+    expect(results[winner].json().posted).toHaveLength(1);
     expect(await importEntries(who.id)).toHaveLength(1);
     expect(await balanceOf(ctx.db, who.id, null)).toBe(500_000n);
 
-    // Проигравший обновляет предпросмотр: выплата показана как возможный повтор,
-    // и провести её можно только явным решением.
-    const refreshed = (await postPreview(token, second, 'вторая.xlsx')).json();
+    // Победивший файл проведён; проигравший после нового предпросмотра —
+    // возможный повтор, который проводится только явным решением.
+    expect((await previewOf(winner)).rows[0]?.state).toBe('already_imported');
+    const refreshed = await previewOf(loser);
     expect(refreshed.rows[0]?.state).toBe('possible_duplicate');
-    const decided = await postConfirm(token, second, {
-      fileName: 'вторая.xlsx',
+    const decided = await postConfirm(token, files[loser].content, {
+      fileName: files[loser].name,
       idempotencyKey: unique('cross-decided'),
       approved: approvedOf(refreshed, [refreshed.rows[0]?.rowNo ?? 0]),
     });
     expect(decided.statusCode).toBe(201);
     expect(await balanceOf(ctx.db, who.id, null)).toBe(1_000_000n);
-  });
+  }
+
+  it('1. две разные выгрузки с одной выплатой при одновременном подтверждении дают одну запись', () =>
+    crossFileRace(null));
+
+  it('1а. тот же исход, когда первой в очередь встаёт первая выгрузка', () =>
+    crossFileRace('first'));
+
+  it('1б. тот же исход, когда первой в очередь встаёт вторая выгрузка', () =>
+    crossFileRace('second'));
 
   it('2. подтверждение проводит ровно то, что показал предпросмотр, иначе требует обновить его', async () => {
     /*
