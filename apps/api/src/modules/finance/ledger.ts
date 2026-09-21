@@ -65,6 +65,8 @@ export interface LedgerEntryInput {
   distanceKmTenths?: number | null;
   /** Общая передача: та же операция на стороне кассы логиста. */
   transferId?: string | null;
+  /** Импорт выписки ПланФакта, из которого пришла выплата. Только у `CASH_ISSUED_TO_COURIER`. */
+  payoutImportId?: string | null;
   idempotencyKey: string;
 }
 
@@ -95,6 +97,12 @@ export interface LedgerEntryView {
   reversesKind: CourierLedgerKind | null;
   /** Та же передача на стороне кассы логиста. */
   transferId: string | null;
+  /**
+   * Импорт выписки ПланФакта — источник записи. `null` у записей, заведённых
+   * человеком или начисленных системой. По нему журнал и выгрузка называют
+   * источник и не путают банковскую выплату с выдачей из кассы логиста.
+   */
+  payoutImportId: string | null;
   reversed: boolean;
 }
 
@@ -137,6 +145,7 @@ export function toLedgerView(row: {
   reversesEntryId: string | null;
   reversesEntry?: { kind: CourierLedgerKind; distanceKmTenths?: number | null } | null;
   transferId?: string | null;
+  payoutImportId?: string | null;
   reversedBy?: { id: string } | null;
   actor?: { fullName: string } | null;
 }): LedgerEntryView {
@@ -159,6 +168,7 @@ export function toLedgerView(row: {
     reversesKind: row.reversesEntry?.kind ?? null,
     reversesDistanceKmTenths: row.reversesEntry?.distanceKmTenths ?? null,
     transferId: row.transferId ?? null,
+    payoutImportId: row.payoutImportId ?? null,
     reversed: (row.reversedBy ?? null) !== null,
   };
 }
@@ -238,6 +248,7 @@ export async function appendLedgerEntry(
       attemptId: input.attemptId ?? null,
       distanceKmTenths: input.distanceKmTenths ?? null,
       transferId: input.transferId ?? null,
+      payoutImportId: input.payoutImportId ?? null,
       idempotencyKey: input.idempotencyKey,
     },
     include: REVERSAL_VIEW,

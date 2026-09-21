@@ -37,6 +37,8 @@ import { formatDate, moscowToday } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
 import { CourierCombobox } from './CourierCombobox';
+import { PayoutImportModal } from './PayoutImportModal';
+import { formatMoney } from './money';
 import './reports.css';
 
 interface SettlementTotals {
@@ -98,6 +100,8 @@ interface LedgerEntry {
   /** Что именно отменяет обратная запись. */
   reversesKind: string | null;
   reversesEntryId: string | null;
+  /** Импорт выписки ПланФакта, из которого пришла выплата; `null` у остальных записей. */
+  payoutImportId: string | null;
 }
 
 interface CourierGroup {
@@ -224,11 +228,8 @@ const CELL_OPERATIONS = {
 
 type CellOperation = keyof typeof CELL_OPERATIONS;
 
-/** Деньги одинаково во всём приложении: рубли, запятая, два знака. */
-export function formatMoney(minor: string): string {
-  const value = Number(BigInt(minor)) / 100;
-  return `${value.toFixed(2).replace('.', ',')} ₽`;
-}
+// Формат денег общий с окном импорта выплат; прежние импорты отсюда сохранены.
+export { formatMoney } from './money';
 
 /**
  * Столбцы таблицы расчётов — ОДИН список на шапку и на журнал.
@@ -413,6 +414,10 @@ export function ReportsScreen(): React.JSX.Element {
    * Это удобство, а не защита: сервер отвечает отказом и на прямой запрос.
    */
   const canReverse = (entry: LedgerEntry): boolean => {
+    // Выплату из выписки ПланФакта отменяет только администратор — как и проводит.
+    if (entry.payoutImportId !== null) {
+      return isAdmin;
+    }
     const isTransfer =
       entry.kind === 'CASH_HANDED_TO_LOGIST' || entry.kind === 'CASH_ISSUED_TO_COURIER';
     if (!isTransfer) {
@@ -470,6 +475,8 @@ export function ReportsScreen(): React.JSX.Element {
   const [openingDebtError, setOpeningDebtError] = useState<string | null>(null);
   /** Шаг подтверждения: показываем, на сколько и кому вырастет долг. */
   const [openingDebtConfirm, setOpeningDebtConfirm] = useState(false);
+  /** Окно импорта выплат из выписки ПланФакта — только администратору. */
+  const [payoutImportOpen, setPayoutImportOpen] = useState(false);
 
   /** Касса логиста для передач наличных. */
   const [deskId, setDeskId] = useState('');
@@ -800,6 +807,18 @@ export function ReportsScreen(): React.JSX.Element {
                 }}
               >
                 Внести начальный долг
+              </Button>
+            )}
+            {/*
+              Выплаты курьерам по банковской выписке ПланФакта. Импорт — тоже
+              право администратора: он проводит деньги по внешнему документу.
+            */}
+            {isAdmin && (
+              <Button
+                data-testid="reports-payout-import-open"
+                onClick={() => setPayoutImportOpen(true)}
+              >
+                Загрузить выписку ПланФакта
               </Button>
             )}
           </>
@@ -1299,6 +1318,18 @@ export function ReportsScreen(): React.JSX.Element {
                                 <td>{formatMoscowDateTime(entry.occurredAt)}</td>
                                 <td className="reports__detail-order">
                                   {ledgerKindLabel(entry.kind)}
+                                  {/*
+                                    Источник записи: выплата из выписки — не
+                                    выдача из кассы логиста, хотя вид у них один.
+                                  */}
+                                  {entry.payoutImportId !== null && (
+                                    <span
+                                      className="reports__source"
+                                      data-testid="reports-entry-source"
+                                    >
+                                      ПланФакт
+                                    </span>
+                                  )}
                                 </td>
                                 <td colSpan={2}>{entry.actorName ?? 'автор неизвестен'}</td>
                                 <td
@@ -1772,6 +1803,14 @@ export function ReportsScreen(): React.JSX.Element {
             }
             addOpeningDebt.mutate({ minor: value.minor });
           }}
+        />
+      )}
+
+      {isAdmin && (
+        <PayoutImportModal
+          open={payoutImportOpen}
+          onClose={() => setPayoutImportOpen(false)}
+          onImported={refresh}
         />
       )}
     </section>

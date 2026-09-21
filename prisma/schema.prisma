@@ -174,14 +174,15 @@ model User {
   issueChecksCleared RouteIssueCheck[]       @relation("IssueCheckClearedBy")
   cancelledOrders    DeliveryOrder[]         @relation("OrderCancelledByLogist")
 
-  cashEntries         LogistCashEntry[]    @relation("CashOwner")
-  cashOperations      LogistCashEntry[]    @relation("CashActor")
-  cashTransfers       LogistCashEntry[]    @relation("CashCourier")
-  ledgerEntries       CourierLedgerEntry[] @relation("LedgerCourier")
-  ledgerOperations    CourierLedgerEntry[] @relation("LedgerActor")
-  correctedDistances  RouteOrderDistance[] @relation("DistanceActor")
-  printPointsCreated  PrintPoint[]         @relation("PrintPointCreatedBy")
-  printTestsRequested PrintPoint[]         @relation("PrintPointTestRequestedBy")
+  cashEntries         LogistCashEntry[]     @relation("CashOwner")
+  cashOperations      LogistCashEntry[]     @relation("CashActor")
+  cashTransfers       LogistCashEntry[]     @relation("CashCourier")
+  ledgerEntries       CourierLedgerEntry[]  @relation("LedgerCourier")
+  ledgerOperations    CourierLedgerEntry[]  @relation("LedgerActor")
+  payoutImports       CourierPayoutImport[] @relation("PayoutImportActor")
+  correctedDistances  RouteOrderDistance[]  @relation("DistanceActor")
+  printPointsCreated  PrintPoint[]          @relation("PrintPointCreatedBy")
+  printTestsRequested PrintPoint[]          @relation("PrintPointTestRequestedBy")
 
   @@index([status])
   @@index([createdAt])
@@ -580,7 +581,7 @@ model DeliveryOrder {
   /// выполнится никогда — ключ задания был бы занят навсегда. Счётчик, а не
   /// момент времени: два события обязаны различаться и тогда, когда часы
   /// отдали одно значение.
-  cancellationCount   Int       @default(0)
+  cancellationCount Int @default(0)
 
   /// Сколько раз источник сообщал о РОСТЕ оплаченной суммы.
   ///
@@ -589,7 +590,7 @@ model DeliveryOrder {
   /// источник снова сообщил ту же оплату — задание не ставится, и наличные за
   /// новой доставкой остаются несниженными. Счётчик растёт только на РОСТЕ
   /// оплаты, поэтому повторный импорт того же снимка новых денег не создаёт.
-  paymentSyncCount    Int       @default(0)
+  paymentSyncCount Int @default(0)
 
   /// Круг сборки заказа.
   ///
@@ -726,7 +727,7 @@ model DeliveryOrder {
   /// Уведомления логистов об изменениях заказа и решения о пересборке.
   changeNotifications     OrderChangeNotification[]
   reassemblyDecisions     OrderReassemblyDecision[]
-  refusalRequests         OrderRefusalRequest[]     @relation("OrderRefusalOrder")
+  refusalRequests         OrderRefusalRequest[]         @relation("OrderRefusalOrder")
   /// Весь текст поля «Получатель» целиком, без разделения на имя и телефон.
   recipient               String?
   /// Только «Комментарий по доставке». Необязателен.
@@ -1241,15 +1242,15 @@ enum OrderRefusalState {
 /// открыт, заказ остаётся у флориста и нового ему не назначают. Один открытый
 /// запрос на пару (заказ, флорист) — повтор не создаёт дубль.
 model OrderRefusalRequest {
-  id        String @id @default(uuid()) @db.Uuid
-  orderId   String @db.Uuid
+  id        String        @id @default(uuid()) @db.Uuid
+  orderId   String        @db.Uuid
   order     DeliveryOrder @relation("OrderRefusalOrder", fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  floristId String @db.Uuid
-  florist   User   @relation("OrderRefusalFlorist", fields: [floristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  floristId String        @db.Uuid
+  florist   User          @relation("OrderRefusalFlorist", fields: [floristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  reason    OrderRefusalReason
-  comment   String?
-  state     OrderRefusalState  @default(PENDING)
+  reason  OrderRefusalReason
+  comment String?
+  state   OrderRefusalState  @default(PENDING)
 
   createdAt   DateTime  @default(now())
   decidedById String?   @db.Uuid
@@ -1257,7 +1258,7 @@ model OrderRefusalRequest {
   decidedAt   DateTime?
 
   /// Уведомление руководителям об этом запросе (общая система уведомлений).
-  notificationId String? @unique @db.Uuid
+  notificationId String?                  @unique @db.Uuid
   notification   OrderChangeNotification? @relation(fields: [notificationId], references: [id], onDelete: SetNull, onUpdate: Restrict)
 
   @@index([orderId])
@@ -3022,7 +3023,6 @@ model DeliveryMoneyFact {
 /// Вид записи финансового учёта курьера.
 /**
  * Почему запись журнала отменена.
- *
  * Разные поводы ведут себя по-разному, и различать их по тексту причины или по
  * состоянию журнала нельзя: снятие финансового результата отменённого заказа
  * внешне неотличимо от обычной правки. Повод называется прямо.
@@ -3104,6 +3104,16 @@ model CourierLedgerEntry {
    */
   transferId String? @db.Uuid
 
+  /**
+   * Импорт выписки ПланФакта, из которого пришла запись.
+   * Выплата курьеру по банковской выписке — не касса логиста: у неё нет второй
+   * стороны в `LogistCashEntry`, и ничьих наличных она не двигает. Ссылка
+   * называет источник («ПланФакт») и связывает запись с файлом, строкой и
+   * итогами импорта. Есть только у `CASH_ISSUED_TO_COURIER`.
+   */
+  payoutImportId String?              @db.Uuid
+  payoutImport   CourierPayoutImport? @relation(fields: [payoutImportId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
   reversesEntryId String?             @unique @db.Uuid
   reversesEntry   CourierLedgerEntry? @relation("LedgerReversal", fields: [reversesEntryId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   reversedBy      CourierLedgerEntry? @relation("LedgerReversal")
@@ -3135,6 +3145,47 @@ model CourierLedgerEntry {
   @@index([orderId])
   @@index([occurredAt])
   @@index([transferId])
+  @@index([payoutImportId])
+}
+
+/**
+ * Импорт выплат курьерам из Excel-выписки ПланФакта.
+ * Строка появляется только при подтверждении: загрузка и предпросмотр ничего
+ * не пишут. Хранится, ЧТО за файл (имя и хеш содержимого), кто и когда
+ * подтвердил, и исход каждой строки — проведена, пропущена и почему.
+ * Персональных данных здесь нет: ни имён контрагентов, ни телефонов — только
+ * идентификаторы курьеров и записей журнала.
+ */
+model CourierPayoutImport {
+  id String @id @default(uuid(7)) @db.Uuid
+
+  /// Откуда выписка. Пока единственный источник — ПланФакт.
+  source     String @default("PLANFACT")
+  fileName   String
+  /// SHA-256 содержимого: тот же файл под другим именем узнаётся по нему.
+  fileSha256 String
+
+  uploadedById String @db.Uuid
+  uploadedBy   User   @relation("PayoutImportActor", fields: [uploadedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// Ключ подтверждения: повтор запроса возвращает тот же импорт.
+  idempotencyKey String @unique
+
+  rowCount         Int
+  postedCount      Int
+  skippedCount     Int
+  postedTotalMinor BigInt
+
+  /// Исход строк файла: номер строки, состояние, причина, курьер и запись
+  /// журнала — идентификаторами.
+  rows Json
+
+  entries CourierLedgerEntry[]
+
+  createdAt DateTime @default(now())
+
+  @@index([fileSha256])
+  @@index([createdAt])
 }
 
 /// Движение наличных в кассе логиста.
@@ -3435,10 +3486,10 @@ model PrintPoint {
 /// `payload` содержит старое и новое значения для показа авторизованному
 /// сотруднику в интерфейсе; в технические журналы и realtime они не уходят.
 model OrderChangeNotification {
-  id         String   @id @default(uuid()) @db.Uuid
-  orderId    String   @db.Uuid
+  id         String        @id @default(uuid()) @db.Uuid
+  orderId    String        @db.Uuid
   order      DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  occurredAt DateTime @default(now())
+  occurredAt DateTime      @default(now())
   /// Источник изменения: пока только синхронизация МоегоСклада.
   source     String
   /// Категории изменений: ADDRESS, DETAILS, DATE, INTERVAL, COMPOSITION.
@@ -3448,12 +3499,12 @@ model OrderChangeNotification {
   kind       String
   /// Старое → новое по полям и понятный diff состава. Только для интерфейса.
   payload    Json
-  createdAt  DateTime @default(now())
+  createdAt  DateTime      @default(now())
 
-  reads        OrderChangeNotificationRead[]
-  decision     OrderReassemblyDecision?
-  refusalRequest OrderRefusalRequest?
-  noFlowersQuarantine OrderNoFlowersQuarantine? @relation("NoFlowersNotification")
+  reads               OrderChangeNotificationRead[]
+  decision            OrderReassemblyDecision?
+  refusalRequest      OrderRefusalRequest?
+  noFlowersQuarantine OrderNoFlowersQuarantine?     @relation("NoFlowersNotification")
 
   @@index([orderId])
   @@index([occurredAt])
@@ -3462,12 +3513,12 @@ model OrderChangeNotification {
 /// Персональная отметка прочтения уведомления. Прочтение одним логистом не
 /// скрывает уведомление у остальных: состояние прочтения — на пользователя.
 model OrderChangeNotificationRead {
-  id             String   @id @default(uuid()) @db.Uuid
-  notificationId String   @db.Uuid
+  id             String                  @id @default(uuid()) @db.Uuid
+  notificationId String                  @db.Uuid
   notification   OrderChangeNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Restrict)
-  userId         String   @db.Uuid
-  user           User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  readAt         DateTime @default(now())
+  userId         String                  @db.Uuid
+  user           User                    @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  readAt         DateTime                @default(now())
 
   @@unique([notificationId, userId])
   @@index([userId])
@@ -3479,17 +3530,17 @@ model OrderChangeNotificationRead {
 /// логистов и повторное нажатие не создают две пересборки. Хранит, кто решил,
 /// какому флористу назначено и в каком круге сборки (`assemblyRound`).
 model OrderReassemblyDecision {
-  id                String   @id @default(uuid()) @db.Uuid
-  notificationId    String   @unique @db.Uuid
+  id                String                  @id @default(uuid()) @db.Uuid
+  notificationId    String                  @unique @db.Uuid
   notification      OrderChangeNotification @relation(fields: [notificationId], references: [id], onDelete: Cascade, onUpdate: Restrict)
-  orderId           String   @db.Uuid
-  order             DeliveryOrder @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  decidedById       String   @db.Uuid
-  decidedBy         User     @relation("ReassemblyDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  assignedFloristId String   @db.Uuid
-  assignedFlorist   User     @relation("ReassemblyAssignedFlorist", fields: [assignedFloristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  orderId           String                  @db.Uuid
+  order             DeliveryOrder           @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  decidedById       String                  @db.Uuid
+  decidedBy         User                    @relation("ReassemblyDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  assignedFloristId String                  @db.Uuid
+  assignedFlorist   User                    @relation("ReassemblyAssignedFlorist", fields: [assignedFloristId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   assemblyRound     Int
-  decidedAt         DateTime @default(now())
+  decidedAt         DateTime                @default(now())
 
   @@index([orderId])
 }

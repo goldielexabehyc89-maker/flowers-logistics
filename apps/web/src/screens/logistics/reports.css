@@ -721,3 +721,91 @@
 .reports__table {
   min-width: max-content;
 }
+
+/* --- Импорт выплат из выписки ПланФакта ---------------------------------- */
+
+/* Таблица предпросмотра широкая: окно шире обычного. */
+.modal.payout-import {
+  width: min(1100px, calc(100vw - 2 * var(--space-4)));
+}
+
+.payout-import__file {
+  display: grid;
+  gap: 4px;
+  font-size: var(--log-font-sm);
+}
+
+.payout-import__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: var(--log-font-sm);
+}
+
+.payout-import__table-wrap {
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.payout-import__state {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-neutral-soft);
+  color: var(--color-text-muted);
+  font-size: var(--log-font-xs);
+  white-space: nowrap;
+}
+
+.payout-import__state--ready {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.payout-import__state--error {
+  background: var(--color-error-soft);
+  color: var(--color-error);
+}
+
+.payout-import__state--possible_duplicate {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.payout-import__reason,
+.payout-import__duplicates,
+.payout-import__accept {
+  margin-top: 4px;
+  color: var(--color-text-muted);
+  font-size: var(--log-font-xs);
+}
+
+.payout-import__duplicates {
+  margin-bottom: 0;
+  padding-left: 16px;
+}
+
+.payout-import__accept {
+  display: block;
+  color: var(--color-text);
+}
+
+.payout-import__ignored {
+  font-size: var(--log-font-sm);
+}
+
+.payout-import__ignored ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+/* Источник записи журнала рядом с названием операции. */
+.reports__source {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-info-soft);
+  color: var(--color-info);
+  font-size: var(--log-font-xs);
+  white-space: nowrap;
+}

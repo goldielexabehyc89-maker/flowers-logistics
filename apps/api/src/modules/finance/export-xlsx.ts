@@ -243,6 +243,8 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
     { header: 'Сумма, ₽', key: 'amount', width: 14, style: { numFmt: '#,##0.00' } },
     { header: 'Автор', key: 'author', width: 24 },
     { header: 'Пояснение', key: 'reason', width: 40 },
+    // Откуда запись: выплата из выписки ПланФакта отличается от выдачи из кассы.
+    { header: 'Источник', key: 'source', width: 12 },
     { header: 'Отменена', key: 'reversed', width: 12 },
   ];
 
@@ -272,6 +274,7 @@ export async function buildSettlementWorkbook(report: SettlementReport): Promise
           amount: toRubles(entry.amountMinor),
           author: entry.actorName ?? '',
           reason: entry.reason ?? '',
+          source: entry.payoutImportId === null ? '' : 'ПланФакт',
           reversed: entry.reversed ? 'да' : '',
         });
       }
