@@ -48,6 +48,7 @@ import {
 } from '../warehouse/route-flow.js';
 import { readManualIssue } from '../settings/service.js';
 import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
+import { publishAwaitingChanged } from '../warehouse/awaiting.js';
 
 /**
  * Кому адресованы события жизненного цикла маршрута.
@@ -766,6 +767,11 @@ export async function cancelShipment(
         deliveredOrders: 0,
       });
       await publishRouteEvent(tx, 'route.updated', route.id);
+      /*
+       * Коробки без ячейки возвращаются в «Ожидают приёмки»: об этом узнают
+       * все роли раздела, а не только аудитория событий листа.
+       */
+      await publishAwaitingChanged(tx, route.id);
       return {
         state: 'CONFIRMED',
         version: route.version + 1,
@@ -785,6 +791,7 @@ export async function cancelShipment(
         previousState: route.state,
       });
       await publishRouteEvent(tx, 'route.updated', routeId);
+      await publishAwaitingChanged(tx, routeId);
       return {
         state: 'CONFIRMED',
         version: route.version + 1,
@@ -794,7 +801,10 @@ export async function cancelShipment(
       };
     }
 
-    return splitShippedRoute(tx, route, delivered, actor, context, now);
+    // Недоставленные заказы уезжают в новый неотгруженный лист — и снова ждут приёмки.
+    const split = await splitShippedRoute(tx, route, delivered, actor, context, now);
+    await publishAwaitingChanged(tx, route.id);
+    return split;
   });
 }
 

@@ -43,9 +43,32 @@ import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { normalizePageRequest, pageInfo, type PageInfo } from '../fulfillment/paging.js';
 import { isOperationalPickup, operationalPickupSql } from '../orders/operational-pickup.js';
 import { excludeNewStateSql } from '../orders/new-state.js';
+import type { TransactionClient } from '../auth/sessions.js';
+import { publishRealtimeEvent } from '../realtime/events.js';
 
 /** Роли, которым виден раздел и его API. Право проверяет сервер. */
 export const AWAITING_INTAKE_ROLES = ['ADMIN', 'WAREHOUSE', 'SUPERVISOR', 'MANAGER'] as const;
+
+/**
+ * Событие «очередь приёмки изменилась» — всем ролям раздела.
+ *
+ * Отгрузка листа убирает коробку из очереди; отмена отгрузки и снятие заказа
+ * с отгруженного листа возвращают её. Складской поток `route_flow_changed` и
+ * события листов `route.*` управляющему и менеджеру выдачи намеренно не
+ * рассылаются, поэтому у очереди своя узкая тема — и публиковать её обязаны
+ * ОБА направления, иначе две роли видят возврат только после перезагрузки.
+ * В полезной нагрузке только идентификатор листа.
+ */
+export async function publishAwaitingChanged(
+  tx: TransactionClient,
+  routeId: string,
+): Promise<void> {
+  await publishRealtimeEvent(tx, {
+    topic: 'warehouse.awaiting_changed',
+    payload: { routeId },
+    audienceRoles: [...AWAITING_INTAKE_ROLES],
+  });
+}
 
 /** Тип получения для фильтра-чипа. `undefined` — весь набор. */
 export type AwaitingMethod = 'delivery' | 'pickup';

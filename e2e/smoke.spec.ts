@@ -8702,7 +8702,37 @@ test('«Ожидают приёмки»: отгруженный курьеру �
   await expect(card).toHaveCount(0);
   await watcher.getByTestId('wh-awaiting-search').fill(order);
   await expect(card).toHaveCount(0);
+  await watcher.getByTestId('wh-awaiting-search').fill('');
 
+  // 6. Менеджер выдачи — ещё один сеанс на том же экране: заказа у него тоже нет.
+  const managerContext = await browser.newContext();
+  const manager = await managerContext.newPage();
+  await login(manager, stand['менеджер'] ?? '', stand['пин'] ?? '');
+  await openSection(manager, 'Склад');
+  await manager.getByTestId('wh-tab-awaiting').click();
+  await expect(manager.getByTestId('wh-awaiting')).toBeVisible();
+  const managerCard = manager.locator(
+    `[data-testid="wh-awaiting-card"][data-order-number="${order}"]`,
+  );
+  await expect(managerCard).toHaveCount(0);
+
+  // 7. Логист отменяет отгрузку листа: коробка снова ждёт приёмки, и оба
+  //    сеанса — управляющего и менеджера — видят её без перезагрузки.
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Маршрутные листы' }).first().click();
+  const shippedRow = page
+    .getByTestId('sheets-SHIPPED')
+    .locator(`[data-sheet-number="${routeNumber}"]`);
+  await expect(shippedRow).toBeVisible({ timeout: 20_000 });
+  await shippedRow.getByTestId('sheet-cancel-shipment').click();
+  await expect(page.getByTestId('cancel-shipment-dialog')).toBeVisible();
+  await page.getByTestId('cancel-confirm').click();
+
+  await expect(card).toHaveCount(1, { timeout: 20_000 });
+  await expect(managerCard).toHaveCount(1, { timeout: 20_000 });
+  await expect.poll(awaitingCountNow).toBe(before);
+
+  await managerContext.close();
   await watcherContext.close();
 });
 

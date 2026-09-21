@@ -62,7 +62,7 @@ export interface StatementPayout {
   currency: string | null;
   paymentDate: string | null;
   paymentDateInvalid: boolean;
-  /** Оплата подтверждена, и начисление (если у строки оно есть) тоже. */
+  /** Оплата подтверждена («Статус оплаты»); статус начисления на отбор не влияет. */
   confirmed: boolean;
   /** Статус, который помешал считать строку подтверждённой. */
   unconfirmedStatus: string | null;
@@ -262,7 +262,7 @@ function checkedDay(day: string): { day: string | null; invalid: boolean } {
  *
  * Полкопейки — не сумма: Excel хранит число с плавающей точкой, и 28944.01
  * восстанавливается округлением до копейки, а 100.005 не восстанавливается
- * ничем и отвергается.
+ * ничем и отвергается. Текст читается строгой грамматикой (`textToMinor`).
  */
 export function cellMinor(value: unknown): { minor: bigint | null; invalid: boolean } {
   if (value === null || value === undefined || value === '') {
@@ -272,16 +272,7 @@ export function cellMinor(value: unknown): { minor: bigint | null; invalid: bool
     return numberToMinor(value);
   }
   if (typeof value === 'string') {
-    // «−28 944,01», «28944.01 ₽», неразрывные пробелы — всё это одно число.
-    const normalized = value
-      .replace(/[\s\u00A0]/g, '')
-      .replace(/\u2212/g, '-')
-      .replace(',', '.')
-      .replace(/[^\d.+-]/g, '');
-    if (normalized === '' || !/^[+-]?\d+(?:\.\d+)?$/.test(normalized)) {
-      return { minor: null, invalid: true };
-    }
-    return numberToMinor(Number(normalized));
+    return textToMinor(value);
   }
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
@@ -303,6 +294,33 @@ function numberToMinor(value: number): { minor: bigint | null; invalid: boolean 
     return { minor: null, invalid: true };
   }
   return { minor: BigInt(rounded), invalid: false };
+}
+
+/*
+ * Текстовая сумма читается по строгой грамматике, а не «оставим только цифры»:
+ * знак, разряды сплошные или по три через пробел, копейки через запятую или
+ * точку, необязательное обозначение рублей в конце. Всё остальное — не сумма.
+ * Иначе «-5O00» с буквой «O» становилось 500 ₽, а «-1e3» — 13 ₽: содержимое
+ * не проверялось, а исправлялось догадкой.
+ */
+const TEXT_AMOUNT = /^([+\-−])?(\d{1,3}(?:[ \u00A0\u202F]\d{3})+|\d+)(?:[.,](\d{1,2}))?$/;
+const CURRENCY_SUFFIX = /\s*(?:₽|руб\.?|rub|р\.)$/i;
+
+function textToMinor(raw: string): { minor: bigint | null; invalid: boolean } {
+  if (raw.trim() === '') {
+    return { minor: null, invalid: false };
+  }
+  const text = raw.trim().replace(CURRENCY_SUFFIX, '').trim();
+  const match = TEXT_AMOUNT.exec(text);
+  if (match === null) {
+    return { minor: null, invalid: true };
+  }
+  const negative = match[1] === '-' || match[1] === '−';
+  // Целые копейки считаются строкой, без плавающей точки: 28 944,01 → 2894401.
+  const whole = BigInt((match[2] ?? '0').replace(/[ \u00A0\u202F]/g, ''));
+  const fraction = BigInt((match[3] ?? '').padEnd(2, '0'));
+  const minor = whole * 100n + fraction;
+  return { minor: negative ? -minor : minor, invalid: false };
 }
 
 function normalizedHeader(value: unknown): string | null {
@@ -389,10 +407,25 @@ function groupPayouts(lines: readonly StatementLine[]): {
     }
 
     let groupError: string | null = null;
+    const parentAmount = parent.amountMinor ?? 0n;
     if (parent.amountMinor === null || parent.amountInvalid) {
       groupError = 'сумма родительской выплаты не распознана';
     } else if (parts.some((part) => part.amountMinor === null || part.amountInvalid)) {
       groupError = 'сумма одной из частей не распознана';
+    } else if (
+      /*
+       * Все части направлены туда же, куда и выплата. Части −1 500 и +500 при
+       * родителе −1 000 сходятся алгебраически, но положительная отбрасывалась
+       * отдельно, а −1 500 проводилась — больше суммы выплаты. Смешение
+       * направлений в одной разбитой выплате не поддерживается: группа
+       * блокируется целиком, соседние правильные строки файла не страдают.
+       */
+      parts.some(
+        (part) =>
+          (part.amountMinor ?? 0n) === 0n || (part.amountMinor ?? 0n) > 0n !== parentAmount > 0n,
+      )
+    ) {
+      groupError = 'части разного знака с выплатой — направление разбиения не поддерживается';
     } else {
       const partsSum = parts.reduce((total, part) => total + (part.amountMinor ?? 0n), 0n);
       if (partsSum !== parent.amountMinor) {
@@ -418,7 +451,7 @@ function groupPayouts(lines: readonly StatementLine[]): {
         currency: part.currency ?? parent.currency,
         paymentDate: ownDate ? part.paymentDate : parent.paymentDate,
         paymentDateInvalid: ownDate ? part.paymentDateInvalid : parent.paymentDateInvalid,
-        ...confirmation(paymentStatus, part.accrualStatus),
+        ...confirmation(paymentStatus),
         amountMinor: part.amountMinor,
         amountInvalid: part.amountInvalid,
         groupError,
@@ -447,17 +480,22 @@ function groupPayouts(lines: readonly StatementLine[]): {
   return { payouts, containers };
 }
 
-function confirmation(
-  paymentStatus: string | null,
-  accrualStatus: string | null,
-): { confirmed: boolean; unconfirmedStatus: string | null } {
-  if (!isConfirmed(paymentStatus)) {
-    return { confirmed: false, unconfirmedStatus: paymentStatus ?? '' };
-  }
-  if (accrualStatus !== null && !isConfirmed(accrualStatus)) {
-    return { confirmed: false, unconfirmedStatus: accrualStatus };
-  }
-  return { confirmed: true, unconfirmedStatus: null };
+/**
+ * Подтверждена ли ВЫПЛАТА. Решает только «Статус оплаты».
+ *
+ * Импортируется факт выдачи денег, а не начисление заработка: при
+ * подтверждённой оплате начисление может оставаться плановым, деньги при этом
+ * уже ушли — и запись «Выдано курьеру» законна. Неподтверждённая оплата не
+ * проводится независимо от начисления. Статус начисления читается, но на отбор
+ * не влияет.
+ */
+function confirmation(paymentStatus: string | null): {
+  confirmed: boolean;
+  unconfirmedStatus: string | null;
+} {
+  return isConfirmed(paymentStatus)
+    ? { confirmed: true, unconfirmedStatus: null }
+    : { confirmed: false, unconfirmedStatus: paymentStatus ?? '' };
 }
 
 function standalone(line: StatementLine): StatementPayout {
@@ -470,7 +508,7 @@ function standalone(line: StatementLine): StatementPayout {
     currency: line.currency,
     paymentDate: line.paymentDate,
     paymentDateInvalid: line.paymentDateInvalid,
-    ...confirmation(line.paymentStatus, line.accrualStatus),
+    ...confirmation(line.paymentStatus),
     amountMinor: line.amountMinor,
     amountInvalid: line.amountInvalid,
     groupError: null,
