@@ -23,6 +23,7 @@ import {
   type Page,
 } from '@playwright/test';
 import { PDFDocument } from 'pdf-lib';
+import ExcelJS from 'exceljs';
 
 /** Точки на миллиметр: единица PDF — 1/72 дюйма. */
 const MM = 72 / 25.4;
@@ -6666,6 +6667,195 @@ test('начальный долг: администратор вносит ег�
   // Отмена — обратной записью: баланс вернулся, исходная строка осталась.
   await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽', { timeout: 15_000 });
   await expect(debtRow).toHaveCount(1);
+
+  await context.close();
+});
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/**
+ * Обезличенная выписка ПланФакта той же структуры, что настоящая: служебная
+ * строка, двадцать заголовков в порядке выгрузки, дальше выплаты. Телефоны и
+ * имена задаёт сама проверка — настоящих данных здесь нет.
+ */
+async function buildPlanFactFixture(
+  rows: { date: string; counterparty: string; amount: number }[],
+): Promise<Buffer> {
+  const headers = [
+    'Дата оплаты',
+    'Статус оплаты',
+    'Дата начисления',
+    'Статус начисления',
+    'Контрагент',
+    'ИНН контрагента',
+    'Тип',
+    'Счет',
+    '№ Счета',
+    'Банк',
+    'Бик',
+    'Юрлицо',
+    'ИНН юрлица',
+    'Статья',
+    'Родительские статьи',
+    'Вид деятельности',
+    'Назначение платежа',
+    'Проекты',
+    'Сумма',
+    'Валюта',
+  ];
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Лист1');
+  sheet.getCell(1, 1).value = 'ПланФакт';
+  sheet.getCell(1, 3).value = 'Создано с помощью сервиса ПланФакт';
+  headers.forEach((header, index) => {
+    sheet.getCell(2, index + 1).value = header;
+  });
+  rows.forEach((row, index) => {
+    const [year, month, day] = row.date.split('-').map(Number);
+    const date = new Date(Date.UTC(year ?? 2000, (month ?? 1) - 1, day ?? 1));
+    const line = sheet.getRow(3 + index);
+    line.getCell(1).value = date;
+    line.getCell(2).value = 'Подтверждена';
+    line.getCell(3).value = date;
+    line.getCell(4).value = 'Подтверждена';
+    line.getCell(5).value = row.counterparty;
+    line.getCell(7).value = 'Выплата';
+    line.getCell(8).value = 'Расчётный счёт';
+    line.getCell(12).value = 'Тестовое юрлицо';
+    line.getCell(14).value = 'Заработная плата курьеров';
+    line.getCell(15).value = 'Расходы - Доставка заказов покупателям';
+    line.getCell(16).value = 'Операционная деятельность';
+    line.getCell(17).value = 'ЗП СМЗ';
+    line.getCell(19).value = row.amount;
+    line.getCell(20).value = 'RUB';
+  });
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+/**
+ * Импорт выплат курьерам из выписки ПланФакта.
+ *
+ * ГРАНИЦА СЦЕНАРИЯ. Выписка обезличенная и строится здесь же: три выплаты
+ * курьеру, заведённому специально для проверки, и одна — на телефон, которого
+ * в системе нет. Настоящих выписок и реальных выплат в проверке нет.
+ */
+test('импорт ПланФакта: загрузка → предпросмотр → подтверждение → суммы в расчётах', async ({
+  browser,
+}: {
+  browser: Browser;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+
+  const courier = await seedOwnCourier(page, token);
+  // Телефон, которого нет ни у одного пользователя: другой префикс, чем у фикстур.
+  const strangerPhone = `+7998${String(Date.now() % 10_000_000).padStart(7, '0')}`;
+  const own = `Курьер отчётов (8${courier.phone.slice(2)})`;
+  const statement = await buildPlanFactFixture([
+    { date: today, counterparty: own, amount: -28944.01 },
+    { date: today, counterparty: own, amount: -24287.34 },
+    { date: today, counterparty: own, amount: -28000 },
+    {
+      date: today,
+      counterparty: `Неизвестный Получатель (8${strangerPhone.slice(2)})`,
+      amount: -1000,
+    },
+  ]);
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await page.waitForURL('**/logistics/reports', { timeout: 30_000 });
+  await expect(page.getByTestId('reports-screen')).toBeVisible({ timeout: 30_000 });
+
+  await page.getByTestId('reports-courier-combobox-field').fill(courier.phone);
+  await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
+  await page.getByTestId('reports-courier-combobox-option').first().click();
+  await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽', { timeout: 15_000 });
+
+  // --- Загрузка и предпросмотр ------------------------------------------------
+
+  await page.getByTestId('reports-payout-import-open').click();
+  await expect(page.getByTestId('payout-import-form')).toBeVisible();
+  await page.getByTestId('payout-import-file').setInputFiles({
+    name: 'выписка-проверка.xlsx',
+    mimeType: XLSX_MIME,
+    buffer: statement,
+  });
+
+  await expect(page.getByTestId('payout-import-ready-count')).toHaveText('3', { timeout: 15_000 });
+  await expect(page.getByTestId('payout-import-ready-total')).toHaveText('81231,35 ₽');
+  await expect(page.getByTestId('payout-import-row')).toHaveCount(4);
+  const failed = page.locator('[data-testid="payout-import-row"][data-state="error"]');
+  await expect(failed).toHaveCount(1);
+  await expect(failed).toContainText('не найден');
+
+  // Предпросмотр ничего не записал: баланс курьера прежний.
+  await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽');
+
+  // --- Подтверждение ------------------------------------------------------------
+
+  await page.getByTestId('payout-import-submit').click();
+  await expect(page.getByText('Провести выплаты?')).toBeVisible();
+  await page.getByRole('button', { name: 'Провести', exact: true }).click();
+  await expect(page.getByTestId('payout-import-result')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('payout-import-posted-count')).toHaveText('3');
+  await expect(page.getByTestId('payout-import-posted-total')).toHaveText('81231,35 ₽');
+  await page.getByTestId('payout-import-close').click();
+
+  // --- Расчёты ------------------------------------------------------------------
+
+  // Долг курьера вырос на всю сумму выплат; записи в журнале — с источником.
+  await expect(page.getByTestId('reports-closing')).toHaveText('81231,35 ₽', { timeout: 15_000 });
+  const group = page
+    .getByTestId('reports-rows')
+    .locator(`[data-testid="reports-group"][data-group-date="${today}"]`)
+    .first();
+  await group.getByTestId('reports-group-toggle').click();
+  await expect(
+    page.locator('[data-testid="reports-payment"][data-entry-kind="CASH_ISSUED_TO_COURIER"]'),
+  ).toHaveCount(3);
+  await expect(page.getByTestId('reports-entry-source')).toHaveCount(3);
+
+  // --- Тот же файл ещё раз, под другим именем ---------------------------------
+
+  await page.getByTestId('reports-payout-import-open').click();
+  await page.getByTestId('payout-import-file').setInputFiles({
+    name: 'выписка-проверка (копия).xlsx',
+    mimeType: XLSX_MIME,
+    buffer: statement,
+  });
+  await expect(page.getByTestId('payout-import-ready-count')).toHaveText('0', { timeout: 15_000 });
+  await expect(
+    page.locator('[data-testid="payout-import-row"][data-state="already_imported"]'),
+  ).toHaveCount(3);
+  await expect(page.getByTestId('payout-import-submit')).toBeDisabled();
+  await page.getByTestId('payout-import-close').click();
+  await expect(page.getByTestId('reports-closing')).toHaveText('81231,35 ₽');
+
+  // --- Не-администратору сервер отказывает ------------------------------------
+
+  const courierAuth = await page.request.post('/api/auth/login', {
+    data: { phone: courier.phone, pin: courier.pin },
+  });
+  expect(courierAuth.status()).toBe(200);
+  const courierToken = ((await courierAuth.json()) as { accessToken: string }).accessToken;
+  const denied = await page.request.post('/api/logistics/payout-imports/preview', {
+    headers: { authorization: `Bearer ${courierToken}` },
+    data: { fileName: 'выписка.xlsx', content: statement.toString('base64') },
+  });
+  expect(denied.status()).toBe(403);
 
   await context.close();
 });

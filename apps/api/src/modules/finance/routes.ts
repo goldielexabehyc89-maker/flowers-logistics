@@ -63,6 +63,7 @@ import { ValhallaClient } from '../integrations/valhalla/client.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
 import { buildSettlementPdf } from './export-pdf.js';
 import { buildCashPdf, buildCashWorkbook } from './export-cash.js';
+import { registerPayoutImportRoutes } from './payout-import-routes.js';
 
 const FINANCE_ROLES = ['ADMIN', 'LOGISTICIAN', 'SUPERVISOR'] as const;
 const ADMIN_ONLY = ['ADMIN'] as const;
@@ -778,8 +779,22 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
       entry = await deps.db.$transaction(async (tx) => {
         const source = await tx.courierLedgerEntry.findUnique({
           where: { id },
-          select: { transferId: true, kind: true },
+          select: { transferId: true, kind: true, payoutImportId: true },
         });
+
+        /*
+         * Выплату из выписки ПланФакта отменяет только администратор.
+         *
+         * Импорт доступен одному администратору, и отмена его записи — то же
+         * право: иначе логист снимал бы с курьера банковскую выплату, которую
+         * сам не проводил и проверить не может. Отмена — обычной обратной
+         * записью с причиной, аудитом и событием; сама запись не меняется.
+         */
+        if (source !== null && source.payoutImportId !== null && !actor.roles.includes('ADMIN')) {
+          throw new AppError('FORBIDDEN', {
+            publicMessage: 'Выплату из выписки ПланФакта отменяет только администратор.',
+          });
+        }
 
         /*
          * Начальный долг отменяется только администратором и только своим
@@ -1817,4 +1832,7 @@ export async function registerFinanceRoutes(app: AppServer, deps: FinanceRouteDe
 
     return { ok: true };
   });
+
+  // --- Импорт выплат из выписки ПланФакта ---------------------------------
+  await registerPayoutImportRoutes(app, deps);
 }
