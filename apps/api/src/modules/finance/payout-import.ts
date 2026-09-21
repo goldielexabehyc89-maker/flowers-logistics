@@ -9,11 +9,19 @@
  * ни загрузившего, ни логиста — не меняется. Источник записи виден по ссылке
  * на импорт, а не угадывается по тексту пояснения.
  *
- * ДВА ШАГА, ОДНА ОЦЕНКА. Предпросмотр и подтверждение считают строки ОДНОЙ
- * функцией: предпросмотр ничего не пишет, а подтверждение заново разбирает
- * файл, заново сопоставляет курьеров и заново проверяет повторы уже внутри
- * транзакции под блокировкой файла. Поэтому решение принимается по состоянию
- * базы в момент записи, а не по картинке, которую человек видел минуту назад.
+ * ДВА ШАГА, ОДНА ОЦЕНКА, ОДИН КОНТРАКТ. Предпросмотр и подтверждение считают
+ * строки ОДНОЙ функцией: предпросмотр ничего не пишет, а подтверждение заново
+ * разбирает файл, заново сопоставляет курьеров и заново проверяет повторы уже
+ * внутри транзакции. Подтверждается не файл, а ПОКАЗАННОЕ: экран присылает
+ * строки, которые администратор видел готовыми или принял как повтор, — с
+ * получателем, днём и суммой. Любое расхождение с повторной оценкой (телефон
+ * перешёл к другому курьеру, появился недостающий курьер, выплату уже провели)
+ * — отказ «предпросмотр устарел», а не молчаливое проведение большего.
+ *
+ * ОДНА ОЧЕРЕДЬ ПОДТВЕРЖДЕНИЙ. Повторы ищутся по журналу, а не по файлу, поэтому
+ * блокировки по хешу файла недостаточно: две разные выгрузки одной выплаты
+ * получали разные очереди и проводили её дважды. Все подтверждения идут через
+ * один ключ — импорт редкая операция администратора, и очередь ей не мешает.
  *
  * ПОВТОРЫ. У выплаты в выписке нет своего идентификатора, поэтому
  * «тот же курьер, день и сумма» повтором НЕ считается: две одинаковые выплаты
@@ -181,27 +189,27 @@ export function phoneOfCounterparty(text: string | null): {
     return { phone: null, problem: 'missing' };
   }
   const found = new Set<string>();
-  let sawDigits = false;
+  let unreadable = false;
   for (const candidate of text.match(PHONE_CANDIDATE) ?? []) {
-    sawDigits = true;
+    /*
+     * Кандидат читается ТОЛЬКО целиком. Последовательность цифр, которая не
+     * является одним номером — два номера через пробел, номер рядом с ИНН или
+     * счётом, два номера в одних скобках, — это не место, откуда можно достать
+     * «один удачный» кусок: так слитный номер побеждал форматированный, и
+     * выплата уходила получателю, которого никто не выбирал.
+     */
     const whole = tryNormalizePhone(candidate);
-    if (whole !== null) {
-      found.add(whole);
+    if (whole === null) {
+      unreadable = true;
       continue;
     }
-    /*
-     * Соседний числовой реквизит (ИНН, счёт) склеивается с телефоном пробелом
-     * в одного кандидата. Тогда номер ищется по отдельным словам.
-     */
-    for (const token of candidate.split(/\s+/)) {
-      const single = tryNormalizePhone(token);
-      if (single !== null) {
-        found.add(single);
-      }
-    }
+    found.add(whole);
+  }
+  if (unreadable) {
+    return { phone: null, problem: 'invalid' };
   }
   if (found.size === 0) {
-    return { phone: null, problem: sawDigits ? 'invalid' : 'missing' };
+    return { phone: null, problem: 'missing' };
   }
   if (found.size > 1) {
     return { phone: null, problem: 'multiple' };
@@ -571,14 +579,72 @@ export async function previewPayoutImport(
   return assessStatement(db, parsed, input.fileName, sha256Of(input.content));
 }
 
+/**
+ * Строка, которую администратор увидел в предпросмотре и подтвердил.
+ *
+ * Это контракт подтверждения: получатель, день и сумма — те, что были на
+ * экране. Сервер им не доверяет, а СВЕРЯЕТ с повторной оценкой файла: строка
+ * проводится, только если сейчас оценивается точно так же.
+ */
+export interface ApprovedRow {
+  rowNo: number;
+  /** Как строка была показана: готовой или возможным повтором, принятым явно. */
+  state: 'ready' | 'possible_duplicate';
+  courierUserId: string;
+  operationDate: string;
+  amountMinor: string;
+}
+
 export interface ConfirmPayoutImportInput {
   actor: { userId: string; roles: readonly Role[] };
   fileName: string;
   content: Buffer;
   idempotencyKey: string;
-  /** Строки-возможные повторы, которые администратор решил провести. */
-  acceptRows: readonly number[];
+  /** Показанные и подтверждённые строки: готовые плюс явно принятые повторы. */
+  approved: readonly ApprovedRow[];
   context: { ip: string | null; userAgent: string | null };
+}
+
+/**
+ * Чем текущая оценка расходится с тем, что подтвердил администратор.
+ *
+ * Расхождением считается и НОВАЯ готовая строка: если после предпросмотра
+ * появился недостающий курьер, проводить его выплату без показа нельзя —
+ * человек согласовывал другую сумму.
+ */
+function staleRows(
+  rows: readonly PayoutPreviewRow[],
+  approved: readonly ApprovedRow[],
+): { rowNo: number; reason: string }[] {
+  const byRowNo = new Map(rows.map((row) => [row.rowNo, row]));
+  const approvedNos = new Set<number>();
+  const stale: { rowNo: number; reason: string }[] = [];
+
+  for (const item of approved) {
+    approvedNos.add(item.rowNo);
+    const row = byRowNo.get(item.rowNo);
+    if (row === undefined) {
+      stale.push({ rowNo: item.rowNo, reason: 'строки нет среди выплат файла' });
+      continue;
+    }
+    if (row.state !== item.state) {
+      stale.push({ rowNo: item.rowNo, reason: `состояние строки изменилось: ${row.state}` });
+      continue;
+    }
+    if (
+      row.courier?.id !== item.courierUserId ||
+      row.operationDate !== item.operationDate ||
+      row.amountMinor !== item.amountMinor
+    ) {
+      stale.push({ rowNo: item.rowNo, reason: 'получатель, день или сумма изменились' });
+    }
+  }
+  for (const row of rows) {
+    if (row.state === 'ready' && !approvedNos.has(row.rowNo)) {
+      stale.push({ rowNo: row.rowNo, reason: 'строка стала готовой после предпросмотра' });
+    }
+  }
+  return stale;
 }
 
 const summaryOf = (
@@ -657,15 +723,17 @@ async function resultOfStored(
 
 const BATCH_INCLUDE = { uploadedBy: { select: { id: true, fullName: true } } } as const;
 
+/** Общая очередь подтверждений: одна на все файлы, потому что повторы ищутся по журналу. */
+export const CONFIRM_QUEUE_KEY = 'payout-import:confirm';
+
 /**
  * Подтверждение импорта: единственное место, где выписка становится записями.
  *
- * Внутри одной транзакции под блокировкой по хешу файла: файл разбирается и
- * оценивается заново, проводятся только строки «готово» и явно принятые
- * администратором «возможные повторы», каждая — своим ключом строки. Повтор
+ * Внутри одной транзакции в общей очереди подтверждений: файл разбирается и
+ * оценивается заново, результат сверяется с показанными строками, и только
+ * при полном совпадении они проводятся — каждая своим ключом строки. Повтор
  * запроса с тем же ключом подтверждения возвращает тот же импорт; тот же файл
- * с другим ключом ничего не добавляет — строки уже проведены и распознаются
- * по своим ключам.
+ * с другим ключом упирается в устаревший предпросмотр — строки уже проведены.
  */
 export async function confirmPayoutImport(
   db: Database,
@@ -693,11 +761,15 @@ export async function confirmPayoutImport(
     return await db.$transaction(
       async (tx) => {
         /*
-         * Один файл — одна очередь. Два подтверждения одной выписки (двойное
-         * нажатие, повтор сети, две вкладки) выполняются строго по очереди:
-         * второе видит записи первого и не проводит ничего.
+         * Все подтверждения — строго по очереди, независимо от файла.
+         *
+         * Возможный повтор ищется по журналу: «тот же курьер, день и сумма».
+         * Пока очередь была своей у каждого файла, две разные выгрузки одной
+         * выплаты не видели записей друг друга и проводили её дважды. Общий
+         * ключ делает второе подтверждение зависимым от первого: оно заново
+         * оценивает файл уже после записи и видит выплату как повтор.
          */
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`payout-import:${fileSha256}`})::bigint)`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CONFIRM_QUEUE_KEY})::bigint)`;
 
         const replay = await tx.courierPayoutImport.findUnique({
           where: { idempotencyKey: input.idempotencyKey },
@@ -708,18 +780,31 @@ export async function confirmPayoutImport(
         }
 
         const preview = await assessStatement(tx, parsed, input.fileName, fileSha256);
-        const accepted = new Set(input.acceptRows);
 
-        const toPost = preview.rows.filter(
-          (row) =>
-            row.courier !== null &&
-            row.amountMinor !== null &&
-            row.operationDate !== null &&
-            (row.state === 'ready' ||
-              (row.state === 'possible_duplicate' && accepted.has(row.rowNo))),
-        );
+        /*
+         * Проводится РОВНО то, что администратор видел и подтвердил.
+         *
+         * Между предпросмотром и подтверждением справочник и журнал могли
+         * измениться: телефон перешёл к другому курьеру, появился недостающий
+         * курьер, ту же выплату провели из другой выписки. Сервер оценивает
+         * файл заново, но расхождение с показанным — не повод молча провести
+         * больше или другому человеку. Это отказ, после которого экран
+         * обновляет предпросмотр.
+         */
+        const stale = staleRows(preview.rows, input.approved);
+        if (stale.length > 0) {
+          throw new AppError('CONFLICT', {
+            message: 'payout import preview is stale',
+            publicMessage:
+              'Предпросмотр устарел: данные изменились после просмотра. Обновите предпросмотр и подтвердите заново.',
+            details: { stale },
+          });
+        }
+
+        const approvedNos = new Set(input.approved.map((row) => row.rowNo));
+        const toPost = preview.rows.filter((row) => approvedNos.has(row.rowNo));
         const skipped: SkippedRow[] = preview.rows
-          .filter((row) => !toPost.includes(row))
+          .filter((row) => !approvedNos.has(row.rowNo))
           .map((row) => ({
             rowNo: row.rowNo,
             state: row.state,
@@ -780,8 +865,8 @@ export async function confirmPayoutImport(
             idempotencyKey: payoutRowKey(fileSha256, row.rowNo),
           });
           /*
-           * Под блокировкой файла чужой записи с ключом этой строки быть не
-           * может: оценка только что её не нашла. Если она всё же есть, база
+           * В общей очереди чужой записи с ключом этой строки быть не может:
+           * оценка только что её не нашла. Если она всё же есть, база
            * изменилась мимо очереди — запись не наша, и импорт откатывается
            * целиком, чтобы не приписать чужую запись этому файлу.
            */

@@ -34,6 +34,7 @@ import { listAwaitingIntake, AWAITING_INTAKE_ROLES } from './awaiting.js';
 import { issueToCustomer, type PickupDeps } from '../pickup/service.js';
 import { cancelIssueSession, checkOrderForIssue, confirmCourier, shipRoute } from './route-flow.js';
 import { cancelShipment, shipRouteManually } from '../routing/lifecycle.js';
+import { removeFromActiveRoute } from '../routing/service.js';
 import { saveManualIssue } from '../settings/service.js';
 
 let ctx: TestContext;
@@ -698,6 +699,24 @@ async function setManualIssue(enabled: boolean): Promise<void> {
   });
 }
 
+/** Курсор ленты событий: идентификатор растёт монотонно. */
+async function lastEventId(): Promise<bigint> {
+  const row = await ctx.db.realtimeEvent.findFirst({
+    orderBy: { id: 'desc' },
+    select: { id: true },
+  });
+  return row?.id ?? 0n;
+}
+
+/** Аудитории событий очереди приёмки, опубликованных после курсора. */
+async function awaitingEventsFor(cursor: bigint): Promise<string[][]> {
+  const events = await ctx.db.realtimeEvent.findMany({
+    where: { topic: 'warehouse.awaiting_changed', id: { gt: cursor } },
+    select: { audienceRoles: true },
+  });
+  return events.map((event) => [...event.audienceRoles]);
+}
+
 /** Полная картина по одному заказу: список, поиск, счётчики, бейдж. */
 async function presence(order: { id: string; number: string }): Promise<{
   listed: boolean;
@@ -830,6 +849,7 @@ describe('отгружен курьеру без ячейки', () => {
       where: { id: route.routeId },
       select: { version: true },
     });
+    const cursor = await lastEventId();
     await cancelShipment(
       { db: ctx.db },
       admin,
@@ -839,6 +859,42 @@ describe('отгружен курьеру без ячейки', () => {
     );
 
     expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+
+    /*
+     * Обратное изменение очереди рассылается тем же ролям, что и отгрузка.
+     * Одного `route.updated` мало: управляющий и менеджер выдачи его не
+     * получают и до перезагрузки не видели вернувшийся заказ.
+     */
+    expect(await awaitingEventsFor(cursor)).toEqual(
+      expect.arrayContaining([expect.arrayContaining([...AWAITING_INTAKE_ROLES])]),
+    );
+  });
+
+  it('снятие заказа из отгруженного листа возвращает его в приёмку и рассылает событие очереди', async () => {
+    const order = await seedAssembled();
+    const route = await seedConfirmedRoute([order.id]);
+    await shipByScanning(route, [order.number]);
+    expect(await presence(order)).toMatchObject({ listed: false });
+
+    const admin = await actorFor(['ADMIN']);
+    const shipped = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.routeId },
+      select: { version: true },
+    });
+    const cursor = await lastEventId();
+    await removeFromActiveRoute(
+      { db: ctx.db },
+      admin,
+      route.routeId,
+      { orderId: order.id, expectedVersion: shipped.version },
+      CONTEXT,
+    );
+
+    // Участие снято — коробка снова ждёт приёмки, и об этом узнают все роли раздела.
+    expect(await presence(order)).toMatchObject({ listed: true, found: true });
+    expect(await awaitingEventsFor(cursor)).toEqual(
+      expect.arrayContaining([expect.arrayContaining([...AWAITING_INTAKE_ROLES])]),
+    );
   });
 
   it('новый круг сборки после отгрузки появляется в приёмке, прежняя отгрузка не мешает', async () => {

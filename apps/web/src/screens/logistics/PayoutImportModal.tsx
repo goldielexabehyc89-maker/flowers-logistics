@@ -139,6 +139,25 @@ export function PayoutImportModal({
     onClose();
   };
 
+  /*
+   * Контракт подтверждения — ровно то, что человек видит: готовые строки плюс
+   * повторы, принятые явно, с получателем, днём и суммой. Сервер сверит его с
+   * повторной оценкой файла и откажет, если что-то изменилось.
+   */
+  const readyRows = preview?.rows.filter((row) => row.state === 'ready') ?? [];
+  const acceptedRows =
+    preview?.rows.filter((row) => row.state === 'possible_duplicate' && accepted.has(row.rowNo)) ??
+    [];
+  const approvedRows = [...readyRows, ...acceptedRows].map((row) => ({
+    rowNo: row.rowNo,
+    state: row.state,
+    courierUserId: row.courier?.id ?? '',
+    operationDate: row.operationDate ?? '',
+    amountMinor: row.amountMinor ?? '0',
+  }));
+  const toPostCount = approvedRows.length;
+  const toPostTotal = (sumMinor(readyRows) + sumMinor(acceptedRows)).toString();
+
   const previewMutation = useMutation({
     mutationFn: (input: { name: string; content: string }) =>
       client.post<Preview>('/api/logistics/payout-imports/preview', {
@@ -158,7 +177,7 @@ export function PayoutImportModal({
         fileName: file?.name ?? '',
         content: file?.content ?? '',
         idempotencyKey: `payout-import:${file?.nonce ?? ''}`,
-        acceptRows: [...accepted],
+        approved: approvedRows,
       }),
     onSuccess: (data) => {
       setConfirmOpen(false);
@@ -195,6 +214,22 @@ export function PayoutImportModal({
     previewMutation.mutate(next);
   };
 
+  /**
+   * Новый предпросмотр того же файла — после отказа «предпросмотр устарел».
+   * Новое решение получает новый ключ подтверждения.
+   */
+  const refreshPreview = (): void => {
+    if (file === null) {
+      return;
+    }
+    setError(null);
+    setPreview(null);
+    setAccepted(new Set());
+    const next = { ...file, nonce: globalThis.crypto.randomUUID() };
+    setFile(next);
+    previewMutation.mutate(next);
+  };
+
   const toggleAccepted = (rowNo: number): void =>
     setAccepted((current) => {
       const next = new Set(current);
@@ -206,12 +241,6 @@ export function PayoutImportModal({
       return next;
     });
 
-  const readyRows = preview?.rows.filter((row) => row.state === 'ready') ?? [];
-  const acceptedRows =
-    preview?.rows.filter((row) => row.state === 'possible_duplicate' && accepted.has(row.rowNo)) ??
-    [];
-  const toPostCount = readyRows.length + acceptedRows.length;
-  const toPostTotal = (sumMinor(readyRows) + sumMinor(acceptedRows)).toString();
   const visibleRows = preview?.rows.filter((row) => row.state !== 'ignored') ?? [];
   const ignoredRows = preview?.rows.filter((row) => row.state === 'ignored') ?? [];
   const busy = previewMutation.isPending || confirmMutation.isPending;
@@ -253,9 +282,22 @@ export function PayoutImportModal({
           )}
 
           {error !== null && (
-            <p className="reports__error" role="alert" data-testid="payout-import-error">
-              {error}
-            </p>
+            <div className="stack" role="alert" data-testid="payout-import-error">
+              <p className="reports__error">{error}</p>
+              {/*
+                Отказ «предпросмотр устарел» лечится только новым предпросмотром:
+                проводить можно лишь то, что показано сейчас.
+              */}
+              {file !== null && result === null && (
+                <Button
+                  data-testid="payout-import-refresh"
+                  disabled={busy}
+                  onClick={refreshPreview}
+                >
+                  Обновить предпросмотр
+                </Button>
+              )}
+            </div>
           )}
 
           {preview !== null && result === null && (

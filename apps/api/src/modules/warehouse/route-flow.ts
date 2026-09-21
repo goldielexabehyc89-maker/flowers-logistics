@@ -18,7 +18,7 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import { enqueueRouteActivatedStateSync } from '../integrations/moysklad/state-sync.js';
 import { enqueueMkadDistanceForRoute } from '../finance/mkad-auto.js';
 import { normalizeCellCode } from './cell-code.js';
-import { AWAITING_INTAKE_ROLES } from './awaiting.js';
+import { publishAwaitingChanged } from './awaiting.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import {
   assemblyRoundOf,
@@ -795,11 +795,7 @@ export async function activateRouteWithinTransaction(
    * коробку до перезагрузки страницы. Своя тема с узкой полезной нагрузкой:
    * только идентификатор листа.
    */
-  await publishRealtimeEvent(tx, {
-    topic: 'warehouse.awaiting_changed',
-    payload: { routeId: route.id },
-    audienceRoles: [...AWAITING_INTAKE_ROLES],
-  });
+  await publishAwaitingChanged(tx, route.id);
   /*
    * Логист и КУРЬЕР обязаны увидеть, что маршрут уехал.
    *

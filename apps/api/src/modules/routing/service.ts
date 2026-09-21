@@ -38,6 +38,7 @@ import { calendarDate, ineligibleReason, INELIGIBLE_MESSAGES } from './eligibili
 import { nextRouteNumber } from './numbering.js';
 import { grantLease, requireLease } from './lease.js';
 import { assertIssueNotStarted } from '../warehouse/issue-guard.js';
+import { publishAwaitingChanged } from '../warehouse/awaiting.js';
 import { confirmWithinTransaction, completeActiveRouteIfAllResolved } from './lifecycle.js';
 
 /**
@@ -694,6 +695,11 @@ export async function removeFromActiveRoute(
       await bumpVersion(tx, routeId, input.expectedVersion);
     }
     await publishRoute(tx, 'route.updated', routeId, [input.orderId]);
+    /*
+     * Снятый с отгруженного листа заказ снова ждёт приёмки — и очередь об этом
+     * узнаёт своей темой: у событий листа другая аудитория.
+     */
+    await publishAwaitingChanged(tx, routeId);
 
     /*
      * Прежнего курьера уведомляем ОТДЕЛЬНО и адресно.

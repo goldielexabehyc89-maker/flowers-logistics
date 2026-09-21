@@ -37,10 +37,19 @@ const uploadSchema = z.object({
   content: z.string().min(1).max(MAX_BODY_BYTES),
 });
 
+/** Строка так, как её показал предпросмотр: сервер сверит, а не поверит. */
+const approvedRowSchema = z.object({
+  rowNo: z.number().int().min(1).max(1_000_000),
+  state: z.enum(['ready', 'possible_duplicate']),
+  courierUserId: z.string().uuid(),
+  operationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amountMinor: z.string().regex(/^\d{1,15}$/),
+});
+
 const confirmSchema = uploadSchema.extend({
   idempotencyKey: z.string().trim().min(8).max(120),
-  /** Возможные повторы, которые администратор решил провести — номерами строк файла. */
-  acceptRows: z.array(z.number().int().min(1).max(1_000_000)).max(10_000).default([]),
+  /** Показанные и подтверждённые строки: готовые плюс явно принятые повторы. */
+  approved: z.array(approvedRowSchema).max(10_000),
 });
 
 const listSchema = z.object({
@@ -100,9 +109,9 @@ export async function registerPayoutImportRoutes(
   );
 
   /**
-   * Подтверждение: файл разбирается и проверяется заново уже под блокировкой,
-   * записи получают ключ «хеш файла + строка», повтор запроса возвращает тот
-   * же импорт.
+   * Подтверждение: файл разбирается и проверяется заново в общей очереди,
+   * результат сверяется с показанными строками, записи получают ключ
+   * «хеш файла + строка», повтор запроса возвращает тот же импорт.
    */
   app.post(
     '/api/logistics/payout-imports',
@@ -116,7 +125,7 @@ export async function registerPayoutImportRoutes(
         fileName: body.fileName,
         content: decodeFile(body.content),
         idempotencyKey: body.idempotencyKey,
-        acceptRows: body.acceptRows,
+        approved: body.approved,
         context: contextOf(request),
       });
 
