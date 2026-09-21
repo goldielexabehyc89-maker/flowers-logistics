@@ -41,6 +41,19 @@ describe('обновление данных по событиям', () => {
     }
   });
 
+  it('отгрузка листа обновляет «Ожидают приёмки» и не трогает ленту заказа', () => {
+    /*
+     * У очереди приёмки своя тема: складской поток комплектования управляющему
+     * и менеджеру не рассылается, а раздел им открыт. Тема обязана бить ровно
+     * в ключ очереди — список и бейдж вкладки, — и не считаться событием
+     * заказа: иначе каждая отгрузка перечитывала бы ленты всех открытых заказов.
+     */
+    const keys = invalidationKeysFor('warehouse.awaiting_changed').map((key) => key.join('.'));
+    expect(keys).toContain('warehouse-awaiting');
+    expect(keys).not.toContain('order-timeline');
+    expect(keys).not.toContain('status');
+  });
+
   it('событие пользователя не трогает список заказов', () => {
     const keys = invalidationKeysFor('user.updated').map((key) => key.join('.'));
     expect(keys).toContain('users');
