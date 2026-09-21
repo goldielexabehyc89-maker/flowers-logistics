@@ -18,6 +18,7 @@ import { publishRealtimeEvent } from '../realtime/events.js';
 import { enqueueRouteActivatedStateSync } from '../integrations/moysklad/state-sync.js';
 import { enqueueMkadDistanceForRoute } from '../finance/mkad-auto.js';
 import { normalizeCellCode } from './cell-code.js';
+import { AWAITING_INTAKE_ROLES } from './awaiting.js';
 import { blockingFlags, resolveOrderByNumber } from './order-lookup.js';
 import {
   assemblyRoundOf,
@@ -785,6 +786,19 @@ export async function activateRouteWithinTransaction(
     topic: 'warehouse.route_flow_changed',
     payload: { routeId: route.id, orderId: input.orderId, action: 'ROUTE_ACTIVATED' },
     audienceRoles: [...FLOW_AUDIENCE],
+  });
+  /*
+   * Отгрузка убирает заказы листа из «Ожидают приёмки» — а этот раздел открыт
+   * ещё управляющему и менеджеру выдачи, которым складской поток комплектования
+   * намеренно не рассылается. Поток фильтруется по ролям адресата, и без
+   * отдельного события двое из четырёх ролей раздела видели бы уехавшую
+   * коробку до перезагрузки страницы. Своя тема с узкой полезной нагрузкой:
+   * только идентификатор листа.
+   */
+  await publishRealtimeEvent(tx, {
+    topic: 'warehouse.awaiting_changed',
+    payload: { routeId: route.id },
+    audienceRoles: [...AWAITING_INTAKE_ROLES],
   });
   /*
    * Логист и КУРЬЕР обязаны увидеть, что маршрут уехал.

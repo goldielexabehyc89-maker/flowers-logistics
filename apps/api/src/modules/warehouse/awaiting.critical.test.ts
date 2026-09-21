@@ -32,6 +32,9 @@ import { createStorageCell, unknownOccupancy, type CellDeps } from './service.js
 import { receiveOrder, withdrawOrder, type FlowDeps } from './placement.js';
 import { listAwaitingIntake, AWAITING_INTAKE_ROLES } from './awaiting.js';
 import { issueToCustomer, type PickupDeps } from '../pickup/service.js';
+import { cancelIssueSession, checkOrderForIssue, confirmCourier, shipRoute } from './route-flow.js';
+import { cancelShipment, shipRouteManually } from '../routing/lifecycle.js';
+import { saveManualIssue } from '../settings/service.js';
 
 let ctx: TestContext;
 let flow: FlowDeps;
@@ -606,5 +609,317 @@ describe('узкая граница «Ожидают приёмки» (PICKUP_WA
     const noCutoff = await listAwaitingIntake(ctx.db, { limit: 500, search: tag });
     expect(noCutoff.items.map((item) => item.orderNumber)).toContain(before.number);
     expect(noCutoff.counts.all).toBe(4);
+  });
+});
+
+// --- Отгружен курьеру без ячейки ---------------------------------------------
+
+/**
+ * Подтверждённый лист с курьером, в котором стоят переданные заказы.
+ *
+ * Ячеек у заказов нет намеренно: проверяется именно коробка, которую передали
+ * курьеру, ни разу не поставив на полку.
+ */
+async function seedConfirmedRoute(orderIds: string[]): Promise<{
+  routeId: string;
+  routeNumber: string;
+  version: number;
+  courier: AuthenticatedActor;
+  keeper: AuthenticatedActor;
+}> {
+  const admin = await actorFor(['ADMIN']);
+  const keeper = await actorFor(['WAREHOUSE']);
+  const courierUser = await seedUser(ctx.db, { roles: ['COURIER'] });
+  const courier = {
+    userId: courierUser.id,
+    roles: ['COURIER'],
+    familyId: randomUUID(),
+  } as AuthenticatedActor;
+
+  const route = await ctx.db.deliveryRoute.create({
+    data: {
+      number: unique('AWR'),
+      deliveryDate: toDateColumn(DAY),
+      state: 'CONFIRMED',
+      vehicleType: 'CAR',
+      createdById: admin.userId,
+      courierUserId: courier.userId,
+    },
+    select: { id: true, number: true, version: true },
+  });
+  let position = 1;
+  for (const orderId of orderIds) {
+    await ctx.db.routeOrder.create({
+      data: { routeId: route.id, orderId, position, addedById: admin.userId },
+    });
+    position += 1;
+  }
+  return {
+    routeId: route.id,
+    routeNumber: route.number,
+    version: route.version,
+    courier,
+    keeper,
+  };
+}
+
+/** Складская отгрузка со сканированием: подтверждение курьера, отметки, выдача. */
+async function shipByScanning(
+  route: { routeId: string; courier: AuthenticatedActor; keeper: AuthenticatedActor },
+  orderNumbers: string[],
+): Promise<void> {
+  await confirmCourier(
+    flow,
+    route.keeper,
+    route.routeId,
+    { courierUserId: route.courier.userId },
+    CONTEXT,
+  );
+  for (const orderNumber of orderNumbers) {
+    await checkOrderForIssue(flow, route.keeper, route.routeId, { orderNumber }, CONTEXT);
+  }
+  await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+}
+
+async function setManualIssue(enabled: boolean): Promise<void> {
+  const admin = await actorFor(['ADMIN']);
+  const current = await ctx.db.systemSetting.findUnique({
+    where: { currentKey: 'routing.manualIssue' },
+    select: { version: true, value: true },
+  });
+  if ((current?.value as { enabled?: boolean } | null)?.enabled === enabled) {
+    return;
+  }
+  await saveManualIssue(ctx.db, admin, {
+    value: { enabled },
+    expectedVersion: current?.version ?? 0,
+    ip: null,
+    userAgent: null,
+  });
+}
+
+/** Полная картина по одному заказу: список, поиск, счётчики, бейдж. */
+async function presence(order: { id: string; number: string }): Promise<{
+  listed: boolean;
+  found: boolean;
+  countedInAll: number;
+  fullTotal: number;
+}> {
+  const page = await listAwaitingIntake(ctx.db, {});
+  const search = await listAwaitingIntake(ctx.db, { search: order.number });
+  return {
+    listed: page.items.some((item) => item.orderId === order.id),
+    found: search.items.some((item) => item.orderId === order.id),
+    countedInAll: search.counts.all,
+    fullTotal: page.fullTotal,
+  };
+}
+
+describe('отгружен курьеру без ячейки', () => {
+  it('до отгрузки виден; скан без отгрузки не скрывает; складская отгрузка скрывает везде', async () => {
+    /*
+     * Коробку передали курьеру, ни разу не поставив на полку: размещения нет,
+     * выдачи покупателю нет — и заказ оставался в «Ожидают приёмки», хотя
+     * физически уехал. Факт отгрузки — переход листа в «отгружен».
+     */
+    const order = await seedAssembled();
+    const route = await seedConfirmedRoute([order.id]);
+
+    // 1. Собран, ни разу не размещён, лист ещё не отгружен — виден.
+    expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+    const before = (await presence(order)).fullTotal;
+
+    // 2. Подтверждение курьера и отметка — это ещё не отгрузка: виден.
+    await confirmCourier(
+      flow,
+      route.keeper,
+      route.routeId,
+      { courierUserId: route.courier.userId },
+      CONTEXT,
+    );
+    await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: order.number },
+      CONTEXT,
+    );
+    expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+
+    // 3. Завершённая отгрузка: ушёл из списка, поиска и счётчиков — одним условием.
+    await shipRoute(flow, route.keeper, route.routeId, CONTEXT);
+    const after = await presence(order);
+    expect(after).toMatchObject({ listed: false, found: false, countedInAll: 0 });
+    expect(after.fullTotal).toBe(before - 1);
+
+    // Размещения так и не появилось: скрыт именно фактом отгрузки.
+    expect(await ctx.db.orderPlacement.count({ where: { orderId: order.id } })).toBe(0);
+
+    // 5. Повтор запроса и «перезагрузка» (новый запрос) заказ не возвращают.
+    expect(await presence(order)).toMatchObject({ listed: false, found: false });
+    const countOnly = await listAwaitingIntake(ctx.db, { countOnly: true });
+    expect(countOnly.fullTotal).toBe(after.fullTotal);
+  });
+
+  it('ручная отгрузка логистом без ячейки скрывает так же', async () => {
+    /*
+     * Ручная отгрузка сессии не открывает и отметок не ставит — поэтому одной
+     * проверки завершённой сессии было бы недостаточно. Оба пути сходятся
+     * к переходу листа в «отгружен», и очередь смотрит на него.
+     */
+    const order = await seedAssembled();
+    const route = await seedConfirmedRoute([order.id]);
+    const logist = await actorFor(['LOGISTICIAN']);
+    await setManualIssue(true);
+    expect(await presence(order)).toMatchObject({ listed: true });
+
+    await shipRouteManually(
+      { db: ctx.db },
+      logist,
+      route.routeId,
+      { expectedVersion: route.version },
+      CONTEXT,
+    );
+
+    expect(await presence(order)).toMatchObject({ listed: false, found: false, countedInAll: 0 });
+    expect(await ctx.db.orderPlacement.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('отменённая незавершённая сессия заказ не скрывает', async () => {
+    const order = await seedAssembled();
+    const route = await seedConfirmedRoute([order.id]);
+
+    await confirmCourier(
+      flow,
+      route.keeper,
+      route.routeId,
+      { courierUserId: route.courier.userId },
+      CONTEXT,
+    );
+    await checkOrderForIssue(
+      flow,
+      route.keeper,
+      route.routeId,
+      { orderNumber: order.number },
+      CONTEXT,
+    );
+    await cancelIssueSession(
+      flow,
+      route.keeper,
+      route.routeId,
+      { reason: 'курьер уехал без листа' },
+      CONTEXT,
+    );
+
+    // Лист остался неотгруженным — коробка по-прежнему ждёт приёмки.
+    expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+  });
+
+  it('отмена отгрузки возвращает заказ: факт больше не действует', async () => {
+    /*
+     * Исключение держится РОВНО пока действует факт отгрузки. Лист вернули в
+     * «не отгружен» — коробка снова на складе и снова ждёт приёмки.
+     */
+    const order = await seedAssembled();
+    const route = await seedConfirmedRoute([order.id]);
+    await shipByScanning(route, [order.number]);
+    expect(await presence(order)).toMatchObject({ listed: false });
+
+    const admin = await actorFor(['ADMIN']);
+    const shipped = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.routeId },
+      select: { version: true },
+    });
+    await cancelShipment(
+      { db: ctx.db },
+      admin,
+      route.routeId,
+      { expectedVersion: shipped.version, mode: 'ALL', reason: 'лист не уехал' },
+      CONTEXT,
+    );
+
+    expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+  });
+
+  it('новый круг сборки после отгрузки появляется в приёмке, прежняя отгрузка не мешает', async () => {
+    /*
+     * Пересборка участие в листе не снимает — круги разводит сравнение. Без
+     * привязки факта отгрузки ко времени сборки текущего круга заказ, собранный
+     * заново после отгрузки, не появился бы в приёмке никогда.
+     */
+    const order = await seedProductionOrder();
+    const florist = await assembleBy(order.id);
+    const route = await seedConfirmedRoute([order.id]);
+    await shipByScanning(route, [order.number]);
+    expect(await presence(order)).toMatchObject({ listed: false });
+
+    // Штатный возврат в работу и новая сборка того же заказа.
+    const admin = await actorFor(['ADMIN']);
+    await reopenOrder(ctx.db, admin, { orderId: order.id, reason: 'пересборка' }, CONTEXT);
+    expect(await presence(order)).toMatchObject({ listed: false });
+    const reopened = await ctx.db.deliveryOrder.findUniqueOrThrow({
+      where: { id: order.id },
+      select: { fulfillmentProcessVersion: true },
+    });
+    await assembleOrder(
+      ctx.db,
+      florist,
+      { orderId: order.id, expectedProcessVersion: reopened.fulfillmentProcessVersion },
+      CONTEXT,
+    );
+
+    // Лист по-прежнему отгружен, но собрано ПОСЛЕ отгрузки — коробка ждёт приёмки.
+    const active = await ctx.db.deliveryRoute.findUniqueOrThrow({
+      where: { id: route.routeId },
+      select: { state: true },
+    });
+    expect(active.state).toBe('ACTIVE');
+    expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+  });
+
+  it('снятие из активного маршрута администратором возвращает заказ в приёмку', async () => {
+    /*
+     * Правило снятия не меняется: участие закрывается, а очередь смотрит на
+     * АКТУАЛЬНОЕ участие — прежняя отгрузка на снятый заказ больше не давит.
+     */
+    const order = await seedAssembled();
+    const route = await seedConfirmedRoute([order.id]);
+    await shipByScanning(route, [order.number]);
+    expect(await presence(order)).toMatchObject({ listed: false });
+
+    const admin = await actorFor(['ADMIN']);
+    await ctx.db.routeOrder.updateMany({
+      where: { routeId: route.routeId, orderId: order.id, removedAt: null },
+      data: {
+        removedAt: new Date(),
+        removedById: admin.userId,
+        removalReason: 'RETURNED_TO_UNASSIGNED',
+      },
+    });
+
+    expect(await presence(order)).toMatchObject({ listed: true, found: true, countedInAll: 1 });
+  });
+
+  it('отгрузка из ячейки и выданный самовывоз работают как прежде', async () => {
+    // Из ячейки: скрывает уже размещение текущего круга — отгрузка ничего не ломает.
+    const placed = await seedAssembled();
+    const keeper = await actorFor(['WAREHOUSE']);
+    const cell = await seedCell();
+    await receiveOrder(flow, keeper, { orderNumber: placed.number, cellCode: cell.code }, CONTEXT);
+    const route = await seedConfirmedRoute([placed.id]);
+    await shipByScanning(route, [placed.number]);
+    expect(await presence(placed)).toMatchObject({ listed: false, found: false });
+
+    // Самовывоз: выданный покупателю без ячейки исключён терминальным фактом.
+    const pickup = await seedAssembled({ deliveryMethodId: MOYSKLAD_IDS.deliveryMethodPickup });
+    const manager = await actorFor(['MANAGER']);
+    const pickups: PickupDeps = { db: ctx.db };
+    await issueToCustomer(
+      pickups,
+      manager,
+      { orderNumber: pickup.number, source: 'SCAN' },
+      CONTEXT,
+    );
+    expect(await presence(pickup)).toMatchObject({ listed: false, found: false });
   });
 });

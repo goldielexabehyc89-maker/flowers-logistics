@@ -8410,6 +8410,112 @@ test('два сеанса: самовывоз виден у менеджера �
   await keeperContext.close();
 });
 
+/**
+ * «Ожидают приёмки» и коробка, уехавшая без ячейки.
+ *
+ * Заказ собран и ни разу не стоял на полке. До отгрузки он обязан быть в
+ * очереди приёмки; подтверждение курьера и внесение в лист — ещё не отгрузка;
+ * завершённая складская отгрузка убирает его у управляющего без перезагрузки
+ * вместе с бейджем вкладки. Управляющий здесь не случаен: событие отгрузки
+ * фильтруется по ролям адресата, и раньше до него не доходило.
+ */
+test('«Ожидают приёмки»: отгруженный курьеру без ячейки уходит у управляющего без F5', async ({
+  page,
+  browser,
+  request,
+}: {
+  page: Page;
+  browser: Browser;
+  request: APIRequestContext;
+}) => {
+  const stand = seedWarehouseStand();
+  const order = stand['заказ ждёт приёмки'] ?? '';
+  const routeNumber = stand['мл без ячейки'] ?? '';
+  const secondOrder = stand['заказ не собран'] ?? '';
+  expect(order).not.toBe('');
+
+  // 1. Администратор: заводит управляющего и включает ручной ввод склада.
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const adminAuth = await request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  const adminToken = ((await adminAuth.json()) as { accessToken: string }).accessToken;
+  const headers = { authorization: `Bearer ${adminToken}` };
+
+  const supPhone = uniquePhone();
+  const created = await request.post('/api/users', {
+    headers,
+    data: { fullName: 'Управляющий Приёмки', phone: supPhone, roles: ['SUPERVISOR'] },
+  });
+  expect(created.status()).toBe(201);
+  const supCode = ((await created.json()) as { activationCode: string }).activationCode;
+
+  const settings = await request.get('/api/settings/planning', { headers });
+  const manual = (
+    (await settings.json()) as {
+      warehouseManualEntry: { value: { enabled: boolean }; version: number };
+    }
+  ).warehouseManualEntry;
+  if (!manual.value.enabled) {
+    const saved = await request.put('/api/settings/warehouse/manual-entry', {
+      headers,
+      data: { value: { enabled: true }, expectedVersion: manual.version },
+    });
+    expect(saved.status()).toBe(200);
+  }
+
+  // 2. Управляющий в отдельном окне открывает «Склад → Ожидают приёмки».
+  const watcherContext = await browser.newContext();
+  const watcher = await watcherContext.newPage();
+  await activate(watcher, supPhone, supCode, '3579');
+  await openSection(watcher, 'Склад');
+  await watcher.getByTestId('wh-tab-awaiting').click();
+  const card = watcher.locator(`[data-testid="wh-awaiting-card"][data-order-number="${order}"]`);
+  await expect(card).toHaveCount(1);
+  const awaitingCountNow = async (): Promise<number> => {
+    const badge = watcher.getByTestId('wh-tab-awaiting-count');
+    return (await badge.count()) === 0 ? 0 : Number(await badge.innerText());
+  };
+  const before = await awaitingCountNow();
+  expect(before).toBeGreaterThan(0);
+
+  // 3. Кладовщик отгружает лист без ячейки: подтверждение курьера и внесение
+  //    заказов — заказ всё ещё в очереди приёмки.
+  await openSection(page, 'Склад');
+  await page.getByTestId('wh-tab-issue').click();
+  // Лист лежит в карточке своего курьера: открываем её по телефону, как склад.
+  const issueRoute = await openIssueRoute(page, routeNumber, stand['курьер один'] ?? '');
+  await expect(issueRoute).toBeVisible();
+  await issueRoute.getByTestId('issue-ship').click();
+  const ship = page.getByTestId('issue-ship-dialog');
+  await expect(ship).toBeVisible();
+  await page.getByTestId('issue-confirm-courier').click();
+  await expect(page.getByTestId('issue-progress')).toHaveText('Внесено: 0 из 2');
+  for (const [index, number] of [order, secondOrder].entries()) {
+    await page.getByTestId('issue-manual-order').fill(number);
+    await ship.getByRole('button', { name: 'Внести' }).click();
+    await expect(page.getByTestId('issue-progress')).toHaveText(`Внесено: ${index + 1} из 2`);
+  }
+  // Внесение — не отгрузка: у управляющего заказ на месте.
+  await expect(card).toHaveCount(1);
+  expect(await awaitingCountNow()).toBe(before);
+
+  // 4. Финальная отгрузка: заказ и бейдж уходят у управляющего без перезагрузки.
+  await page.getByTestId('issue-ship-submit').click();
+  await expect(card).toHaveCount(0);
+  await expect.poll(awaitingCountNow).toBe(before - 1);
+
+  // 5. Перезагрузка и повторный вход не возвращают заказ.
+  await watcher.reload();
+  await watcher.getByTestId('wh-tab-awaiting').click();
+  await expect(watcher.getByTestId('wh-awaiting')).toBeVisible();
+  await expect(card).toHaveCount(0);
+  await watcher.getByTestId('wh-awaiting-search').fill(order);
+  await expect(card).toHaveCount(0);
+
+  await watcherContext.close();
+});
+
 test('два сеанса: управляющий видит уход выданного самовывоза из обеих очередей без F5', async ({
   page,
   browser,
