@@ -17,7 +17,7 @@
 
 import type { CourierLedgerKind } from '../../generated/prisma/client.js';
 import type { TransactionClient } from '../auth/sessions.js';
-import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { appendEntry, accrualKey, reversalKey, reverseEntry } from './ledger.js';
 import {
   ledgerCoversDate,
@@ -608,13 +608,34 @@ const ATTEMPT_KINDS: readonly CourierLedgerKind[] = ['ATTEMPT_FEE'];
  */
 export type ReversalScope = 'SYSTEM' | 'ATTEMPT';
 
+/**
+ * Каким днём учитывать обратные записи — тоже решает вызывающий.
+ *
+ * `EVENT_DAY` — одним общим днём события, снявшего деньги. Так живёт отмена
+ * РЕЗУЛЬТАТА доставки: логист исправил ошибку сегодня, и итоги закрытого дня
+ * остаются как были. Пересчёт воспроизводит тот же путь днём фактической
+ * отмены результата.
+ *
+ * `ORIGINAL_DAY` — днём ИСХОДНОЙ записи, у каждой обратной свой. Так снимает
+ * деньги отмена ЗАКАЗА в источнике (решение владельца, 24.09.2026): курьер
+ * отвёз, а заказ потом отменили в МоемСкладе — начисления уходят из тех дней,
+ * в которых были учтены. Отчёт за день доставки показывает по заказу нули, а
+ * день обработки отмены отдельного минуса не получает. Общим днём обработки
+ * они снимались раньше: день доставки нёс полные суммы отменённого заказа, а
+ * спустя дни появлялся минус, к которому в тот день ничего не происходило.
+ *
+ * Исторической датой подменяется ТОЛЬКО день учёта: реальное время появления
+ * записи (`occurredAt`), аудит и отметка снятия попытки остаются фактическими.
+ */
+export type ReversalDating = { kind: 'EVENT_DAY'; day: string } | { kind: 'ORIGINAL_DAY' };
+
 export async function reverseDeliveryAccruals(
   tx: TransactionClient,
   input: {
     attemptId: string;
     actorUserId: string;
     reason: string;
-    operationDate: string;
+    dating: ReversalDating;
     scope: ReversalScope;
   },
 ): Promise<boolean> {
@@ -630,6 +651,7 @@ export async function reverseDeliveryAccruals(
       id: true,
       courierUserId: true,
       amountMinor: true,
+      operationDate: true,
       routeId: true,
       orderId: true,
       attemptId: true,
@@ -637,12 +659,23 @@ export async function reverseDeliveryAccruals(
   });
 
   for (const entry of entries) {
+    /*
+     * День учёта сторно: общий день события или день САМОЙ снимаемой записи.
+     *
+     * Во втором случае дата берётся из записи, а не из даты доставки заказа:
+     * корректировка оплаты и пересчитанные километры лежат в своих днях, и
+     * каждая снимается там, где была учтена. Пара «запись — её сторно» даёт
+     * ноль в каждом таком дне, а не только в сумме за период.
+     */
+    const operationDate =
+      input.dating.kind === 'ORIGINAL_DAY' ? entry.operationDate : toDateColumn(input.dating.day);
+
     await tx.courierLedgerEntry.create({
       data: {
         courierUserId: entry.courierUserId,
         kind: 'ADJUSTMENT',
         amountMinor: -entry.amountMinor,
-        operationDate: new Date(`${input.operationDate}T00:00:00.000Z`),
+        operationDate,
         actorUserId: input.actorUserId,
         reason: input.reason,
         routeId: entry.routeId,

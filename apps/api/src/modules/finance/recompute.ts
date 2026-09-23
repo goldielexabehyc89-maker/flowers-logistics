@@ -211,7 +211,10 @@ export async function recomputeDeliveriesForDate(
             attemptId: attempt.id,
             actorUserId: input.actorUserId,
             reason: attempt.cancellation.reason ?? 'Пересчёт: отмена результата доставки',
-            operationDate: moscowCalendarDate(attempt.cancellation.occurredAt),
+            dating: {
+              kind: 'EVENT_DAY',
+              day: moscowCalendarDate(attempt.cancellation.occurredAt),
+            },
             /*
              * Тот же повод — та же область, что у боевого пути.
              *

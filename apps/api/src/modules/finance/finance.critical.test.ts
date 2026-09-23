@@ -625,7 +625,7 @@ describe('деньги доставки', () => {
       attemptId,
       actorUserId: logist.userId,
       reason: 'ошибочная доставка',
-      operationDate: day,
+      dating: { kind: 'EVENT_DAY', day },
       scope: 'ATTEMPT',
     });
 
@@ -737,7 +737,7 @@ describe('деньги доставки', () => {
       attemptId: byResult.attemptId,
       actorUserId: logist.userId,
       reason: 'результат отменён',
-      operationDate: day,
+      dating: { kind: 'EVENT_DAY', day },
       scope: 'ATTEMPT',
     });
     const leftAfterResult = await ctx.db.courierLedgerEntry.count({
@@ -752,7 +752,7 @@ describe('деньги доставки', () => {
       attemptId: byOrder.attemptId,
       actorUserId: logist.userId,
       reason: 'заказ отменён в источнике',
-      operationDate: day,
+      dating: { kind: 'EVENT_DAY', day },
       scope: 'SYSTEM',
     });
     const leftAfterOrder = await ctx.db.courierLedgerEntry.count({
@@ -1297,7 +1297,7 @@ describe('наличные в строке отчёта', () => {
       attemptId,
       actorUserId: logist.userId,
       reason: 'результат отменён логистом',
-      operationDate: day,
+      dating: { kind: 'EVENT_DAY', day },
       scope: 'ATTEMPT',
     });
 
