@@ -6910,15 +6910,18 @@ test('расчёты: «Показать ещё» добавляет дни бе
   }
 
   /*
-   * 60 групп «день + курьер»: 20 дней × 3 курьера, по 100 ₽. Период берётся с
-   * 40-го по 21-й день назад: соседние сценарии живут вокруг «сегодня», и их
-   * группы в этот отбор не попадают — счёт страниц детерминирован.
+   * 60 групп «день + курьер»: 20 дней × 3 курьера, по 100 ₽. Период берётся в
+   * прошлом, не ближе 21 дня назад: соседние сценарии живут вокруг «сегодня»,
+   * и их группы в этот отбор не попадают — счёт страниц детерминирован. Окно
+   * выбирается по номеру запуска из шестнадцати непересекающихся, чтобы
+   * повторные прогоны в одной базе не складывали группы друг с другом.
    */
-  const periodEnd = dayBefore(today, 21);
-  const periodStart = dayBefore(today, 40);
   const runId = Date.now();
+  const base = 21 + (runId % 16) * 20;
+  const periodEnd = dayBefore(today, base);
+  const periodStart = dayBefore(today, base + 19);
   for (const [index, courier] of couriers.entries()) {
-    for (let day = 21; day <= 40; day += 1) {
+    for (let day = base; day < base + 20; day += 1) {
       const recorded = await page.request.post('/api/logistics/ledger/opening-debt', {
         headers,
         data: {
@@ -7038,7 +7041,9 @@ test('расчёты: «Показать ещё» добавляет дни бе
     data: {
       courierUserId: couriers[0]?.id ?? '',
       amountMinor: '10000',
-      operationDate: periodEnd,
+      // Свёрнутая группа в середине списка: новая запись не добавляет видимых
+      // строк, поэтому проверка прокрутки не зависит от якорения браузера.
+      operationDate: dayBefore(today, base + 9),
       reason: 'realtime после догрузки',
       idempotencyKey: `load-more:${runId}:realtime`,
     },
@@ -7069,7 +7074,7 @@ test('расчёты: «Показать ещё» добавляет дни бе
 
   // --- 4. Смена отбора во время незавершённой догрузки ---
   // Период на 15 дней: 45 групп — снова две страницы и кнопка.
-  await page.getByTestId('reports-from').fill(dayBefore(today, 35));
+  await page.getByTestId('reports-from').fill(dayBefore(today, base + 14));
   await expect(groups).toHaveCount(25, { timeout: 20_000 });
   plan = 'hold';
   heldLimit = '50';
