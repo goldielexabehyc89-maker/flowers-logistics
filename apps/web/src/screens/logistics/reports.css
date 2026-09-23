@@ -809,3 +809,21 @@
   font-size: var(--log-font-xs);
   white-space: nowrap;
 }
+
+/* «Показать ещё»: кнопка и, при отказе догрузки, ошибка с повтором рядом. */
+.reports__more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+}
+
+.reports__retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent-link);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
