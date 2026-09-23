@@ -12,7 +12,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { useToast } from '../../ui/ToastProvider';
 import {
@@ -490,7 +490,21 @@ export function ReportsScreen(): React.JSX.Element {
    * а подробности человек открывает сам по конкретному курьеру.
    */
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const [pages, setPages] = useState(1);
+  /**
+   * Сколько страниц групп показано — для ТЕКУЩЕГО отбора.
+   *
+   * Число страниц привязано к отбору (период и курьер): другой отбор начинается
+   * с первой страницы сразу, в том же рендере, без промежуточного запроса со
+   * старым числом страниц и без шанса подмешать к новому списку поздний ответ
+   * прежнего.
+   */
+  const selectionKey = `${from}|${to}|${courierUserId}`;
+  const [paging, setPaging] = useState<{ selection: string; pages: number }>({
+    selection: selectionKey,
+    pages: 1,
+  });
+  const pages = paging.selection === selectionKey ? paging.pages : 1;
+  const showMore = (): void => setPaging({ selection: selectionKey, pages: pages + 1 });
 
   const toggle = (key: string): void =>
     setExpanded((current) => {
@@ -545,11 +559,52 @@ export function ReportsScreen(): React.JSX.Element {
     return search.toString();
   };
 
+  /** Ключ запроса того же отбора: отличается только числом страниц. */
+  const isSameSelection = (key: readonly unknown[]): boolean =>
+    key[1] === from && key[2] === to && key[3] === courierUserId;
+
   const settlements = useQuery({
     queryKey: ['settlements', from, to, courierUserId, pages],
     enabled: mode === 'SETTLEMENTS',
     queryFn: () => client.get<SettlementReport>(`/api/logistics/reports/settlements?${params()}`),
+    /*
+     * «Показать ещё» — тот же отбор с бо́льшим числом групп. Пока следующая
+     * страница едет, на экране остаётся прежняя.
+     *
+     * Без этого новое число страниц означало новый ключ запроса без данных:
+     * таблица заменялась общим загрузчиком «Считаем расчёты…», а затем
+     * собиралась заново с нуля — отсюда мигание всего экрана и потеря
+     * прокрутки. Другой отбор (период, курьер) прежние данные не наследует:
+     * это действительно новая выборка, и загрузчик там уместен.
+     */
+    placeholderData: (previous, previousQuery) =>
+      previousQuery !== undefined && isSameSelection(previousQuery.queryKey) ? previous : undefined,
   });
+
+  /*
+   * Последний успешно показанный отчёт текущего отбора.
+   *
+   * Если следующая страница не загрузилась, уже показанные дни остаются на
+   * экране, а ошибка и «Повторить» встают рядом с кнопкой — вместо того чтобы
+   * заменить весь отчёт сообщением об ошибке.
+   */
+  const [lastReport, setLastReport] = useState<{
+    selection: string;
+    report: SettlementReport;
+  } | null>(null);
+  useEffect(() => {
+    if (settlements.data !== undefined && !settlements.isPlaceholderData) {
+      setLastReport({ selection: selectionKey, report: settlements.data });
+    }
+  }, [settlements.data, settlements.isPlaceholderData, selectionKey]);
+  const report =
+    settlements.data ?? (lastReport?.selection === selectionKey ? lastReport.report : undefined);
+  /** Едет следующая страница: прежние группы на экране, кнопка занята. */
+  const loadingMore =
+    settlements.isPlaceholderData ||
+    (settlements.isFetching && settlements.data === undefined && report !== undefined);
+  /** Следующая страница не загрузилась, но прежние группы на месте. */
+  const loadMoreError = settlements.isError && !settlements.isFetching && report !== undefined;
 
   const operations = useQuery({
     queryKey: ['operations-report', from, to],
@@ -826,16 +881,18 @@ export function ReportsScreen(): React.JSX.Element {
       </div>
 
       {mode === 'SETTLEMENTS' ? (
-        settlements.isPending ? (
-          <LoadingState title="Считаем расчёты…" />
-        ) : settlements.isError ? (
-          <ErrorState
-            title="Не удалось построить отчёт"
-            onRetry={() => void settlements.refetch()}
-          />
+        report === undefined ? (
+          settlements.isError ? (
+            <ErrorState
+              title="Не удалось построить отчёт"
+              onRetry={() => void settlements.refetch()}
+            />
+          ) : (
+            <LoadingState title="Считаем расчёты…" />
+          )
         ) : (
           <>
-            {settlements.data.ledgerActiveFrom === null && (
+            {report.ledgerActiveFrom === null && (
               <p className="reports__notice" role="status" data-testid="reports-ledger-off">
                 Финансовый учёт ещё не включён: начислений за период нет. Прошлые доставки
                 показываются с пометкой «Расчёт отсутствует».
@@ -868,32 +925,23 @@ export function ReportsScreen(): React.JSX.Element {
               <div className="reports__balance" data-testid="reports-balance">
                 <span className="reports__balance-title">
                   {
-                    balanceCaption(
-                      courierUserId,
-                      courierName,
-                      settlements.data.totals.closingBalanceMinor,
-                    ).title
+                    balanceCaption(courierUserId, courierName, report.totals.closingBalanceMinor)
+                      .title
                   }
                 </span>
                 <span className="reports__balance-value" data-testid="reports-closing">
-                  {formatMoney(settlements.data.totals.closingBalanceMinor)}
+                  {formatMoney(report.totals.closingBalanceMinor)}
                 </span>
                 <span className="reports__balance-words">
                   {
-                    balanceCaption(
-                      courierUserId,
-                      courierName,
-                      settlements.data.totals.closingBalanceMinor,
-                    ).words
+                    balanceCaption(courierUserId, courierName, report.totals.closingBalanceMinor)
+                      .words
                   }
                 </span>
-                {balanceCaption(
-                  courierUserId,
-                  courierName,
-                  settlements.data.totals.closingBalanceMinor,
-                ).showOpening ? (
+                {balanceCaption(courierUserId, courierName, report.totals.closingBalanceMinor)
+                  .showOpening ? (
                   <span className="reports__balance-opening">
-                    Начальный {formatMoney(settlements.data.totals.openingBalanceMinor)}
+                    Начальный {formatMoney(report.totals.openingBalanceMinor)}
                   </span>
                 ) : null}
               </div>
@@ -902,14 +950,14 @@ export function ReportsScreen(): React.JSX.Element {
                 <span className="reports__metrics-title">Показатели за период</span>
                 <div className="reports__summary" data-testid="reports-summary">
                   {[
-                    ['Наличные у курьера', settlements.data.totals.cashReceivedMinor],
-                    ['Сдано логисту', settlements.data.totals.handedToLogistMinor],
-                    ['Выдано курьеру', settlements.data.totals.issuedToCourierMinor],
-                    ['Оплата доставок', settlements.data.totals.deliveryFeesMinor],
-                    ['Оплачиваемые попытки', settlements.data.totals.attemptFeesMinor],
-                    ['Километры за МКАД', settlements.data.totals.distanceFeesMinor],
-                    ['Расходы', settlements.data.totals.expensesMinor],
-                    ['Доплаты', settlements.data.totals.bonusesMinor],
+                    ['Наличные у курьера', report.totals.cashReceivedMinor],
+                    ['Сдано логисту', report.totals.handedToLogistMinor],
+                    ['Выдано курьеру', report.totals.issuedToCourierMinor],
+                    ['Оплата доставок', report.totals.deliveryFeesMinor],
+                    ['Оплачиваемые попытки', report.totals.attemptFeesMinor],
+                    ['Километры за МКАД', report.totals.distanceFeesMinor],
+                    ['Расходы', report.totals.expensesMinor],
+                    ['Доплаты', report.totals.bonusesMinor],
                   ].map(([label, value]) => (
                     <div key={label} className="reports__cell">
                       <span className="reports__cell-label">{label}</span>
@@ -926,28 +974,27 @@ export function ReportsScreen(): React.JSX.Element {
               его заработок и не движение наличных, и смешивать их нельзя.
               В периодах после дня учёта сумма уже сидит в начальном балансе.
             */}
-            {settlements.data.totals.cashCorrectionsMinor !== '0' && (
+            {report.totals.cashCorrectionsMinor !== '0' && (
               <p
                 className="reports__notice"
                 role="status"
                 data-testid="reports-cash-corrections-total"
               >
-                Корректировки наличных за период:{' '}
-                {signOf(settlements.data.totals.cashCorrectionsMinor)}
-                {formatMoney(absMoney(settlements.data.totals.cashCorrectionsMinor))} — заказы
-                оплатили в МоемСкладе уже после доставки, столько наличных курьер не сдаёт.
+                Корректировки наличных за период: {signOf(report.totals.cashCorrectionsMinor)}
+                {formatMoney(absMoney(report.totals.cashCorrectionsMinor))} — заказы оплатили в
+                МоемСкладе уже после доставки, столько наличных курьер не сдаёт.
               </p>
             )}
 
-            {settlements.data.totals.openingDebtMinor !== '0' && (
+            {report.totals.openingDebtMinor !== '0' && (
               <p className="reports__notice" role="status" data-testid="reports-opening-debt-total">
-                Начальный долг за период: {formatMoney(settlements.data.totals.openingDebtMinor)} —
-                долг курьера перед компанией, возникший до перехода на ERP. Не заработок и не
-                движение наличных.
+                Начальный долг за период: {formatMoney(report.totals.openingDebtMinor)} — долг
+                курьера перед компанией, возникший до перехода на ERP. Не заработок и не движение
+                наличных.
               </p>
             )}
 
-            {settlements.data.days.length === 0 ? (
+            {report.days.length === 0 ? (
               <EmptyState title="За период доставок и операций не было" />
             ) : (
               <>
@@ -983,7 +1030,7 @@ export function ReportsScreen(): React.JSX.Element {
                       </tr>
                     </thead>
                     <tbody>
-                      {settlements.data.days.flatMap((day) =>
+                      {report.days.flatMap((day) =>
                         day.couriers.flatMap((group) => {
                           const key = `${day.date}:${group.courierUserId}`;
                           const open = expanded.has(key);
@@ -1381,14 +1428,35 @@ export function ReportsScreen(): React.JSX.Element {
                   </table>
                 </div>
 
-                {settlements.data.hasMore &&
-                  (canShowMore(settlements.data.hasMore, pages) ? (
-                    <Button
-                      data-testid="reports-more"
-                      onClick={() => setPages((current) => current + 1)}
-                    >
-                      Показать ещё
-                    </Button>
+                {report.hasMore &&
+                  (canShowMore(report.hasMore, pages) ? (
+                    <div className="reports__more" data-testid="reports-more-block">
+                      {/*
+                        Следующие дни ДОБАВЛЯЮТСЯ к показанным: пока страница
+                        едет, кнопка занята, список и прокрутка остаются.
+                      */}
+                      <Button
+                        data-testid="reports-more"
+                        disabled={loadingMore}
+                        aria-busy={loadingMore || undefined}
+                        onClick={showMore}
+                      >
+                        {loadingMore ? 'Загружаем…' : 'Показать ещё'}
+                      </Button>
+                      {loadMoreError && (
+                        <p className="reports__error" role="alert" data-testid="reports-more-error">
+                          Не удалось загрузить следующие дни.{' '}
+                          <button
+                            type="button"
+                            className="reports__retry"
+                            data-testid="reports-more-retry"
+                            onClick={() => void settlements.refetch()}
+                          >
+                            Повторить
+                          </button>
+                        </p>
+                      )}
+                    </div>
                   ) : (
                     <p className="reports__notice" role="status" data-testid="reports-limit">
                       Показаны первые {GROUPS_LIMIT} групп «день + курьер». Дальше отчёт не
