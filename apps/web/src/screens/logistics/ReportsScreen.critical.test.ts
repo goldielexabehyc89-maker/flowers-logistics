@@ -19,6 +19,8 @@ import {
   debtWords,
   formatMoney,
   journalColumn,
+  loadMoreControls,
+  pagesShown,
   rowExtra,
   SETTLEMENT_COLUMNS,
   signOf,
@@ -156,6 +158,31 @@ describe('предел листания', () => {
     expect(canShowMore(true, 39)).toBe(true);
     expect(canShowMore(true, 40)).toBe(false);
     expect(canShowMore(false, 1)).toBe(false);
+  });
+
+  it('число показанных страниц берётся из предела, с которым пришёл отчёт', () => {
+    expect(pagesShown(25)).toBe(1);
+    expect(pagesShown(60)).toBe(3);
+    expect(pagesShown(975)).toBe(39);
+    expect(pagesShown(1000)).toBe(40);
+    // Выгрузка без предела отдаёт всё: показана хотя бы одна страница.
+    expect(pagesShown(0)).toBe(1);
+  });
+
+  it('у последней допустимой страницы остаются индикатор и повтор, пока она не получена', () => {
+    /*
+     * Показано 975 групп (39 страниц), запрошена сороковая. Пока ответа нет
+     * или он не пришёл, на экране прежний отчёт с hasMore=true и limit=975 —
+     * и решение принимается по нему: кнопка с индикатором и «Повторить», а не
+     * сообщение о пределе. Прежде решение шло по ЗАПРОШЕННОЙ странице (40), и
+     * блок повтора заменялся сообщением «показаны первые 1000».
+     */
+    expect(loadMoreControls({ hasMore: true, limit: 975 })).toBe('more');
+    // Тысяча получена, а дальше ещё есть — теперь честное сообщение о пределе.
+    expect(loadMoreControls({ hasMore: true, limit: 1000 })).toBe('limit');
+    // Данных больше нет — ни кнопки, ни сообщения.
+    expect(loadMoreControls({ hasMore: false, limit: 60 })).toBe('none');
+    expect(loadMoreControls({ hasMore: true, limit: 25 })).toBe('more');
   });
 });
 

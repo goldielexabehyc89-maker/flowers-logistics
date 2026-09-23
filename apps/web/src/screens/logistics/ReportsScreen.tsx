@@ -140,6 +140,8 @@ interface SettlementReport {
   rows: SettlementRow[];
   days: DayGroup[];
   totalGroups: number;
+  /** Предел групп, с которым сервер собрал ЭТОТ ответ: сколько страниц реально показано. */
+  limit: number;
   hasMore: boolean;
   entries: LedgerEntry[];
   ledgerActiveFrom: string | null;
@@ -320,6 +322,31 @@ export function balanceCaption(
 /** Показывать ли кнопку «Показать ещё»: дальше предела отчёт не листается. */
 export function canShowMore(hasMore: boolean, pages: number): boolean {
   return hasMore && GROUPS_PER_PAGE * pages < GROUPS_LIMIT;
+}
+
+/** Сколько страниц групп РЕАЛЬНО показано — по пределу, с которым пришёл отчёт. */
+export function pagesShown(limit: number): number {
+  return Math.max(1, Math.ceil(limit / GROUPS_PER_PAGE));
+}
+
+/**
+ * Что стоит под таблицей: кнопка догрузки (с индикатором и «Повторить») или
+ * сообщение о пределе.
+ *
+ * Решается по ПОКАЗАННОМУ отчёту, а не по запрошенной странице. Пока едет
+ * последняя допустимая страница (975 → 1000) или она не загрузилась, на экране
+ * по-прежнему 975 групп — и человеку нужны индикатор и повтор, а не сообщение
+ * «показаны первые 1000», которое становится правдой только после успешного
+ * получения тысячной группы.
+ */
+export function loadMoreControls(report: {
+  hasMore: boolean;
+  limit: number;
+}): 'more' | 'limit' | 'none' {
+  if (!report.hasMore) {
+    return 'none';
+  }
+  return canShowMore(report.hasMore, pagesShown(report.limit)) ? 'more' : 'limit';
 }
 
 /**
@@ -505,6 +532,19 @@ export function ReportsScreen(): React.JSX.Element {
   });
   const pages = paging.selection === selectionKey ? paging.pages : 1;
   const showMore = (): void => setPaging({ selection: selectionKey, pages: pages + 1 });
+  /*
+   * Смена отбора СБРАСЫВАЕТ сохранённые страницы, а не только скрывает их.
+   *
+   * Одного вывода `pages = 1` для чужого отбора мало: после A → B → A прежние
+   * три страницы A всплывали снова, хотя обещано начинать каждый новый отбор
+   * с первой. Первый рендер нового отбора уже идёт с одной страницей (см.
+   * вывод выше), поэтому промежуточного запроса со старым пределом нет.
+   */
+  useEffect(() => {
+    setPaging((current) =>
+      current.selection === selectionKey ? current : { selection: selectionKey, pages: 1 },
+    );
+  }, [selectionKey]);
 
   const toggle = (key: string): void =>
     setExpanded((current) => {
@@ -1428,8 +1468,8 @@ export function ReportsScreen(): React.JSX.Element {
                   </table>
                 </div>
 
-                {report.hasMore &&
-                  (canShowMore(report.hasMore, pages) ? (
+                {loadMoreControls(report) !== 'none' &&
+                  (loadMoreControls(report) === 'more' ? (
                     <div className="reports__more" data-testid="reports-more-block">
                       {/*
                         Следующие дни ДОБАВЛЯЮТСЯ к показанным: пока страница
