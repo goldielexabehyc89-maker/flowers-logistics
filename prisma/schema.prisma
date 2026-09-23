@@ -3038,6 +3038,19 @@ enum LedgerReversalCause {
   MANUAL
 }
 
+/**
+ * Сторона переноса дня учёта.
+ * Перенос — связанная пара обратных записей одной категории: учёт начисления
+ * уходит из дня, где оно было учтено, и приходит в день его сторно. Сумма
+ * пары равна нулю, общий баланс не меняется.
+ */
+enum LedgerRelocationSide {
+  /// День, ИЗ которого учёт уходит: сумма противоположна переносимой записи.
+  OUT
+  /// День, В который учёт приходит: сумма равна переносимой записи.
+  IN
+}
+
 enum CourierLedgerKind {
   CASH_RECEIVED
   DELIVERY_FEE
@@ -3127,6 +3140,20 @@ model CourierLedgerEntry {
   /// блокировалась старой отменой заказа.
   reversalCause LedgerReversalCause?
 
+  /// Перенос дня учёта: КАКАЯ запись переносится. Только у обратной записи
+  /// без ссылки сторно; заполняется вместе со стороной.
+  ///
+  /// Отмена заказа в источнике снимает системные начисления в исходных днях
+  /// их учёта. Начисление, уже погашенное сторно ДРУГОГО дня (километры
+  /// пересчитали назавтра), второй раз снять нельзя — уникальность сторно, —
+  /// а несвязанная корректировка потеряла бы категорию и километры. Поэтому
+  /// его учёт переносится в день сторно парой записей OUT/IN: категория и
+  /// километры читаются из переносимой записи, сумма пары — ноль.
+  relocatesEntryId String?               @db.Uuid
+  relocatesEntry   CourierLedgerEntry?   @relation("LedgerRelocation", fields: [relocatesEntryId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  relocatedBy      CourierLedgerEntry[]  @relation("LedgerRelocation")
+  relocationSide   LedgerRelocationSide?
+
   /// Километры, ПО КОТОРЫМ начислена эта оплата за МКАД (десятые доли).
   ///
   /// Хранится, а не восстанавливается делением суммы на ставку: сумма уже
@@ -3140,6 +3167,8 @@ model CourierLedgerEntry {
 
   createdAt DateTime @default(now())
 
+  /// У переносимой записи не больше одной пары: сторона не повторяется.
+  @@unique([relocatesEntryId, relocationSide])
   @@index([courierUserId, operationDate])
   @@index([routeId])
   @@index([orderId])

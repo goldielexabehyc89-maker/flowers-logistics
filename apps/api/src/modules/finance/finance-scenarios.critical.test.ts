@@ -1970,6 +1970,148 @@ describe('исправленные километры и деньги за ни�
       }),
     ).toBe(1);
   });
+
+  it('пересчёт километров другим днём и отмена через день: каждый исходный день заказа в нуле', async () => {
+    /*
+     * Настоящий путь целиком: доставка с километрами, правка на следующий день,
+     * отмена в источнике через день — импортом и очередью. Правка разнесла
+     * начисление и его сторно по двум дням; отмена обязана обнулить ОБА дня,
+     * а не только снять действующую запись. Прежнее начисление второй раз не
+     * снимается — его учёт переносится связанной парой записей той же
+     * категории и с теми же километрами.
+     */
+    const scenario = await seedScenario({
+      sum: 300_000,
+      payedSum: 300_000,
+      perOrderMinor: 30_000n,
+      perKmMinor: 4_000n,
+    });
+    await seedGeo(scenario);
+    await seedDistance(scenario, 125);
+    await deliver(scenario);
+    expect(await sumKind(scenario.orderId, 'DISTANCE_FEE')).toBe(-50_000n);
+    // Задание МКАД, поставленное доставкой, отрабатывает вхолостую: километры уже оплачены.
+    expect(await runQueue(new Date(`${DAY}T18:00:00.000Z`), scenario)).toBe(1);
+    expect(await entryCount(scenario.orderId, 'DISTANCE_FEE')).toBe(1);
+
+    // Правка на следующий день: 12,5 → 20,0 км.
+    await seedDistance(scenario, 200);
+    const admin = await actorFor(['ADMIN']);
+    expect(
+      await ctx.db.$transaction((tx) =>
+        restateDistanceFee(tx, {
+          routeOrderId: scenario.routeOrderId,
+          actorUserId: admin.userId,
+          reason: 'Правка километров: маршрут построен по неверной точке',
+          operationDate: NEXT_DAY,
+        }),
+      ),
+    ).toBe(true);
+    expect((await report(DAY, DAY, scenario.courierId)).totals.distanceFeesMinor).toBe('50000');
+    expect((await report(NEXT_DAY, NEXT_DAY, scenario.courierId)).totals.distanceFeesMinor).toBe(
+      '30000',
+    );
+
+    // Отмена в источнике через день — настоящим импортом и настоящей очередью.
+    await syncSource(scenario, { sum: 300_000, payedSum: 300_000, cancelled: true });
+    const cursor = await lastEventId();
+    expect(await runQueue(new Date(`${LATER_DAY}T09:00:00.000Z`), scenario)).toBe(1);
+    expect(await ledgerEventsAfter(cursor)).toHaveLength(1);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+
+    // Каждый исходный день — в нуле, день отмены пуст.
+    const zero = (built: Awaited<ReturnType<typeof report>>): void => {
+      expect(built.totals.deliveryFeesMinor).toBe('0');
+      expect(built.totals.distanceFeesMinor).toBe('0');
+      expect(built.totals.adjustmentsMinor).toBe('0');
+      expect(
+        BigInt(built.totals.closingBalanceMinor) - BigInt(built.totals.openingBalanceMinor),
+      ).toBe(0n);
+      for (const group of built.days.flatMap((day) => day.couriers)) {
+        expect(group.distanceFeesMinor).toBe('0');
+        expect(group.distanceKmTenths).toBe(0);
+        expect(group.totalMinor).toBe('0');
+      }
+    };
+    const onDelivery = await report(DAY, DAY, scenario.courierId);
+    zero(onDelivery);
+    const row = onDelivery.rows.find((item) => item.orderId === scenario.orderId);
+    expect(row?.outcome).toBe('DELIVERED');
+    expect(row?.financeCancelled).toBe(true);
+    expect(row?.beyondMkadKmTenths).toBe(0);
+    expect(BigInt(row?.distanceFeeMinor ?? '1')).toBe(0n);
+    zero(await report(NEXT_DAY, NEXT_DAY, scenario.courierId));
+    expect((await report(LATER_DAY, LATER_DAY, scenario.courierId)).days).toHaveLength(0);
+    const period = await report(DAY, LATER_DAY, scenario.courierId);
+    zero(period);
+    expect(period.days.map((day) => day.date)).toEqual([NEXT_DAY, DAY]);
+    expect(await balanceOf(ctx.db, scenario.courierId, LATER_DAY)).toBe(0n);
+
+    // Перенос: связанная пара категории МКАД с километрами, сумма ноль.
+    const relocations = await ctx.db.courierLedgerEntry.findMany({
+      where: { orderId: scenario.orderId, relocatesEntryId: { not: null } },
+      select: {
+        relocationSide: true,
+        amountMinor: true,
+        operationDate: true,
+        relocatesEntry: { select: { kind: true, distanceKmTenths: true } },
+      },
+    });
+    expect(
+      relocations
+        .map((item) => [
+          item.relocationSide,
+          item.amountMinor,
+          item.operationDate.toISOString().slice(0, 10),
+          item.relocatesEntry?.kind,
+          item.relocatesEntry?.distanceKmTenths,
+        ])
+        .sort(),
+    ).toEqual([
+      ['IN', -50_000n, NEXT_DAY, 'DISTANCE_FEE', 125],
+      ['OUT', 50_000n, DAY, 'DISTANCE_FEE', 125],
+    ]);
+
+    // Повтор задания — воркером и явным вызовом обработчика: записей и событий нет.
+    const entriesAfter = await ctx.db.courierLedgerEntry.count({
+      where: { orderId: scenario.orderId },
+    });
+    const beforeReplay = await lastEventId();
+    expect(await runQueue(new Date(`${LATER_DAY}T10:00:00.000Z`), scenario)).toBe(0);
+    await ctx.db.$transaction((tx) =>
+      createOrderFinanceHandler({ now: () => new Date(`${LATER_DAY}T11:00:00.000Z`) })(
+        {
+          id: randomUUID(),
+          topic: ORDER_FINANCE_TOPIC,
+          idempotencyKey: unique('replay-cancel'),
+          payload: { reason: 'CANCEL', orderId: scenario.orderId },
+          attempts: 0,
+          maxAttempts: 5,
+        },
+        tx,
+      ),
+    );
+    expect(await ctx.db.courierLedgerEntry.count({ where: { orderId: scenario.orderId } })).toBe(
+      entriesAfter,
+    );
+    expect(await ledgerEventsAfter(beforeReplay)).toHaveLength(0);
+
+    // Поздний расчёт МКАД после отмены денег не возвращает и активной записи не создаёт.
+    await ctx.db.deliveryOrder.update({
+      where: { id: scenario.orderId },
+      data: { geoLatMicro: 55_400_000, geoLonMicro: 37_400_000 },
+    });
+    await ctx.db.$transaction((tx) => enqueueMkadDistanceForRouteOrder(tx, scenario.routeOrderId));
+    expect(
+      await runQueue(new Date(`${LATER_DAY}T12:00:00.000Z`), scenario, { meters: 30_000 }),
+    ).toBeGreaterThan(0);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: scenario.orderId, kind: 'DISTANCE_FEE', reversedBy: { is: null } },
+      }),
+    ).toBe(0);
+    expect(await contribution(scenario.orderId)).toBe(0n);
+  });
 });
 
 // --- Сценарий: повторная оплата после новой доставки --------------------------

@@ -14,6 +14,7 @@ import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-
 import { balanceOf, entriesOf, type LedgerEntryView } from './ledger.js';
 import {
   CASH_KINDS,
+  categoryKind,
   changeOf,
   groupSettlement,
   pageOfGroups,
@@ -210,10 +211,11 @@ export async function buildSettlementReport(
     bonusesMinor: changeOf(entries, ['BONUS']).toString(),
     /*
      * Здесь остаются только обратные записи, чью исходную операцию определить
-     * не удалось. В норме их нет: каждая отмена учтена в своей категории.
+     * не удалось. В норме их нет: каждая отмена и каждый перенос дня учёта
+     * учтены в своей категории.
      */
     adjustmentsMinor: entries
-      .filter((entry) => entry.kind === 'ADJUSTMENT' && entry.reversesKind === null)
+      .filter((entry) => categoryKind(entry) === 'ADJUSTMENT')
       .reduce((total, entry) => total + BigInt(entry.amountMinor), 0n)
       .toString(),
     openingDebtMinor: changeOf(entries, ['OPENING_DEBT']).toString(),
@@ -351,6 +353,23 @@ export async function buildSettlementReport(
         } else {
           km -= entry.reversesDistanceKmTenths;
         }
+        continue;
+      }
+      /*
+       * Перенос дня учёта двигает и километры: из дня начисления они уходят
+       * (OUT), в день сторно приходят (IN). Без этого день доставки после
+       * отмены показывал бы 12,5 км при нулевых деньгах за них.
+       */
+      if (entry.kind === 'ADJUSTMENT' && entry.relocatesKind === 'DISTANCE_FEE') {
+        seen = true;
+        if (entry.relocatesDistanceKmTenths === null) {
+          unknown = true;
+        } else {
+          km +=
+            entry.relocationSide === 'IN'
+              ? entry.relocatesDistanceKmTenths
+              : -entry.relocatesDistanceKmTenths;
+        }
       }
     }
     if (!seen) {
@@ -479,12 +498,20 @@ export async function buildSettlementReport(
        */
       financeCancelled: (() => {
         const accruals = own.filter((entry) => entry.kind !== 'ADJUSTMENT');
-        const reversedHere = new Set(
-          own
+        /*
+         * Запись закрыта в этом дне либо сторно того же дня, либо переносом
+         * учёта ИЗ этого дня: после переноса её деньги и километры в дне
+         * доставки сведены в ноль так же, как после сторно.
+         */
+        const closedHere = new Set([
+          ...own
             .filter((entry) => entry.reversesEntryId !== null)
             .map((entry) => entry.reversesEntryId as string),
-        );
-        return accruals.length > 0 && accruals.every((entry) => reversedHere.has(entry.id));
+          ...own
+            .filter((entry) => entry.relocationSide === 'OUT' && entry.relocatesEntryId !== null)
+            .map((entry) => entry.relocatesEntryId as string),
+        ]);
+        return accruals.length > 0 && accruals.every((entry) => closedHere.has(entry.id));
       })(),
       sourceCancelled: fact.attempt.order.cancelledInSource,
       totalMinor: own.reduce((total, entry) => total + BigInt(entry.amountMinor), 0n).toString(),

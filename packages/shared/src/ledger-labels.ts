@@ -47,12 +47,27 @@ export function ledgerKindLabel(kind: string): string {
  *
  * У обратной записи собственный вид всегда `ADJUSTMENT`, и без вида отменяемой
  * операции строка называлась бы одинаково для отмены долга, передачи и
- * расхода. Поэтому отмена называется по тому, что она отменяет.
+ * расхода. Поэтому отмена называется по тому, что она отменяет, а перенос дня
+ * учёта — по тому, что переносит, и по стороне: из какого дня учёт ушёл и в
+ * какой пришёл.
  */
-export function ledgerEntryTitle(entry: { kind: string; reversesKind?: string | null }): string {
+export function ledgerEntryTitle(entry: {
+  kind: string;
+  reversesKind?: string | null;
+  relocatesKind?: string | null;
+  relocationSide?: string | null;
+}): string {
   if (entry.kind !== 'ADJUSTMENT') {
     return ledgerKindLabel(entry.kind);
   }
   const reversed = entry.reversesKind ?? null;
-  return reversed === null ? ledgerKindLabel('ADJUSTMENT') : `Отмена: ${ledgerKindLabel(reversed)}`;
+  if (reversed !== null) {
+    return `Отмена: ${ledgerKindLabel(reversed)}`;
+  }
+  const relocated = entry.relocatesKind ?? null;
+  if (relocated !== null) {
+    const side = entry.relocationSide === 'IN' ? 'в день' : 'из дня';
+    return `Перенос учёта ${side}: ${ledgerKindLabel(relocated)}`;
+  }
+  return ledgerKindLabel('ADJUSTMENT');
 }

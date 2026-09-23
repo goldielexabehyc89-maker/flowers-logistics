@@ -26,6 +26,24 @@ describe('названия операций журнала', () => {
     );
   });
 
+  it('перенос дня учёта называется по переносимой операции и стороне', () => {
+    expect(
+      ledgerEntryTitle({
+        kind: 'ADJUSTMENT',
+        relocatesKind: 'DISTANCE_FEE',
+        relocationSide: 'OUT',
+      }),
+    ).toBe('Перенос учёта из дня: Оплата километров за МКАД');
+    expect(
+      ledgerEntryTitle({ kind: 'ADJUSTMENT', relocatesKind: 'DISTANCE_FEE', relocationSide: 'IN' }),
+    ).toBe('Перенос учёта в день: Оплата километров за МКАД');
+    // Сторно называется отменой даже при заполненном переносе: такой записи не бывает,
+    // но название не должно зависеть от порядка полей.
+    expect(
+      ledgerEntryTitle({ kind: 'ADJUSTMENT', reversesKind: 'OPENING_DEBT', relocatesKind: null }),
+    ).toBe('Отмена: Начальный долг');
+  });
+
   it('вид отменяемой операции неизвестен — остаётся общее название', () => {
     expect(ledgerEntryTitle({ kind: 'ADJUSTMENT', reversesKind: null })).toBe(
       'Обратная корректировка',

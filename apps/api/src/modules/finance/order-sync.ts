@@ -31,7 +31,7 @@ import type { OutboxHandler } from '../outbox/worker.js';
 import { enqueueOutbox } from '../outbox/producer.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { appendLedgerEntry } from './ledger.js';
-import { reverseDeliveryAccruals } from './accrual.js';
+import { ACCRUED_KINDS, reverseDeliveryAccruals } from './accrual.js';
 
 export const ORDER_FINANCE_TOPIC = 'finance.order_sync' as const;
 
@@ -311,12 +311,19 @@ export async function stripCancelledOrderFinance(
     });
   }
 
+  /*
+   * Попытки с системными начислениями — действующими ИЛИ уже погашенными.
+   *
+   * Погашенные нужны не меньше: сторно другого дня (километры пересчитали
+   * назавтра) оставляет дни попытки ненулевыми, и отмена обязана свести их —
+   * даже когда непогашенных записей у заказа не осталось вовсе. Отбор «есть
+   * непогашенная запись» такой заказ пропускал бы целиком.
+   */
   const entries = await tx.courierLedgerEntry.findMany({
     where: {
       orderId: input.orderId,
       attemptId: { not: null },
-      kind: { not: 'ADJUSTMENT' },
-      reversedBy: { is: null },
+      kind: { in: [...ACCRUED_KINDS] },
     },
     select: { attemptId: true, courierUserId: true },
   });
@@ -329,12 +336,12 @@ export async function stripCancelledOrderFinance(
   }
 
   /*
-   * Изменением считается СНЯТАЯ запись, а не найденная попытка.
+   * Изменением считается СНЯТАЯ или ПЕРЕНЕСЁННАЯ запись, а не найденная попытка.
    *
-   * Снимается только начисленное системой, а попытки ищутся шире — по любой
-   * непогашенной записи. У заказа, где осталась лишь ручная операция логиста,
-   * попытка нашлась бы, снимать было бы нечего, а отчёт получал бы событие
-   * «журнал изменился» и перечитывался у всех открытых вкладок.
+   * У заказа, чья цепочка уже сведена в ноль (повтор задания, выверенная
+   * вручную партия прошлых отмен), попытка найдётся, а делать будет нечего —
+   * и отчёт не должен получать событие «журнал изменился» и перечитываться у
+   * всех открытых вкладок.
    */
   let reversed = false;
   for (const [attemptId, courierUserId] of attempts) {
@@ -346,6 +353,7 @@ export async function stripCancelledOrderFinance(
        * Каждое сторно — в дне снятой им записи, а не в дне обработки отмены.
        * Так снимается и всё, что уже начислено и скорректировано ранее: у
        * каждой записи свой день, и вклад заказа обнуляется в каждом из них.
+       * Начисление, погашенное сторно другого дня, сводится переносом учёта.
        */
       dating: { kind: 'ORIGINAL_DAY' },
       /*

@@ -1012,6 +1012,10 @@ describe('группировка отчёта', () => {
         reversesEntryId: null,
         reversed: false,
         reversesKind: null,
+        relocatesEntryId: null,
+        relocatesKind: null,
+        relocatesDistanceKmTenths: null,
+        relocationSide: null,
         transferId: null,
       },
     ];
