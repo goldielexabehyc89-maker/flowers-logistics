@@ -6863,12 +6863,13 @@ test('импорт ПланФакта: загрузка → предпросмо
 /**
  * «Показать ещё» в расчётах с курьерами: следующие дни ДОБАВЛЯЮТСЯ к списку.
  *
- * ГРАНИЦА СЦЕНАРИЯ. Три курьера заводятся специально для проверки, доставок у
- * них нет; группы «день + курьер» создаются начальными долгами по 100 ₽ за
- * 20 прошедших дней — 60 групп, три страницы по 25. Реальные курьеры и их
- * расчёты не затрагиваются.
+ * ГРАНИЦА СЦЕНАРИЯ. Два курьера заводятся специально для проверки, доставок у
+ * них нет; группы «день + курьер» создаются начальными долгами по 100 ₽.
+ * Отчёт всегда смотрится ПО КУРЬЕРУ: отбор детерминирован и не зависит от
+ * чужих данных в общей базе — ни от соседних сценариев CI, ни от прежних
+ * прогонов на том же стенде. Реальные курьеры и их расчёты не затрагиваются.
  */
-test('расчёты: «Показать ещё» добавляет дни без перезагрузки, сохраняет прокрутку, переживает ошибку и смену отбора', async ({
+test('расчёты: «Показать ещё» добавляет дни без перезагрузки, сохраняет прокрутку, переживает ошибку, смену отбора и предел', async ({
   browser,
 }: {
   browser: Browser;
@@ -6895,45 +6896,49 @@ test('расчёты: «Показать ещё» добавляет дни бе
     return date.toISOString().slice(0, 10);
   };
 
-  // Три курьера без доставок.
-  const couriers: { phone: string; id: string }[] = [];
-  for (let index = 0; index < 3; index += 1) {
-    const created = await seedOwnCourier(page, token);
-    couriers.push({ phone: created.phone, id: '' });
-  }
+  // Два курьера без доставок.
+  const seeded = [await seedOwnCourier(page, token), await seedOwnCourier(page, token)];
   const users = (await (
     await page.request.get('/api/users?role=COURIER&status=ACTIVE&limit=100', { headers })
   ).json()) as { items: { id: string; phone: string }[] };
+  const couriers = seeded.map((courier) => ({
+    phone: courier.phone,
+    id: users.items.find((item) => item.phone === courier.phone)?.id ?? '',
+  }));
   for (const courier of couriers) {
-    courier.id = users.items.find((item) => item.phone === courier.phone)?.id ?? '';
     expect(courier.id).not.toBe('');
   }
+  const [first, second] = couriers as [
+    { phone: string; id: string },
+    { phone: string; id: string },
+  ];
 
   /*
-   * 60 групп «день + курьер»: 20 дней × 3 курьера, по 100 ₽. Период берётся в
-   * прошлом, не ближе 21 дня назад: соседние сценарии живут вокруг «сегодня»,
-   * и их группы в этот отбор не попадают — счёт страниц детерминирован. Окно
-   * выбирается по номеру запуска из шестнадцати непересекающихся, чтобы
-   * повторные прогоны в одной базе не складывали группы друг с другом.
+   * Первый курьер: 60 групп (дни с 21-го по 80-й назад) — три страницы по 25.
+   * Второй: 15 групп (дни с 21-го по 35-й) — одна страница. Период не
+   * захватывает «сегодня», вокруг которого живут соседние сценарии.
    */
+  const periodEnd = dayBefore(today, 21);
+  const periodStart = dayBefore(today, 80);
   const runId = Date.now();
-  const base = 21 + (runId % 16) * 20;
-  const periodEnd = dayBefore(today, base);
-  const periodStart = dayBefore(today, base + 19);
-  for (const [index, courier] of couriers.entries()) {
-    for (let day = base; day < base + 20; day += 1) {
-      const recorded = await page.request.post('/api/logistics/ledger/opening-debt', {
-        headers,
-        data: {
-          courierUserId: courier.id,
-          amountMinor: '10000',
-          operationDate: dayBefore(today, day),
-          reason: 'проверка листания отчёта',
-          idempotencyKey: `load-more:${runId}:${index}:${day}`,
-        },
-      });
-      expect(recorded.status()).toBe(201);
-    }
+  const debt = async (courierId: string, day: number, tag: string): Promise<void> => {
+    const recorded = await page.request.post('/api/logistics/ledger/opening-debt', {
+      headers,
+      data: {
+        courierUserId: courierId,
+        amountMinor: '10000',
+        operationDate: dayBefore(today, day),
+        reason: 'проверка листания отчёта',
+        idempotencyKey: `load-more:${runId}:${tag}:${day}`,
+      },
+    });
+    expect(recorded.status()).toBe(201);
+  };
+  for (let day = 21; day <= 80; day += 1) {
+    await debt(first.id, day, 'first');
+  }
+  for (let day = 21; day <= 35; day += 1) {
+    await debt(second.id, day, 'second');
   }
 
   await openSection(page, 'Логистика');
@@ -6941,30 +6946,38 @@ test('расчёты: «Показать ещё» добавляет дни бе
   await page.waitForURL('**/logistics/reports', { timeout: 30_000 });
   await expect(page.getByTestId('reports-screen')).toBeVisible({ timeout: 30_000 });
 
-  // Период проверки, без отбора по курьеру: первая страница — 25 групп.
-  await page.getByTestId('reports-from').fill(periodStart);
-  await page.getByTestId('reports-to').fill(periodEnd);
+  const selectCourier = async (courier: { phone: string }): Promise<void> => {
+    await page.getByTestId('reports-courier-combobox-field').fill(courier.phone);
+    await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
+    await page.getByTestId('reports-courier-combobox-option').first().click();
+  };
   const groups = page.getByTestId('reports-group');
-  await expect(groups).toHaveCount(25, { timeout: 20_000 });
   const groupKeys = (): Promise<string[]> =>
     page.$$eval('[data-testid="reports-group"]', (rows) =>
       rows.map(
         (row) => `${row.getAttribute('data-group-date')}:${row.getAttribute('data-group-courier')}`,
       ),
     );
+  const scrollY = (): Promise<number> =>
+    page.evaluate(() => (globalThis as unknown as { scrollY: number }).scrollY);
+  const marker = (): Promise<string | undefined> =>
+    page.evaluate(() => (globalThis as unknown as { __reportsMarker?: string }).__reportsMarker);
+
+  // Период проверки и первый курьер: первая страница — 25 групп.
+  await page.getByTestId('reports-from').fill(periodStart);
+  await page.getByTestId('reports-to').fill(periodEnd);
+  await selectCourier(first);
+  await expect(groups).toHaveCount(25, { timeout: 20_000 });
   const firstPage = await groupKeys();
   expect(new Set(firstPage).size).toBe(25);
   const totalsBefore = await page.getByTestId('reports-opening-debt-total').innerText();
+  const closingBefore = await page.getByTestId('reports-closing').innerText();
 
   // Раскрытая группа обязана пережить догрузку.
   await groups.first().getByTestId('reports-group-toggle').click();
   await expect(groups.first()).toHaveAttribute('data-expanded', 'true');
 
   // Маркер документа и счётчик навигаций: перезагрузки или перехода быть не должно.
-  const scrollY = (): Promise<number> =>
-    page.evaluate(() => (globalThis as unknown as { scrollY: number }).scrollY);
-  const marker = (): Promise<string | undefined> =>
-    page.evaluate(() => (globalThis as unknown as { __reportsMarker?: string }).__reportsMarker);
   await page.evaluate(() => {
     (globalThis as unknown as { __reportsMarker?: string }).__reportsMarker = 'kept';
   });
@@ -6975,20 +6988,28 @@ test('расчёты: «Показать ещё» добавляет дни бе
     }
   });
 
-  // Перехват запросов отчёта: задержать вторую страницу, один раз сломать третью.
+  /*
+   * Перехват запросов отчёта ПЕРВОГО курьера: задержать страницу, сломать
+   * страницу до нажатия «Повторить», а в конце — сыграть предел 1000 групп,
+   * подменяя в ответах только hasMore и limit.
+   */
   let release: (() => void) | null = null;
-  let plan: 'pass' | 'hold' | 'fail' = 'hold';
+  let plan: 'pass' | 'hold' | 'fail' | 'emulate' | 'emulate-fail' = 'pass';
   let heldLimit = '50';
   await page.route('**/api/logistics/reports/settlements?*', async (route) => {
     const url = new URL(route.request().url());
-    const limit = url.searchParams.get('limit');
-    const byCourier = url.searchParams.has('courierUserId');
-    if (plan === 'hold' && limit === heldLimit && !byCourier) {
+    const limit = url.searchParams.get('limit') ?? '';
+    const forFirst = url.searchParams.get('courierUserId') === first.id;
+    if (!forFirst) {
+      await route.continue();
+      return;
+    }
+    if (plan === 'hold' && limit === heldLimit) {
       await new Promise<void>((resolve) => {
         release = resolve;
       });
     }
-    if (plan === 'fail' && limit === '75' && !byCourier) {
+    if (plan === 'fail' && limit === '75') {
       await route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -6996,10 +7017,35 @@ test('расчёты: «Показать ещё» добавляет дни бе
       });
       return;
     }
+    if (plan === 'emulate-fail' && limit === '1000') {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'INTERNAL_ERROR', message: 'сбой последней страницы' }),
+      });
+      return;
+    }
+    if (plan === 'emulate') {
+      const response = await route.fetch();
+      const json = (await response.json()) as { hasMore: boolean; limit: number };
+      json.hasMore = true;
+      json.limit = Number(limit);
+      await route.fulfill({ response, json });
+      return;
+    }
     await route.continue();
   });
+  const responseFor = (limit: number): Promise<unknown> =>
+    page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/logistics/reports/settlements') &&
+        response.url().includes(`limit=${limit}`) &&
+        response.url().includes(`courierUserId=${first.id}`),
+      { timeout: 20_000 },
+    );
 
   // --- 1. Вторая страница: пока едет — прежние группы на месте, кнопка занята ---
+  plan = 'hold';
   await page.getByTestId('reports-more').scrollIntoViewIfNeeded();
   const scrollBefore = await scrollY();
   expect(scrollBefore).toBeGreaterThan(0);
@@ -7013,10 +7059,9 @@ test('расчёты: «Показать ещё» добавляет дни бе
   await expect(groups.first()).toHaveAttribute('data-expanded', 'true');
   expect(await scrollY()).toBe(scrollBefore);
 
+  plan = 'pass';
   (release as unknown as () => void)();
   release = null;
-  // Дальше запросы того же отбора не задерживаем: realtime-обновление должно дойти.
-  plan = 'pass';
   await expect(groups).toHaveCount(50, { timeout: 20_000 });
   const secondPage = await groupKeys();
   // Старые строки на месте и в том же порядке, новые добавлены, дублей нет.
@@ -7025,30 +7070,16 @@ test('расчёты: «Показать ещё» добавляет дни бе
   await expect(groups.first()).toHaveAttribute('data-expanded', 'true');
   expect(Math.abs((await scrollY()) - scrollBefore)).toBeLessThanOrEqual(2);
   await expect(page.getByTestId('reports-opening-debt-total')).toHaveText(totalsBefore);
+  await expect(page.getByTestId('reports-closing')).toHaveText(closingBefore);
   expect(await marker()).toBe('kept');
   expect(navigations).toBe(0);
   await expect(page.getByTestId('reports-more')).toBeEnabled();
 
   // --- 2. Realtime после догрузки не сбрасывает список к первой странице ---
-  const refetched = page.waitForResponse(
-    (response) =>
-      response.url().includes('/api/logistics/reports/settlements') &&
-      response.url().includes('limit=50'),
-    { timeout: 20_000 },
-  );
-  const extra = await page.request.post('/api/logistics/ledger/opening-debt', {
-    headers,
-    data: {
-      courierUserId: couriers[0]?.id ?? '',
-      amountMinor: '10000',
-      // Свёрнутая группа в середине списка: новая запись не добавляет видимых
-      // строк, поэтому проверка прокрутки не зависит от якорения браузера.
-      operationDate: dayBefore(today, base + 9),
-      reason: 'realtime после догрузки',
-      idempotencyKey: `load-more:${runId}:realtime`,
-    },
-  });
-  expect(extra.status()).toBe(201);
+  const refetched = responseFor(50);
+  // Свёрнутая группа в середине списка: новая запись не добавляет видимых
+  // строк, поэтому проверка прокрутки не зависит от якорения браузера.
+  await debt(first.id, 50, 'realtime');
   await refetched;
   await expect(groups).toHaveCount(50);
   expect(new Set(await groupKeys()).size).toBe(50);
@@ -7072,44 +7103,81 @@ test('расчёты: «Показать ещё» добавляет дни бе
   expect(await marker()).toBe('kept');
   expect(navigations).toBe(0);
 
-  // --- 4. Смена отбора во время незавершённой догрузки ---
-  // Период на 15 дней: 45 групп — снова две страницы и кнопка.
-  await page.getByTestId('reports-from').fill(dayBefore(today, base + 14));
+  // --- 4. Смена курьера A → B → A: возвращение начинается с первой страницы ---
+  await selectCourier(second);
+  await expect(groups).toHaveCount(15, { timeout: 20_000 });
+  await expect(page.getByTestId('reports-more')).toHaveCount(0);
+  await selectCourier(first);
+  await expect(groups).toHaveCount(25, { timeout: 20_000 });
+  await expect(page.getByTestId('reports-more')).toBeVisible();
+
+  // --- 5. Смена периода A → B → A: то же правило для дат ---
+  await page.getByTestId('reports-more').click();
+  await expect(groups).toHaveCount(50, { timeout: 20_000 });
+  // Короче на 30 дней: 30 групп — снова первая страница и кнопка.
+  await page.getByTestId('reports-from').fill(dayBefore(today, 50));
+  await expect(groups).toHaveCount(25, { timeout: 20_000 });
+  await expect(page.getByTestId('reports-more')).toBeVisible();
+  await page.getByTestId('reports-from').fill(periodStart);
+  await expect(groups).toHaveCount(25, { timeout: 20_000 });
+  await expect(page.getByTestId('reports-more')).toBeVisible();
+
+  // --- 6. Смена отбора во время незавершённой догрузки ---
+  // Свежий отбор (иначе вторая страница уже в кэше запроса и сети не будет).
+  await page.getByTestId('reports-to').fill(dayBefore(today, 22));
   await expect(groups).toHaveCount(25, { timeout: 20_000 });
   plan = 'hold';
   heldLimit = '50';
   await page.getByTestId('reports-more').scrollIntoViewIfNeeded();
   await page.getByTestId('reports-more').click();
   await expect.poll(() => release !== null, { timeout: 15_000 }).toBe(true);
-  const held = page.waitForResponse(
-    (response) =>
-      response.url().includes('/api/logistics/reports/settlements') &&
-      response.url().includes('limit=50') &&
-      !response.url().includes('courierUserId'),
-    { timeout: 20_000 },
-  );
-
-  // Пока вторая страница «едет», выбираем курьера: новая выборка, первая страница.
-  await page.getByTestId('reports-courier-combobox-field').fill(couriers[1]?.phone ?? '');
-  await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
-  await page.getByTestId('reports-courier-combobox-option').first().click();
-  await expect(groups).toHaveCount(15, { timeout: 20_000 });
+  const held = responseFor(50);
+  // Пока вторая страница «едет», выбираем другого курьера: новая выборка.
+  await selectCourier(second);
+  await expect(groups).toHaveCount(14, { timeout: 20_000 });
   const filtered = await groupKeys();
-  expect(filtered.every((key) => key.endsWith(`:${couriers[1]?.id ?? ''}`))).toBe(true);
-
+  expect(filtered.every((key) => key.endsWith(`:${second.id}`))).toBe(true);
   // Поздний ответ прежнего отбора приходит — и к новому списку не добавляется.
+  plan = 'pass';
   (release as unknown as () => void)();
   release = null;
-  plan = 'pass';
   await held;
   await page.waitForTimeout(500);
-  await expect(groups).toHaveCount(15);
+  await expect(groups).toHaveCount(14);
   expect(await groupKeys()).toEqual(filtered);
   await expect(page.getByTestId('reports-more')).toHaveCount(0);
 
-  // --- 5. Обычный просмотр и выгрузки не пострадали ---
+  // --- 7. Предел 1000 групп: ошибка последней допустимой страницы не прячет повтор ---
+  // Снова свежий отбор: каждая страница эмуляции обязана уйти в сеть.
+  await page.getByTestId('reports-to').fill(dayBefore(today, 23));
+  await selectCourier(first);
+  await expect(groups).toHaveCount(25, { timeout: 20_000 });
+  // Ответы первого курьера играют бесконечный список: hasMore и limit подменены.
+  plan = 'emulate';
+  for (let pages = 2; pages <= 39; pages += 1) {
+    const arrived = responseFor(pages * 25);
+    await page.getByTestId('reports-more').click();
+    await arrived;
+    await expect(page.getByTestId('reports-more')).toBeEnabled();
+  }
+  // 975 показано; сороковая — последняя допустимая — страница не загружается.
+  plan = 'emulate-fail';
+  await page.getByTestId('reports-more').click();
+  await expect(page.getByTestId('reports-more-error')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('reports-limit')).toHaveCount(0);
+  await expect(page.getByTestId('reports-more-retry')).toBeVisible();
+  // Повтор успешен: получены все 1000 — теперь сообщение о пределе, кнопки нет.
+  plan = 'emulate';
+  const lastPage = responseFor(1000);
+  await page.getByTestId('reports-more-retry').click();
+  await lastPage;
+  await expect(page.getByTestId('reports-limit')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('reports-more')).toHaveCount(0);
+  await expect(page.getByTestId('reports-more-error')).toHaveCount(0);
+
+  // --- 8. Обычный просмотр и выгрузки не пострадали ---
   await page.unroute('**/api/logistics/reports/settlements?*');
-  const query = `from=${periodStart}&to=${periodEnd}`;
+  const query = `from=${periodStart}&to=${periodEnd}&courierUserId=${first.id}`;
   const xlsx = await page.request.get(`/api/logistics/reports/settlements.xlsx?${query}`, {
     headers,
   });
