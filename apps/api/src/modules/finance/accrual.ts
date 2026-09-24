@@ -17,8 +17,8 @@
 
 import type { CourierLedgerKind } from '../../generated/prisma/client.js';
 import type { TransactionClient } from '../auth/sessions.js';
-import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
-import { appendEntry, accrualKey, reversalKey, reverseEntry } from './ledger.js';
+import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { appendEntry, accrualKey, relocationKey, reversalKey, reverseEntry } from './ledger.js';
 import {
   ledgerCoversDate,
   perOrderForVehicle,
@@ -367,8 +367,9 @@ export async function accrueDistanceFee(
  *
  * Список закрытый и сверен с местами записи: `accrueDeliveryResult`,
  * `accrueDistanceFee` и корректировка наличных после оплаты в источнике.
+ * Именно эти записи — и только они — снимает отмена заказа в источнике.
  */
-const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
+export const ACCRUED_KINDS: readonly CourierLedgerKind[] = [
   'CASH_RECEIVED',
   'DELIVERY_FEE',
   'DISTANCE_FEE',
@@ -608,58 +609,171 @@ const ATTEMPT_KINDS: readonly CourierLedgerKind[] = ['ATTEMPT_FEE'];
  */
 export type ReversalScope = 'SYSTEM' | 'ATTEMPT';
 
+/**
+ * Каким днём учитывать обратные записи — тоже решает вызывающий.
+ *
+ * `EVENT_DAY` — одним общим днём события, снявшего деньги. Так живёт отмена
+ * РЕЗУЛЬТАТА доставки: логист исправил ошибку сегодня, и итоги закрытого дня
+ * остаются как были. Пересчёт воспроизводит тот же путь днём фактической
+ * отмены результата.
+ *
+ * `ORIGINAL_DAY` — днём ИСХОДНОЙ записи, у каждой обратной свой. Так снимает
+ * деньги отмена ЗАКАЗА в источнике (решение владельца, 24.09.2026): курьер
+ * отвёз, а заказ потом отменили в МоемСкладе — начисления уходят из тех дней,
+ * в которых были учтены. Отчёт за день доставки показывает по заказу нули, а
+ * день обработки отмены отдельного минуса не получает. Общим днём обработки
+ * они снимались раньше: день доставки нёс полные суммы отменённого заказа, а
+ * спустя дни появлялся минус, к которому в тот день ничего не происходило.
+ *
+ * Исторической датой подменяется ТОЛЬКО день учёта: реальное время появления
+ * записи (`occurredAt`), аудит и отметка снятия попытки остаются фактическими.
+ *
+ * Исходными днями снимается ВСЯ цепочка попытки, а не только действующие
+ * записи. Начисление, уже погашенное сторно ДРУГОГО дня (километры пересчитали
+ * назавтра), оставляет плюс в дне начисления и минус в дне сторно; второй раз
+ * его снять нельзя. Его учёт переносится в день сторно связанной парой
+ * записей той же категории (`relocatesEntryId`, стороны OUT/IN) — после этого
+ * каждый исходный день по заказу равен нулю, а общий баланс не меняется.
+ */
+export type ReversalDating = { kind: 'EVENT_DAY'; day: string } | { kind: 'ORIGINAL_DAY' };
+
+/** Пояснение у записей переноса: стоит рядом с причиной снятия. */
+const RELOCATION_NOTE = 'учёт начисления перенесён в день его сторно';
+
 export async function reverseDeliveryAccruals(
   tx: TransactionClient,
   input: {
     attemptId: string;
     actorUserId: string;
     reason: string;
-    operationDate: string;
+    dating: ReversalDating;
     scope: ReversalScope;
   },
 ): Promise<boolean> {
-  const entries = await tx.courierLedgerEntry.findMany({
+  /*
+   * Вся системная цепочка попытки — и действующие записи, и погашенные.
+   *
+   * Общим днём события снимаются только действующие: прежний контракт отмены
+   * результата. Исходными днями нужны и погашенные: у них проверяется, лежит
+   * ли сторно в том же дне, что и начисление.
+   */
+  const chain = await tx.courierLedgerEntry.findMany({
     where: {
       attemptId: input.attemptId,
       kind: {
         in: input.scope === 'SYSTEM' ? [...ACCRUED_KINDS] : [...ACCRUED_KINDS, ...ATTEMPT_KINDS],
       },
-      reversedBy: { is: null },
     },
+    orderBy: [{ operationDate: 'asc' }, { occurredAt: 'asc' }, { id: 'asc' }],
     select: {
       id: true,
       courierUserId: true,
       amountMinor: true,
+      operationDate: true,
       routeId: true,
       orderId: true,
       attemptId: true,
+      reversedBy: { select: { operationDate: true } },
+      relocatedBy: { select: { id: true } },
     },
   });
 
-  for (const entry of entries) {
+  let changed = false;
+  for (const entry of chain) {
+    if (entry.reversedBy === null) {
+      /*
+       * День учёта сторно: общий день события или день САМОЙ снимаемой записи.
+       *
+       * Во втором случае дата берётся из записи, а не из даты доставки заказа:
+       * корректировка оплаты и пересчитанные километры лежат в своих днях, и
+       * каждая снимается там, где была учтена. Пара «запись — её сторно» даёт
+       * ноль в каждом таком дне, а не только в сумме за период.
+       */
+      const operationDate =
+        input.dating.kind === 'ORIGINAL_DAY' ? entry.operationDate : toDateColumn(input.dating.day);
+
+      await tx.courierLedgerEntry.create({
+        data: {
+          courierUserId: entry.courierUserId,
+          kind: 'ADJUSTMENT',
+          amountMinor: -entry.amountMinor,
+          operationDate,
+          actorUserId: input.actorUserId,
+          reason: input.reason,
+          routeId: entry.routeId,
+          orderId: entry.orderId,
+          attemptId: entry.attemptId,
+          reversesEntryId: entry.id,
+          /*
+           * Повод называется прямо: по нему потом видно, что финансовый результат
+           * этой попытки СНЯТ, а не просто исправлен человеком.
+           */
+          reversalCause: input.scope === 'SYSTEM' ? 'ORDER_CANCELLED' : 'RESULT_CANCELLED',
+          idempotencyKey: reversalKey(entry.id),
+        },
+      });
+      changed = true;
+      continue;
+    }
+
+    if (input.dating.kind !== 'ORIGINAL_DAY') {
+      continue;
+    }
+
+    /*
+     * Погашенная запись. Сторно в том же дне — пара уже в нуле, трогать нечего.
+     *
+     * Сторно в ДРУГОМ дне (километры пересчитали назавтра, результат отменили
+     * позже) оставляет плюс в дне начисления и минус в дне сторно. Второе
+     * сторно запрещено уникальностью ссылки, а несвязанная корректировка
+     * потеряла бы категорию и километры. Поэтому учёт начисления ПЕРЕНОСИТСЯ
+     * в день его сторно связанной парой: OUT в дне начисления с обратной
+     * суммой, IN в дне сторно с той же суммой. Сумма пары — ноль, общий баланс
+     * не меняется; категория и километры читаются из переносимой записи.
+     * Активного начисления перенос не создаёт: обе записи — обратные.
+     *
+     * Повтор безопасен: у записи не больше одной пары, и уже сведённая цепочка
+     * — в том числе выверенная вручную партия прошлых отмен — пропускается.
+     */
+    if (entry.reversedBy.operationDate.getTime() === entry.operationDate.getTime()) {
+      continue;
+    }
+    if (entry.relocatedBy.length > 0) {
+      continue;
+    }
+
+    const relocation = {
+      courierUserId: entry.courierUserId,
+      kind: 'ADJUSTMENT' as const,
+      actorUserId: input.actorUserId,
+      reason: `${input.reason}; ${RELOCATION_NOTE}`,
+      routeId: entry.routeId,
+      orderId: entry.orderId,
+      attemptId: entry.attemptId,
+      relocatesEntryId: entry.id,
+    };
     await tx.courierLedgerEntry.create({
       data: {
-        courierUserId: entry.courierUserId,
-        kind: 'ADJUSTMENT',
+        ...relocation,
         amountMinor: -entry.amountMinor,
-        operationDate: new Date(`${input.operationDate}T00:00:00.000Z`),
-        actorUserId: input.actorUserId,
-        reason: input.reason,
-        routeId: entry.routeId,
-        orderId: entry.orderId,
-        attemptId: entry.attemptId,
-        reversesEntryId: entry.id,
-        /*
-         * Повод называется прямо: по нему потом видно, что финансовый результат
-         * этой попытки СНЯТ, а не просто исправлен человеком.
-         */
-        reversalCause: input.scope === 'SYSTEM' ? 'ORDER_CANCELLED' : 'RESULT_CANCELLED',
-        idempotencyKey: reversalKey(entry.id),
+        operationDate: entry.operationDate,
+        relocationSide: 'OUT',
+        idempotencyKey: relocationKey(entry.id, 'OUT'),
       },
     });
+    await tx.courierLedgerEntry.create({
+      data: {
+        ...relocation,
+        amountMinor: entry.amountMinor,
+        operationDate: entry.reversedBy.operationDate,
+        relocationSide: 'IN',
+        idempotencyKey: relocationKey(entry.id, 'IN'),
+      },
+    });
+    changed = true;
   }
 
-  // Было ли что снимать: вызывающий по этому признаку решает, сообщать ли
-  // отчёту об изменении журнала.
-  return entries.length > 0;
+  // Менялся ли журнал: вызывающий по этому признаку решает, сообщать ли отчёту
+  // об изменении.
+  return changed;
 }

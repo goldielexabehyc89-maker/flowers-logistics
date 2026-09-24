@@ -945,7 +945,12 @@ export async function cancelDeliveryResult(
       attemptId,
       actorUserId: actor.userId,
       reason: reason ?? 'Отмена результата доставки',
-      operationDate: moscowCalendarDate(now),
+      /*
+       * Днём исправления: результат отменил человек сегодня, и итоги
+       * закрытого дня не переписываются. Исходными днями снимает деньги
+       * только отмена ЗАКАЗА в источнике — там решения человека нет.
+       */
+      dating: { kind: 'EVENT_DAY', day: moscowCalendarDate(now) },
       /*
        * Попытки больше нет — снимается оплата ЗА НЕЁ вместе с начисленным
        * системой. Расход курьера остаётся: парковку он оплатил, и решение

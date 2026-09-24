@@ -10,6 +10,10 @@
  *     снимаются: он всё отвёз;
  *   • отмена в источнике снимает финансовый результат доставки целиком, и заказ
  *     перестаёт давать и плюс, и минус; исходные записи остаются в истории;
+ *   • снятие ложится В ИСХОДНЫЕ ДНИ учёта каждой записи: отчёт за день доставки
+ *     показывает по заказу нули, а день обработки отмены отдельного минуса не
+ *     получает; реальное время записи и отметка снятия попытки исторической
+ *     датой не подменяются;
  *   • после отмены ни поздний расчёт МКАД, ни пришедшая оплата не возвращают
  *     заказу ненулевой вклад;
  *   • начальный долг, фактические передачи денег и чужие операции не трогаются.
@@ -27,10 +31,11 @@ import {
 } from '../auth/testing/harness.js';
 import type { AuthenticatedActor } from '../auth/guards.js';
 import type { Role } from '@fl/shared';
-import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { fromDateColumn, toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import ExcelJS from 'exceljs';
-import { accrueDeliveryResult, accrueDistanceFee } from './accrual.js';
+import { accrueDeliveryResult, accrueDistanceFee, restateDistanceFee } from './accrual.js';
 import { appendEntry, balanceOf, reverseEntry } from './ledger.js';
+import { saveDistanceSnapshot } from './mkad.js';
 import { LEDGER_SETTING_KEY, readLedgerActivation } from './tariffs.js';
 import { buildSettlementReport } from './reports.js';
 import { buildSettlementWorkbook } from './export-xlsx.js';
@@ -44,6 +49,10 @@ let ctx: TestContext;
 
 const DAY = '2030-08-12';
 const NEXT_DAY = '2030-08-13';
+/** День обработки отмены, когда она приходит не назавтра, а позже. */
+const LATER_DAY = '2030-08-14';
+/** Отмена через неделю: цепочка правок к этому моменту разнесена по трём дням. */
+const WEEK_LATER = '2030-08-19';
 
 beforeAll(async () => {
   ctx = await createTestContext();
@@ -123,11 +132,18 @@ async function seedDelivered(input: {
   sum: bigint;
   payed: bigint;
   perOrder?: bigint;
+  /** Ставка за километр в снимке маршрута: нужна проверкам правки километров. */
+  perKm?: bigint;
   /** Уже начисленные километры за МКАД: снимок расстояния здесь не нужен. */
   distanceFee?: bigint;
+  /** Курьер, у которого уже есть другие доставки; иначе заводится новый. */
+  courierId?: string;
 }): Promise<Delivery> {
   const admin = await actorFor(['ADMIN']);
-  const courier = await actorFor(['COURIER']);
+  const courier =
+    input.courierId === undefined
+      ? await actorFor(['COURIER'])
+      : ({ userId: input.courierId } as AuthenticatedActor);
 
   const order = await ctx.db.deliveryOrder.create({
     data: {
@@ -181,7 +197,7 @@ async function seedDelivered(input: {
       tariffVersionId,
       vehicleType: 'CAR',
       perOrderMinor: input.perOrder ?? 0n,
-      perKmMinor: 0n,
+      perKmMinor: input.perKm ?? 0n,
       deliveryDate: toDateColumn(DAY),
     },
   });
@@ -269,18 +285,20 @@ async function seedDistance(delivery: Delivery, kmTenths: number): Promise<void>
       select: { id: true },
     }));
 
-  await ctx.db.routeOrderDistance.create({
-    data: {
-      routeOrderId: delivery.routeOrderId,
-      ringVersionId: ring.id,
-      meters: kmTenths * 100,
-      roundedKmTenths: kmTenths,
-      insideMkad: false,
-      source: 'MANUAL',
-      actorUserId: admin.userId,
-      reason: 'проверка позднего начисления',
-      activeKey: delivery.routeOrderId,
-    },
+  /*
+   * Снимок ставится ТОЙ ЖЕ функцией, что и боевой путь: она гасит прежний
+   * действующий снимок, поэтому правку километров можно повторять. Прямая
+   * вставка второй раз упиралась бы в уникальность `activeKey`.
+   */
+  await saveDistanceSnapshot(ctx.db, {
+    routeOrderId: delivery.routeOrderId,
+    ringVersionId: ring.id,
+    graphSha256: null,
+    meters: kmTenths * 100,
+    insideMkad: false,
+    source: 'MANUAL',
+    actorUserId: admin.userId,
+    reason: 'проверка позднего начисления',
   });
 }
 
@@ -368,6 +386,91 @@ async function orderContribution(orderId: string): Promise<bigint> {
     _sum: { amountMinor: true },
   });
   return result._sum.amountMinor ?? 0n;
+}
+
+/**
+ * Обратные записи отмены заказа в источнике: день каждой, реальное время её
+ * появления и снятая ею запись. По ним проверяется правило даты: сторно
+ * ложится в день ИСХОДНОЙ записи, а не в день обработки отмены.
+ */
+async function cancellationReversals(orderId: string) {
+  return ctx.db.courierLedgerEntry.findMany({
+    where: { orderId, kind: 'ADJUSTMENT', reversalCause: 'ORDER_CANCELLED' },
+    select: {
+      operationDate: true,
+      occurredAt: true,
+      amountMinor: true,
+      reversesEntry: { select: { kind: true, operationDate: true, amountMinor: true } },
+    },
+  });
+}
+
+/**
+ * Переносы дня учёта по заказу: сторона, день, сумма и переносимая запись.
+ *
+ * Перенос — связанная пара обратных записей одной категории: OUT в дне
+ * начисления, IN в дне его сторно. Сумма пары равна нулю.
+ */
+async function relocationsOf(orderId: string) {
+  return ctx.db.courierLedgerEntry.findMany({
+    where: { orderId, relocatesEntryId: { not: null } },
+    select: {
+      operationDate: true,
+      amountMinor: true,
+      relocationSide: true,
+      reason: true,
+      relocatesEntry: {
+        select: { kind: true, amountMinor: true, operationDate: true, distanceKmTenths: true },
+      },
+    },
+  });
+}
+
+/** Сжатая форма переноса для сравнения: сторона, сумма, день, вид и километры. */
+function relocationShape(
+  relocation: Awaited<ReturnType<typeof relocationsOf>>[number],
+): [string | null, bigint, string, string | undefined, number | null | undefined] {
+  return [
+    relocation.relocationSide,
+    relocation.amountMinor,
+    fromDateColumn(relocation.operationDate),
+    relocation.relocatesEntry?.kind,
+    relocation.relocatesEntry?.distanceKmTenths,
+  ];
+}
+
+/** Дни, в которых у заказа есть хотя бы одна запись журнала, по возрастанию. */
+async function daysOf(orderId: string): Promise<string[]> {
+  const rows = await ctx.db.courierLedgerEntry.findMany({
+    where: { orderId },
+    select: { operationDate: true },
+    distinct: ['operationDate'],
+  });
+  return rows.map((row) => fromDateColumn(row.operationDate)).sort();
+}
+
+/** Сколько соединений СЕЙЧАС ждут чужую блокировку в этой базе. */
+async function blockedBackends(): Promise<number> {
+  const rows = await ctx.db.$queryRaw<{ count: bigint }[]>`
+    SELECT count(*)::bigint AS count
+    FROM pg_stat_activity
+    WHERE cardinality(pg_blocking_pids(pid)) > 0
+      AND datname = current_database()
+  `;
+  return Number(rows[0]?.count ?? 0n);
+}
+
+async function waitForBlocked(expected: number, timeoutMs = 10_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let seen = 0;
+  while (Date.now() < deadline) {
+    seen = await blockedBackends();
+    if (seen >= expected) {
+      return seen;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return seen;
 }
 
 // --- Оплата после доставки ----------------------------------------------------
@@ -501,10 +604,12 @@ describe('оплата в источнике уменьшает наличные
 
   /*
    * Обязательная регрессия из ревью: доставка с наличными, оплатой и МКАД,
-   * отмена на следующий день. История дней сохраняется, но за весь период
-   * отменённый заработок не остаётся в зарплатных показателях.
+   * отмена на следующий день. Снятие ложится В ДЕНЬ ДОСТАВКИ — туда, где
+   * начисления были учтены (решение владельца, 24.09.2026). День обработки
+   * отмены отдельного минуса не получает, а за период отменённый заработок не
+   * остаётся ни в одном показателе.
    */
-  it('отмена следующего дня: движения дней сохранены, заработок за период нулевой', async () => {
+  it('отмена следующего дня снимает начисления днём доставки, день отмены пуст', async () => {
     const delivery = await seedDelivered({
       sum: 500_000n,
       payed: 0n,
@@ -512,10 +617,7 @@ describe('оплата в источнике уменьшает наличные
       distanceFee: 10_000n,
     });
 
-    await ctx.db.deliveryOrder.update({
-      where: { id: delivery.orderId },
-      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
-    });
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -527,55 +629,50 @@ describe('оплата в источнике уменьшает наличные
     const onCancel = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
     const both = await report(DAY, NEXT_DAY, delivery.courierId);
 
-    // День доставки: заработок начислен и виден как было.
-    expect(onDelivery.totals.deliveryFeesMinor).toBe('20000');
-    expect(onDelivery.totals.distanceFeesMinor).toBe('10000');
-    expect(onDelivery.totals.cashReceivedMinor).toBe('500000');
-    expect(onDelivery.totals.closingBalanceMinor).toBe('470000');
+    // День доставки: по заказу нули во всех трёх категориях — снятие лежит здесь же.
+    expect(onDelivery.totals.deliveryFeesMinor).toBe('0');
+    expect(onDelivery.totals.distanceFeesMinor).toBe('0');
+    expect(onDelivery.totals.cashReceivedMinor).toBe('0');
+    expect(onDelivery.totals.closingBalanceMinor).toBe('0');
 
-    // День отмены: те же категории с МИНУСОМ, а не общей «корректировкой».
-    expect(onCancel.totals.deliveryFeesMinor).toBe('-20000');
-    expect(onCancel.totals.distanceFeesMinor).toBe('-10000');
-    expect(onCancel.totals.cashReceivedMinor).toBe('-500000');
+    // День обработки отмены: ни минуса, ни группы — денег в этот день не двигали.
+    expect(onCancel.totals.deliveryFeesMinor).toBe('0');
+    expect(onCancel.totals.distanceFeesMinor).toBe('0');
+    expect(onCancel.totals.cashReceivedMinor).toBe('0');
+    expect(onCancel.totals.openingBalanceMinor).toBe('0');
     expect(onCancel.totals.closingBalanceMinor).toBe('0');
+    expect(onCancel.days).toHaveLength(0);
 
-    // Весь период: заработка нет, баланс ноль.
+    // Весь период: заработка нет, баланс ноль, единственный день — день доставки.
     expect(both.totals.deliveryFeesMinor).toBe('0');
     expect(both.totals.distanceFeesMinor).toBe('0');
     expect(both.totals.cashReceivedMinor).toBe('0');
     expect(both.totals.closingBalanceMinor).toBe('0');
+    expect(both.days.map((day) => day.date)).toEqual([DAY]);
 
-    // Дневные категории согласованы с итогами периода и между отчётами.
+    // Дневная группа согласована между отдельным и общим отчётом.
     const dayGroup = (built: typeof both, date: string) =>
       built.days.find((day) => day.date === date)?.couriers[0];
-
     expect(dayGroup(both, DAY)?.deliveryFeesMinor).toBe(
       dayGroup(onDelivery, DAY)?.deliveryFeesMinor,
     );
-    expect(dayGroup(both, NEXT_DAY)?.deliveryFeesMinor).toBe(
-      dayGroup(onCancel, NEXT_DAY)?.deliveryFeesMinor,
-    );
-    expect(dayGroup(both, DAY)?.accruedMinor).toBe('30000');
-    expect(dayGroup(both, NEXT_DAY)?.accruedMinor).toBe('-30000');
-
-    // Сумма дневных категорий равна итогу периода.
-    const sumDays = (field: 'deliveryFeesMinor' | 'distanceFeesMinor' | 'accruedMinor'): bigint =>
-      both.days
-        .flatMap((day) => day.couriers)
-        .reduce((total, courier) => total + BigInt(courier[field]), 0n);
-    expect(sumDays('deliveryFeesMinor')).toBe(BigInt(both.totals.deliveryFeesMinor));
-    expect(sumDays('distanceFeesMinor')).toBe(BigInt(both.totals.distanceFeesMinor));
-    expect(sumDays('accruedMinor')).toBe(0n);
+    expect(dayGroup(both, DAY)?.accruedMinor).toBe('0');
+    expect(dayGroup(both, DAY)?.cashMinor).toBe('0');
+    expect(dayGroup(both, DAY)?.totalMinor).toBe('0');
 
     /*
-     * Строка доставки осталась на своём дне и НЕ помечена снятой: снятие
-     * пришло на следующий день и живёт там. Пометка на дне доставки прятала бы
-     * настоящие деньги этого дня за словом «отменён».
+     * Строка доставки стоит в своём дне: факт доставки сохранён, а деньги этого
+     * дня сняты целиком и помечены — ровно как при отмене в тот же день.
      */
     const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
     expect(row?.deliveryDate).toBe(DAY);
-    expect(row?.financeCancelled).toBe(false);
     expect(row?.outcome).toBe('DELIVERED');
+    expect(row?.financeCancelled).toBe(true);
+    expect(row?.sourceCancelled).toBe(true);
+    expect(row?.cashMinor).toBe('0');
+    expect(row?.deliveryFeeMinor).toBe('0');
+    expect(row?.distanceFeeMinor).toBe('0');
+    expect(row?.totalMinor).toBe('0');
   });
 
   it('частичная → полная оплата → отмена не снимает дважды', async () => {
@@ -663,14 +760,11 @@ describe('оплата в источнике уменьшает наличные
     expect(dayTotal(both, NEXT_DAY)).toBe(-200_000n);
   });
 
-  it('отмена следующего дня тоже остаётся в своём дне', async () => {
+  it('отмена следующего дня не создаёт своего дня: снятие лежит в дне доставки', async () => {
     const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
 
     // Отмена приходит на СЛЕДУЮЩИЙ день после доставки.
-    await ctx.db.deliveryOrder.update({
-      where: { id: delivery.orderId },
-      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
-    });
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -680,25 +774,29 @@ describe('оплата в источнике уменьшает наличные
 
     const both = await report(DAY, NEXT_DAY, delivery.courierId);
 
-    // День доставки показывает то, что в нём действительно начислили.
-    const deliveryDay = both.days.find((day) => day.date === DAY);
-    expect(deliveryDay).toBeDefined();
-    const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
-    expect(row?.cashMinor).toBe('500000');
-    expect(row?.deliveryFeeMinor).toBe('20000');
-    /*
-     * Строка дня доставки «снятой» НЕ помечается: снятие лежит в следующем
-     * дне, а этот день честно несёт свои 4 800 ₽ и полностью входит в итог
-     * периода. Пометка здесь спрятала бы настоящие деньги за словом «отменён».
-     */
-    expect(row?.financeCancelled).toBe(false);
-    expect(row?.totalMinor).toBe('480000');
+    // Единственный день периода — день доставки; дня отмены в отчёте нет.
+    expect(both.days.map((day) => day.date)).toEqual([DAY]);
 
-    // День отмены существует и несёт обратные записи.
-    const cancelDay = both.days.find((day) => day.date === NEXT_DAY);
-    expect(cancelDay).toBeDefined();
-    const reversals = (cancelDay?.couriers ?? []).flatMap((courier) => courier.operations.entries);
-    expect(reversals.filter((entry) => entry.kind === 'ADJUSTMENT').length).toBeGreaterThan(0);
+    /*
+     * Строка дня доставки: факт сохранён, деньги дня сняты целиком и помечены.
+     * Начисления и их снятие лежат в одной строке одного дня, поэтому в журнале
+     * операций ни того, ни другого нет — двойного показа не возникает.
+     */
+    const row = both.rows.find((item) => item.attemptId === delivery.attemptId);
+    expect(row?.outcome).toBe('DELIVERED');
+    expect(row?.cashMinor).toBe('0');
+    expect(row?.deliveryFeeMinor).toBe('0');
+    expect(row?.totalMinor).toBe('0');
+    expect(row?.financeCancelled).toBe(true);
+    expect(row?.sourceCancelled).toBe(true);
+    const journal = both.days
+      .flatMap((day) => day.couriers)
+      .flatMap((courier) => courier.operations.entries);
+    expect(journal).toHaveLength(0);
+
+    // История периода цела: и начисления, и их снятие — все днём доставки.
+    expect(both.entries.filter((entry) => entry.kind === 'ADJUSTMENT')).toHaveLength(2);
+    expect(both.entries.every((entry) => entry.operationDate === DAY)).toBe(true);
 
     // Вклад заказа за оба дня — ноль, и сумма групп объясняет баланс.
     expect(await orderContribution(delivery.orderId)).toBe(0n);
@@ -927,6 +1025,16 @@ describe('отмена в источнике исключает заказ из 
     const delivery = await seedDelivered({ sum: 500_000n, payed: 0n, perOrder: 20_000n });
     const admin = await actorFor(['ADMIN']);
 
+    // Другой заказ того же курьера в тот же день: соседняя отмена его не касается.
+    const control = await seedDelivered({
+      sum: 300_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      courierId: delivery.courierId,
+    });
+    const controlContribution = await orderContribution(control.orderId);
+    expect(controlContribution).toBe(300_000n - 20_000n);
+
     // Начальный долг того же курьера — к этой доставке отношения не имеет.
     await ctx.db.$transaction((tx) =>
       appendEntry(tx, {
@@ -963,8 +1071,667 @@ describe('отмена в источнике исключает заказ из 
 
     // Доставка обнулена, а всё остальное осталось как было.
     expect(await orderContribution(delivery.orderId)).toBe(0n);
-    expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(untouched);
+    expect(await balanceOf(ctx.db, delivery.courierId, null)).toBe(untouched + controlContribution);
     expect(await sumKind(delivery.orderId, 'OPENING_DEBT')).toBe(0n);
+
+    // У соседнего заказа не снято ничего: ни одной обратной записи, вклад прежний.
+    expect(await orderContribution(control.orderId)).toBe(controlContribution);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: control.orderId, reversedBy: { isNot: null } },
+      }),
+    ).toBe(0);
+    // Ручные операции курьера не снимались и не помечены снятыми.
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: {
+          courierUserId: delivery.courierId,
+          kind: { in: ['OPENING_DEBT', 'CASH_HANDED_TO_LOGIST'] },
+          reversedBy: { isNot: null },
+        },
+      }),
+    ).toBe(0);
+  });
+});
+
+// --- Дата снятия: исходные дни учёта -------------------------------------------
+
+describe('отмена в источнике снимает начисления исходными днями их учёта', () => {
+  /*
+   * Курьер отвёз, а заказ позже отменили в МоемСкладе. Владелец решил
+   * (24.09.2026): системные начисления снимаются в тех днях, где были учтены,
+   * а не днём обработки отмены. Отчёт за день доставки показывает по заказу
+   * нули, в дне обработки отдельного минуса нет. Факт доставки, история
+   * начислений и реальное время отмены сохраняются.
+   */
+  it('сторно каждой записи ложится в день её учёта, а день обработки остаётся пустым', async () => {
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      distanceFee: 10_000n,
+    });
+    const processedAt = new Date(`${LATER_DAY}T09:00:00.000Z`);
+    const startedAt = Date.now();
+
+    await cancelInSource(delivery);
+    expect(
+      await ctx.db.$transaction((tx) =>
+        stripCancelledOrderFinance(tx, { orderId: delivery.orderId, now: processedAt }),
+      ),
+    ).toBe(true);
+
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(reversals.map((reversal) => reversal.reversesEntry?.kind).sort()).toEqual([
+      'CASH_RECEIVED',
+      'DELIVERY_FEE',
+      'DISTANCE_FEE',
+    ]);
+    for (const reversal of reversals) {
+      // Дата учёта — из ИСХОДНОЙ записи, а не из момента обработки отмены.
+      expect(fromDateColumn(reversal.operationDate)).toBe(
+        fromDateColumn(reversal.reversesEntry?.operationDate ?? new Date(0)),
+      );
+      expect(fromDateColumn(reversal.operationDate)).toBe(DAY);
+      expect(reversal.amountMinor).toBe(-(reversal.reversesEntry?.amountMinor ?? 0n));
+      // Реальное время появления записи исторической датой не подменяется.
+      expect(reversal.occurredAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
+    }
+    // В дне обработки отмены у заказа нет ни одной записи.
+    expect(await daysOf(delivery.orderId)).toEqual([DAY]);
+
+    // Отметка снятия — фактическим временем обработки, не днём доставки.
+    const attempt = await ctx.db.deliveryAttempt.findUniqueOrThrow({
+      where: { id: delivery.attemptId },
+      select: { financeStrippedAt: true },
+    });
+    expect(attempt.financeStrippedAt?.toISOString()).toBe(processedAt.toISOString());
+
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+    expect(await balanceOf(ctx.db, delivery.courierId, DAY)).toBe(0n);
+    expect((await report(LATER_DAY, LATER_DAY, delivery.courierId)).days).toHaveLength(0);
+  });
+
+  it('оплата другим днём, отмена третьим: наличные и корректировка снимаются каждая своим днём', async () => {
+    // Заказ 5 000 ₽, до доставки оплачено 1 000 ₽ → за курьером 4 000 ₽.
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 100_000n, perOrder: 20_000n });
+    // Оплата выросла на следующий день: корректировка −2 000 ₽ учтена этим днём.
+    await payInSource(delivery, 300_000n);
+    expect(await sumKind(delivery.orderId, 'CASH_PAYMENT_CORRECTION')).toBe(-200_000n);
+
+    await cancelInSource(delivery);
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${LATER_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    // Наличные и оплата работы — днём доставки, корректировка — днём оплаты.
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(reversals).toHaveLength(3);
+    const dated = new Map(
+      reversals.map((reversal) => [
+        reversal.reversesEntry?.kind,
+        fromDateColumn(reversal.operationDate),
+      ]),
+    );
+    expect(dated.get('CASH_RECEIVED')).toBe(DAY);
+    expect(dated.get('DELIVERY_FEE')).toBe(DAY);
+    expect(dated.get('CASH_PAYMENT_CORRECTION')).toBe(NEXT_DAY);
+    expect(await daysOf(delivery.orderId)).toEqual([DAY, NEXT_DAY]);
+
+    // День доставки: наличных и оплаты нет, корректировок в нём не появилось.
+    const onDelivery = await report(DAY, DAY, delivery.courierId);
+    expect(onDelivery.totals.cashReceivedMinor).toBe('0');
+    expect(onDelivery.totals.cashCorrectionsMinor).toBe('0');
+    expect(onDelivery.totals.deliveryFeesMinor).toBe('0');
+    expect(onDelivery.totals.closingBalanceMinor).toBe('0');
+
+    // День оплаты: корректировка погашена в своём дне, журнал объясняет ноль.
+    const onPayment = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
+    expect(onPayment.totals.cashCorrectionsMinor).toBe('0');
+    expect(onPayment.totals.openingBalanceMinor).toBe('0');
+    expect(onPayment.totals.closingBalanceMinor).toBe('0');
+    const journal = (onPayment.days.find((day) => day.date === NEXT_DAY)?.couriers ?? []).flatMap(
+      (courier) => courier.operations.entries,
+    );
+    expect(journal.map((entry) => entry.kind).sort()).toEqual([
+      'ADJUSTMENT',
+      'CASH_PAYMENT_CORRECTION',
+    ]);
+
+    // День обработки отмены пуст; снято ровно по разу — 4 000 ₽, а не 4 000 и ещё 2 000.
+    expect((await report(LATER_DAY, LATER_DAY, delivery.courierId)).days).toHaveLength(0);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: delivery.orderId, kind: 'ADJUSTMENT' },
+      }),
+    ).toBe(3);
+  });
+
+  /** Километры за МКАД, посчитанные уже после доставки, по ставке снимка маршрута. */
+  async function lateDistance(delivery: Delivery, perKmMinor: bigint): Promise<void> {
+    await ctx.db.$transaction((tx) =>
+      accrueDistanceFee(tx, {
+        attemptId: delivery.attemptId,
+        routeOrderId: delivery.routeOrderId,
+        routeId: delivery.routeId,
+        orderId: delivery.orderId,
+        courierUserId: delivery.courierId,
+        actorUserId: delivery.courierId,
+        operationDate: DAY,
+        perKmMinor,
+      }),
+    );
+  }
+
+  async function restate(delivery: Delivery, operationDate: string): Promise<boolean> {
+    const admin = await actorFor(['ADMIN']);
+    return ctx.db.$transaction((tx) =>
+      restateDistanceFee(tx, {
+        routeOrderId: delivery.routeOrderId,
+        actorUserId: admin.userId,
+        reason: 'Правка километров: маршрут построен по неверной точке',
+        operationDate,
+      }),
+    );
+  }
+
+  /** Задание отмены, обработанное в указанный день. */
+  function strip(delivery: Delivery, day: string): Promise<boolean> {
+    return ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${day}T09:00:00.000Z`),
+      }),
+    );
+  }
+
+  /** День по заказу в нуле: категории, «прочие корректировки» и вклад в баланс. */
+  function expectDayZero(built: Awaited<ReturnType<typeof report>>): void {
+    expect(built.totals.cashReceivedMinor).toBe('0');
+    expect(built.totals.cashCorrectionsMinor).toBe('0');
+    expect(built.totals.deliveryFeesMinor).toBe('0');
+    expect(built.totals.distanceFeesMinor).toBe('0');
+    expect(built.totals.adjustmentsMinor).toBe('0');
+    expect(
+      BigInt(built.totals.closingBalanceMinor) - BigInt(built.totals.openingBalanceMinor),
+    ).toBe(0n);
+    for (const group of built.days.flatMap((day) => day.couriers)) {
+      expect(group.distanceFeesMinor).toBe('0');
+      expect(group.distanceKmTenths).toBe(0);
+      expect(group.totalMinor).toBe('0');
+    }
+  }
+
+  /** Снятие отмены не возвращает деньги: ни правкой километров, ни поздним расчётом. */
+  async function expectNoRevival(delivery: Delivery, kmTenths: number): Promise<void> {
+    const before = await ctx.db.courierLedgerEntry.count({ where: { orderId: delivery.orderId } });
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: false, cancelledInSourceAt: null },
+    });
+    await seedDistance(delivery, kmTenths);
+    expect(await restate(delivery, WEEK_LATER)).toBe(false);
+    await lateDistance(delivery, 4_000n);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: delivery.orderId, kind: 'DISTANCE_FEE', reversedBy: { is: null } },
+      }),
+    ).toBe(0);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { orderId: delivery.orderId } })).toBe(
+      before,
+    );
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+  }
+
+  /*
+   * Цепочка правок километров в разных днях. Владелец подтвердил: после отмены
+   * заказа КАЖДЫЙ исходный день по заказу в нуле, включая пересчитанный МКАД.
+   * Прежнее начисление уже погашено сторно другого дня, второй раз его снять
+   * нельзя — поэтому его учёт ПЕРЕНОСИТСЯ в день сторно связанной парой
+   * записей той же категории и с теми же километрами; сумма пары — ноль.
+   */
+  it('километры пересчитаны другим днём: после отмены оба дня по заказу в нуле, перенос связан и хранит километры', async () => {
+    // Ставка 40 ₽/км; на момент доставки расстояния нет — километры приходят позже.
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      perKm: 4_000n,
+    });
+    await seedDistance(delivery, 125);
+    await lateDistance(delivery, 4_000n);
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(-50_000n);
+
+    // Правка километров на следующий день: 12,5 → 20,0 км, деньги — днём правки.
+    await seedDistance(delivery, 200);
+    expect(await restate(delivery, NEXT_DAY)).toBe(true);
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(-80_000n);
+    // До отмены дни живут по правилу правки: 500 ₽ в дне доставки, +300 ₽ в дне правки.
+    expect((await report(DAY, DAY, delivery.courierId)).totals.distanceFeesMinor).toBe('50000');
+    expect((await report(NEXT_DAY, NEXT_DAY, delivery.courierId)).totals.distanceFeesMinor).toBe(
+      '30000',
+    );
+
+    await cancelInSource(delivery);
+    expect(await strip(delivery, LATER_DAY)).toBe(true);
+
+    // 1. Каждый исходный день — в нуле по всем категориям; день отмены пуст.
+    const onDelivery = await report(DAY, DAY, delivery.courierId);
+    expectDayZero(onDelivery);
+    const onRestatement = await report(NEXT_DAY, NEXT_DAY, delivery.courierId);
+    expectDayZero(onRestatement);
+    expect(onRestatement.totals.openingBalanceMinor).toBe('0');
+    expect((await report(LATER_DAY, LATER_DAY, delivery.courierId)).days).toHaveLength(0);
+    expect(await daysOf(delivery.orderId)).toEqual([DAY, NEXT_DAY]);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+
+    // Строка дня доставки: деньги и километры дня сняты целиком, факт сохранён.
+    const row = onDelivery.rows.find((item) => item.attemptId === delivery.attemptId);
+    expect(row?.outcome).toBe('DELIVERED');
+    expect(row?.distanceFeeMinor).toBe('0');
+    expect(row?.beyondMkadKmTenths).toBe(0);
+    expect(row?.totalMinor).toBe('0');
+    expect(row?.financeCancelled).toBe(true);
+
+    // 2. Действующие записи сняты сторно в своих днях.
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(
+      reversals
+        .map((reversal) => [
+          reversal.reversesEntry?.kind,
+          reversal.reversesEntry?.amountMinor,
+          fromDateColumn(reversal.operationDate),
+        ])
+        .sort(),
+    ).toEqual([
+      ['CASH_RECEIVED', 500_000n, DAY],
+      ['DELIVERY_FEE', -20_000n, DAY],
+      ['DISTANCE_FEE', -80_000n, NEXT_DAY],
+    ]);
+
+    // 3. Прежние километры перенесены связанной парой: из дня доставки в день правки.
+    const relocations = await relocationsOf(delivery.orderId);
+    expect(relocations.map(relocationShape).sort()).toEqual([
+      ['IN', -50_000n, NEXT_DAY, 'DISTANCE_FEE', 125],
+      ['OUT', 50_000n, DAY, 'DISTANCE_FEE', 125],
+    ]);
+    // Сумма переноса — ноль: общий баланс он не меняет.
+    expect(relocations.reduce((total, item) => total + item.amountMinor, 0n)).toBe(0n);
+    // Сторно правки не переписано и не задвоено; исходные записи целы.
+    const restated = await ctx.db.courierLedgerEntry.findMany({
+      where: { orderId: delivery.orderId, reversalCause: 'DISTANCE_RESTATED' },
+      select: { operationDate: true, reversesEntry: { select: { amountMinor: true } } },
+    });
+    expect(restated).toHaveLength(1);
+    expect(fromDateColumn(restated[0]?.operationDate ?? new Date(0))).toBe(NEXT_DAY);
+    expect(restated[0]?.reversesEntry?.amountMinor).toBe(-50_000n);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { orderId: delivery.orderId, kind: 'DISTANCE_FEE' },
+      }),
+    ).toBe(2);
+
+    // 4. Выгрузка называет перенос своей категорией, а день правки сходится в ноль.
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(
+      (await buildSettlementWorkbook(
+        await report(DAY, LATER_DAY, delivery.courierId),
+      )) as unknown as Parameters<typeof workbook.xlsx.load>[0],
+    );
+    const operations = workbook.getWorksheet('Операции');
+    const lines: { level: string; date: unknown; kind: string; amount: unknown }[] = [];
+    operations?.eachRow((line) =>
+      lines.push({
+        level: String(line.getCell(1).value ?? ''),
+        date: line.getCell(2).value,
+        kind: String(line.getCell(7).value ?? ''),
+        amount: line.getCell(8).value,
+      }),
+    );
+    expect(
+      lines.find((line) => line.kind === 'Перенос учёта в день: Оплата километров за МКАД'),
+    ).toMatchObject({ date: NEXT_DAY, amount: -500 });
+    expect(lines.find((line) => line.level === 'Итог дня' && line.date === NEXT_DAY)?.amount).toBe(
+      0,
+    );
+    const orders = workbook.getWorksheet('Заказы');
+    const orderLines: { total: unknown; note: string }[] = [];
+    const header = (orders?.getRow(1).values as unknown[]).map((name) => String(name ?? ''));
+    orders?.eachRow((line) => {
+      if (String(line.getCell(1).value ?? '') === 'Заказ') {
+        orderLines.push({
+          total: line.getCell(header.indexOf('Итог, ₽')).value,
+          note: String(line.getCell(header.indexOf('Примечание')).value ?? ''),
+        });
+      }
+    });
+    expect(orderLines).toHaveLength(1);
+    expect(orderLines[0]?.total).toBe(0);
+    expect(orderLines[0]?.note).toContain('Начисления дня сняты');
+
+    // 5. Повтор ничего не добавляет: цепочка уже выверена в ноль.
+    const total = await ctx.db.courierLedgerEntry.count({ where: { orderId: delivery.orderId } });
+    expect(await strip(delivery, LATER_DAY)).toBe(false);
+    expect(await ctx.db.courierLedgerEntry.count({ where: { orderId: delivery.orderId } })).toBe(
+      total,
+    );
+
+    // 6. Нового активного начисления нет, а снятие отмены денег не возвращает.
+    await expectNoRevival(delivery, 300);
+  });
+
+  it('километры обнулены другим днём и других начислений нет: отмена переносит учёт и обнуляет оба дня', async () => {
+    // Заказ оплачен полностью, ставка за заказ нулевая: единственное начисление — километры.
+    const delivery = await seedDelivered({ sum: 300_000n, payed: 300_000n, perKm: 4_000n });
+    await seedDistance(delivery, 125);
+    await lateDistance(delivery, 4_000n);
+    expect(await orderContribution(delivery.orderId)).toBe(-50_000n);
+
+    // На следующий день километры обнулили: адрес внутри МКАД.
+    await seedDistance(delivery, 0);
+    expect(await restate(delivery, NEXT_DAY)).toBe(true);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+    // До отмены дни живут по правилу правки: +500 ₽ в дне доставки, −500 ₽ в дне правки.
+    expect((await report(DAY, DAY, delivery.courierId)).totals.distanceFeesMinor).toBe('50000');
+    expect((await report(NEXT_DAY, NEXT_DAY, delivery.courierId)).totals.distanceFeesMinor).toBe(
+      '-50000',
+    );
+
+    const processedAt = new Date(`${LATER_DAY}T09:00:00.000Z`);
+    await cancelInSource(delivery);
+    /*
+     * Действующих начислений нет — но снимать есть что: учёт разнесён по двум
+     * дням. Отбор «есть непогашенная запись» такой заказ пропускал бы вовсе.
+     */
+    expect(
+      await ctx.db.$transaction((tx) =>
+        stripCancelledOrderFinance(tx, { orderId: delivery.orderId, now: processedAt }),
+      ),
+    ).toBe(true);
+
+    expectDayZero(await report(DAY, DAY, delivery.courierId));
+    expectDayZero(await report(NEXT_DAY, NEXT_DAY, delivery.courierId));
+    expect((await report(LATER_DAY, LATER_DAY, delivery.courierId)).days).toHaveLength(0);
+    expect(await daysOf(delivery.orderId)).toEqual([DAY, NEXT_DAY]);
+
+    const row = (await report(DAY, DAY, delivery.courierId)).rows.find(
+      (item) => item.attemptId === delivery.attemptId,
+    );
+    expect(row?.distanceFeeMinor).toBe('0');
+    expect(row?.beyondMkadKmTenths).toBe(0);
+    expect(row?.totalMinor).toBe('0');
+    expect(row?.financeCancelled).toBe(true);
+
+    // Сторно отмены нет — нечего снимать; есть ровно один перенос с километрами.
+    expect(await cancellationReversals(delivery.orderId)).toHaveLength(0);
+    const relocations = await relocationsOf(delivery.orderId);
+    expect(relocations.map(relocationShape).sort()).toEqual([
+      ['IN', -50_000n, NEXT_DAY, 'DISTANCE_FEE', 125],
+      ['OUT', 50_000n, DAY, 'DISTANCE_FEE', 125],
+    ]);
+    // Отметка снятия стоит фактическим временем обработки.
+    const attempt = await ctx.db.deliveryAttempt.findUniqueOrThrow({
+      where: { id: delivery.attemptId },
+      select: { financeStrippedAt: true },
+    });
+    expect(attempt.financeStrippedAt?.toISOString()).toBe(processedAt.toISOString());
+
+    // Повтор задания — без изменений; снятие отмены денег не возвращает.
+    expect(await strip(delivery, LATER_DAY)).toBe(false);
+    await expectNoRevival(delivery, 200);
+  });
+
+  it('несколько правок в разных днях: после отмены каждый день цепочки в нуле', async () => {
+    // День доставки: 12,5 км (500 ₽); назавтра 20 км (800 ₽); ещё через день 30 км (1 200 ₽).
+    const delivery = await seedDelivered({ sum: 300_000n, payed: 300_000n, perKm: 4_000n });
+    await seedDistance(delivery, 125);
+    await lateDistance(delivery, 4_000n);
+    await seedDistance(delivery, 200);
+    expect(await restate(delivery, NEXT_DAY)).toBe(true);
+    await seedDistance(delivery, 300);
+    expect(await restate(delivery, LATER_DAY)).toBe(true);
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(-120_000n);
+    expect(await orderContribution(delivery.orderId)).toBe(-120_000n);
+
+    // Отмена через неделю.
+    await cancelInSource(delivery);
+    expect(await strip(delivery, WEEK_LATER)).toBe(true);
+
+    for (const day of [DAY, NEXT_DAY, LATER_DAY]) {
+      expectDayZero(await report(day, day, delivery.courierId));
+    }
+    expect((await report(WEEK_LATER, WEEK_LATER, delivery.courierId)).days).toHaveLength(0);
+    expect(await daysOf(delivery.orderId)).toEqual([DAY, NEXT_DAY, LATER_DAY]);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+    expect(await balanceOf(ctx.db, delivery.courierId, WEEK_LATER)).toBe(0n);
+
+    // Действующая запись снята в своём дне; две прежних перенесены — каждая в день своего сторно.
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(
+      reversals.map((reversal) => [
+        reversal.reversesEntry?.amountMinor,
+        fromDateColumn(reversal.operationDate),
+      ]),
+    ).toEqual([[-120_000n, LATER_DAY]]);
+    expect((await relocationsOf(delivery.orderId)).map(relocationShape).sort()).toEqual([
+      ['IN', -50_000n, NEXT_DAY, 'DISTANCE_FEE', 125],
+      ['IN', -80_000n, LATER_DAY, 'DISTANCE_FEE', 200],
+      ['OUT', 50_000n, DAY, 'DISTANCE_FEE', 125],
+      ['OUT', 80_000n, NEXT_DAY, 'DISTANCE_FEE', 200],
+    ]);
+    // Период целиком: ни одной категории с остатком, дни — только исходные.
+    const period = await report(DAY, WEEK_LATER, delivery.courierId);
+    expectDayZero(period);
+    expect(period.days.map((day) => day.date)).toEqual([LATER_DAY, NEXT_DAY, DAY]);
+
+    expect(await strip(delivery, WEEK_LATER)).toBe(false);
+    await expectNoRevival(delivery, 400);
+  });
+
+  it('после переноса снятая отмена и новая законная доставка начисляют и правят километры как обычно', async () => {
+    const delivery = await seedDelivered({ sum: 300_000n, payed: 300_000n, perKm: 4_000n });
+    await seedDistance(delivery, 125);
+    await lateDistance(delivery, 4_000n);
+    await seedDistance(delivery, 200);
+    expect(await restate(delivery, NEXT_DAY)).toBe(true);
+    await cancelInSource(delivery);
+    expect(await strip(delivery, LATER_DAY)).toBe(true);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+
+    // Отмену сняли, прежний результат закрыт, заказ везут заново — новой попыткой.
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { cancelledInSource: false, cancelledInSourceAt: null },
+    });
+    await ctx.db.deliveryAttempt.update({
+      where: { id: delivery.attemptId },
+      data: { activeKey: null },
+    });
+    const fresh = await ctx.db.deliveryAttempt.create({
+      data: {
+        routeOrderId: delivery.routeOrderId,
+        orderId: delivery.orderId,
+        routeId: delivery.routeId,
+        outcome: 'DELIVERED',
+        courierUserId: delivery.courierId,
+        activeKey: delivery.routeOrderId,
+      },
+      select: { id: true },
+    });
+    await accrueDeliveryResult(ctx.db, await readLedgerActivation(ctx.db), {
+      attemptId: fresh.id,
+      routeOrderId: delivery.routeOrderId,
+      routeId: delivery.routeId,
+      orderId: delivery.orderId,
+      courierUserId: delivery.courierId,
+      actorUserId: delivery.courierId,
+      outcome: 'DELIVERED',
+    });
+    // Новая попытка законно получает 800 ₽ за 20 км по действующему снимку.
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(-80_000n);
+    expect(await orderContribution(delivery.orderId)).toBe(-80_000n);
+
+    // И правка километров новой доставки работает: старый перенос ей не мешает.
+    await seedDistance(delivery, 300);
+    expect(await restate(delivery, WEEK_LATER)).toBe(true);
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(-120_000n);
+    expect(await orderContribution(delivery.orderId)).toBe(-120_000n);
+    // Записи прежней попытки не тронуты: переносов ровно один, новых по ней нет.
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { attemptId: delivery.attemptId, relocatesEntryId: { not: null } },
+      }),
+    ).toBe(2);
+    expect(
+      await ctx.db.courierLedgerEntry.count({
+        where: { attemptId: fresh.id, relocatesEntryId: { not: null } },
+      }),
+    ).toBe(0);
+  });
+
+  it('километры пересчитаны в день доставки: после отмены день доставки по заказу пуст целиком', async () => {
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      perKm: 4_000n,
+    });
+    await seedDistance(delivery, 125);
+    await lateDistance(delivery, 4_000n);
+    await seedDistance(delivery, 200);
+    expect(await restate(delivery, DAY)).toBe(true);
+    expect(await sumKind(delivery.orderId, 'DISTANCE_FEE')).toBe(-80_000n);
+
+    await cancelInSource(delivery);
+    await ctx.db.$transaction((tx) =>
+      stripCancelledOrderFinance(tx, {
+        orderId: delivery.orderId,
+        now: new Date(`${LATER_DAY}T09:00:00.000Z`),
+      }),
+    );
+
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(reversals).toHaveLength(3);
+    expect(reversals.every((reversal) => fromDateColumn(reversal.operationDate) === DAY)).toBe(
+      true,
+    );
+    expect(await daysOf(delivery.orderId)).toEqual([DAY]);
+
+    // Единственный день заказа обнулён целиком, и строка это называет.
+    const onDelivery = await report(DAY, DAY, delivery.courierId);
+    expect(onDelivery.totals.cashReceivedMinor).toBe('0');
+    expect(onDelivery.totals.deliveryFeesMinor).toBe('0');
+    expect(onDelivery.totals.distanceFeesMinor).toBe('0');
+    expect(onDelivery.totals.closingBalanceMinor).toBe('0');
+    const row = onDelivery.rows.find((item) => item.attemptId === delivery.attemptId);
+    expect(row?.financeCancelled).toBe(true);
+    expect(row?.distanceFeeMinor).toBe('0');
+    expect(row?.beyondMkadKmTenths).toBe(0);
+    expect(row?.totalMinor).toBe('0');
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+  });
+
+  it('одновременные снятия одного заказа дают один набор сторно исходными днями', async () => {
+    const delivery = await seedDelivered({
+      sum: 500_000n,
+      payed: 0n,
+      perOrder: 20_000n,
+      distanceFee: 10_000n,
+    });
+    await cancelInSource(delivery);
+
+    const strip = (): Promise<boolean> =>
+      ctx.db.$transaction((tx) =>
+        stripCancelledOrderFinance(tx, {
+          orderId: delivery.orderId,
+          now: new Date(`${LATER_DAY}T09:00:00.000Z`),
+        }),
+      );
+
+    /*
+     * Оба запроса обязаны завершиться успешно: строка заказа блокируется
+     * первой, второй ждёт и находит уже снятый журнал. Отказ по уникальности
+     * здесь означал бы гонку, которую блокировка и должна исключать.
+     */
+    const results = await Promise.all([strip(), strip()]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(reversals).toHaveLength(3);
+    expect(reversals.every((reversal) => fromDateColumn(reversal.operationDate) === DAY)).toBe(
+      true,
+    );
+    expect(await daysOf(delivery.orderId)).toEqual([DAY]);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
+  });
+
+  it('отмена, догнавшая доставку под блокировкой, снимает её начисления днём доставки', async () => {
+    // Первая попытка без начислений: заказ оплачен полностью, ставки нулевые.
+    const delivery = await seedDelivered({ sum: 500_000n, payed: 500_000n });
+    expect(await ctx.db.courierLedgerEntry.count({ where: { orderId: delivery.orderId } })).toBe(0);
+    // Источник «откатывает» оплату: управляемая доставка начислит 5 000 ₽ наличных.
+    await ctx.db.deliveryOrder.update({
+      where: { id: delivery.orderId },
+      data: { payedSumMinor: 0n, cashToCollectMinor: 500_000n, cashAnomaly: false },
+    });
+    const second = await seedAttemptFor(delivery);
+
+    let accrued!: () => void;
+    let release!: () => void;
+    const accruedSignal = new Promise<void>((resolve) => (accrued = resolve));
+    const releaseSignal = new Promise<void>((resolve) => (release = resolve));
+
+    const activation = await readLedgerActivation(ctx.db);
+    const deliveryTx = ctx.db.$transaction(
+      async (tx) => {
+        await accrueDeliveryResult(tx, activation, {
+          attemptId: second,
+          routeOrderId: delivery.routeOrderId,
+          routeId: delivery.routeId,
+          orderId: delivery.orderId,
+          courierUserId: delivery.courierId,
+          actorUserId: delivery.courierId,
+          outcome: 'DELIVERED',
+        });
+        accrued();
+        await releaseSignal;
+      },
+      { timeout: 20_000, maxWait: 20_000 },
+    );
+    await accruedSignal;
+
+    // Отмена в источнике и её задание стартуют, пока доставка держит строку заказа.
+    let stripped: boolean | null = null;
+    const cancellation = (async (): Promise<void> => {
+      await cancelInSource(delivery);
+      stripped = await ctx.db.$transaction((tx) =>
+        stripCancelledOrderFinance(tx, {
+          orderId: delivery.orderId,
+          now: new Date(`${LATER_DAY}T09:00:00.000Z`),
+        }),
+      );
+    })();
+
+    // Отмена действительно ждёт доставку на блокировке строки заказа.
+    expect(await waitForBlocked(1)).toBeGreaterThanOrEqual(1);
+    expect(stripped).toBeNull();
+
+    release();
+    await deliveryTx;
+    await cancellation;
+    expect(stripped).toBe(true);
+
+    // Начисление доставки увидено и снято — днём доставки, а не днём обработки.
+    const reversals = await cancellationReversals(delivery.orderId);
+    expect(reversals).toHaveLength(1);
+    expect(reversals[0]?.reversesEntry?.kind).toBe('CASH_RECEIVED');
+    expect(fromDateColumn(reversals[0]?.operationDate ?? new Date(0))).toBe(DAY);
+    expect(await daysOf(delivery.orderId)).toEqual([DAY]);
+    expect(await orderContribution(delivery.orderId)).toBe(0n);
   });
 });
 
@@ -1213,17 +1980,14 @@ describe('отменённый заказ не остаётся в действ�
 // --- Содержимое выгрузки -------------------------------------------------------
 
 describe('выгрузка показывает корректировки, а не только непустой файл', () => {
-  it('XLSX отменённого периода: заработок обнулён, движения дней сохранены', async () => {
+  it('XLSX отменённого периода: заработок обнулён, снятие показано в дне доставки', async () => {
     const delivery = await seedDelivered({
       sum: 500_000n,
       payed: 0n,
       perOrder: 20_000n,
       distanceFee: 10_000n,
     });
-    await ctx.db.deliveryOrder.update({
-      where: { id: delivery.orderId },
-      data: { cancelledInSource: true, cancelledInSourceAt: new Date() },
-    });
+    await cancelInSource(delivery);
     await ctx.db.$transaction((tx) =>
       stripCancelledOrderFinance(tx, {
         orderId: delivery.orderId,
@@ -1250,11 +2014,9 @@ describe('выгрузка показывает корректировки, а �
     expect(named.get('Конечный баланс')).toBe(0);
 
     /*
-     * Дневные движения в листе «Заказы» сохранены.
-     *
-     * Строка дня доставки НЕ помечается снятой: снятие пришло на следующий
-     * день. Её итог остаётся настоящим числом, а обратные записи видны
-     * отдельной строкой своего дня — именно так это выглядит и на экране.
+     * Лист «Заказы»: строка доставки стоит в своём дне с нулевым итогом, а
+     * пометка называет обе стороны — отмену в источнике и снятие начислений
+     * дня. Дня обработки отмены в файле нет: денег в нём не двигали.
      */
     /*
      * Утверждения привязаны к КОНКРЕТНОЙ строке по столбцу «Уровень».
@@ -1284,19 +2046,17 @@ describe('выгрузка показывает корректировки, а �
       }
     });
 
-    // Строка заказа одна, стоит в дне доставки и несёт настоящий итог.
+    // Строка заказа одна, стоит в дне доставки, и её итог — ноль.
     expect(orderRows).toHaveLength(1);
-    // 4 700 ₽: 5 000 наличных минус 200 оплаты работы и 100 МКАД.
-    expect(orderRows[0]?.total).toBe(4700);
+    expect(orderRows[0]?.total).toBe(0);
     expect(orderRows[0]?.date).toBe(DAY);
-    // «Начисления дня сняты» к этому дню не относится — снятие в следующем.
-    expect(orderRows[0]?.note).not.toContain('Начисления дня сняты');
-    // Но отмена заказа в источнике названа прямо.
+    // Пометки складываются: и отмена в источнике, и снятие начислений этого дня.
     expect(orderRows[0]?.note).toContain('Отменён в МоемСкладе');
+    expect(orderRows[0]?.note).toContain('Начисления дня сняты');
 
-    // День отмены показан отдельной группой и ровно тем же числом со знаком минус.
-    expect(dayRows.find((row) => row.date === DAY)?.total).toBe(4700);
-    expect(dayRows.find((row) => row.date === NEXT_DAY)?.total).toBe(-4700);
+    // Итог дня доставки — ноль; дня обработки отмены в файле нет.
+    expect(dayRows.find((row) => row.date === DAY)?.total).toBe(0);
+    expect(dayRows.find((row) => row.date === NEXT_DAY)).toBeUndefined();
   });
 
   it('XLSX: подписи, знаки и суммы итогов и журнала', async () => {

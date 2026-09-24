@@ -100,6 +100,12 @@ interface LedgerEntry {
   /** Что именно отменяет обратная запись. */
   reversesKind: string | null;
   reversesEntryId: string | null;
+  /**
+   * Перенос дня учёта: вид переносимой записи и сторона — из какого дня учёт
+   * ушёл (`OUT`) или в какой пришёл (`IN`). `null` у остальных записей.
+   */
+  relocatesKind: string | null;
+  relocationSide: 'OUT' | 'IN' | null;
   /** Импорт выписки ПланФакта, из которого пришла выплата; `null` у остальных записей. */
   payoutImportId: string | null;
 }
@@ -359,7 +365,8 @@ export function loadMoreControls(report: {
  * показывают знак и направление и ссылаются на исходную запись.
  */
 export function correctiveOperation(
-  entry: Pick<LedgerEntry, 'kind' | 'amountMinor' | 'reversesKind'>,
+  entry: Pick<LedgerEntry, 'kind' | 'amountMinor' | 'reversesKind'> &
+    Partial<Pick<LedgerEntry, 'relocatesKind' | 'relocationSide'>>,
 ): { title: string; direction: string } | null {
   if (entry.kind === 'OPENING_DEBT') {
     return { title: ledgerKindLabel(entry.kind), direction: 'увеличивает долг' };

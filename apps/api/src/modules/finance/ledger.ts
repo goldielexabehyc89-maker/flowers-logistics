@@ -15,7 +15,11 @@
  * получает ту же запись в ответ.
  */
 
-import type { LedgerReversalCause, CourierLedgerKind } from '../../generated/prisma/client.js';
+import type {
+  LedgerRelocationSide,
+  LedgerReversalCause,
+  CourierLedgerKind,
+} from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { AppError } from '../../platform/errors.js';
 import type { TransactionClient } from '../auth/sessions.js';
@@ -95,6 +99,17 @@ export interface LedgerEntryView {
    * словами («Отмена начального долга»), а не общей «корректировкой».
    */
   reversesKind: CourierLedgerKind | null;
+  /**
+   * Перенос дня учёта: какая запись переносится, её вид и километры, сторона.
+   *
+   * Так снятие отменённого заказа сводит в ноль день начисления, уже погашенного
+   * сторно другого дня. Категория и километры переноса — переносимой записи:
+   * иначе он попадал бы в «прочие корректировки» и терял километры.
+   */
+  relocatesEntryId: string | null;
+  relocatesKind: CourierLedgerKind | null;
+  relocatesDistanceKmTenths: number | null;
+  relocationSide: LedgerRelocationSide | null;
   /** Та же передача на стороне кассы логиста. */
   transferId: string | null;
   /**
@@ -128,6 +143,11 @@ export function reversalKey(entryId: string): string {
   return `reversal:${entryId}`;
 }
 
+/** Ключ записи переноса дня учёта: у переносимой записи одна пара сторон. */
+export function relocationKey(entryId: string, side: LedgerRelocationSide): string {
+  return `relocation:${entryId}:${side}`;
+}
+
 export function toLedgerView(row: {
   id: string;
   courierUserId: string;
@@ -144,6 +164,9 @@ export function toLedgerView(row: {
   distanceKmTenths?: number | null;
   reversesEntryId: string | null;
   reversesEntry?: { kind: CourierLedgerKind; distanceKmTenths?: number | null } | null;
+  relocatesEntryId?: string | null;
+  relocatesEntry?: { kind: CourierLedgerKind; distanceKmTenths?: number | null } | null;
+  relocationSide?: LedgerRelocationSide | null;
   transferId?: string | null;
   payoutImportId?: string | null;
   reversedBy?: { id: string } | null;
@@ -167,6 +190,10 @@ export function toLedgerView(row: {
     reversesEntryId: row.reversesEntryId,
     reversesKind: row.reversesEntry?.kind ?? null,
     reversesDistanceKmTenths: row.reversesEntry?.distanceKmTenths ?? null,
+    relocatesEntryId: row.relocatesEntryId ?? null,
+    relocatesKind: row.relocatesEntry?.kind ?? null,
+    relocatesDistanceKmTenths: row.relocatesEntry?.distanceKmTenths ?? null,
+    relocationSide: row.relocationSide ?? null,
     transferId: row.transferId ?? null,
     payoutImportId: row.payoutImportId ?? null,
     reversed: (row.reversedBy ?? null) !== null,
@@ -184,6 +211,7 @@ export function toLedgerView(row: {
 const REVERSAL_VIEW = {
   reversedBy: { select: { id: true } },
   reversesEntry: { select: { kind: true, distanceKmTenths: true } },
+  relocatesEntry: { select: { kind: true, distanceKmTenths: true } },
   actor: { select: { fullName: true } },
 } as const;
 
@@ -406,11 +434,7 @@ export async function openingDebtsOf(
   const rows = await db.courierLedgerEntry.findMany({
     where: { courierUserId, kind: 'OPENING_DEBT' },
     orderBy: [{ operationDate: 'asc' }, { occurredAt: 'asc' }],
-    include: {
-      reversedBy: { select: { id: true } },
-      reversesEntry: { select: { kind: true, distanceKmTenths: true } },
-      actor: { select: { fullName: true } },
-    },
+    include: REVERSAL_VIEW,
   });
   return rows.map(toLedgerView);
 }
@@ -426,11 +450,7 @@ export async function entriesOf(
       operationDate: { gte: toDateColumn(input.from), lte: toDateColumn(input.to) },
     },
     orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
-    include: {
-      reversedBy: { select: { id: true } },
-      reversesEntry: { select: { kind: true, distanceKmTenths: true } },
-      actor: { select: { fullName: true } },
-    },
+    include: REVERSAL_VIEW,
   });
   return rows.map(toLedgerView);
 }

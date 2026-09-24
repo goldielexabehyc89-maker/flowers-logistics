@@ -34,11 +34,25 @@ const DEBT_INCREASING: readonly string[] = [
  * Иначе снятая зарплата оставалась бы в зарплате, а её отмена пряталась в общей
  * строке «обратные корректировки», где смешаны наличные, заработок и долги.
  * Отмена оплаты доставки — это изменение оплаты доставки, и считаться должна там.
+ *
+ * Перенос дня учёта — тем же правилом: категория ПЕРЕНОСИМОЙ записи. Он лишь
+ * двигает учёт начисления между днями, и в каждом из них должен считаться там
+ * же, где само начисление, — иначе день доставки показывал бы километры, а их
+ * снятие уходило в «прочие корректировки».
  */
-export function categoryKind(entry: Pick<LedgerEntryView, 'kind' | 'reversesKind'>): string {
-  return entry.kind === 'ADJUSTMENT' && entry.reversesKind !== null
-    ? entry.reversesKind
-    : entry.kind;
+export function categoryKind(
+  entry: Pick<LedgerEntryView, 'kind' | 'reversesKind' | 'relocatesKind'>,
+): string {
+  if (entry.kind !== 'ADJUSTMENT') {
+    return entry.kind;
+  }
+  if (entry.reversesKind !== null) {
+    return entry.reversesKind;
+  }
+  if (entry.relocatesKind !== null) {
+    return entry.relocatesKind;
+  }
+  return entry.kind;
 }
 
 /**
