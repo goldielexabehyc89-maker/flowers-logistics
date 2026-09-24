@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -64,9 +64,52 @@ try {
   await once(upstream, 'listening');
   const port = await freePort();
   const upstreamPort = upstream.address().port;
+  const bootstrapFolder = path.join(folder, 'bootstrap');
+  await mkdir(bootstrapFolder);
+  await writeFile(
+    path.join(bootstrapFolder, 'certificate.pem'),
+    `${await readFile(cert, 'utf8')}\n${await readFile(key, 'utf8')}`,
+    { mode: 0o600 },
+  );
+  const bootstrap = await readFile(
+    new URL('../proxy/app.erpget-bootstrap.conf', import.meta.url),
+    'utf8',
+  );
+  const bootstrapConfig = path.join(folder, 'bootstrap.conf');
+  await writeFile(
+    bootstrapConfig,
+    bootstrap.replace('/var/lib/caddy/app.erpget-bootstrap', bootstrapFolder),
+  );
+  const productionConfig = path.join(folder, 'production.Caddyfile');
+  await writeFile(
+    productionConfig,
+    template.replace('/etc/caddy/app.erpget-bootstrap/*.conf', bootstrapConfig),
+  );
+  const adapted = JSON.parse(
+    command(caddyBin, ['adapt', '--config', productionConfig, '--adapter', 'caddyfile']),
+  );
+  assert.deepEqual(adapted.apps.tls.certificates.automate, ['app.erpget.ru']);
+  assert.deepEqual(adapted.apps.tls.certificates.load_folders, [bootstrapFolder]);
+  assert.ok(
+    adapted.apps.tls.automation.policies.some(
+      (policy) => policy.subjects.includes('app.erpget.ru') && policy.key_type === 'rsa2048',
+    ),
+  );
+  await writeFile(
+    productionConfig,
+    template.replace('/etc/caddy/app.erpget-bootstrap/*.conf', `${folder}/absent-*.conf`),
+  );
+  const automatedOnly = JSON.parse(
+    command(caddyBin, ['adapt', '--config', productionConfig, '--adapter', 'caddyfile']),
+  );
+  assert.deepEqual(automatedOnly.apps.tls.certificates.automate, ['app.erpget.ru']);
+  assert.equal(automatedOnly.apps.tls.certificates.load_folders, undefined);
+  // Keep the fixture entirely offline. Explicit automation was asserted above;
+  // this running server uses only the fixture certificate from the same loader.
   const site = template
     .replace('app.erpget.ru {', `https://app.erpget.ru:${port} {`)
-    .replace('tls {', `tls ${cert} ${key} {`)
+    .replace('tls force_automate {', 'tls {')
+    .replace('/etc/caddy/app.erpget-bootstrap/*.conf', bootstrapConfig)
     .replace('127.0.0.1:3002', `127.0.0.1:${upstreamPort}`);
   const controls = ['erpget.ru', 'staging.erpget.ru']
     .map((host) => `https://${host}:${port} {\n tls ${cert} ${key}\n respond "control"\n}`)
@@ -142,7 +185,7 @@ ${controls}
     }
   }
   assert.ok(ready, `Caddy did not start: ${logs}`);
-  let checks = 0;
+  let checks = 2;
   for (const cipher of ['ECDHE-RSA-AES128-SHA', 'ECDHE-RSA-AES256-SHA']) {
     const legacy = {
       minVersion: 'TLSv1.2',

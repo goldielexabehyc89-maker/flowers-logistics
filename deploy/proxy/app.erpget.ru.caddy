@@ -1,7 +1,10 @@
 # Additional site only. Import this file from the existing Caddyfile.
 # Do not replace the erpget.ru/staging.erpget.ru blocks or restart the app.
 app.erpget.ru {
-	tls {
+	tls force_automate {
+		# Optional one-time DNS-01 certificate; remove the imported file only
+		# after Caddy has obtained its own automatically managed certificate.
+		import /etc/caddy/app.erpget-bootstrap/*.conf
 		key_type rsa2048
 		protocols tls1.2 tls1.3
 		# Modern clients keep AEAD; CBC is limited to this legacy hostname.
