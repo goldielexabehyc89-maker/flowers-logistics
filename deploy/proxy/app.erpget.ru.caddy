@@ -1,0 +1,19 @@
+# Additional site only. Import this file from the existing Caddyfile.
+# Do not replace the erpget.ru/staging.erpget.ru blocks or restart the app.
+app.erpget.ru {
+	tls {
+		key_type rsa2048
+		protocols tls1.2 tls1.3
+		# Modern clients keep AEAD; CBC is limited to this legacy hostname.
+		# Windows 7 SChannel supports ECDHE-RSA-CBC with P-256/P-384.
+		ciphers TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+	}
+
+	log
+
+	reverse_proxy 127.0.0.1:3002 {
+		# This hostname is now direct: never accept a client-supplied XFF,
+		# even while the old proxy remains trusted for erpget.ru elsewhere.
+		header_up X-Forwarded-For {remote_host}
+	}
+}
