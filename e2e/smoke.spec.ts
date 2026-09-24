@@ -7565,6 +7565,204 @@ test('«Отчёты»: при открытии выбран день и все 
 });
 
 /**
+ * Доставка ПРОШЛЫМ днём с километрами за МКАД — предпосылка проверки переноса
+ * дня учёта. Лист и результат в браузере живут сегодняшним днём, поэтому
+ * прошлый день заводится сеялкой теми же доменными функциями, что и боевой
+ * путь. Правка километров и отмена делаются в самом сценарии.
+ */
+function seedFinanceRelocation(): {
+  courierPhone: string;
+  courierId: string;
+  orderNumber: string;
+  deliveryDate: string;
+  routeOrderId: string;
+} {
+  const output = execFileSync('npm', ['run', '--silent', 'seed:e2e-finance-relocation'], {
+    encoding: 'utf8',
+  });
+  const value = (label: string): string =>
+    output.match(new RegExp(`^${label}:\\s*(.+)$`, 'm'))?.[1]?.trim() ?? '';
+  const fixture = {
+    courierPhone: value('курьер'),
+    courierId: value('курьер id'),
+    orderNumber: value('заказ'),
+    deliveryDate: value('день доставки'),
+    routeOrderId: value('участие'),
+  };
+  if (Object.values(fixture).some((item) => item === '')) {
+    throw new Error('сеялка переноса дня учёта вернула неполную фикстуру');
+  }
+  return fixture;
+}
+
+/**
+ * Отмена заказа после правки километров ДРУГИМ днём.
+ *
+ * Правило владельца: после отмены заказа в источнике каждый исходный день по
+ * заказу в нуле. Правка километров назавтра разносит начисление и его сторно
+ * по двум дням, и второй раз начисление снять нельзя — его учёт переносится
+ * в день сторно связанной парой записей. Здесь это видно так, как видит
+ * логист: открытый отчёт обновляется сам, строка дня доставки обнулена и
+ * помечена, перенос назван в журнале дня правки и в выгрузке.
+ */
+test('расчёты: отмена после правки километров другим днём обнуляет оба дня и показывает перенос учёта', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  const fixture = seedFinanceRelocation();
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const today = await page.evaluate(() =>
+    new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' }).format(new Date()),
+  );
+  const auth = await page.request.post('/api/auth/login', {
+    data: { phone: ADMIN_PHONE, pin: ADMIN_PIN },
+  });
+  expect(auth.status()).toBe(200);
+  const token = ((await auth.json()) as { accessToken: string }).accessToken;
+  const authorized = { authorization: `Bearer ${token}` };
+
+  // Отчёт по курьеру за период с дня доставки по сегодня.
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await page.waitForURL('**/logistics/reports', { timeout: 30_000 });
+  await expect(page.getByTestId('reports-screen')).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('reports-from').fill(fixture.deliveryDate);
+  await page.getByTestId('reports-to').fill(today);
+  await page.getByTestId('reports-courier-combobox-field').fill(fixture.courierPhone);
+  await expect(page.getByTestId('reports-courier-combobox-option')).toHaveCount(1);
+  await page.getByTestId('reports-courier-combobox-option').first().click();
+  // 3 000 ₽ наличных минус 200 ₽ за заказ и 500 ₽ за 12,5 км: за курьером 2 300 ₽.
+  await expect(page.getByTestId('reports-closing')).toHaveText('2300,00 ₽', { timeout: 25_000 });
+
+  /*
+   * Правка километров сегодня: 12,5 → 20,0 км, деньги — днём правки (+300 ₽).
+   * Открытый отчёт обновляется сам: день правки появляется без перезагрузки.
+   */
+  const restated = await page.request.put('/api/logistics/distances', {
+    headers: authorized,
+    data: {
+      routeOrderId: fixture.routeOrderId,
+      kmTenths: 200,
+      reason: 'маршрут построен по неверной точке',
+    },
+  });
+  expect(restated.status()).toBe(200);
+  await expect(page.getByTestId('reports-closing')).toHaveText('2000,00 ₽', { timeout: 30_000 });
+  const todayGroup = page.locator(`[data-testid="reports-group"][data-group-date="${today}"]`);
+  await expect(todayGroup).toBeVisible();
+
+  // Источник отменяет заказ. Снятие делает обычный воркер очереди — без перезагрузки.
+  const cancelled = await page.request.post('/api/testing/source-cancellation', {
+    headers: authorized,
+    data: { orderNumber: fixture.orderNumber, cancelled: true },
+  });
+  expect(cancelled.status()).toBe(200);
+  await expect(page.getByTestId('reports-closing')).toHaveText('0,00 ₽', { timeout: 30_000 });
+
+  // День доставки: километров и денег нет, строка заказа помечена снятой.
+  const deliveryGroup = page.locator(
+    `[data-testid="reports-group"][data-group-date="${fixture.deliveryDate}"]`,
+  );
+  await expect(deliveryGroup).toBeVisible();
+  await expect(deliveryGroup).toContainText('0.0 км · 0,00 ₽');
+  await deliveryGroup.getByTestId('reports-group-toggle').click();
+  const row = page.locator(`[data-order-number="${fixture.orderNumber}"]`);
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId('reports-finance-cancelled')).toBeVisible();
+  await expect(row).toContainText('отменён в МоемСкладе');
+
+  /*
+   * День правки: перенос учёта и снятие пересчитанных километров названы
+   * своими словами, и итог дня — ноль. Пересчитанное начисление стоит рядом,
+   * его сторно и сторно правки — тоже: история дня цела.
+   */
+  await expect(todayGroup).toContainText('0.0 км · 0,00 ₽');
+  await todayGroup.getByTestId('reports-group-toggle').click();
+  const payments = page.getByTestId('reports-payment');
+  await expect(
+    payments.filter({ hasText: 'Перенос учёта в день: Оплата километров за МКАД' }),
+  ).toHaveCount(1);
+  await expect(payments.filter({ hasText: 'Отмена: Оплата километров за МКАД' })).toHaveCount(2);
+  await expect(
+    payments.filter({ has: page.getByText('Оплата километров за МКАД', { exact: true }) }),
+  ).toHaveCount(1);
+
+  // API: оба дня по заказу в нуле по категориям, «прочих корректировок» нет.
+  const dayReport = async (
+    day: string,
+  ): Promise<{
+    totals: Record<string, string>;
+    rows: { orderNumber: string; financeCancelled: boolean; beyondMkadKmTenths: number | null }[];
+  }> => {
+    const response = await page.request.get(
+      `/api/logistics/reports/settlements?from=${day}&to=${day}&courierUserId=${fixture.courierId}`,
+      { headers: authorized },
+    );
+    expect(response.status()).toBe(200);
+    return (await response.json()) as {
+      totals: Record<string, string>;
+      rows: { orderNumber: string; financeCancelled: boolean; beyondMkadKmTenths: number | null }[];
+    };
+  };
+  for (const day of [fixture.deliveryDate, today]) {
+    const built = await dayReport(day);
+    expect(built.totals['cashReceivedMinor']).toBe('0');
+    expect(built.totals['deliveryFeesMinor']).toBe('0');
+    expect(built.totals['distanceFeesMinor']).toBe('0');
+    expect(built.totals['adjustmentsMinor']).toBe('0');
+    expect(
+      BigInt(built.totals['closingBalanceMinor'] ?? '1') -
+        BigInt(built.totals['openingBalanceMinor'] ?? '0'),
+    ).toBe(0n);
+  }
+  const deliveryDayRow = (await dayReport(fixture.deliveryDate)).rows.find(
+    (item) => item.orderNumber === fixture.orderNumber,
+  );
+  expect(deliveryDayRow?.financeCancelled).toBe(true);
+  expect(deliveryDayRow?.beyondMkadKmTenths).toBe(0);
+
+  // Выгрузки: XLSX называет перенос и помечает строку заказа, PDF отдаётся документом.
+  const period = `from=${fixture.deliveryDate}&to=${today}&courierUserId=${fixture.courierId}`;
+  const xlsx = await page.request.get(`/api/logistics/reports/settlements.xlsx?${period}`, {
+    headers: authorized,
+  });
+  expect(xlsx.status()).toBe(200);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(
+    (await xlsx.body()) as unknown as Parameters<typeof workbook.xlsx.load>[0],
+  );
+  const operations = workbook.getWorksheet('Операции');
+  const operationTitles: string[] = [];
+  operations?.eachRow((line) => operationTitles.push(String(line.getCell(7).value ?? '')));
+  expect(operationTitles).toContain('Перенос учёта в день: Оплата километров за МКАД');
+  const orders = workbook.getWorksheet('Заказы');
+  const header = (orders?.getRow(1).values as unknown[]).map((name) => String(name ?? ''));
+  const orderLines: { total: unknown; note: string }[] = [];
+  orders?.eachRow((line) => {
+    if (String(line.getCell(1).value ?? '') === 'Заказ') {
+      orderLines.push({
+        total: line.getCell(header.indexOf('Итог, ₽')).value,
+        note: String(line.getCell(header.indexOf('Примечание')).value ?? ''),
+      });
+    }
+  });
+  expect(orderLines).toHaveLength(1);
+  expect(orderLines[0]?.total).toBe(0);
+  expect(orderLines[0]?.note).toContain('Начисления дня сняты');
+  expect(orderLines[0]?.note).toContain('Отменён в МоемСкладе');
+
+  const pdf = await page.request.get(`/api/logistics/reports/settlements.pdf?${period}`, {
+    headers: authorized,
+  });
+  expect(pdf.status()).toBe(200);
+  expect((await pdf.body()).subarray(0, 5).toString('latin1')).toBe('%PDF-');
+});
+
+/**
  * «Маршрутизация»: нераспределённая сделка выглядит как в «Сделках»,
  * а пустой черновик заводится кнопкой.
  *
