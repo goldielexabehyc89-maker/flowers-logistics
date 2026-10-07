@@ -824,6 +824,24 @@
   font-weight: 500;
 }
 
+/*
+ * Номер и пометка «(ОТКРЫТКА)» — один блок строки.
+ *
+ * Блок сжимается не уже номера; когда пометка не помещается рядом,
+ * она переносится под номер. Время, адрес и кнопка остаются в строке.
+ */
+.sheets__order-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+}
+
+/* Номер не рвётся по дефисам: иначе блок сжимался бы уже номера и тот наезжал на время. */
+.sheets__order-title > .sheets__order-number {
+  white-space: nowrap;
+}
+
 .sheets__order-address {
   overflow: hidden;
   flex: 1;

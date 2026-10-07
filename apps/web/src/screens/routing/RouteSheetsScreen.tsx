@@ -26,6 +26,7 @@ import {
   Field,
   LoadingState,
   Modal,
+  PostcardMark,
   StatusBadge,
   TextInput,
 } from '../../ui/components';
@@ -164,15 +165,23 @@ function SheetOrders({
             data-order-number={item.order.number}
           >
             <span className="sheets__order-position">{item.position}</span>
-            {/* Номер — вход в окно заказа: там вся информация и правки. */}
-            <button
-              type="button"
-              className="sheets__order-number order-number-button"
-              data-testid="order-number"
-              onClick={() => onOpenOrder(item.order.id)}
-            >
-              {item.order.number}
-            </button>
+            {/*
+              Номер и пометка «(ОТКРЫТКА)» — один блок: пометка читается
+              вместе с номером, а на узком экране уходит под него, не
+              выталкивая время, адрес и кнопку удаления за край строки.
+            */}
+            <span className="sheets__order-title">
+              {/* Номер — вход в окно заказа: там вся информация и правки. */}
+              <button
+                type="button"
+                className="sheets__order-number order-number-button"
+                data-testid="order-number"
+                onClick={() => onOpenOrder(item.order.id)}
+              >
+                {item.order.number}
+              </button>
+              <PostcardMark hasPostcard={item.order.hasPostcard} />
+            </span>
             {/*
               Время стоит между номером и адресом: остановка читается как
               «этот заказ, к этому часу, сюда». Адрес идёт последним — он

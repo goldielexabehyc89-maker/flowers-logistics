@@ -38,6 +38,7 @@ import { closeAfterCancelledResult, openAfterFailedDelivery } from '../returns/s
 // Рабочий адрес считается в одном месте на весь продукт, а не переписывается здесь.
 import { addressDetailsOf, effectiveAddress, ORDER_ADDRESS_SELECT } from '../orders/address.js';
 import { fromMicro } from '../orders/geo.js';
+import { hasPostcard, POSTCARD_SELECT } from '../fulfillment/postcard.js';
 import { readLedgerActivation } from '../finance/tariffs.js';
 
 /** Кто работает с доставкой. Курьер сообщает результат, остальные — наблюдают и правят. */
@@ -230,6 +231,12 @@ export interface ActiveDeliveryOrder {
    * физически в машине, и делать вид, что его там нет, нельзя.
    */
   cancelled: boolean;
+  /**
+   * К заказу приложена открытка (`fulfillment/postcard.ts`).
+   *
+   * Только признак: текст открытки курьеру в списке не нужен.
+   */
+  hasPostcard: boolean;
   /** Действующий результат, если он уже есть. */
   result: AttemptView | null;
 }
@@ -407,6 +414,7 @@ export async function listActiveDeliveries(
               cashCollectable: true,
               cancelledInSource: true,
               cancelledByLogistAt: true,
+              ...POSTCARD_SELECT,
             },
           },
           attempts: {
@@ -450,6 +458,7 @@ export async function listActiveDeliveries(
           cancelled:
             participation.order.cancelledInSource ||
             participation.order.cancelledByLogistAt !== null,
+          hasPostcard: hasPostcard(participation.order),
           result: attempt === undefined ? null : toAttemptView(attempt, actor, now),
         };
       }),

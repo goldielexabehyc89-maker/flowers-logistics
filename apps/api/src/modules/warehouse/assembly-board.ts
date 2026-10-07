@@ -21,6 +21,7 @@
 import type { $Enums } from '../../generated/prisma/client.js';
 import type { Database } from '../../platform/db.js';
 import { fromDateColumn } from '../integrations/moysklad/delivery-date.js';
+import { hasPostcard, POSTCARD_SELECT } from '../fulfillment/postcard.js';
 
 /**
  * Складская стадия одного заказа листа.
@@ -334,6 +335,12 @@ export interface IssueOrderView {
   requiresRelocation: boolean;
   /** Заказ уже внесён в лист текущей проверкой. */
   checked: boolean;
+  /**
+   * К заказу приложена открытка (`fulfillment/postcard.ts`).
+   *
+   * Сведение, а не условие выдачи: на готовность и отгрузку не влияет.
+   */
+  hasPostcard: boolean;
 }
 
 /**
@@ -433,6 +440,7 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
               manualIntervalStartMinute: true,
               cancelledInSource: true,
               cancelledByLogistAt: true,
+              ...POSTCARD_SELECT,
               placements: {
                 where: { releasedAt: null },
                 select: {
@@ -521,6 +529,7 @@ export async function readIssueBoard(db: Database): Promise<IssueCourierView[]> 
             : null,
         requiresRelocation: placement?.requiresRelocation ?? false,
         checked: checkedIds.has(order.id),
+        hasPostcard: hasPostcard(order),
       };
     });
 

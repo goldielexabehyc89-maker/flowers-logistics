@@ -16,8 +16,9 @@
  * списком, и админ либо переназначает заказ, либо возвращает его в очередь.
  */
 
-import type { Role } from '@fl/shared';
+import { moscowToday, shiftCalendarDate, type Role } from '@fl/shared';
 import { AppError } from '../../platform/errors.js';
+import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import type { Database } from '../../platform/db.js';
 import type { TransactionClient } from '../auth/sessions.js';
 import { writeAudit, type AuditAction } from '../audit/service.js';
@@ -54,7 +55,15 @@ export interface ShiftView {
   closedAt: string | null;
   closeKind: 'SELF' | 'ADMIN_FORCED' | null;
   closeReason: string | null;
-  /** Сколько незавершённых заказов было взято в этой смене. */
+  /**
+   * Сколько заказов у человека в сборке.
+   *
+   * В обычных ответах (своя смена, список смен) это счётчик «В сборке» —
+   * незавершённые заказы с датой доставки не раньше вчерашнего московского
+   * дня (`countCurrentAssembly`). В ответах закрытия смены — ВСЯ незавершённая
+   * работа, которая остаётся за человеком: там число отвечает на другой
+   * вопрос, и обрезать его датой значило бы спрятать часть оставленных заказов.
+   */
   openAssignments: number;
   /**
    * Точка печати этой смены.
@@ -211,7 +220,7 @@ export async function setShiftPrintPoint(
     return tx.floristShift.findUniqueOrThrow({ where: { id: active.id }, select: SHIFT_SELECT });
   });
 
-  return toView(updated, await openAssignmentsOf(db, actor.userId));
+  return toView(updated, await countCurrentAssembly(db, actor.userId, new Date()));
 }
 
 /** Отказ действия, требующего активной смены. */
@@ -236,6 +245,12 @@ export async function findActiveShift(
   return db.floristShift.findUnique({ where: { activeKey: userId }, select: SHIFT_SELECT });
 }
 
+/**
+ * Вся незавершённая работа человека — без границы по дате.
+ *
+ * Нужна там, где речь о работе, оставленной за человеком: при закрытии смены
+ * (ответ и аудит). Счётчик «В сборке» — другое число, см. `countCurrentAssembly`.
+ */
 async function openAssignmentsOf(
   db: Database | TransactionClient,
   userId: string,
@@ -248,13 +263,62 @@ async function openAssignmentsOf(
   });
 }
 
-/** Собственная смена вместе с числом незавершённых назначений. */
-export async function ownShift(db: Database, userId: string): Promise<ShiftView | null> {
+/**
+ * Самая ранняя дата доставки, которую ещё учитывает счётчик «В сборке»:
+ * вчерашний календарный день Москвы.
+ *
+ * Именно календарный день, а не «последние 24 часа»: в 00:30 вчерашним
+ * становится весь прошлый день целиком, а позавчерашний выбывает. День
+ * считается от переданного момента на КАЖДЫЙ вызов — граница сдвигается
+ * в полночь сама, без перезапуска сервера и без кеша. Москва берётся из
+ * общего модуля времени, поэтому часовой пояс процесса и дата UTC (с 21:00
+ * до 24:00 UTC она отстаёт от московской на день) на результат не влияют.
+ */
+export function currentAssemblyFloor(now: Date): string {
+  return shiftCalendarDate(moscowToday(now), -1);
+}
+
+/**
+ * Счётчик «В сборке» флориста.
+ *
+ * Прежние условия сохранены целиком: заказ закреплён за этим человеком
+ * и находится в незавершённом состоянии (`OPEN_PROCESS_STATES`). Добавлено
+ * одно: дата доставки не раньше вчерашнего московского дня. Берётся именно
+ * дата доставки — не создания, не назначения и не начала сборки.
+ *
+ * Заказ без даты доставки сегодняшним не считается и в счётчик не входит:
+ * сравнение с границей для `NULL` ложно, подстановки «сегодня» нет.
+ *
+ * МЕНЯЕТСЯ ТОЛЬКО ЧИСЛО. Старые заказы остаются за флористом, в «Моих
+ * заказах», в назначениях и в истории. Занятость флористов и AUTO-раздача
+ * считают собственную выборку (`dispatch.ts`, `dispatch-florist.ts`) и этой
+ * функцией не пользуются; закрытие смены по-прежнему видит всю работу.
+ */
+export async function countCurrentAssembly(
+  db: Database | TransactionClient,
+  userId: string,
+  now: Date,
+): Promise<number> {
+  return db.deliveryOrder.count({
+    where: {
+      fulfillmentAssigneeId: userId,
+      fulfillmentProcessState: { in: [...OPEN_PROCESS_STATES] },
+      deliveryDate: { gte: toDateColumn(currentAssemblyFloor(now)) },
+    },
+  });
+}
+
+/** Собственная смена вместе со счётчиком «В сборке». */
+export async function ownShift(
+  db: Database,
+  userId: string,
+  now: Date = new Date(),
+): Promise<ShiftView | null> {
   const shift = await findActiveShift(db, userId);
   if (shift === null) {
     return null;
   }
-  return toView(shift, await openAssignmentsOf(db, userId));
+  return toView(shift, await countCurrentAssembly(db, userId, now));
 }
 
 /**
@@ -273,7 +337,10 @@ export async function startShift(
 ): Promise<{ shift: ShiftView; created: boolean }> {
   const existing = await findActiveShift(db, actor.userId);
   if (existing !== null) {
-    return { shift: toView(existing, await openAssignmentsOf(db, actor.userId)), created: false };
+    return {
+      shift: toView(existing, await countCurrentAssembly(db, actor.userId, new Date())),
+      created: false,
+    };
   }
 
   const printPointId = await assertSelectablePoint(db, input.printPointId ?? null);
@@ -298,7 +365,10 @@ export async function startShift(
     // сработал именно так, как задумано, и рассказывать об этом человеку нечего.
     const again = await findActiveShift(db, actor.userId);
     if (again !== null) {
-      return { shift: toView(again, await openAssignmentsOf(db, actor.userId)), created: false };
+      return {
+        shift: toView(again, await countCurrentAssembly(db, actor.userId, new Date())),
+        created: false,
+      };
     }
     throw error;
   }
@@ -453,15 +523,17 @@ export async function forceCloseShift(
   });
 }
 
-/** Активные смены: кто сейчас работает и сколько заказов у каждого в сборке. */
-export async function listActiveShifts(db: Database): Promise<ShiftView[]> {
+/** Активные смены: кто сейчас работает и счётчик «В сборке» у каждого. */
+export async function listActiveShifts(db: Database, now: Date = new Date()): Promise<ShiftView[]> {
   const shifts = await db.floristShift.findMany({
     where: { closedAt: null },
     orderBy: { startedAt: 'asc' },
     select: SHIFT_SELECT,
   });
 
-  const counts = await Promise.all(shifts.map((shift) => openAssignmentsOf(db, shift.userId)));
+  const counts = await Promise.all(
+    shifts.map((shift) => countCurrentAssembly(db, shift.userId, now)),
+  );
   return shifts.map((shift, index) => toView(shift, counts[index] ?? 0));
 }
 
@@ -470,9 +542,13 @@ export async function listActiveShifts(db: Database): Promise<ShiftView[]> {
  *
  * Только активная смена: назначить заказ человеку, который сегодня не работает,
  * значит потерять заказ до конца дня (`FUL-002` §2.3).
+ *
+ * Число рядом с именем — тот же счётчик «В сборке», что и в списке смен:
+ * один и тот же человек не должен выглядеть по-разному в двух окнах.
  */
 export async function listAssignableFlorists(
   db: Database,
+  now: Date = new Date(),
 ): Promise<{ userId: string; fullName: string; openAssignments: number }[]> {
   const shifts = await db.floristShift.findMany({
     where: { closedAt: null },
@@ -481,7 +557,9 @@ export async function listAssignableFlorists(
   });
 
   const active = shifts.filter((shift) => shift.user.status === 'ACTIVE');
-  const counts = await Promise.all(active.map((shift) => openAssignmentsOf(db, shift.userId)));
+  const counts = await Promise.all(
+    active.map((shift) => countCurrentAssembly(db, shift.userId, now)),
+  );
 
   return active.map((shift, index) => ({
     userId: shift.userId,

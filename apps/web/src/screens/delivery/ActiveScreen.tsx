@@ -22,6 +22,7 @@ import {
   ErrorState,
   LoadingState,
   Modal,
+  PostcardMark,
   StatusBadge,
 } from '../../ui/components';
 import {
@@ -569,8 +570,15 @@ function OrderCard(props: OrderCardProps): React.JSX.Element {
         .join(' ')}
     >
       <div className="delivery__order-head">
-        <span className="delivery__order-number">
-          {order.position}. {order.number}
+        {/*
+          Номер и пометка «(ОТКРЫТКА)» — одним блоком слева: пометка читается
+          вместе с номером, а интервал остаётся на своём месте справа.
+        */}
+        <span className="delivery__order-title">
+          <span className="delivery__order-number">
+            {order.position}. {order.number}
+          </span>
+          <PostcardMark hasPostcard={order.hasPostcard} />
         </span>
         <span className="delivery__order-muted">
           {minutesLabel(order.intervalStartMinute)}–{minutesLabel(order.intervalEndMinute)}

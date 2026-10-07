@@ -87,6 +87,16 @@
   font-weight: 600;
 }
 
+/* Номер и пометка «(ОТКРЫТКА)»: при нехватке места пометка уходит строкой ниже. */
+.delivery__order-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+  min-width: 0;
+  font-size: var(--font-size-md);
+}
+
 .delivery__order-line {
   font-size: 14px;
   overflow-wrap: anywhere;

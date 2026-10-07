@@ -101,6 +101,11 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
   'apps/api/src/modules/finance/finance-scenarios.critical.test.ts': Object.freeze(['2030-10']),
   'apps/api/src/modules/finance/presentation.critical.test.ts': Object.freeze(['2030-11']),
   'apps/api/src/modules/finance/payout-import.critical.test.ts': Object.freeze(['2030-12']),
+  'apps/api/src/modules/fulfillment/assembly-counter.critical.test.ts': Object.freeze([
+    '2026-05',
+    '2031-03',
+  ]),
+  'apps/api/src/modules/fulfillment/postcard-marker.critical.test.ts': Object.freeze(['2031-04']),
 });
 
 /** Месяц даты `ГГГГ-ММ-ДД`. */

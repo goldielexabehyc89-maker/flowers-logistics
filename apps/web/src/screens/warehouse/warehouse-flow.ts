@@ -330,6 +330,8 @@ export interface IssueOrderView {
   /** На коробке стоит «требуется перемещение»: предупреждение, не запрет. */
   requiresRelocation: boolean;
   checked: boolean;
+  /** К заказу приложена открытка: пометка «(ОТКРЫТКА)» рядом с номером. */
+  hasPostcard: boolean;
 }
 
 /**

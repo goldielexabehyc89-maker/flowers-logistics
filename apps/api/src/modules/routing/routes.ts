@@ -25,6 +25,7 @@ import { toDecimalString } from '../integrations/moysklad/money.js';
 import { assignmentStateOf, calendarDate } from './eligibility.js';
 // Рабочий адрес считается в одном месте на весь продукт.
 import { addressDetailsOf, effectiveAddress, ORDER_ADDRESS_SELECT } from '../orders/address.js';
+import { hasPostcard, POSTCARD_SELECT } from '../fulfillment/postcard.js';
 import {
   addOrders,
   createEmptyDraft,
@@ -663,6 +664,8 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
               // сколько взять. Суммы заказа, оплаты и признаки аномалии здесь лишние.
               cashCollectable: true,
               cashToCollectMinor: true,
+              // Только для признака «есть открытка»: сам текст в ответ не идёт.
+              ...POSTCARD_SELECT,
             },
           },
         },
@@ -750,6 +753,13 @@ async function routeCard(db: Database, id: string, actor: AuthenticatedActor) {
          * обязан увидеть отмену и решить сам, а выдачу склад уже не пропустит.
          */
         cancelled: item.order.cancelledInSource || item.order.cancelledByLogistAt !== null,
+        /*
+         * К заказу приложена открытка — пометка в строке листа.
+         *
+         * Признак тот же, по которому бланк флориста печатает раздел открытки
+         * (`fulfillment/postcard.ts`). Текст не отдаётся: списку нужен факт.
+         */
+        hasPostcard: hasPostcard(item.order),
       },
     })),
   };

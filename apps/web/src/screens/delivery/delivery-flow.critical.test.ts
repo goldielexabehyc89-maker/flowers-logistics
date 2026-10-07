@@ -171,6 +171,7 @@ describe('объединённый список', () => {
       intervalEndMinute: null,
       cashToCollectMinor: '0',
       cashCollectable: false,
+      hasPostcard: false,
       result:
         result === null
           ? null
