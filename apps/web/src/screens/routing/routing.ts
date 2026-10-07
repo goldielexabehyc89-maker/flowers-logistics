@@ -39,6 +39,8 @@ export interface RouteOrderView {
     needsAttention: boolean;
     /** Заказ отменён: из состава не исчезает, но выдавать его нельзя. */
     cancelled?: boolean;
+    /** К заказу приложена открытка: пометка «(ОТКРЫТКА)» в строке листа. */
+    hasPostcard: boolean;
     attentionReasons: string[];
     cashToCollect: string | null;
     scope: { inScope: boolean; sourceMissing: boolean; sourceArchived: boolean };

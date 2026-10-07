@@ -271,7 +271,21 @@ const TOPIC_KEYS: Record<RealtimeTopic, string[][]> = {
     ['logistics-resolutions'],
   ],
 
-  'order.fulfillment_changed': [...FLORIST_SCREEN, ...DEALS_SCREEN, ...WAREHOUSE_SCREEN],
+  /*
+   * Изменение состава и текстов заказа.
+   *
+   * Кроме производства, оно меняет пометку «(ОТКРЫТКА)» в трёх списках:
+   * «Выдача» (склад, уже в `WAREHOUSE_SCREEN`), состав маршрутного листа
+   * (`route` — тот же запрос `GET /api/routes/:id`) и «Активные»
+   * (`delivery-active`). Перечитываются только открытые экраны.
+   */
+  'order.fulfillment_changed': [
+    ...FLORIST_SCREEN,
+    ...DEALS_SCREEN,
+    ...WAREHOUSE_SCREEN,
+    ['route'],
+    ['delivery-active'],
+  ],
   'order.fulfillment_process_changed': [
     ...FLORIST_SCREEN,
     ...DEALS_SCREEN,

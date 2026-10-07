@@ -79,6 +79,7 @@ import {
   processLabel,
   routeLabel,
   safeFileName,
+  type AssemblyCountedList,
   type FloristDispatchStatus,
   type RefusalReason,
   type FloristOption,
@@ -93,6 +94,7 @@ import {
   type ShiftResponse,
   type ShiftView,
 } from './florist';
+import { useAssemblyDayRefresh } from './useAssemblyDayRefresh';
 import './florist.css';
 
 /**
@@ -173,6 +175,12 @@ export function FloristScreen(): React.JSX.Element {
     queryKey: ['florist-shift'],
     queryFn: () => client.get<ShiftResponse>('/api/florist/shift'),
   });
+  // «В сборке» у своей смены меняется в полночь само — перечитываем по окну.
+  useAssemblyDayRefresh(
+    shiftQuery.data?.assemblyCounter,
+    shiftQuery.dataUpdatedAt,
+    shiftQuery.refetch,
+  );
 
   /**
    * Режим распределения и рабочее место авто-раздачи.
@@ -368,16 +376,26 @@ export function FloristScreen(): React.JSX.Element {
 
   const floristsQuery = useQuery({
     queryKey: ['florist-florists'],
-    queryFn: () => client.get<{ items: FloristOption[] }>('/api/florist/florists'),
+    queryFn: () => client.get<AssemblyCountedList<FloristOption>>('/api/florist/florists'),
     enabled: isAdmin,
   });
+  useAssemblyDayRefresh(
+    floristsQuery.data?.assemblyCounter,
+    floristsQuery.dataUpdatedAt,
+    floristsQuery.refetch,
+  );
 
   /** Кто сейчас на смене. Только администратору: это управление людьми. */
   const shiftsQuery = useQuery({
     queryKey: ['florist-shifts'],
-    queryFn: () => client.get<{ items: ShiftView[] }>('/api/florist/shifts'),
+    queryFn: () => client.get<AssemblyCountedList<ShiftView>>('/api/florist/shifts'),
     enabled: isAdmin,
   });
+  useAssemblyDayRefresh(
+    shiftsQuery.data?.assemblyCounter,
+    shiftsQuery.dataUpdatedAt,
+    shiftsQuery.refetch,
+  );
 
   const shift = shiftQuery.data?.shift ?? null;
   const hasActiveShift = shift !== null;

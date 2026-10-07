@@ -22,6 +22,7 @@ import { writeAudit, type AuditAction } from '../audit/service.js';
 import { publishRealtimeEvent } from '../realtime/events.js';
 import { diffSnapshots, snapshotHash, type FulfillmentSnapshot } from './composition.js';
 import { enqueueDispatch } from './dispatch-trigger.js';
+import { hasPostcard, notifyCouriersOfPostcardChange } from './postcard.js';
 
 /**
  * Кто видит производственные события.
@@ -35,8 +36,19 @@ import { enqueueDispatch } from './dispatch-trigger.js';
  * Склад включён: размещение и выдача начинаются с собранного заказа, и вкладки
  * склада обязаны видеть готовность без перезагрузки. Логист — потому что
  * признак «Собран» стоит в его карточке и на карте.
+ *
+ * Управляющий включён ради пометки «(ОТКРЫТКА)»: он видит маршрутные листы,
+ * «Активные» и «Выдачу», а признак открытки меняется именно этим событием.
+ * Payload содержимого не несёт — только идентификатор и имена изменившихся
+ * частей снимка. Курьеру производственные события по-прежнему не адресуются.
  */
-const FULFILLMENT_AUDIENCE = ['ADMIN', 'FLORIST', 'WAREHOUSE', 'LOGISTICIAN'] as const;
+const FULFILLMENT_AUDIENCE = [
+  'ADMIN',
+  'FLORIST',
+  'WAREHOUSE',
+  'LOGISTICIAN',
+  'SUPERVISOR',
+] as const;
 
 /**
  * После скольких неудач подряд состояние становится `FAILED`.
@@ -117,6 +129,13 @@ interface StoredFulfillment {
    * промежуток, в котором заказ выглядит собранным по данным, которых уже нет.
    */
   fulfillmentProcessState: 'NEW' | 'IN_ASSEMBLY' | 'ASSEMBLED' | 'NEEDS_REVIEW';
+  /**
+   * Подтверждённый «Текст открытки» ДО применения снимка.
+   *
+   * Нужен, чтобы понять, сменился ли признак «есть открытка»: о смене признака
+   * лично узнаёт курьер листа (`notifyCouriersOfPostcardChange`).
+   */
+  fulfillmentCardText: string | null;
 }
 
 export async function applyFulfillmentSnapshot(
@@ -137,7 +156,8 @@ export async function applyFulfillmentSnapshot(
            "fulfillmentCompositionState",
            "fulfillmentCompositionAttempts",
            "fulfillmentPendingExternalUpdated",
-           "fulfillmentProcessState"
+           "fulfillmentProcessState",
+           "fulfillmentCardText"
     FROM "DeliveryOrder"
     WHERE "externalId" = ${input.externalId}::uuid
     FOR UPDATE
@@ -379,6 +399,14 @@ async function confirmed(
     payload: { orderId: order.id, changedFields, first },
     audienceRoles: [...FULFILLMENT_AUDIENCE],
   });
+
+  // Пометку «(ОТКРЫТКА)» видит и курьер, но производственных событий он не
+  // получает. О смене самого признака — появилась открытка или пропала — ему
+  // сообщается лично и только по его листу. Смена текста без смены признака
+  // пометку не меняет, и курьера не тревожит.
+  if (hasPostcard(order) !== (snapshot.cardText !== null)) {
+    await notifyCouriersOfPostcardChange(tx, order.id);
+  }
 
   // Состав подтверждён — заказ мог стать пригодным к работе (NEW + READY).
   // Ставим распределение в очередь: движок сам решит, есть ли что раздать.

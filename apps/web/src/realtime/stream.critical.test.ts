@@ -143,6 +143,18 @@ describe('таблица событий и потребителей полна',
     }
   });
 
+  it('изменение открытки обновляет «Маршрутные листы», «Активные» и «Выдачу»', () => {
+    // Пометка «(ОТКРЫТКА)» меняется событием изменения состава: без этих
+    // ключей она обновлялась бы в трёх списках только по F5.
+    const keys = invalidationKeysFor('order.fulfillment_changed').map((key) => key[0]);
+    expect(keys).toContain('route');
+    expect(keys).toContain('delivery-active');
+    expect(keys).toContain('warehouse-issue-board');
+    // Курьеру производственное событие не приходит: о смене пометки он узнаёт
+    // личным `route.updated`, и оно обязано перечитывать его «Активные».
+    expect(invalidationKeysFor('route.updated').map((key) => key[0])).toContain('delivery-active');
+  });
+
   it('маршрутные события доходят до производства, а не только до логистики', () => {
     /*
      * Подтверждённый лист — это работа склада и флориста: он задаёт, что

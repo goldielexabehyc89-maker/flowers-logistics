@@ -14,7 +14,14 @@ import { useState } from 'react';
 import { useAuth } from '../../auth/AuthContext';
 import { ApiError } from '../../lib/api-client';
 import { useToast } from '../../ui/ToastProvider';
-import { Button, EmptyState, ErrorState, LoadingState, StatusBadge } from '../../ui/components';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  PostcardMark,
+  StatusBadge,
+} from '../../ui/components';
 import { ScannerScreen } from '../../scan/ScannerScreen';
 import type { ScanEvent, ScanIntent } from '../../scan/scan-machine';
 import {
@@ -207,7 +214,14 @@ export function IssueTab({ manualEntry }: { manualEntry: boolean }): React.JSX.E
                             data-order-number={order.orderNumber}
                           >
                             <span className="wh-route__position">{order.position}</span>
-                            <span className="wh-route__order-number">{order.orderNumber}</span>
+                            {/*
+                              Номер и пометка «(ОТКРЫТКА)» делят одну ячейку:
+                              номер сжимается многоточием, пометка — никогда.
+                            */}
+                            <span className="wh-route__order-title">
+                              <span className="wh-route__order-number">{order.orderNumber}</span>
+                              <PostcardMark hasPostcard={order.hasPostcard} />
+                            </span>
                             {/*
                             Фактическое место коробки — сведение, а не запрет.
                             Показывается всегда и полной подписью: своя
@@ -486,7 +500,10 @@ function ShipDialog({
               data-checked={order.checked ? 'yes' : 'no'}
             >
               <span className="wh-route__position">{order.position}</span>
-              <span className="wh-route__order-number">{order.orderNumber}</span>
+              <span className="wh-route__order-title">
+                <span className="wh-route__order-number">{order.orderNumber}</span>
+                <PostcardMark hasPostcard={order.hasPostcard} />
+              </span>
               {/*
                 Место коробки и предупреждение остаются видимыми и в диалоге
                 отгрузки, рядом с отметкой «Проверен»: скан помечает заказ

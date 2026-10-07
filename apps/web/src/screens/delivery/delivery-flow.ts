@@ -60,6 +60,8 @@ export interface ActiveOrderView {
   intervalEndMinute: number | null;
   cashToCollectMinor: string;
   cashCollectable: boolean;
+  /** К заказу приложена открытка: пометка «(ОТКРЫТКА)» рядом с номером. */
+  hasPostcard: boolean;
   result: AttemptView | null;
 }
 

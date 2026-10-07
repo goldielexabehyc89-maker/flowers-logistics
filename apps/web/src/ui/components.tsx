@@ -159,6 +159,24 @@ export function StatusBadge({
   return <span className={`badge badge--${tone}`}>{children}</span>;
 }
 
+/**
+ * Пометка «(ОТКРЫТКА)» в строке заказа.
+ *
+ * Признак считает сервер (`hasPostcard`) по тому же полю, по которому бланк
+ * флориста печатает раздел открытки. Без открытки не рисуется ничего — ни
+ * пустого места, ни серой заглушки.
+ */
+export function PostcardMark({ hasPostcard }: { hasPostcard: boolean }): React.JSX.Element | null {
+  if (!hasPostcard) {
+    return null;
+  }
+  return (
+    <span className="postcard-mark" data-testid="postcard-mark" title="К заказу приложена открытка">
+      (ОТКРЫТКА)
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Состояния списков
 // ---------------------------------------------------------------------------

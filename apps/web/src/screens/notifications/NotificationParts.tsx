@@ -26,6 +26,8 @@ import {
   NO_FLOWERS_QUARANTINE_KIND,
   type NotificationView,
 } from './notifications';
+import type { AssemblyCountedList } from '../florist/florist';
+import { useAssemblyDayRefresh } from '../florist/useAssemblyDayRefresh';
 import './notifications.css';
 
 /** Тело уведомления: что изменилось (старое → новое) и где заказ сейчас. */
@@ -226,8 +228,11 @@ export function ReassemblyDialog({
 
   const florists = useQuery({
     queryKey: ['notifications-florists'],
-    queryFn: () => client.get<{ items: Florist[] }>('/api/logistics/notifications/florists'),
+    queryFn: () =>
+      client.get<AssemblyCountedList<Florist>>('/api/logistics/notifications/florists'),
   });
+  // Число «в работе» — тот же счётчик «В сборке»: в полночь он меняется сам.
+  useAssemblyDayRefresh(florists.data?.assemblyCounter, florists.dataUpdatedAt, florists.refetch);
 
   const chosen = florists.data?.items.find((florist) => florist.id === floristId) ?? null;
 
@@ -336,9 +341,16 @@ export function RefusalDialog({
 
   const florists = useQuery({
     queryKey: ['notifications-florists'],
-    queryFn: () => client.get<{ items: Florist[] }>('/api/logistics/notifications/florists'),
+    queryFn: () =>
+      client.get<AssemblyCountedList<Florist>>('/api/logistics/notifications/florists'),
     enabled: transferOpen,
   });
+  // Выбор закрыт — список не на экране, и перечитывать его в полночь незачем.
+  useAssemblyDayRefresh(
+    transferOpen ? florists.data?.assemblyCounter : undefined,
+    florists.dataUpdatedAt,
+    florists.refetch,
+  );
 
   const decide = useMutation({
     mutationFn: (input: { action: 'REJECT' | 'APPROVE' | 'TRANSFER'; floristId?: string }) =>

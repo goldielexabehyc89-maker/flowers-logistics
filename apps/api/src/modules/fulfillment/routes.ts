@@ -49,6 +49,7 @@ import {
   MAX_REASON_LENGTH,
   MIN_REASON_LENGTH,
   closeOwnShift,
+  currentAssemblyWindow,
   forceCloseShift,
   listActiveShifts,
   listAssignableFlorists,
@@ -199,8 +200,10 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
    */
   app.get('/api/florist/shift', async (request) => {
     const actor = await authenticateWithRoles(request, deps, FLORIST_ROLES);
+    // Один момент на ответ: число «В сборке» и его окно считаются от него же.
+    const now = new Date();
     const [shift, activeOrders] = await Promise.all([
-      ownShift(deps.db, actor.userId),
+      ownShift(deps.db, actor.userId, now),
       countActiveAssignments(
         deps.db,
         actor.userId,
@@ -209,7 +212,7 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
         deps.config.MOYSKLAD_NEW_STATE_ID,
       ),
     ]);
-    return { shift, activeOrders };
+    return { shift, activeOrders, assemblyCounter: currentAssemblyWindow(now) };
   });
 
   /**
@@ -249,12 +252,20 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
   /** Кто сейчас работает. Нужен администратору, чтобы понять, кому назначать. */
   app.get('/api/florist/shifts', async (request) => {
     await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
-    return { items: await listActiveShifts(deps.db) };
+    const now = new Date();
+    return {
+      items: await listActiveShifts(deps.db, now),
+      assemblyCounter: currentAssemblyWindow(now),
+    };
   });
 
   app.get('/api/florist/florists', async (request) => {
     await authenticateWithRoles(request, deps, FLORIST_ADMIN_ROLES);
-    return { items: await listAssignableFlorists(deps.db) };
+    const now = new Date();
+    return {
+      items: await listAssignableFlorists(deps.db, now),
+      assemblyCounter: currentAssemblyWindow(now),
+    };
   });
 
   /**
