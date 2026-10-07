@@ -16,7 +16,13 @@
  *    своему листу: другой курьер его не видит, смена текста без смены
  *    признака курьера не тревожит.
  *
- * ВЛАДЕНИЕ ДАТАМИ: апрель 2031 (`platform/testing/test-days.ts`).
+ * ВЛАДЕНИЕ ДАТАМИ: август 2027 (`platform/testing/test-days.ts`).
+ *
+ * Месяц выбран не произвольно. Пересчёт учёта (`finance-recompute`) снимает
+ * тариф со ВСЕХ подтверждённых и отгруженных листов от июня 2030 и позже, а
+ * проверка разделов листов (`sheets`) ждёт свои декабрьские дни 2027 года на
+ * первой странице отгруженных, где свежие дни идут первыми. Листы этого файла
+ * лежат раньше обоих порогов и ни в одну из этих выборок не попадают.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -35,7 +41,7 @@ import { applyFulfillmentSnapshot } from './service.js';
 import { hasPostcard } from './postcard.js';
 import { readEventsForViewer, VISIBILITY_LAG_MS } from '../realtime/reader.js';
 
-const DAY = '2031-04-14';
+const DAY = '2027-08-16';
 const CARD_TEXT = 'Синтетическая открытка: с днём рождения!';
 
 let ctx: TestContext;
@@ -108,10 +114,13 @@ async function seedOrder(cardText: string | null): Promise<SeededOrder> {
     data: {
       externalId,
       externalName: number,
-      externalUpdated: new Date('2031-04-01T00:00:00.000Z'),
+      externalUpdated: new Date('2027-08-01T00:00:00.000Z'),
       deliveryDate: toDateColumn(DAY),
-      inScope: true,
-      fulfillmentInScope: true,
+      // Вне обеих областей намеренно. Признак открытки от области не зависит,
+      // и три списка показывают заказ листа в любой области. А свободный заказ
+      // в области стал бы кандидатом чужих очередей и AUTO-раздачи в общей базе.
+      inScope: false,
+      fulfillmentInScope: false,
       address: 'синтетический адрес',
       recipient: 'синтетический получатель',
       comment: 'Позвонить заранее; открытку вручить лично',
@@ -122,7 +131,7 @@ async function seedOrder(cardText: string | null): Promise<SeededOrder> {
       fulfillmentCompositionSyncedAt: new Date(),
       fulfillmentRevisions: {
         create: {
-          externalUpdated: new Date('2031-04-01T00:00:00.000Z'),
+          externalUpdated: new Date('2027-08-01T00:00:00.000Z'),
           snapshot: snap as never,
           snapshotHash: snapshotHash(snap),
           changedFields: ['externalId', 'description', 'cardText', 'positions'],

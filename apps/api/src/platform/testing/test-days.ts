@@ -105,7 +105,7 @@ export const RESERVED_MONTHS: Readonly<Record<string, readonly ReservedMonth[]>>
     '2026-05',
     '2031-03',
   ]),
-  'apps/api/src/modules/fulfillment/postcard-marker.critical.test.ts': Object.freeze(['2031-04']),
+  'apps/api/src/modules/fulfillment/postcard-marker.critical.test.ts': Object.freeze(['2027-08']),
 });
 
 /** Месяц даты `ГГГГ-ММ-ДД`. */
