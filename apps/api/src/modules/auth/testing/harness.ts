@@ -57,7 +57,9 @@ export interface TestContext {
   app: AppServer;
 }
 
-export async function createTestContext(): Promise<TestContext> {
+export async function createTestContext(
+  overrides: Record<string, string> = {},
+): Promise<TestContext> {
   /*
    * Приложение проверок поднимается с подменным решателем.
    *
@@ -66,7 +68,7 @@ export async function createTestContext(): Promise<TestContext> {
    * здесь, а не в `testConfig`: тем же помощником собираются конфигурации
    * production и staging, где подмена запрещена и обязана ронять загрузку.
    */
-  const config = testConfig({ PLANNING_TEST_SOLVER: 'true' });
+  const config = testConfig({ PLANNING_TEST_SOLVER: 'true', ...overrides });
   const db = createDatabase(config, silentLogger());
   const app = await buildServer({
     config,

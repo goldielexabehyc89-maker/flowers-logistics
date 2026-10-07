@@ -583,8 +583,15 @@ function decodeBase64Key(value: string): Buffer | null {
   }
 }
 
-/** Значение, которое принимает Fastify в опции `trustProxy`. */
-export type TrustProxySetting = false | number | string[];
+/**
+ * Значение опции `trustProxy` Fastify: не доверять никому либо доверять ровно
+ * перечисленным адресам прокси.
+ *
+ * Числа переходов здесь нет. Fastify с версии 5.12.1 не доверяет прокси по
+ * количеству переходов вовсе — так нельзя проверить, кто на самом деле
+ * подключился, — и молча записывал бы адрес прокси вместо адреса клиента.
+ */
+export type TrustProxySetting = false | string[];
 
 export type AppConfig = Readonly<z.infer<typeof configSchema>> & {
   readonly isProduction: boolean;
@@ -616,17 +623,20 @@ export function parseTrustProxy(raw: string | undefined): TrustProxySetting {
   if (value.toLowerCase() === 'true') {
     throw new Error(
       'TRUST_PROXY=true запрещено: безусловное доверие заголовкам прокси позволяет ' +
-        'подделать IP-адрес клиента. Укажите список IP/CIDR доверенных прокси ' +
-        'либо число доверенных переходов.',
+        'подделать IP-адрес клиента. Укажите адрес, с которого обратный прокси ' +
+        'подключается к приложению.',
     );
   }
 
+  // Число переходов не поддерживается: Fastify ≥ 5.12.1 по нему никому не
+  // доверяет, и приложение молча видело бы адрес прокси вместо адреса клиента
+  // во всех записях входа, сессий и аудита. Отказ в запуске заметен сразу.
   if (/^\d+$/.test(value)) {
-    const hops = Number(value);
-    if (hops < 1 || hops > 10) {
-      throw new Error('TRUST_PROXY: число доверенных переходов должно быть от 1 до 10');
-    }
-    return hops;
+    throw new Error(
+      `TRUST_PROXY=${value}: число переходов больше не поддерживается — Fastify не доверяет ` +
+        'прокси по количеству переходов. Укажите адрес, с которого обратный прокси ' +
+        'подключается к приложению (docs/DEPLOY.md, «Адрес прокси и TRUST_PROXY»).',
+    );
   }
 
   const entries = value
@@ -637,7 +647,7 @@ export function parseTrustProxy(raw: string | undefined): TrustProxySetting {
   const invalid = entries.filter((entry) => !IP_OR_CIDR.test(entry));
   if (entries.length === 0 || invalid.length > 0) {
     throw new Error(
-      `TRUST_PROXY: ожидается false, число переходов или список IP/CIDR. ` +
+      `TRUST_PROXY: ожидается false или список IP/CIDR доверенных прокси. ` +
         `Не распознано: ${invalid.join(', ')}`,
     );
   }
