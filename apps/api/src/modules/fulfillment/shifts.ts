@@ -16,7 +16,7 @@
  * списком, и админ либо переназначает заказ, либо возвращает его в очередь.
  */
 
-import { moscowToday, shiftCalendarDate, type Role } from '@fl/shared';
+import { moscowDayRange, moscowToday, shiftCalendarDate, type Role } from '@fl/shared';
 import { AppError } from '../../platform/errors.js';
 import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import type { Database } from '../../platform/db.js';
@@ -276,6 +276,30 @@ async function openAssignmentsOf(
  */
 export function currentAssemblyFloor(now: Date): string {
   return shiftCalendarDate(moscowToday(now), -1);
+}
+
+/** Окно счётчика «В сборке» на момент ответа. Отдаётся вместе с самим числом. */
+export interface CurrentAssemblyWindow {
+  /** Самая ранняя учитываемая дата доставки — вчерашний день Москвы. */
+  countedFrom: string;
+  /**
+   * Через сколько миллисекунд граница сдвинется: до ближайшей московской
+   * полуночи ПО ЧАСАМ СЕРВЕРА.
+   *
+   * Число относительное, а не момент времени, и это решающее: клиент ставит
+   * таймер от получения ответа, поэтому ни часы устройства, ни их расхождение
+   * с сервером, ни пояс браузера на миг перечитывания не влияют. Перечитанный
+   * ответ приносит новое окно — и следующий таймер ставится уже по нему.
+   */
+  refreshInMs: number;
+}
+
+export function currentAssemblyWindow(now: Date): CurrentAssemblyWindow {
+  const today = moscowToday(now);
+  return {
+    countedFrom: shiftCalendarDate(today, -1),
+    refreshInMs: Math.max(0, moscowDayRange(today).to.getTime() - now.getTime()),
+  };
 }
 
 /**

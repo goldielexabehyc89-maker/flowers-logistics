@@ -26,6 +26,7 @@ import {
   listPendingRefusalNotificationIds,
 } from '../fulfillment/dispatch-florist.js';
 import { listPendingEscalationNotificationIds } from './escalation.js';
+import { currentAssemblyWindow } from '../fulfillment/shifts.js';
 import {
   NO_FLOWERS_ROLES,
   countOpenNoFlowersQuarantines,
@@ -82,10 +83,19 @@ export function registerNotificationRoutes(app: AppServer, deps: NotificationDep
     return { unread: await countUnread(deps.db, actor.userId) };
   });
 
-  /** Флористы на активной смене — для выбора при назначении пересборки. */
+  /**
+   * Флористы на активной смене — для выбора при назначении пересборки.
+   *
+   * Рядом с числом «В сборке» идёт его окно: клиент перечитывает список сам,
+   * когда граница дня сдвигается (`fulfillment/shifts.ts`).
+   */
   app.get('/api/logistics/notifications/florists', async (request) => {
     await authenticateWithRoles(request, deps, NOTIFICATION_ROLES);
-    return { items: await listReassemblyFlorists(deps.db) };
+    const now = new Date();
+    return {
+      items: await listReassemblyFlorists(deps.db, now),
+      assemblyCounter: currentAssemblyWindow(now),
+    };
   });
 
   /** Одно уведомление с живым состоянием заказа (для всплывающего окна). */

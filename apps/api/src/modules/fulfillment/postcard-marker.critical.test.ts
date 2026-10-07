@@ -11,7 +11,10 @@
  *  * сам текст открытки в эти ответы не уходит;
  *  * изменение текста открытки синхронизацией меняет признак и публикует
  *    `order.fulfillment_changed` тем ролям, которые видят эти списки, — по
- *    нему экраны перечитываются штатно. Курьеру событие не адресуется.
+ *    нему экраны перечитываются штатно. Курьеру оно не адресуется;
+ *  * курьер узнаёт о появлении и снятии открытки ЛИЧНЫМ событием и только по
+ *    своему листу: другой курьер его не видит, смена текста без смены
+ *    признака курьера не тревожит.
  *
  * ВЛАДЕНИЕ ДАТАМИ: апрель 2031 (`platform/testing/test-days.ts`).
  */
@@ -30,6 +33,7 @@ import { toDateColumn } from '../integrations/moysklad/delivery-date.js';
 import { snapshotHash, type FulfillmentSnapshot } from './composition.js';
 import { applyFulfillmentSnapshot } from './service.js';
 import { hasPostcard } from './postcard.js';
+import { readEventsForViewer, VISIBILITY_LAG_MS } from '../realtime/reader.js';
 
 const DAY = '2031-04-14';
 const CARD_TEXT = 'Синтетическая открытка: с днём рождения!';
@@ -376,5 +380,121 @@ describe('изменение открытки', () => {
       expect(event.audienceRoles, role).toContain(role);
     }
     expect(event.audienceRoles).not.toContain('COURIER');
+  });
+});
+
+// --- Курьер ------------------------------------------------------------------
+
+async function currentMaxEventId(): Promise<bigint> {
+  const newest = await ctx.db.realtimeEvent.findFirst({
+    orderBy: { id: 'desc' },
+    select: { id: true },
+  });
+  return newest?.id ?? 0n;
+}
+
+/** События, которые канал отдал бы этому курьеру после курсора. */
+async function eventsSeenByCourier(
+  courierUserId: string,
+  after: bigint,
+): Promise<{ topic: string; payload: { routeId?: string; orderIds?: string[] } }[]> {
+  const read = await readEventsForViewer(
+    ctx.db,
+    { userId: courierUserId, roles: ['COURIER'] },
+    after,
+    new Date(Date.now() + VISIBILITY_LAG_MS + 1_000),
+  );
+  return read.events.map((event) => ({
+    topic: event.topic,
+    payload: event.payload as { routeId?: string; orderIds?: string[] },
+  }));
+}
+
+function aboutOrder(
+  events: readonly { topic: string; payload: { routeId?: string; orderIds?: string[] } }[],
+  orderId: string,
+): { topic: string; routeId: string | undefined }[] {
+  return events
+    .filter((event) => (event.payload.orderIds ?? []).includes(orderId))
+    .map((event) => ({ topic: event.topic, routeId: event.payload.routeId }));
+}
+
+describe('курьер узнаёт о смене пометки лично', () => {
+  it('появление и снятие открытки: личное событие курьеру листа, другому — ничего', async () => {
+    const stand = await seedStand();
+    const stranger = await loginAs(['COURIER']);
+    await seedRoute('ACTIVE', stranger.userId, [await seedOrder(null)]);
+    const order = stand.active.withoutCard;
+
+    const beforeAdd = await currentMaxEventId();
+    await syncCardText(order, CARD_TEXT);
+    expect(
+      aboutOrder(await eventsSeenByCourier(stand.courier.userId, beforeAdd), order.id),
+    ).toEqual([{ topic: 'route.updated', routeId: stand.activeRouteId }]);
+    expect(aboutOrder(await eventsSeenByCourier(stranger.userId, beforeAdd), order.id)).toEqual([]);
+    // По событию «Активные» курьера перечитываются — и показывают пометку.
+    expect(
+      (await activeMarks(stand.courier.token, stand.activeRouteId)).marks.get(order.number),
+    ).toBe(true);
+
+    const beforeRemove = await currentMaxEventId();
+    await syncCardText(order, null);
+    expect(
+      aboutOrder(await eventsSeenByCourier(stand.courier.userId, beforeRemove), order.id),
+    ).toEqual([{ topic: 'route.updated', routeId: stand.activeRouteId }]);
+    expect(aboutOrder(await eventsSeenByCourier(stranger.userId, beforeRemove), order.id)).toEqual(
+      [],
+    );
+    expect(
+      (await activeMarks(stand.courier.token, stand.activeRouteId)).marks.get(order.number),
+    ).toBe(false);
+  });
+
+  it('событие личное: адресат — курьер листа, ролям оно не рассылается, текста в нём нет', async () => {
+    const stand = await seedStand();
+    const order = stand.active.withoutCard;
+    const before = await currentMaxEventId();
+
+    await syncCardText(order, CARD_TEXT);
+
+    const rows = await ctx.db.realtimeEvent.findMany({
+      where: { id: { gt: before }, topic: 'route.updated' },
+      select: { audienceUserId: true, audienceRoles: true, payload: true },
+    });
+    const personal = rows.filter((row) =>
+      ((row.payload as { orderIds?: string[] }).orderIds ?? []).includes(order.id),
+    );
+    expect(personal).toHaveLength(1);
+    expect(personal[0]?.audienceUserId).toBe(stand.courier.userId);
+    expect(personal[0]?.audienceRoles).toEqual([]);
+    expect(personal[0]?.payload).toEqual({ routeId: stand.activeRouteId, orderIds: [order.id] });
+    expect(JSON.stringify(personal[0]?.payload)).not.toContain(CARD_TEXT);
+  });
+
+  it('смена текста без смены признака курьера не тревожит', async () => {
+    const stand = await seedStand();
+    const order = stand.active.withCard;
+    const before = await currentMaxEventId();
+
+    await syncCardText(order, 'Другой синтетический текст открытки');
+
+    expect(aboutOrder(await eventsSeenByCourier(stand.courier.userId, before), order.id)).toEqual(
+      [],
+    );
+    expect(
+      (await activeMarks(stand.courier.token, stand.activeRouteId)).marks.get(order.number),
+    ).toBe(true);
+  });
+
+  it('курьер ещё не отгруженного листа тоже узнаёт: гонка с ручной отгрузкой закрыта', async () => {
+    const stand = await seedStand();
+    const order = stand.confirmed.withoutCard;
+    const before = await currentMaxEventId();
+
+    await syncCardText(order, CARD_TEXT);
+
+    expect(aboutOrder(await eventsSeenByCourier(stand.courier.userId, before), order.id)).toEqual([
+      { topic: 'route.updated', routeId: stand.confirmedRouteId },
+    ]);
   });
 });

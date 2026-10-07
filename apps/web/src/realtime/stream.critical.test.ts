@@ -150,6 +150,9 @@ describe('таблица событий и потребителей полна',
     expect(keys).toContain('route');
     expect(keys).toContain('delivery-active');
     expect(keys).toContain('warehouse-issue-board');
+    // Курьеру производственное событие не приходит: о смене пометки он узнаёт
+    // личным `route.updated`, и оно обязано перечитывать его «Активные».
+    expect(invalidationKeysFor('route.updated').map((key) => key[0])).toContain('delivery-active');
   });
 
   it('маршрутные события доходят до производства, а не только до логистики', () => {

@@ -488,11 +488,17 @@ export async function decideReassembly(
   }
 }
 
-/** Флористы, доступные для назначения пересборки (на активной смене). */
+/**
+ * Флористы, доступные для назначения пересборки (на активной смене).
+ *
+ * `openAssignments` — тот же счётчик «В сборке», что и в разделе флориста,
+ * посчитанный от переданного момента.
+ */
 export async function listReassemblyFlorists(
   db: Database,
+  now: Date = new Date(),
 ): Promise<{ id: string; fullName: string; openAssignments: number }[]> {
-  const florists = await listAssignableFlorists(db);
+  const florists = await listAssignableFlorists(db, now);
   return florists.map((florist) => ({
     id: florist.userId,
     fullName: florist.fullName,

@@ -23,9 +23,65 @@
  * Сам текст в списки не отдаётся: им нужен только факт.
  */
 
+import type { TransactionClient } from '../auth/sessions.js';
+import { publishRealtimeEvent } from '../realtime/events.js';
+
 /** Поле заказа, из которого считается признак. Подмешивается в `select`. */
 export const POSTCARD_SELECT = { fulfillmentCardText: true } as const;
 
 export function hasPostcard(order: { fulfillmentCardText: string | null }): boolean {
   return order.fulfillmentCardText !== null;
+}
+
+/**
+ * Листы, курьеру которых сообщается о смене пометки.
+ *
+ * `ACTIVE` — лист уже у курьера и стоит в его «Активных».
+ *
+ * `CONFIRMED` — закрывает гонку с ручной отгрузкой. Она блокирует только сам
+ * лист, а не строки заказов, поэтому подтверждение снимка может прочитать лист
+ * ещё неотгруженным, а зафиксироваться уже после того, как курьер перечитал
+ * «Активные» по событию отгрузки. Брать здесь блокировку листа нельзя: снимок
+ * уже держит строку заказа, а маршрутные операции берут сначала лист, потом
+ * заказы, — обратный порядок дал бы взаимную блокировку. Личное событие
+ * курьеру неотгруженного листа безопасно: это его собственный лист, а сервер
+ * отдаст ему в «Активных» только то, что уже отгружено.
+ */
+const NOTIFIED_ROUTE_STATES = ['CONFIRMED', 'ACTIVE'] as const;
+
+/**
+ * Личное событие курьеру: у заказа в его листе появилась или пропала открытка.
+ *
+ * Производственные события курьеру не адресуются, и это правило не меняется:
+ * курьер узнаёт только о собственном листе, а не обо всех заказах. Тема — то
+ * же личное `route.updated`, которым курьера уже уведомляет снятие заказа
+ * с отгруженного листа; по нему его «Активные» перечитываются сами.
+ * В событии только идентификаторы листа и заказа — ни текста, ни номера.
+ *
+ * Вызывается в транзакции подтверждения снимка, под блокировкой строки заказа.
+ */
+export async function notifyCouriersOfPostcardChange(
+  tx: TransactionClient,
+  orderId: string,
+): Promise<void> {
+  const participations = await tx.routeOrder.findMany({
+    where: {
+      orderId,
+      removedAt: null,
+      route: { state: { in: [...NOTIFIED_ROUTE_STATES] }, courierUserId: { not: null } },
+    },
+    select: { routeId: true, route: { select: { courierUserId: true } } },
+  });
+
+  for (const participation of participations) {
+    const courierUserId = participation.route.courierUserId;
+    if (courierUserId === null) {
+      continue;
+    }
+    await publishRealtimeEvent(tx, {
+      topic: 'route.updated',
+      payload: { routeId: participation.routeId, orderIds: [orderId] },
+      audienceUserId: courierUserId,
+    });
+  }
 }

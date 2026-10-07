@@ -11,6 +11,7 @@
  */
 
 import { formatCalendarDate, formatMinutesOfDay, moscowToday, shiftCalendarDate } from '@fl/shared';
+import type { AssemblyCounterWindow } from './assembly-day';
 
 export type QueueDay = 'today' | 'tomorrow';
 export type QueueScope = 'general' | 'mine';
@@ -349,6 +350,14 @@ export interface PrintPointOption {
 export interface ShiftResponse {
   shift: ShiftView | null;
   activeOrders: number;
+  /** Окно счётчика «В сборке»: по нему экран перечитывает смену в полночь. */
+  assemblyCounter: AssemblyCounterWindow;
+}
+
+/** Список со счётчиком «В сборке» у каждого флориста и окном этого счётчика. */
+export interface AssemblyCountedList<T> {
+  items: T[];
+  assemblyCounter: AssemblyCounterWindow;
 }
 
 export interface PrintJobView {
