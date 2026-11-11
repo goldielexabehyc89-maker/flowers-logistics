@@ -26,6 +26,7 @@ import {
 } from '../../ui/components';
 import { formatDate } from '../routing/routing';
 import { evaluateMoney, previewOf } from './money-calculator';
+import { ReportExportButtons } from './ReportExport';
 
 interface CashEntry {
   id: string;
@@ -295,20 +296,7 @@ export function CashDeskPanel({ from, to }: CashDeskPanelProps): React.JSX.Eleme
       </div>
 
       <div className="reports__actions">
-        <a
-          className="reports__export"
-          href={`/api/logistics/reports/cash.xlsx?from=${from}&to=${to}`}
-          data-testid="cash-xlsx"
-        >
-          Выгрузить XLSX
-        </a>
-        <a
-          className="reports__export"
-          href={`/api/logistics/reports/cash.pdf?from=${from}&to=${to}`}
-          data-testid="cash-pdf"
-        >
-          Итог в PDF
-        </a>
+        <ReportExportButtons kind="cash" selection={{ from, to }} testIdPrefix="cash" />
       </div>
 
       {report.data.days.length === 0 ? (

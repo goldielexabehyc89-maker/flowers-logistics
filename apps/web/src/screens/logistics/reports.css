@@ -468,7 +468,12 @@
   background-repeat: no-repeat;
 }
 
-/* Выгрузка — действие, а не ссылка в тексте: у неё своя плитка. */
+/*
+ * Выгрузка — действие, а не ссылка в тексте: у неё своя плитка.
+ *
+ * Это кнопка (`Button`), а не ссылка: файл забирается запросом с токеном.
+ * Высота, кегль и начертание остаются плиточными, а не общей кнопки.
+ */
 .reports__export {
   display: inline-flex;
   align-items: center;
@@ -478,6 +483,7 @@
   background: var(--color-surface);
   color: var(--color-text);
   font-size: var(--font-size-md);
+  font-weight: inherit;
   white-space: nowrap;
   text-decoration: none;
   box-shadow: var(--shadow-out);
@@ -487,7 +493,8 @@
   margin-left: auto;
 }
 
-.reports__export:hover {
+/* Пока файл готовится, кнопка занята и на наведение не откликается. */
+.reports__export:hover:not(:disabled) {
   color: var(--color-accent-text);
   box-shadow: var(--shadow-in);
 }
