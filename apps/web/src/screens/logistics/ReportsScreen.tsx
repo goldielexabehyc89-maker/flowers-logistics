@@ -38,6 +38,7 @@ import { evaluateMoney, previewOf } from './money-calculator';
 import { CashDeskPanel } from './CashDeskPanel';
 import { CourierCombobox } from './CourierCombobox';
 import { PayoutImportModal } from './PayoutImportModal';
+import { ReportExportButtons } from './ReportExport';
 import { formatMoney } from './money';
 import './reports.css';
 
@@ -593,16 +594,14 @@ export function ReportsScreen(): React.JSX.Element {
       ? null
       : ((couriers.data?.items ?? []).find((item) => item.id === courierUserId)?.fullName ?? null);
 
-  const params = (withPaging = true): string => {
+  const params = (): string => {
     const search = new URLSearchParams({ from, to });
     if (courierUserId !== '') {
       search.set('courierUserId', courierUserId);
     }
-    if (withPaging) {
-      // Страница считается ГРУППАМИ: группа курьера не делится между страницами.
-      search.set('limit', String(Math.min(GROUPS_PER_PAGE * pages, GROUPS_LIMIT)));
-      search.set('offset', '0');
-    }
+    // Страница считается ГРУППАМИ: группа курьера не делится между страницами.
+    search.set('limit', String(Math.min(GROUPS_PER_PAGE * pages, GROUPS_LIMIT)));
+    search.set('offset', '0');
     return search.toString();
   };
 
@@ -776,10 +775,6 @@ export function ReportsScreen(): React.JSX.Element {
       ),
   });
 
-  // Выгрузка отдаёт ВЕСЬ отбор, а не показанную страницу.
-  const exportUrl = (format: 'xlsx' | 'pdf'): string =>
-    `/api/logistics/reports/settlements.${format}?${params(false)}`;
-
   return (
     <section className="reports" data-testid="reports-screen">
       {/*
@@ -879,12 +874,11 @@ export function ReportsScreen(): React.JSX.Element {
               />
             </div>
             {/* Выгрузка относится ко всему отчёту, поэтому стоит в его шапке. */}
-            <a className="reports__export" href={exportUrl('xlsx')} data-testid="reports-xlsx">
-              Выгрузить XLSX
-            </a>
-            <a className="reports__export" href={exportUrl('pdf')} data-testid="reports-pdf">
-              Итог в PDF
-            </a>
+            <ReportExportButtons
+              kind="settlements"
+              selection={{ from, to, courierUserId }}
+              testIdPrefix="reports"
+            />
             {/*
               Долг до перехода на ERP заводит только администратор: это ручной
               ввод исторической суммы, которую система ничем не подтверждает.

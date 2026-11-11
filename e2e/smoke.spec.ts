@@ -7565,6 +7565,115 @@ test('«Отчёты»: при открытии выбран день и все 
 });
 
 /**
+ * Выгрузки «Отчётов» и «Кассы» скачиваются кнопкой — с токеном.
+ *
+ * Раньше это были обычные ссылки на адрес API. Токен приложения живёт только
+ * в памяти вкладки и уходит заголовком, а переход по `href` его не несёт:
+ * сервер отвечал 401, и вместо файла вкладка уходила на текст ошибки.
+ * Прежние проверки выгрузок ходили в API сами, с заголовком, — кнопку
+ * не нажимал никто. Здесь файл получает именно кнопка.
+ */
+test('выгрузки «Отчётов» и «Кассы»: кнопка скачивает файл с токеном и не уводит с экрана', async ({
+  page,
+}: {
+  page: Page;
+}) => {
+  test.skip(ADMIN_CODE === '', 'не передан одноразовый код администратора (E2E_ADMIN_CODE)');
+
+  // Каждое скачивание учитывается: отказ обязан обойтись без файла.
+  const downloads: string[] = [];
+  page.on('download', (download) => downloads.push(download.suggestedFilename()));
+
+  await login(page, ADMIN_PHONE, ADMIN_PIN);
+  const day = today();
+
+  await openSection(page, 'Логистика');
+  await page.getByRole('link', { name: 'Отчёты' }).first().click();
+  await expect(page.getByTestId('reports-screen')).toBeVisible();
+  await expect(page.getByTestId('reports-from')).toHaveValue(day);
+  await expect(page.getByTestId('reports-to')).toHaveValue(day);
+
+  /*
+   * Нажатие → запрос страницы с заголовком → файл.
+   *
+   * Заголовок проверяется у самого запроса: без него сервер файл не отдал бы,
+   * но так видно и другое — токен ушёл заголовком, а не адресом.
+   */
+  const exportByButton = async (
+    testId: string,
+    path: string,
+    fileName: string,
+    signature: string,
+  ): Promise<void> => {
+    const requested = page.waitForRequest((request) => new URL(request.url()).pathname === path);
+    const downloaded = page.waitForEvent('download');
+    await page.getByTestId(testId).click();
+
+    const request = await requested;
+    expect((await request.allHeaders())['authorization'] ?? '').toMatch(/^Bearer \S+$/);
+    expect(new URL(request.url()).search).toBe(`?from=${day}&to=${day}`);
+
+    const download = await downloaded;
+    expect(download.suggestedFilename()).toBe(fileName);
+    const bytes = await readFile(await download.path());
+    // Сигнатура файла: XLSX — это zip, PDF — это PDF, а не текст ошибки.
+    expect(bytes.subarray(0, signature.length).toString('latin1')).toBe(signature);
+
+    // Экран остался на месте, кнопка снова доступна.
+    expect(new URL(page.url()).pathname).toBe('/logistics/reports');
+    await expect(page.getByTestId(testId)).toBeEnabled();
+  };
+
+  // 1. Расчёты с курьерами.
+  await exportByButton(
+    'reports-xlsx',
+    '/api/logistics/reports/settlements.xlsx',
+    `settlements-${day}_${day}.xlsx`,
+    'PK',
+  );
+  await exportByButton(
+    'reports-pdf',
+    '/api/logistics/reports/settlements.pdf',
+    `settlements-${day}_${day}.pdf`,
+    '%PDF-',
+  );
+
+  // 2. Касса логистов.
+  await page.getByTestId('reports-mode-cash').click();
+  await expect(page.getByTestId('cash-panel')).toBeVisible();
+  await exportByButton(
+    'cash-xlsx',
+    '/api/logistics/reports/cash.xlsx',
+    `cash-${day}_${day}.xlsx`,
+    'PK',
+  );
+  await exportByButton(
+    'cash-pdf',
+    '/api/logistics/reports/cash.pdf',
+    `cash-${day}_${day}.pdf`,
+    '%PDF-',
+  );
+
+  // 3. Отказ сервера назван словами в уведомлении: ни файла, ни перехода.
+  await page.getByTestId('reports-mode-settlements').click();
+  const yesterday = new Date(Date.parse(`${day}T00:00:00Z`) - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  await page.getByTestId('reports-to').fill(yesterday);
+  await page.getByTestId('reports-xlsx').click();
+  await expect(page.locator('.toast-region')).toContainText('Конец периода раньше его начала.');
+  await expect(page.getByTestId('reports-xlsx')).toBeEnabled();
+  expect(new URL(page.url()).pathname).toBe('/logistics/reports');
+  expect(downloads).toHaveLength(4);
+
+  // 4. Сервер не ослаблен: без заголовка выгрузка по-прежнему 401.
+  const anonymous = await page.request.get(
+    `/api/logistics/reports/settlements.xlsx?from=${day}&to=${day}`,
+  );
+  expect(anonymous.status()).toBe(401);
+});
+
+/**
  * Доставка ПРОШЛЫМ днём с километрами за МКАД — предпосылка проверки переноса
  * дня учёта. Лист и результат в браузере живут сегодняшним днём, поэтому
  * прошлый день заводится сеялкой теми же доменными функциями, что и боевой
