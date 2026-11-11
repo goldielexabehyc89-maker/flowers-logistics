@@ -11,7 +11,18 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { formatCalendarDate, moscowToday, shiftCalendarDate } from '@fl/shared';
 import { useAuth } from '../../auth/AuthContext';
-import { EmptyState, ErrorState, Field, LoadingState, TextInput } from '../../ui/components';
+import { ApiError } from '../../lib/api-client';
+import { useToast } from '../../ui/ToastProvider';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  Field,
+  LoadingState,
+  TextInput,
+} from '../../ui/components';
+
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 interface Comparison {
   shiftDurationMinutes: number;
@@ -133,9 +144,37 @@ function valueCell(value: React.ReactNode): React.JSX.Element {
 
 export function StatisticsTab(): React.JSX.Element {
   const { client } = useAuth();
+  const { showToast } = useToast();
   const today = moscowToday();
   const [from, setFrom] = useState(() => weekStart(today));
   const [to, setTo] = useState(today);
+  const [exporting, setExporting] = useState(false);
+
+  /**
+   * Сборки за выбранный период файлом Excel.
+   *
+   * Файл забирается запросом с токеном и сохраняется по ссылке на объект:
+   * обычная ссылка ушла бы без заголовка авторизации и получила 401.
+   */
+  async function downloadAssemblies(): Promise<void> {
+    setExporting(true);
+    try {
+      const blob = await client.getBlob(
+        `/api/florist/statistics/assemblies.xlsx?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        XLSX_TYPE,
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `florist-assemblies-${from}_${to}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      showToast(error instanceof ApiError ? error.message : 'Не удалось скачать файл.', 'error');
+    } finally {
+      setExporting(false);
+    }
+  }
 
   const valid = from <= to;
   const stats = useQuery({
@@ -185,6 +224,15 @@ export function StatisticsTab(): React.JSX.Element {
               />
             )}
           </Field>
+          <Button
+            className="stats__export"
+            data-testid="stats-export"
+            loading={exporting}
+            disabled={!valid}
+            onClick={() => void downloadAssemblies()}
+          >
+            Скачать Excel
+          </Button>
         </div>
         {!valid && (
           <p className="finance__error" role="alert">
