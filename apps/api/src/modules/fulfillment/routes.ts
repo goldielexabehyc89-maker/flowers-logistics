@@ -44,6 +44,12 @@ import {
 } from './dispatch-florist.js';
 import { buildFloristStatistics } from './statistics.js';
 import {
+  assertAssemblyExportPeriod,
+  buildAssembliesWorkbook,
+  readAssemblyExportRows,
+} from './assemblies-export.js';
+import { writeAudit } from '../audit/service.js';
+import {
   FLORIST_ADMIN_ROLES,
   FLORIST_ROLES,
   MAX_REASON_LENGTH,
@@ -281,6 +287,39 @@ export async function registerFloristRoutes(app: AppServer, deps: FloristRouteDe
       });
     }
     return buildFloristStatistics(deps.db, { from: query.from, to: query.to });
+  });
+
+  /**
+   * Сборки флористов за период файлом Excel: ФИО, номер заказа, время сборки.
+   *
+   * Права те же, что у статистики, — только администратор: в файле имена и
+   * рабочее время сотрудников. Факт выгрузки фиксируется в аудите, как у
+   * финансовых выгрузок: кто и какой период выгрузил, без самих данных.
+   */
+  app.get('/api/florist/statistics/assemblies.xlsx', async (request, reply) => {
+    const actor = await authenticateWithRoles(request, deps, ['ADMIN']);
+    const query = statisticsQuerySchema.parse(request.query);
+    assertAssemblyExportPeriod(query.from, query.to);
+
+    const rows = await readAssemblyExportRows(deps.db, query);
+    const file = await buildAssembliesWorkbook(rows, query);
+
+    await writeAudit(deps.db, {
+      action: 'FLORIST_ASSEMBLIES_EXPORTED',
+      entityType: 'DeliveryOrder',
+      actorUserId: actor.userId,
+      actorRoles: actor.roles,
+      newValue: { format: 'xlsx', from: query.from, to: query.to, rows: rows.length },
+      ...contextOf(request),
+    });
+
+    return reply
+      .header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .header(
+        'content-disposition',
+        `attachment; filename="florist-assemblies-${query.from}_${query.to}.xlsx"`,
+      )
+      .send(file);
   });
 
   app.post('/api/florist/shifts/:id/force-close', async (request) => {

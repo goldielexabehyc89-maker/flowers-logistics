@@ -218,6 +218,9 @@ export const AUDIT_ACTIONS = [
   'PRINT_POINT_TEST_REQUESTED',
   // Смена флориста выбрала точку печати. В записи только идентификатор точки.
   'FLORIST_SHIFT_PRINT_POINT_SET',
+  // Выгрузка сборок флористов в Excel. В записи — период и число строк;
+  // ни имён, ни номеров заказов: они остаются в самом файле.
+  'FLORIST_ASSEMBLIES_EXPORTED',
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
